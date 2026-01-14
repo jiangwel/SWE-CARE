@@ -1,0 +1,175 @@
+  Task-ID: scikit-learn__scikit-learn-16655@293ed17
+  Please checkout to this commit first: f1acf834685f8bcd1bcdd903e9c40b7515fe0a67
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  inverse_transform in KernelPCA does not account for the mean
+<!--
+Before submitting a bug, please make sure the issue hasn't been already
+addressed by searching through the past issues.
+-->
+
+#### Describe the bug
+<!--
+A clear and concise description of what the bug is.
+-->
+`KernelPCA.inverse_transform` gives back a zero-meaned dataset, even if the data used to fit the PCA did not have zero mean.
+
+#### Steps/Code to Reproduce
+
+Example:
+```python
+from sklearn.datasets import make_blobs
+from sklearn.decomposition import KernelPCA
+
+X, _ = make_blobs(n_samples=100, centers=[[1, 1]], random_state=0)
+
+kp = KernelPCA(n_components=2, fit_inverse_transform=True)
+X_trans = kp.fit_transform(X)
+X_inv = kp.inverse_transform(X_trans)
+
+print(X.mean(axis=0))
+print(X_inv.mean(axis=0))
+```
+
+#### Expected Results
+<!-- Example: No error is thrown. Please paste or describe the expected results.-->
+```
+[0.99904232 1.14277867]
+[0.99904232 1.14277867]
+```
+The mean of the data after transforming and then inverse transforming should be the same, or at least very similar (maybe there are rounding errors etc.) to the mean of the original dataset.
+
+#### Actual Results
+<!-- Please paste or specifically describe the actual output or traceback. -->
+```
+[0.99904232 1.14277867]
+[-5.07371922e-16  2.21767049e-16]
+```
+(The inverse transformed data still has zero mean)
+
+#### Versions
+<!--
+Please run the following snippet and paste the output below.
+For scikit-learn >= 0.20:
+import sklearn; sklearn.show_versions()
+For scikit-learn < 0.20:
+import platform; print(platform.platform())
+import sys; print("Python", sys.version)
+import numpy; print("NumPy", numpy.__version__)
+import scipy; print("SciPy", scipy.__version__)
+import sklearn; print("Scikit-Learn", sklearn.__version__)
+import imblearn; print("Imbalanced-Learn", imblearn.__version__)
+-->
+
+System:
+    python: 3.6.8 (default, Oct  7 2019, 12:59:55)  [GCC 8.3.0]
+executable: /home/<user>/.virtualenvs/kernelpca_issue/bin/python3
+   machine: Linux-4.15.0-88-generic-x86_64-with-Ubuntu-18.04-bionic
+
+Python dependencies:
+       pip: 20.0.2
+setuptools: 45.2.0
+   sklearn: 0.22.2.post1
+     numpy: 1.18.1
+     scipy: 1.4.1
+    Cython: None
+    pandas: None
+matplotlib: None
+    joblib: 0.14.1
+
+Built with OpenMP: True
+
+
+<!-- Thanks for contributing! -->
+  </issue>
+  
+  <patch>
+  diff --git a/doc/whats_new/v0.23.rst b/doc/whats_new/v0.23.rst
+index 96702dae01235..0a77277f1da3a 100644
+--- a/doc/whats_new/v0.23.rst
++++ b/doc/whats_new/v0.23.rst
+@@ -138,6 +138,10 @@ Changelog
+   :func:`decomposition.non_negative_factorization` now preserves float32 dtype.
+   :pr:`16280` by :user:`Jeremie du Boisberranger <jeremiedbb>`.
+ 
++- |Fix| :class:`decomposition.KernelPCA` method ``inverse_transform`` now
++  applies the correct inverse transform to the transformed data. :pr:`16655`
++  by :user:`Lewis Ball <lrjball>`.
++
+ :mod:`sklearn.ensemble`
+ .......................
+ 
+diff --git a/sklearn/decomposition/_kernel_pca.py b/sklearn/decomposition/_kernel_pca.py
+index b1f83c8e0ff81..6f15ebc29f761 100644
+--- a/sklearn/decomposition/_kernel_pca.py
++++ b/sklearn/decomposition/_kernel_pca.py
+@@ -358,5 +358,6 @@ def inverse_transform(self, X):
+                                  "the inverse transform is not available.")
+ 
+         K = self._get_kernel(X, self.X_transformed_fit_)
+-
++        n_samples = self.X_transformed_fit_.shape[0]
++        K.flat[::n_samples + 1] += self.alpha
+         return np.dot(K, self.dual_coef_)
+diff --git a/sklearn/decomposition/tests/test_kernel_pca.py b/sklearn/decomposition/tests/test_kernel_pca.py
+index a08ae0cb7a43a..22d4fd31e9bdd 100644
+--- a/sklearn/decomposition/tests/test_kernel_pca.py
++++ b/sklearn/decomposition/tests/test_kernel_pca.py
+@@ -7,6 +7,7 @@
+ 
+ from sklearn.decomposition import PCA, KernelPCA
+ from sklearn.datasets import make_circles
++from sklearn.datasets import make_blobs
+ from sklearn.linear_model import Perceptron
+ from sklearn.pipeline import Pipeline
+ from sklearn.model_selection import GridSearchCV
+@@ -282,3 +283,15 @@ def test_kernel_conditioning():
+     # check that the small non-zero eigenvalue was correctly set to zero
+     assert kpca.lambdas_.min() == 0
+     assert np.all(kpca.lambdas_ == _check_psd_eigenvalues(kpca.lambdas_))
++
++
++@pytest.mark.parametrize("kernel",
++                         ["linear", "poly", "rbf", "sigmoid", "cosine"])
++def test_kernel_pca_inverse_transform(kernel):
++    X, *_ = make_blobs(n_samples=100, n_features=4, centers=[[1, 1, 1, 1]],
++                       random_state=0)
++
++    kp = KernelPCA(n_components=2, kernel=kernel, fit_inverse_transform=True)
++    X_trans = kp.fit_transform(X)
++    X_inv = kp.inverse_transform(X_trans)
++    assert np.isclose(X, X_inv).all()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

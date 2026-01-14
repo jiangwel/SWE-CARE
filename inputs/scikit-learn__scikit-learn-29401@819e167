@@ -1,0 +1,203 @@
+  Task-ID: scikit-learn__scikit-learn-29401@819e167
+  Please checkout to this commit first: ecdc9570953f21d702e3e96394133abdad8e3b6a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  TransformedTargetRegressor warns about set_output set to pandas
+### Describe the bug
+
+If `set_output` is set to `"pandas"`, `TransformedTargetRegressor` warns unnecessarily.
+
+### Steps/Code to Reproduce
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn import set_config
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.datasets import make_regression
+from sklearn.linear_model import LinearRegression
+
+set_config(transform_output="pandas")
+X, y = make_regression()
+y = np.abs(y) + 1
+TransformedTargetRegressor(
+    regressor=LinearRegression(),
+    func=np.log,
+    inverse_func=np.exp,
+).fit(X, y)
+```
+
+### Expected Results
+
+No warning.
+
+### Actual Results
+
+3 times the same warning:
+```
+python3.11/site-packages/sklearn/preprocessing/_function_transformer.py:303: UserWarning: When `set_output` is configured to be 'pandas', `func` should return a pandas DataFrame to follow the `set_output` API  or `feature_names_out` should be defined.
+  warnings.warn(warn_msg.format("pandas"))
+```
+
+### Versions
+
+```shell
+System:
+    python: 3.11.7
+Python dependencies:
+      sklearn: 1.5.0
+      pandas: 2.2.2
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/_config.py b/sklearn/_config.py
+index fc9392de68df6..e8da4bcaa3381 100644
+--- a/sklearn/_config.py
++++ b/sklearn/_config.py
+@@ -142,7 +142,7 @@ def set_config(
+         - `"default"`: Default output format of a transformer
+         - `"pandas"`: DataFrame output
+         - `"polars"`: Polars output
+-        - `None`: Transform configuration is unchanged
++        - `None`: Transform configuration is unchanged, global configuration is used
+ 
+         .. versionadded:: 1.2
+         .. versionadded:: 1.4
+@@ -297,7 +297,7 @@ def config_context(
+         - `"default"`: Default output format of a transformer
+         - `"pandas"`: DataFrame output
+         - `"polars"`: Polars output
+-        - `None`: Transform configuration is unchanged
++        - `None`: Transform configuration is unchanged, global configuration is used
+ 
+         .. versionadded:: 1.2
+         .. versionadded:: 1.4
+diff --git a/sklearn/compose/_column_transformer.py b/sklearn/compose/_column_transformer.py
+index a5aa7db17d4ae..a8b6af47f0a98 100644
+--- a/sklearn/compose/_column_transformer.py
++++ b/sklearn/compose/_column_transformer.py
+@@ -350,7 +350,7 @@ def set_output(self, *, transform=None):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `"polars"`: Polars output
+-            - `None`: Transform configuration is unchanged
++            - `None`: Transform configuration is unchanged, global configuration is used
+ 
+             .. versionadded:: 1.4
+                 `"polars"` option was added.
+diff --git a/sklearn/compose/_target.py b/sklearn/compose/_target.py
+index ac33957b23ce2..800f7337129b5 100644
+--- a/sklearn/compose/_target.py
++++ b/sklearn/compose/_target.py
+@@ -198,6 +198,10 @@ def _fit_transformer(self, y):
+                 validate=True,
+                 check_inverse=self.check_inverse,
+             )
++            # to force `_get_output_config()` to use the `set_output` setting of
++            # FunctionTransformer's instance and not the global configuration from
++            # `set_config`:
++            self.transformer_.set_output(transform="default")
+         # XXX: sample_weight is not currently passed to the
+         # transformer. However, if transformer starts using sample_weight, the
+         # code should be modified accordingly. At the time to consider the
+diff --git a/sklearn/compose/tests/test_target.py b/sklearn/compose/tests/test_target.py
+index a971553b64739..8a96d3a297641 100644
+--- a/sklearn/compose/tests/test_target.py
++++ b/sklearn/compose/tests/test_target.py
+@@ -1,7 +1,7 @@
+ import numpy as np
+ import pytest
+ 
+-from sklearn import datasets
++from sklearn import config_context, datasets
+ from sklearn.base import BaseEstimator, TransformerMixin, clone
+ from sklearn.compose import TransformedTargetRegressor
+ from sklearn.dummy import DummyRegressor
+@@ -393,3 +393,17 @@ def test_transform_target_regressor_pass_extra_predict_parameters():
+     regr.fit(X, y)
+     regr.predict(X, check_input=False)
+     assert regr.regressor_.predict_called
++
++
++@pytest.mark.filterwarnings("error")
++@pytest.mark.parametrize("output_format", ["pandas", "polars"])
++def test_transform_target_regressor_not_warns_with_global_output_set(output_format):
++    """Test that TransformedTargetRegressor will not raise warnings if
++    set_config(transform_output="pandas"/"polars") is set globally; regression test for
++    issue #29361."""
++    X, y = datasets.make_regression()
++    y = np.abs(y) + 1
++    with config_context(transform_output=output_format):
++        TransformedTargetRegressor(
++            regressor=LinearRegression(), func=np.log, inverse_func=np.exp
++        ).fit(X, y)
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 47faefcfd56ff..001c2d88f5c62 100644
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -178,7 +178,7 @@ def set_output(self, *, transform=None):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `"polars"`: Polars output
+-            - `None`: Transform configuration is unchanged
++            - `None`: Transform configuration is unchanged, global configuration is used
+ 
+             .. versionadded:: 1.4
+                 `"polars"` option was added.
+@@ -1456,7 +1456,7 @@ def set_output(self, *, transform=None):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `"polars"`: Polars output
+-            - `None`: Transform configuration is unchanged
++            - `None`: Transform configuration is unchanged, global configuration is used
+ 
+         Returns
+         -------
+diff --git a/sklearn/utils/_set_output.py b/sklearn/utils/_set_output.py
+index 42757dbb00fae..45e2893a7f34d 100644
+--- a/sklearn/utils/_set_output.py
++++ b/sklearn/utils/_set_output.py
+@@ -398,7 +398,7 @@ def set_output(self, *, transform=None):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `"polars"`: Polars output
+-            - `None`: Transform configuration is unchanged
++            - `None`: Transform configuration is unchanged, global configuration is used
+ 
+             .. versionadded:: 1.4
+                 `"polars"` option was added.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

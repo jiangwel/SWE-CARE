@@ -1,0 +1,198 @@
+  Task-ID: getsentry__sentry-87304@7f85f57
+  Please checkout to this commit first: ea8d9fa79df07be4576a4151c97ae05c32794904
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [New Org/Project Creation] Add Mobile Replay Instructions, Opt-in Only
+## Add Mobile Replay Onboarding Instructions
+
+- to the new org/project creation flow
+- covers iOS, Android, and React Native (excl. Flutter until it's out of beta)
+- default to replay being 'unchecked'/not enabled
+- user analytics to track this funnel (1) users that land on the new org/project creation flow for mobile and (2) what % send replays
+  </issue>
+  
+  <patch>
+  diff --git a/static/app/components/onboarding/productSelection.tsx b/static/app/components/onboarding/productSelection.tsx
+index 225ffb22fe632f..07d9905b371d21 100644
+--- a/static/app/components/onboarding/productSelection.tsx
++++ b/static/app/components/onboarding/productSelection.tsx
+@@ -76,8 +76,16 @@ function getDisabledProducts(organization: Organization): DisabledProducts {
+ // Since the ProductSelection component is rendered in the onboarding/project creation flow only, it is ok to have this list here
+ // NOTE: Please keep the prefix in alphabetical order
+ export const platformProductAvailability = {
+-  android: [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+-  'apple-ios': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
++  android: [
++    ProductSolution.PERFORMANCE_MONITORING,
++    ProductSolution.PROFILING,
++    ProductSolution.SESSION_REPLAY,
++  ],
++  'apple-ios': [
++    ProductSolution.PERFORMANCE_MONITORING,
++    ProductSolution.PROFILING,
++    ProductSolution.SESSION_REPLAY,
++  ],
+   'apple-macos': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+   bun: [ProductSolution.PERFORMANCE_MONITORING],
+   capacitor: [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.SESSION_REPLAY],
+@@ -187,7 +195,11 @@ export const platformProductAvailability = {
+   'python-tornado': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+   'python-starlette': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+   'python-wsgi': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+-  'react-native': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
++  'react-native': [
++    ProductSolution.PERFORMANCE_MONITORING,
++    ProductSolution.PROFILING,
++    ProductSolution.SESSION_REPLAY,
++  ],
+   ruby: [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+   'ruby-rack': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+   'ruby-rails': [ProductSolution.PERFORMANCE_MONITORING, ProductSolution.PROFILING],
+@@ -391,18 +403,6 @@ export function ProductSelection({
+           checked={urlProducts.includes(ProductSolution.PERFORMANCE_MONITORING)}
+         />
+       )}
+-      {products.includes(ProductSolution.SESSION_REPLAY) && (
+-        <Product
+-          label={t('Session Replay')}
+-          description={t(
+-            'Video-like reproductions of user sessions with debugging context to help you confirm issue impact and troubleshoot faster.'
+-          )}
+-          docLink="https://docs.sentry.io/platforms/javascript/guides/react/session-replay/"
+-          onClick={() => handleClickProduct(ProductSolution.SESSION_REPLAY)}
+-          disabled={disabledProducts[ProductSolution.SESSION_REPLAY]}
+-          checked={urlProducts.includes(ProductSolution.SESSION_REPLAY)}
+-        />
+-      )}
+       {products.includes(ProductSolution.PROFILING) && (
+         <Product
+           label={t('Profiling')}
+@@ -418,6 +418,18 @@ export function ProductSelection({
+           checked={urlProducts.includes(ProductSolution.PROFILING)}
+         />
+       )}
++      {products.includes(ProductSolution.SESSION_REPLAY) && (
++        <Product
++          label={t('Session Replay')}
++          description={t(
++            'Video-like reproductions of user sessions with debugging context to help you confirm issue impact and troubleshoot faster.'
++          )}
++          docLink="https://docs.sentry.io/platforms/javascript/guides/react/session-replay/"
++          onClick={() => handleClickProduct(ProductSolution.SESSION_REPLAY)}
++          disabled={disabledProducts[ProductSolution.SESSION_REPLAY]}
++          checked={urlProducts.includes(ProductSolution.SESSION_REPLAY)}
++        />
++      )}
+     </Products>
+   );
+ }
+diff --git a/static/app/gettingStartedDocs/android/android.tsx b/static/app/gettingStartedDocs/android/android.tsx
+index ec4ad41829ee8a..4790017db546aa 100644
+--- a/static/app/gettingStartedDocs/android/android.tsx
++++ b/static/app/gettingStartedDocs/android/android.tsx
+@@ -88,6 +88,14 @@ const getConfigurationSnippet = (params: Params) => `
+   <!-- see https://docs.sentry.io/platforms/android/profiling/troubleshooting/ -->
+   <meta-data android:name="io.sentry.traces.profiling.sample-rate" android:value="1.0" />`
+       : ''
++  }${
++    params.isReplaySelected
++      ? `
++
++  <!-- record session replays for 100% of errors and 10% of sessions -->
++  <meta-data android:name="io.sentry.session-replay.on-error-sample-rate" android:value="1.0" />
++  <meta-data android:name="io.sentry.session-replay.session-sample-rate" android:value="0.1" />`
++      : ''
+   }
+ </application>`;
+ 
+diff --git a/static/app/gettingStartedDocs/apple/ios.tsx b/static/app/gettingStartedDocs/apple/ios.tsx
+index ca717ec398bf4e..4544d1e500e06f 100644
+--- a/static/app/gettingStartedDocs/apple/ios.tsx
++++ b/static/app/gettingStartedDocs/apple/ios.tsx
+@@ -86,6 +86,16 @@ func application(_ application: UIApplication,
+         // We recommend adjusting this value in production.
+         options.profilesSampleRate = 1.0`
+             : ''
++        }${
++          params.isReplaySelected
++            ? `
++
++        // Record Session Replays for 100% of Errors and 10% of Sessions
++        options.sessionReplay.onErrorSampleRate = 1.0
++        options.sessionReplay.sessionSampleRate = 0.1
++        // We recommend the ~5x more performant experimental view renderer
++        options.sessionReplay.enableExperimentalViewRenderer = true`
++            : ''
+         }
+     }${
+       params.isProfilingSelected &&
+@@ -135,6 +145,16 @@ struct SwiftUIApp: App {
+             // We recommend adjusting this value in production.
+             options.profilesSampleRate = 1.0`
+                 : ''
++            }${
++              params.isReplaySelected
++                ? `
++
++            // Record Session Replays for 100% of Errors and 10% of Sessions
++            options.sessionReplay.onErrorSampleRate = 1.0
++            options.sessionReplay.sessionSampleRate = 0.1
++            // We recommend the ~5x more performant experimental view renderer
++            options.sessionReplay.enableExperimentalViewRenderer = true`
++                : ''
+             }
+         }${
+           params.isProfilingSelected &&
+diff --git a/static/app/gettingStartedDocs/react-native/react-native.tsx b/static/app/gettingStartedDocs/react-native/react-native.tsx
+index f2c9eb52d58898..c31a9ab25dcda6 100644
+--- a/static/app/gettingStartedDocs/react-native/react-native.tsx
++++ b/static/app/gettingStartedDocs/react-native/react-native.tsx
+@@ -73,6 +73,14 @@ Sentry.init({
+   // Here, we'll capture profiles for 100% of transactions.
+   profilesSampleRate: 1.0,`
+       : ''
++  }${
++    params.isReplaySelected
++      ? `
++  // Record Session Replays for 10% of Sessions and 100% of Errors
++  replaysSessionSampleRate: 0.1,
++  replaysOnErrorSampleRate: 1.0,
++  integrations: [Sentry.mobileReplayIntegration()],`
++      : ''
+   }
+ });`;
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

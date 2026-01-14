@@ -1,0 +1,114 @@
+  Task-ID: scikit-learn__scikit-learn-14358@dfcd0aa
+  Please checkout to this commit first: 98e0866318e4c6792096c2b354484b5db8d67fca
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Assymetry of roc_auc_score
+#### Description
+For binary tasks with wrapped down custom scoring functions by the `metrics.make_scorerer`-scheme `roc_auc_score` is behaving unexpectedly. When requiring the probability output from a binary classifier, which is a shape( n , 2) object, while the training/testing lables are an expected shape (n, ) input, A scoring will fail.
+However, the binary task and internal handling of different y shapes is incidentially correctly understood by `metrics.log_loss` by internal evaluations, but `roc_auc_score` currently fails at this. This especially cumbersome, if the scoring function is wrapped down in a `cross_val_score` and a `make_scorer` much deeper in the code with possible nested pipelines etc, where the automatic correct evaluation of this particular metric is required.
+
+#### Steps/Code to Reproduce
+This should illustrate what is failing
+```python
+from sklearn.metrics import roc_auc_score, log_loss
+y_true0 = np.array([False, False, True, True])
+y_true1 = ~y_true0
+y_true = np.matrix([y_true0, y_true1]).T
+
+y_proba0 = np.array([0.1, 0.4, 0.35, 0.8]) #predict_proba component [:,0]
+y_proba1 = 1 - y_proba0 #predict_proba component [:,1]
+y_proba = np.matrix([y_proba0, y_proba1]).T #as obtained by classifier.predict_proba()
+
+log_loss(y_true1, y_proba1) # compute for positive class component >>> OK
+log_loss(y_true, y_proba) # compute for all class >>> OK
+log_loss(y_true1, y_proba) # compute for mixed component >>> OK
+
+roc_auc_score(y_true1, y_proba1) # compute for positive class component >>> OK
+roc_auc_score(y_true, y_proba) # compute for all class >>> OK
+roc_auc_score(y_true1, y_proba) # compute for mixed component >>> FAIL: bad input shape (4, 2)
+
+#last above line is source of error in this snippet: of binary classification and scoring task
+from sklearn.datasets import make_hastie_10_2
+from sklearn.ensemble import GradientBoostingClassifier
+
+X, y = make_hastie_10_2(random_state=0)
+X_train, X_test = X[:2000], X[2000:]
+y_train, y_test = y[:2000], y[2000:]
+
+clf = GradientBoostingClassifier(n_estimators=100, learning_rate=1.0,
+    max_depth=1, random_state=0).fit(X_train, y_train)
+
+from sklearn.metrics import make_scorer, roc_auc_score
+make_scorer(roc_auc_score, needs_proba=True)(clf, X_test, y_test) # >>> FAIL: bad input shape (1000, 2)
+#compare
+make_scorer(log_loss, greater_is_better=True, needs_proba=True)(clf, X_test, y_test) # >>> OK
+```
+
+#### Expected Results
+`roc_auc_score` should behave in a similar way as `log_loss`, guessing the binary classification task and handle different shape input correctly
+
+
+#### Versions
+Windows-10-10.0.15063-SP0
+Python 3.6.1 |Anaconda 4.4.0 (64-bit)| (default, May 11 2017, 13:25:24) [MSC v.1900 64 bit (AMD64)]
+NumPy 1.13.3
+SciPy 0.19.1
+Scikit-Learn 0.19.1
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/metrics/scorer.py b/sklearn/metrics/scorer.py
+index 087ade8c3642f..d8d59a1b13e2a 100644
+--- a/sklearn/metrics/scorer.py
++++ b/sklearn/metrics/scorer.py
+@@ -449,6 +449,16 @@ def make_scorer(score_func, greater_is_better=True, needs_proba=False,
+     >>> from sklearn.svm import LinearSVC
+     >>> grid = GridSearchCV(LinearSVC(), param_grid={'C': [1, 10]},
+     ...                     scoring=ftwo_scorer)
++
++    Notes
++    -----
++    If ``needs_proba is False`` and ``needs_threshold is False``, the score
++    function is supposed to accept the output of ``predict``. If
++    ``needs_proba is True``, the score function is supposed to accept the
++    output of ``predict_proba`` (For binary y_true, the score function is
++    supposed to accept probability of the positive class). If
++    ``needs_threshold is True``, the score function is supposed to accept the
++    output of ``decision_function``.
+     """
+     sign = 1 if greater_is_better else -1
+     if needs_proba and needs_threshold:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

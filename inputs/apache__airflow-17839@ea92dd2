@@ -1,0 +1,320 @@
+  Task-ID: apache__airflow-17839@ea92dd2
+  Please checkout to this commit first: bec006e418706f11d92271d0b9f2a46afccc80e2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Abort a DAG Run
+**Description**
+
+It would be great having a option to abort a DAG Runs through the REST API.
+
+**Use case / motivation**
+
+The proposed input params would be:
+ - DAG_ID
+ - DAG_RUN_ID
+
+The DAG Run should abort all its tasks running and mark them as "failed".
+
+**Are you willing to submit a PR?**
+
+**Related Issues**
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/api_connexion/endpoints/dag_run_endpoint.py b/airflow/api_connexion/endpoints/dag_run_endpoint.py
+index feb6d24cf3247..9d4e554313c88 100644
+--- a/airflow/api_connexion/endpoints/dag_run_endpoint.py
++++ b/airflow/api_connexion/endpoints/dag_run_endpoint.py
+@@ -17,6 +17,7 @@
+ from flask import current_app, g, request
+ from marshmallow import ValidationError
+ from sqlalchemy import or_
++from typing import Optional
+ 
+ from airflow._vendor.connexion import NoContent
+ from airflow.api_connexion import security
+@@ -31,8 +32,9 @@
+ from airflow.models import DagModel, DagRun
+ from airflow.security import permissions
+ from airflow.utils.session import provide_session
+-from airflow.utils.state import State
++from airflow.utils.state import State, DagRunState
+ from airflow.utils.types import DagRunType
++from airflow.exceptions import DagRunNotFound
+ 
+ 
+ @security.requires_access(
+@@ -271,3 +273,24 @@ def post_dag_run(dag_id, session):
+         )
+ 
+     raise AlreadyExists(detail=f"DAGRun with DAG ID: '{dag_id}' and DAGRun ID: '{run_id}' already exists")
++
++
++@security.requires_access(
++    [
++        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
++        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG_RUN)
++    ]
++)
++@provide_session
++def post_set_dag_run_state(dag_id: str, dag_run_id: str, session) -> dict:
++    """Set a state of a dag run."""
++    dag_run: Optional[DagRun] = session.query(DagRun) \
++        .filter(DagRun.dag_id == dag_id, DagRun.run_id == dag_run_id).one_or_none()
++    if dag_run is None:
++        error_message = f'Dag Run id {dag_run_id} not found in dag {dag_id}'
++        raise NotFound(error_message)
++
++    state = request.json['state']
++    dag_run.set_state(state=DagRunState(state.lower()).value)
++    session.merge(dag_run)
++    return dagrun_schema.dump(dag_run)
+diff --git a/airflow/api_connexion/openapi/v1.yaml b/airflow/api_connexion/openapi/v1.yaml
+index 2ce6804bbd888..525b712badeea 100644
+--- a/airflow/api_connexion/openapi/v1.yaml
++++ b/airflow/api_connexion/openapi/v1.yaml
+@@ -604,6 +604,41 @@ paths:
+         '404':
+           $ref: '#/components/responses/NotFound'
+ 
++  /dags/{dag_id}/dagRuns/{dag_run_id}/state:
++    parameters:
++      - $ref: '#/components/parameters/DAGID'
++      - $ref: '#/components/parameters/DAGRunID'
++
++    post:
++      summary: Set a state of DAG run
++      description: >
++        Set a state of DAG run
++      x-openapi-router-controller: airflow.api_connexion.endpoints.dag_run_endpoint
++      operationId: post_set_dag_run_state
++      tags: [UpdateDagRunState]
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: '#/components/schemas/UpdateDagRunState'
++
++      responses:
++        '200':
++          description: Success.
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/DAGRun'
++        '400':
++          $ref: '#/components/responses/BadRequest'
++        '401':
++          $ref: '#/components/responses/Unauthenticated'
++        '403':
++          $ref: '#/components/responses/PermissionDenied'
++        '404':
++          $ref: '#/components/responses/NotFound'
++
+   /dags/~/dagRuns/list:
+     post:
+       summary: List DAG runs (batch)
+@@ -1996,6 +2031,14 @@ components:
+       required:
+         - dag_id
+ 
++    UpdateDagRunState:
++      type: object
++      properties:
++        state:
++          $ref: '#/components/schemas/DagState'
++      required:
++        - state
++
+     DAGRunCollection:
+       type: object
+       description: Collection of DAG runs.
+diff --git a/airflow/api_connexion/schemas/dag_run_schema.py b/airflow/api_connexion/schemas/dag_run_schema.py
+index 62ac172ce5525..a5c6dc4d9e7a6 100644
+--- a/airflow/api_connexion/schemas/dag_run_schema.py
++++ b/airflow/api_connexion/schemas/dag_run_schema.py
+@@ -104,6 +104,14 @@ def autofill(self, data, **kwargs):
+         return data
+ 
+ 
++class SetDagRunStateFormSchema(Schema):
++    """Schema for handling the request of setting state of DAG run"""
++
++    run_id = auto_field(data_key='dag_run_id')
++    dag_id = auto_field(dump_only=True)
++    state = DagStateField(dump_only=True)
++
++
+ class DAGRunCollection(NamedTuple):
+     """List of DAGRuns with metadata"""
+ 
+diff --git a/tests/api_connexion/endpoints/test_dag_run_endpoint.py b/tests/api_connexion/endpoints/test_dag_run_endpoint.py
+index 71b52747dcff7..618ee8b677b81 100644
+--- a/tests/api_connexion/endpoints/test_dag_run_endpoint.py
++++ b/tests/api_connexion/endpoints/test_dag_run_endpoint.py
+@@ -19,12 +19,14 @@
+ 
+ import pytest
+ from parameterized import parameterized
++from freezegun import freeze_time
+ 
+ from airflow.api_connexion.exceptions import EXCEPTIONS_LINK_MAP
+ from airflow.models import DAG, DagModel, DagRun
+ from airflow.security import permissions
+ from airflow.utils import timezone
+ from airflow.utils.session import create_session, provide_session
++from airflow.utils.state import DagRunState
+ from airflow.utils.types import DagRunType
+ from tests.test_utils.api_connexion_utils import assert_401, create_user, delete_user
+ from tests.test_utils.config import conf_vars
+@@ -1154,3 +1156,115 @@ def test_should_raises_403_unauthorized(self):
+             environ_overrides={'REMOTE_USER': "test_view_dags"},
+         )
+         assert response.status_code == 403
++
++
++class TestPostSetDagRunState(TestDagRunEndpoint):
++
++    @parameterized.expand([
++        ("TEST_DAG_ID", "TEST_DAG_RUN_ID_1", "failed"),
++        ("TEST_DAG_ID", "TEST_DAG_RUN_ID_1", "success")
++    ])
++    @freeze_time(TestDagRunEndpoint.default_time)
++    def test_should_respond_200(self, dag_id, dag_run_id, state):
++        test_time = timezone.parse(self.default_time)
++        with create_session() as session:
++            dag = DagModel(dag_id=dag_id)
++            dag_run = DagRun(
++                dag_id=dag_id,
++                run_id=dag_run_id,
++                state=DagRunState.RUNNING,
++                run_type=DagRunType.MANUAL,
++                execution_date=test_time,
++                start_date=test_time,
++                external_trigger=True
++            )
++            session.add(dag)
++            session.add(dag_run)
++
++        request_json = {
++            "state": state
++        }
++
++        response = self.client.post(
++            "api/v1/dags/TEST_DAG_ID/dagRuns/TEST_DAG_RUN_ID_1/state",
++            json=request_json,
++            environ_overrides={"REMOTE_USER": "test"},
++        )
++
++        assert response.status_code == 200
++        assert response.json == {
++            'conf': {},
++            'dag_id': 'TEST_DAG_ID',
++            'dag_run_id': 'TEST_DAG_RUN_ID_1',
++            'end_date': self.default_time,
++            'execution_date': self.default_time,
++            'external_trigger': True,
++            'logical_date': self.default_time,
++            'start_date': self.default_time,
++            'state': state
++        }
++
++    def test_should_response_400_for_non_existing_dag_run_state(self):
++        test_time = timezone.parse(self.default_time)
++        with create_session() as session, freeze_time(self.default_time):
++            dag_id = "TEST_DAG_ID"
++            dag_run_id = "TEST_DAG_RUN_ID_1"
++            dag = DagModel(dag_id=dag_id)
++            dag_run = DagRun(
++                dag_id=dag_id,
++                run_id=dag_run_id,
++                state=DagRunState.RUNNING,
++                run_type=DagRunType.MANUAL,
++                execution_date=test_time,
++                start_date=test_time,
++                external_trigger=True
++            )
++            session.add(dag)
++            session.add(dag_run)
++
++            request_json = {
++                "state": "madeUpState"
++            }
++
++            response = self.client.post(
++                "api/v1/dags/TEST_DAG_ID/dagRuns/TEST_DAG_RUN_ID_1/state",
++                json=request_json,
++                environ_overrides={"REMOTE_USER": "test"},
++            )
++            assert response.status_code == 400
++            assert response.json == {
++                'detail': "'madeUpState' is not one of ['queued', 'running', 'success', 'failed'] - 'state'",
++                'status': 400,
++                'title': 'Bad Request',
++                'type': EXCEPTIONS_LINK_MAP[400]
++            }
++
++    def test_should_raises_401_unauthenticated(self, session):
++        response = self.client.post(
++            "api/v1/dags/TEST_DAG_ID/dagRuns/TEST_DAG_RUN_ID_1/state",
++            json={
++                "state": 'success',
++            },
++        )
++
++        assert_401(response)
++
++    def test_should_raise_403_forbidden(self):
++        response = self.client.post(
++            "api/v1/dags/TEST_DAG_ID/dagRuns/TEST_DAG_RUN_ID_1/state",
++            json={
++                "state": 'success',
++            },
++            environ_overrides={'REMOTE_USER': "test_no_permissions"},
++        )
++        assert response.status_code == 403
++
++    def test_should_respond_404(self):
++        response = self.client.post(
++            "api/v1/dags/INVALID_DAG_ID/dagRuns/TEST_DAG_RUN_ID_1/state",
++            json={
++                "state": 'success',
++            },
++            environ_overrides={"REMOTE_USER": "test"}
++        )
++        assert response.status_code == 404
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

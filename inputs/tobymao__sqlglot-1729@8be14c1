@@ -1,0 +1,134 @@
+  Task-ID: tobymao__sqlglot-1729@8be14c1
+  Please checkout to this commit first: e4b164ff762fe3491ba86e8a9b5759793acf825a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Trino aliases cannot start with an integer if unquoted
+This is a valid Spark query, but it's not in Trino, I get an error "identifiers must not start with a digit; surround the identifier with double quotes"
+
+```
+>>> import sqlglot
+>>> sqlglot.__version__
+'15.0.0'
+>>> sqlglot.transpile("SELECT 1 AS 1x", read='spark', write='trino')[0]
+'SELECT 1 AS 1x'
+```
+
+The desired output here is then
+
+```
+>>> sqlglot.transpile("SELECT 1 AS 1x", read='spark', write='trino')[0]
+'SELECT 1 AS "1x"'
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sqlglot/dialects/hive.py b/sqlglot/dialects/hive.py
+index fbd626a2c0..8b434396ed 100644
+--- a/sqlglot/dialects/hive.py
++++ b/sqlglot/dialects/hive.py
+@@ -283,6 +283,7 @@ class Generator(generator.Generator):
+         JOIN_HINTS = False
+         TABLE_HINTS = False
+         INDEX_ON = "ON TABLE"
++        IDENTIFIER_CAN_START_WITH_DIGIT = True
+ 
+         TYPE_MAPPING = {
+             **generator.Generator.TYPE_MAPPING,
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 55dd589d87..9550047229 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -133,6 +133,9 @@ class Generator:
+     # Whether or not to treat the number in TABLESAMPLE (50) as a percentage
+     TABLESAMPLE_SIZE_IS_PERCENT = False
+ 
++    # Whether or not unquoted identifiers are allowed to start with a digit
++    IDENTIFIER_CAN_START_WITH_DIGIT = False
++
+     # Whether or not limit and fetch are supported (possible values: "ALL", "LIMIT", "FETCH")
+     LIMIT_FETCH = "ALL"
+ 
+@@ -896,6 +899,7 @@ def identifier_sql(self, expression: exp.Identifier) -> str:
+             expression.quoted
+             or should_identify(text, self.identify)
+             or lower in self.RESERVED_KEYWORDS
++            or (not self.IDENTIFIER_CAN_START_WITH_DIGIT and text[:1].isdigit())
+         ):
+             text = f"{self.identifier_start}{text}{self.identifier_end}"
+         return text
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+index a21a667fc7..39696e9f16 100644
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -3060,11 +3060,7 @@ def _parse_column_ops(self, this: exp.Expression) -> exp.Expression:
+                     else exp.Literal.string(value)
+                 )
+             else:
+-                field = (
+-                    self._parse_star()
+-                    or self._parse_function(anonymous=True)
+-                    or self._parse_id_var()
+-                )
++                field = self._parse_field(anonymous_func=True)
+ 
+             if isinstance(field, exp.Func):
+                 # bigquery allows function calls like x.y.count(...)
+@@ -3135,10 +3131,11 @@ def _parse_field(
+         self,
+         any_token: bool = False,
+         tokens: t.Optional[t.Collection[TokenType]] = None,
++        anonymous_func: bool = False,
+     ) -> t.Optional[exp.Expression]:
+         return (
+             self._parse_primary()
+-            or self._parse_function()
++            or self._parse_function(anonymous=anonymous_func)
+             or self._parse_id_var(any_token=any_token, tokens=tokens)
+         )
+ 
+diff --git a/tests/dialects/test_hive.py b/tests/dialects/test_hive.py
+index 99b5602b9d..f6cc2244c7 100644
+--- a/tests/dialects/test_hive.py
++++ b/tests/dialects/test_hive.py
+@@ -412,6 +412,7 @@ def test_hive(self):
+             "SELECT 1_a AS a FROM test_table",
+             write={
+                 "spark": "SELECT 1_a AS a FROM test_table",
++                "trino": 'SELECT "1_a" AS a FROM test_table',
+             },
+         )
+         self.validate_all(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

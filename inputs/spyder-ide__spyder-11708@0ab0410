@@ -1,0 +1,358 @@
+  Task-ID: spyder-ide__spyder-11708@0ab0410
+  Please checkout to this commit first: e7b29d9c87febda78dbd60ec78a069c22f272650
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Static Code Analysis Not Reading .pylintrc file
+I have a .pylintrc file in the Spyder project directory and in the file directory (it is located in a subdirectory). It has the following line in the [MASTER] block:
+
+extension-pkg-whitelist=numpy
+
+It also has the following lines in the [TYPECHECK] block:
+ignored-modules=numpy
+ignored-classes=optparse.Values,thread._local,_thread._local,numpy
+
+However, the code analysis still gives me an error on the second line of these two:
+time1 = df.index.to_datetime()
+time2 = np.array([time1.year, time1.month, time1.day,
+                          time1.hour, time1.minute,
+                          time1.second, time1.microsecond/1000]).transpose()
+
+The error is [E1101] Instance of 'list' has no 'transpose' member
+
+Is there another directory that Spyder's call of Pylint must be reading from? How do I check this? Also, my project is on a shared network drive (temporarily). 
+
+## Versions and main components
+
+* Spyder Version: 3.2.3
+* Python Version: Anaconda 3.6
+* Qt Version: 5.6.2
+* PyQt Version: 5.6.0
+* Operating system: Windows 7
+  </issue>
+  
+  <patch>
+  diff --git a/spyder/app/tests/test_mainwindow.py b/spyder/app/tests/test_mainwindow.py
+index ffabecd7f5f..9e7618395f8 100644
+--- a/spyder/app/tests/test_mainwindow.py
++++ b/spyder/app/tests/test_mainwindow.py
+@@ -2996,8 +2996,9 @@ def test_runcell_after_restart(main_window, qtbot):
+     # Make sure no errors are shown
+     assert "error" not in shell._control.toPlainText().lower()
+ 
++
+ @pytest.mark.slow
+-@flaky(max_runs=1)
++@flaky(max_runs=3)
+ @pytest.mark.parametrize(
+     "ipython", [True, False])
+ @pytest.mark.parametrize(
+diff --git a/spyder/plugins/pylint/tests/test_pylint.py b/spyder/plugins/pylint/tests/test_pylint.py
+new file mode 100644
+index 00000000000..19cddbbb39a
+--- /dev/null
++++ b/spyder/plugins/pylint/tests/test_pylint.py
+@@ -0,0 +1,169 @@
++# -*- coding: utf-8 -*-
++# ----------------------------------------------------------------------------
++# Copyright © Spyder Project Contributors
++#
++# Licensed under the terms of the MIT License
++# ----------------------------------------------------------------------------
++"""Tests for the execution of pylint."""
++
++from __future__ import unicode_literals
++
++# Standard library imports
++from io import open
++import os.path as osp
++
++# Third party imports
++import pytest
++
++# Local imports
++from spyder.plugins.pylint.widgets.pylintgui import (
++    get_pylintrc_path,
++    PylintWidget,
++    )
++from spyder.py3compat import PY2
++
++# pylint: disable=redefined-outer-name
++
++PYLINTRC_FILENAME = ".pylintrc"
++
++# Constants for dir name keys
++# TODO in Python 3 : Replace with enum
++NO_DIR = "e"
++SCRIPT_DIR = "SCRIPT_DIR"
++WORKING_DIR = "WORKING_DIR"
++PROJECT_DIR = "PROJECT_DIR"
++HOME_DIR = "HOME_DIR"
++ALL_DIR = "ALL_DIR"
++
++DIR_LIST = [SCRIPT_DIR, WORKING_DIR, PROJECT_DIR, HOME_DIR]
++DIR_LIST_ALL = [NO_DIR] + DIR_LIST + [ALL_DIR]
++
++PYLINT_TEST_SCRIPT = "\n".join(
++    [dir_name + " = " + str(idx) for idx, dir_name in enumerate(DIR_LIST_ALL)])
++PYLINT_TEST_SCRIPT = "\"\"\"Docstring.\"\"\"\n" + PYLINT_TEST_SCRIPT + "\n"
++
++PYLINTRC_TEST_CONTENTS = """
++[MESSAGES CONTROL]
++enable=blacklisted-name
++
++[BASIC]
++bad-names={bad_names}
++good-names=e
++"""
++
++
++@pytest.fixture
++def pylintrc_search_paths(tmp_path_factory):
++    """Construct temporary .pylintrc search paths."""
++    search_paths = {dir_name: str(tmp_path_factory.mktemp(dir_name))
++                    for dir_name in DIR_LIST}
++    return search_paths
++
++
++@pytest.fixture
++def pylint_test_script(pylintrc_search_paths):
++    """Write a script for testing Pylint to a temporary directory."""
++    script_path = osp.join(
++        pylintrc_search_paths[SCRIPT_DIR], "test_script.py")
++    with open(script_path, mode="w",
++              encoding="utf-8", newline="\n") as script_file:
++        script_file.write(PYLINT_TEST_SCRIPT)
++    return script_path
++
++
++@pytest.fixture(
++    params=[
++        [], [SCRIPT_DIR], [WORKING_DIR], [PROJECT_DIR], [HOME_DIR],
++        [SCRIPT_DIR, HOME_DIR], [WORKING_DIR, PROJECT_DIR],
++        [SCRIPT_DIR, PROJECT_DIR], [PROJECT_DIR, HOME_DIR],
++        [SCRIPT_DIR, WORKING_DIR, PROJECT_DIR, HOME_DIR]],
++    ids=["None", "Script", "Working", "Project", "Home", "Script & Home",
++         "Working & Project", "Script & Working", "Project & Home", "All"])
++def pylintrc_files(pylintrc_search_paths, request):
++    """Store test .pylintrc files at the paths and determine the result."""
++    search_paths = pylintrc_search_paths
++
++    # Determine the bad names that should be reported
++    pylintrc_locations = request.param
++    bad_names = [ALL_DIR]
++    for search_path_name, search_path in search_paths.items():
++        if search_path_name in pylintrc_locations:
++            expected_path = osp.join(search_path, PYLINTRC_FILENAME)
++            bad_names += [search_path_name]
++            break
++    else:
++        expected_path = None
++        bad_names = [NO_DIR]
++
++    # Store the selected pylintrc files at the designated paths
++    for location in pylintrc_locations:
++        pylintrc_test_contents = PYLINTRC_TEST_CONTENTS.format(
++            bad_names=", ".join([location, ALL_DIR]))
++        pylintrc_path = osp.join(search_paths[location], PYLINTRC_FILENAME)
++        with open(pylintrc_path, mode="w",
++                  encoding="utf-8", newline="\n") as rc_file:
++            rc_file.write(pylintrc_test_contents)
++    return search_paths, expected_path, bad_names
++
++
++def test_get_pylintrc_path(pylintrc_files, mocker):
++    """Test that get_pylintrc_path finds the expected one in the hiearchy."""
++    search_paths, expected_path, __ = pylintrc_files
++    mocker.patch("pylint.config.os.path.expanduser",
++                 return_value=search_paths[HOME_DIR])
++    actual_path = get_pylintrc_path(
++        search_paths=list(search_paths.values()),
++        home_path=search_paths[HOME_DIR],
++        )
++    assert actual_path == expected_path
++
++
++def test_pylint_widget_noproject(pylint_test_script, qtbot):
++    """Test that pylint works without errors with no project open."""
++    pylint_widget = PylintWidget(parent=None)
++    pylint_widget.analyze(filename=pylint_test_script)
++    qtbot.waitUntil(
++        lambda: pylint_widget.get_data(pylint_test_script)[1] is not None,
++        timeout=5000)
++    pylint_data = pylint_widget.get_data(filename=pylint_test_script)
++    print(pylint_data)
++    assert pylint_data
++    assert pylint_data[0] is not None
++    assert pylint_data[1] is not None
++
++
++@pytest.mark.skipif(PY2, reason="It fails on PY2 for no obvious reason")
++def test_pylint_widget_pylintrc(
++        pylint_test_script, pylintrc_files, mocker, qtbot):
++    """Test that entire pylint widget gets results depending on pylintrc."""
++    search_paths, __, bad_names = pylintrc_files
++    mocker.patch("pylint.config.os.path.expanduser",
++                 return_value=search_paths[HOME_DIR])
++    mocker.patch("spyder.plugins.pylint.widgets.pylintgui.getcwd_or_home",
++                 return_value=search_paths[WORKING_DIR])
++    mock_parent = mocker.Mock()
++    mock_parent.main.projects.get_active_project_path = mocker.MagicMock(
++        return_value=search_paths[PROJECT_DIR])
++    mocker.patch(
++        "spyder.plugins.pylint.widgets.pylintgui.PylintWidget.parentWidget",
++        return_value=mock_parent)
++    mocker.patch("spyder.plugins.pylint.widgets.pylintgui.osp.expanduser",
++                 return_value=search_paths[HOME_DIR])
++
++    pylint_widget = PylintWidget(parent=None)
++    pylint_widget.analyze(filename=pylint_test_script)
++    qtbot.waitUntil(
++        lambda: pylint_widget.get_data(pylint_test_script)[1] is not None,
++        timeout=5000)
++    pylint_data = pylint_widget.get_data(filename=pylint_test_script)
++    print(pylint_data)
++    assert pylint_data
++    conventions = pylint_data[1][3]["C:"]
++    assert conventions
++    assert len(conventions) == len(bad_names)
++    assert all([sum([bad_name in message[2] for message in conventions]) == 1
++                for bad_name in bad_names])
++
++
++if __name__ == "__main__":
++    pytest.main([osp.basename(__file__), '-vv', '-rw'])
+diff --git a/spyder/plugins/pylint/widgets/pylintgui.py b/spyder/plugins/pylint/widgets/pylintgui.py
+index 4241ae5e013..bf7733c92a8 100644
+--- a/spyder/plugins/pylint/widgets/pylintgui.py
++++ b/spyder/plugins/pylint/widgets/pylintgui.py
+@@ -13,6 +13,7 @@
+ 
+ # Standard library imports
+ from __future__ import print_function, with_statement
++import os
+ import os.path as osp
+ import re
+ import sys
+@@ -20,6 +21,7 @@
+ 
+ # Third party imports
+ import pylint
++import pylint.config
+ from qtpy.compat import getopenfilename
+ from qtpy.QtCore import QByteArray, QProcess, Signal, Slot, QProcessEnvironment
+ from qtpy.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QTreeWidgetItem,
+@@ -44,6 +46,31 @@
+     import gettext
+     _ = gettext.gettext
+ 
++
++def _find_pylintrc_path(path):
++    os.chdir(path)
++    return pylint.config.find_pylintrc()
++
++
++def get_pylintrc_path(search_paths=None, home_path=None):
++    """Get the path to the highest pylintrc file on a set of search paths."""
++    current_cwd = os.getcwd()
++    pylintrc_path = None
++    if home_path is None:
++        home_path = osp.expanduser("~")
++    try:
++        pylintrc_paths = [
++            _find_pylintrc_path(path) for path in search_paths if path]
++        pylintrc_path_home = _find_pylintrc_path(home_path)
++        for pylintrc_path in pylintrc_paths:
++            if (pylintrc_path is not None
++                    and pylintrc_path != pylintrc_path_home):
++                break
++    finally:
++        os.chdir(current_cwd)
++    return pylintrc_path
++
++
+ PYLINT_VER = pylint.__version__
+ #TODO: display results on 3 columns instead of 1: msg_id, lineno, message
+ class ResultsTree(OneColumnTree):
+@@ -310,6 +337,21 @@ def analyze_button_handler(self):
+         """Try to start code analysis when Analyze button pressed."""
+         self.start_analysis.emit()
+ 
++    def get_pylintrc_path(self, filename):
++        """Get the path to the most proximate pylintrc config to the file."""
++        parent = self.parentWidget()
++        if parent is not None:
++            project_dir = parent.main.projects.get_active_project_path()
++        else:
++            project_dir = None
++        search_paths = [
++            osp.dirname(filename),  # File's directory
++            getcwd_or_home(),  # Working directory
++            project_dir,  # Project directory
++            osp.expanduser("~"),  # Home directory
++        ]
++        return get_pylintrc_path(search_paths=search_paths)
++
+     @Slot()
+     def start(self):
+         """Start the code analysis."""
+@@ -317,7 +359,7 @@ def start(self):
+ 
+         self.process = QProcess(self)
+         self.process.setProcessChannelMode(QProcess.SeparateChannels)
+-        self.process.setWorkingDirectory(osp.dirname(filename))
++        self.process.setWorkingDirectory(getcwd_or_home())
+         self.process.readyReadStandardOutput.connect(self.read_output)
+         self.process.readyReadStandardError.connect(
+                                           lambda: self.read_output(error=True))
+@@ -336,11 +378,13 @@ def start(self):
+             else:
+                 # Option '-i' (alias for '--include-ids') was removed in pylint
+                 # 1.0
+-                p_args += ["--msg-template='{msg_id}:{line:3d},"\
++                p_args += ["--msg-template='{msg_id}:{line:3d},"
+                            "{column}: {obj}: {msg}"]
+-            p_args += [osp.basename(filename)]
+-        else:
+-            p_args = [osp.basename(filename)]
++
++        pylintrc_path = self.get_pylintrc_path(filename=filename)
++        if pylintrc_path is not None:
++            p_args += ['--rcfile={}'.format(pylintrc_path)]
++        p_args += [filename]
+         processEnvironment = QProcessEnvironment()
+         processEnvironment.insert("PYTHONIOENCODING", "utf8")
+         self.process.setProcessEnvironment(processEnvironment)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

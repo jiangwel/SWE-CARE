@@ -1,0 +1,532 @@
+  Task-ID: freqtrade__freqtrade-3210@2307495
+  Please checkout to this commit first: 9d6a41aa7a4094a7d7685b6eb5b5fb08a9344bb6
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  shutdown should cancel open orders
+## Proposal
+
+When stopping the bot (via ctrl+c, `/stop`) open orders are kept open and will be filled by the exchange "whenever" the market is ready to.
+This can be dangerous should the bot be stopped due to a sudden market crash
+
+A proper shutdown should allow the following (configurable!):
+
+- [ ] cancel unfilled open orders
+- [ ] force-close all open orders
+
+Comments, suggestions, Pullrequests in this regard are welcome :wink:
+  </issue>
+  
+  <patch>
+  diff --git a/config.json.example b/config.json.example
+index 8ebb092e1f2..d37a6b33603 100644
+--- a/config.json.example
++++ b/config.json.example
+@@ -6,6 +6,7 @@
+     "fiat_display_currency": "USD",
+     "ticker_interval": "5m",
+     "dry_run": false,
++    "cancel_open_orders_on_exit": false,
+     "trailing_stop": false,
+     "unfilledtimeout": {
+         "buy": 10,
+diff --git a/config_binance.json.example b/config_binance.json.example
+index d324ce88340..5d7b6b6566c 100644
+--- a/config_binance.json.example
++++ b/config_binance.json.example
+@@ -6,6 +6,7 @@
+     "fiat_display_currency": "USD",
+     "ticker_interval": "5m",
+     "dry_run": true,
++    "cancel_open_orders_on_exit": false,
+     "trailing_stop": false,
+     "unfilledtimeout": {
+         "buy": 10,
+diff --git a/config_full.json.example b/config_full.json.example
+index 181740b9a07..79154b0d409 100644
+--- a/config_full.json.example
++++ b/config_full.json.example
+@@ -8,6 +8,7 @@
+     "amend_last_stake_amount": false,
+     "last_stake_amount_min_ratio": 0.5,
+     "dry_run": false,
++    "cancel_open_orders_on_exit": false,
+     "ticker_interval": "5m",
+     "trailing_stop": false,
+     "trailing_stop_positive": 0.005,
+diff --git a/config_kraken.json.example b/config_kraken.json.example
+index dcf4c552a32..54fbf4a002a 100644
+--- a/config_kraken.json.example
++++ b/config_kraken.json.example
+@@ -6,6 +6,7 @@
+     "fiat_display_currency": "EUR",
+     "ticker_interval": "5m",
+     "dry_run": true,
++    "cancel_open_orders_on_exit": false,
+     "trailing_stop": false,
+     "unfilledtimeout": {
+         "buy": 10,
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 67e8578ddfa..59d8ba1ebc2 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -51,6 +51,7 @@ Mandatory parameters are marked as **Required**, which means that they are requi
+ | `fiat_display_currency` | Fiat currency used to show your profits. [More information below](#what-values-can-be-used-for-fiat_display_currency). <br> **Datatype:** String
+ | `dry_run` | **Required.** Define if the bot must be in Dry Run or production mode. <br>*Defaults to `true`.* <br> **Datatype:** Boolean
+ | `dry_run_wallet` | Define the starting amount in stake currency for the simulated wallet used by the bot running in the Dry Run mode.<br>*Defaults to `1000`.* <br> **Datatype:** Float
++| `cancel_open_orders_on_exit` | Cancel orders when `/stop` is issued or `ctrl+c` is pressed. This will allow you to use `/stop` to cancel unfilled orders in the event of a market crash. This will not impact open positions. <br>*Defaults to `False`.* <br> **Datatype:** Boolean
+ | `process_only_new_candles` | Enable processing of indicators only when new candles arrive. If false each loop populates the indicators, this will mean the same candle is processed many times creating system load but can be useful of your strategy depends on tick data not only candle. [Strategy Override](#parameters-in-the-strategy). <br>*Defaults to `false`.*  <br> **Datatype:** Boolean
+ | `minimal_roi` | **Required.** Set the threshold in percent the bot will use to sell a trade. [More information below](#understand-minimal_roi). [Strategy Override](#parameters-in-the-strategy). <br> **Datatype:** Dict
+ | `stoploss` |  **Required.** Value of the stoploss in percent used by the bot. More details in the [stoploss documentation](stoploss.md). [Strategy Override](#parameters-in-the-strategy).  <br> **Datatype:** Float (as ratio)
+diff --git a/freqtrade/commands/arguments.py b/freqtrade/commands/arguments.py
+index 8c64c585755..be03bb906e2 100644
+--- a/freqtrade/commands/arguments.py
++++ b/freqtrade/commands/arguments.py
+@@ -13,7 +13,7 @@
+ 
+ ARGS_STRATEGY = ["strategy", "strategy_path"]
+ 
+-ARGS_TRADE = ["db_url", "sd_notify", "dry_run"]
++ARGS_TRADE = ["db_url", "sd_notify", "dry_run", "cancel_open_orders_on_exit"]
+ 
+ ARGS_COMMON_OPTIMIZE = ["ticker_interval", "timerange",
+                         "max_open_trades", "stake_amount", "fee"]
+diff --git a/freqtrade/commands/cli_options.py b/freqtrade/commands/cli_options.py
+index 498ea935989..adb28399af2 100644
+--- a/freqtrade/commands/cli_options.py
++++ b/freqtrade/commands/cli_options.py
+@@ -109,6 +109,11 @@ def __init__(self, *args, **kwargs):
+         help='Enforce dry-run for trading (removes Exchange secrets and simulates trades).',
+         action='store_true',
+     ),
++    "cancel_open_orders_on_exit": Arg(
++        '--cancel-open-orders-on-exit',
++        help='Close unfilled open orders when the bot stops / exits',
++        action='store_true',
++    ),
+     # Optimize common
+     "ticker_interval": Arg(
+         '-i', '--ticker-interval',
+diff --git a/freqtrade/configuration/configuration.py b/freqtrade/configuration/configuration.py
+index e5515670d4c..cfbba998741 100644
+--- a/freqtrade/configuration/configuration.py
++++ b/freqtrade/configuration/configuration.py
+@@ -134,6 +134,11 @@ def _process_trading_options(self, config: Dict[str, Any]) -> None:
+         if config['runmode'] not in TRADING_MODES:
+             return
+ 
++        if self.args.get('cancel_open_orders_on_exit', False):
++            config.update({
++                'cancel_open_orders_on_exit': self.args.get('cancel_open_orders_on_exit')
++            })
++
+         if config.get('dry_run', False):
+             logger.info('Dry run is enabled')
+             if config.get('db_url') in [None, constants.DEFAULT_DB_PROD_URL]:
+diff --git a/freqtrade/constants.py b/freqtrade/constants.py
+index 54f620631e9..c238f227b73 100644
+--- a/freqtrade/constants.py
++++ b/freqtrade/constants.py
+@@ -85,6 +85,7 @@
+         'fiat_display_currency': {'type': 'string', 'enum': SUPPORTED_FIAT},
+         'dry_run': {'type': 'boolean'},
+         'dry_run_wallet': {'type': 'number', 'default': DRY_RUN_WALLET},
++        'cancel_open_orders_on_exit': {'type': 'boolean', 'default': False},
+         'process_only_new_candles': {'type': 'boolean'},
+         'minimal_roi': {
+             'type': 'object',
+@@ -318,3 +319,10 @@
+     'dataformat_ohlcv',
+     'dataformat_trades',
+ ]
++
++CANCEL_REASON = {
++    "TIMEOUT": "cancelled due to timeout",
++    "PARTIALLY_FILLED": "partially filled - keeping order open",
++    "ALL_CANCELLED": "cancelled (all unfilled orders cancelled)",
++    "CANCELLED_ON_EXCHANGE": "cancelled on exchange",
++}
+diff --git a/freqtrade/freqtradebot.py b/freqtrade/freqtradebot.py
+index 7ae87e80743..5b8d59ed278 100644
+--- a/freqtrade/freqtradebot.py
++++ b/freqtrade/freqtradebot.py
+@@ -113,6 +113,9 @@ def cleanup(self) -> None:
+         """
+         logger.info('Cleaning up modules ...')
+ 
++        if self.config['cancel_open_orders_on_exit']:
++            self.cancel_all_open_orders()
++
+         self.rpc.cleanup()
+         persistence.cleanup()
+ 
+@@ -162,6 +165,13 @@ def process(self) -> None:
+ 
+         Trade.session.flush()
+ 
++    def process_stopped(self) -> None:
++        """
++        Close all trades that were left open
++        """
++        if self.config['cancel_open_orders_on_exit']:
++            self.cancel_all_open_orders()
++
+     def _refresh_whitelist(self, trades: List[Trade] = []) -> List[str]:
+         """
+         Refresh whitelist from pairlist or edge and extend it with trades.
+@@ -875,11 +885,7 @@ def check_handle_timedout(self) -> None:
+                                              default_retval=False)(pair=trade.pair,
+                                                                    trade=trade,
+                                                                    order=order))):
+-
+-                self.handle_timedout_limit_buy(trade, order)
+-                self.wallets.update()
+-                order_type = self.strategy.order_types['buy']
+-                self._notify_buy_cancel(trade, order_type)
++                self.handle_cancel_buy(trade, order, constants.CANCEL_REASON['TIMEOUT'])
+ 
+             elif (order['side'] == 'sell' and (
+                   trade_state_update
+@@ -888,24 +894,42 @@ def check_handle_timedout(self) -> None:
+                                            default_retval=False)(pair=trade.pair,
+                                                                  trade=trade,
+                                                                  order=order))):
+-                reason = self.handle_timedout_limit_sell(trade, order)
+-                self.wallets.update()
+-                order_type = self.strategy.order_types['sell']
+-                self._notify_sell_cancel(trade, order_type, reason)
++                self.handle_cancel_sell(trade, order, constants.CANCEL_REASON['TIMEOUT'])
++
++    def cancel_all_open_orders(self) -> None:
++        """
++        Cancel all orders that are currently open
++        :return: None
++        """
++
++        for trade in Trade.get_open_order_trades():
++            try:
++                order = self.exchange.get_order(trade.open_order_id, trade.pair)
++            except (DependencyException, InvalidOrderException):
++                logger.info('Cannot query order for %s due to %s', trade, traceback.format_exc())
++                continue
+ 
+-    def handle_timedout_limit_buy(self, trade: Trade, order: Dict) -> bool:
++            if order['side'] == 'buy':
++                self.handle_cancel_buy(trade, order, constants.CANCEL_REASON['ALL_CANCELLED'])
++
++            elif order['side'] == 'sell':
++                self.handle_cancel_sell(trade, order, constants.CANCEL_REASON['ALL_CANCELLED'])
++
++    def handle_cancel_buy(self, trade: Trade, order: Dict, reason: str) -> bool:
+         """
+-        Buy timeout - cancel order
++        Buy cancel - cancel order
+         :return: True if order was fully cancelled
+         """
++        was_trade_fully_canceled = False
++
+         if order['status'] != 'canceled':
+-            reason = "cancelled due to timeout"
++            reason = constants.CANCEL_REASON['TIMEOUT']
+             corder = self.exchange.cancel_order_with_result(trade.open_order_id, trade.pair,
+                                                             trade.amount)
+         else:
+             # Order was cancelled already, so we can reuse the existing dict
+             corder = order
+-            reason = "cancelled on exchange"
++            reason = constants.CANCEL_REASON['CANCELLED_ON_EXCHANGE']
+ 
+         logger.info('Buy order %s for %s.', reason, trade)
+ 
+@@ -914,40 +938,42 @@ def handle_timedout_limit_buy(self, trade: Trade, order: Dict) -> bool:
+             # if trade is not partially completed, just delete the trade
+             Trade.session.delete(trade)
+             Trade.session.flush()
+-            return True
++            was_trade_fully_canceled = True
++        else:
++            # if trade is partially complete, edit the stake details for the trade
++            # and close the order
++            # cancel_order may not contain the full order dict, so we need to fallback
++            # to the order dict aquired before cancelling.
++            # we need to fall back to the values from order if corder does not contain these keys.
++            trade.amount = order['amount'] - safe_value_fallback(corder, order,
++                                                                 'remaining', 'remaining')
++            trade.stake_amount = trade.amount * trade.open_rate
++            self.update_trade_state(trade, corder, trade.amount)
+ 
+-        # if trade is partially complete, edit the stake details for the trade
+-        # and close the order
+-        # cancel_order may not contain the full order dict, so we need to fallback
+-        # to the order dict aquired before cancelling.
+-        # we need to fall back to the values from order if corder does not contain these keys.
+-        trade.amount = order['amount'] - safe_value_fallback(corder, order,
+-                                                             'remaining', 'remaining')
+-        trade.stake_amount = trade.amount * trade.open_rate
+-        self.update_trade_state(trade, corder, trade.amount)
+-
+-        trade.open_order_id = None
+-        logger.info('Partial buy order timeout for %s.', trade)
+-        self.rpc.send_msg({
+-            'type': RPCMessageType.STATUS_NOTIFICATION,
+-            'status': f'Remaining buy order for {trade.pair} cancelled due to timeout'
+-        })
+-        return False
++            trade.open_order_id = None
++            logger.info('Partial buy order timeout for %s.', trade)
++            self.rpc.send_msg({
++                'type': RPCMessageType.STATUS_NOTIFICATION,
++                'status': f'Remaining buy order for {trade.pair} cancelled due to timeout'
++            })
++
++        self.wallets.update()
++        self._notify_buy_cancel(trade, order_type=self.strategy.order_types['buy'])
++        return was_trade_fully_canceled
+ 
+-    def handle_timedout_limit_sell(self, trade: Trade, order: Dict) -> str:
++    def handle_cancel_sell(self, trade: Trade, order: Dict, reason: str) -> str:
+         """
+-        Sell timeout - cancel order and update trade
++        Sell cancel - cancel order and update trade
+         :return: Reason for cancel
+         """
+         # if trade is not partially completed, just cancel the trade
+         if order['remaining'] == order['amount'] or order.get('filled') == 0.0:
+             if not self.exchange.check_order_canceled_empty(order):
+-                reason = "cancelled due to timeout"
+                 # if trade is not partially completed, just delete the trade
+                 self.exchange.cancel_order(trade.open_order_id, trade.pair)
+                 logger.info('Sell order %s for %s.', reason, trade)
+             else:
+-                reason = "cancelled on exchange"
++                reason = constants.CANCEL_REASON['CANCELLED_ON_EXCHANGE']
+                 logger.info('Sell order %s for %s.', reason, trade)
+ 
+             trade.close_rate = None
+@@ -957,11 +983,17 @@ def handle_timedout_limit_sell(self, trade: Trade, order: Dict) -> str:
+             trade.close_date = None
+             trade.is_open = True
+             trade.open_order_id = None
++        else:
++            # TODO: figure out how to handle partially complete sell orders
++            reason = constants.CANCEL_REASON['PARTIALLY_FILLED']
+ 
+-            return reason
+-
+-        # TODO: figure out how to handle partially complete sell orders
+-        return 'partially filled - keeping order open'
++        self.wallets.update()
++        self._notify_sell_cancel(
++            trade,
++            order_type=self.strategy.order_types['sell'],
++            reason=reason
++        )
++        return reason
+ 
+     def _safe_sell_amount(self, pair: str, amount: float) -> float:
+         """
+diff --git a/freqtrade/templates/base_config.json.j2 b/freqtrade/templates/base_config.json.j2
+index 1347192739c..6d3174347ea 100644
+--- a/freqtrade/templates/base_config.json.j2
++++ b/freqtrade/templates/base_config.json.j2
+@@ -6,6 +6,7 @@
+     "fiat_display_currency": "{{ fiat_display_currency }}",
+     "ticker_interval": "{{ ticker_interval }}",
+     "dry_run": {{ dry_run | lower }},
++    "cancel_open_orders_on_exit": false,
+     "unfilledtimeout": {
+         "buy": 10,
+         "sell": 30
+diff --git a/freqtrade/worker.py b/freqtrade/worker.py
+index 4c28ecaeb24..55cf30d16e7 100755
+--- a/freqtrade/worker.py
++++ b/freqtrade/worker.py
+@@ -131,8 +131,7 @@ def _throttle(self, func: Callable[..., Any], throttle_secs: float, *args, **kwa
+         return result
+ 
+     def _process_stopped(self) -> None:
+-        # Maybe do here something in the future...
+-        pass
++        self.freqtrade.process_stopped()
+ 
+     def _process_running(self) -> None:
+         try:
+diff --git a/tests/conftest.py b/tests/conftest.py
+index d95475b8ced..2f5f468f644 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -249,6 +249,7 @@ def default_conf(testdatadir):
+         "fiat_display_currency": "USD",
+         "ticker_interval": '5m',
+         "dry_run": True,
++        "cancel_open_orders_on_exit": False,
+         "minimal_roi": {
+             "40": 0.0,
+             "30": 0.01,
+diff --git a/tests/test_arguments.py b/tests/test_arguments.py
+index 0052a61d076..91501384ba5 100644
+--- a/tests/test_arguments.py
++++ b/tests/test_arguments.py
+@@ -64,6 +64,14 @@ def test_parse_args_db_url() -> None:
+     assert args["db_url"] == 'sqlite:///test.sqlite'
+ 
+ 
++def test_parse_args_cancel_open_orders_on_exit() -> None:
++    args = Arguments(['trade']).get_parsed_arg()
++    assert args["cancel_open_orders_on_exit"] is False
++
++    args = Arguments(['trade', '--cancel-open-orders-on-exit']).get_parsed_arg()
++    assert args["cancel_open_orders_on_exit"] is True
++
++
+ def test_parse_args_verbose() -> None:
+     args = Arguments(['trade', '-v']).get_parsed_arg()
+     assert args["verbosity"] == 1
+diff --git a/tests/test_configuration.py b/tests/test_configuration.py
+index c89f1381e7f..0315ffe1bcc 100644
+--- a/tests/test_configuration.py
++++ b/tests/test_configuration.py
+@@ -250,6 +250,7 @@ def test_load_config_with_params(default_conf, mocker) -> None:
+         '--strategy', 'TestStrategy',
+         '--strategy-path', '/some/path',
+         '--db-url', 'sqlite:///someurl',
++        '--cancel-open-orders-on-exit',
+     ]
+     args = Arguments(arglist).get_parsed_arg()
+     configuration = Configuration(args)
+@@ -258,6 +259,7 @@ def test_load_config_with_params(default_conf, mocker) -> None:
+     assert validated_conf.get('strategy') == 'TestStrategy'
+     assert validated_conf.get('strategy_path') == '/some/path'
+     assert validated_conf.get('db_url') == 'sqlite:///someurl'
++    assert validated_conf.get('cancel_open_orders_on_exit') is True
+ 
+     # Test conf provided db_url prod
+     conf = default_conf.copy()
+diff --git a/tests/test_freqtradebot.py b/tests/test_freqtradebot.py
+index 6f2ce9f3c8c..8adc834cf51 100644
+--- a/tests/test_freqtradebot.py
++++ b/tests/test_freqtradebot.py
+@@ -11,7 +11,7 @@
+ import pytest
+ import requests
+ 
+-from freqtrade.constants import MATH_CLOSE_PREC, UNLIMITED_STAKE_AMOUNT
++from freqtrade.constants import MATH_CLOSE_PREC, UNLIMITED_STAKE_AMOUNT, CANCEL_REASON
+ from freqtrade.exceptions import (DependencyException, InvalidOrderException,
+                                   OperationalException, TemporaryError)
+ from freqtrade.freqtradebot import FreqtradeBot
+@@ -2281,8 +2281,8 @@ def test_check_handle_timedout_exception(default_conf, ticker, open_trade, mocke
+ 
+     mocker.patch.multiple(
+         'freqtrade.freqtradebot.FreqtradeBot',
+-        handle_timedout_limit_buy=MagicMock(),
+-        handle_timedout_limit_sell=MagicMock(),
++        handle_cancel_buy=MagicMock(),
++        handle_cancel_sell=MagicMock(),
+     )
+     mocker.patch.multiple(
+         'freqtrade.exchange.Exchange',
+@@ -2309,21 +2309,23 @@ def test_handle_timedout_limit_buy(mocker, caplog, default_conf, limit_buy_order
+     mocker.patch('freqtrade.exchange.Exchange.cancel_order_with_result', cancel_order_mock)
+ 
+     freqtrade = FreqtradeBot(default_conf)
++    freqtrade._notify_buy_cancel = MagicMock()
+ 
+     Trade.session = MagicMock()
+     trade = MagicMock()
+     trade.pair = 'LTC/ETH'
+     limit_buy_order['remaining'] = limit_buy_order['amount']
+-    assert freqtrade.handle_timedout_limit_buy(trade, limit_buy_order)
++    reason = CANCEL_REASON['TIMEOUT']
++    assert freqtrade.handle_cancel_buy(trade, limit_buy_order, reason)
+     assert cancel_order_mock.call_count == 1
+ 
+     cancel_order_mock.reset_mock()
+     limit_buy_order['amount'] = 2
+-    assert not freqtrade.handle_timedout_limit_buy(trade, limit_buy_order)
++    assert not freqtrade.handle_cancel_buy(trade, limit_buy_order, reason)
+     assert cancel_order_mock.call_count == 1
+ 
+     mocker.patch('freqtrade.exchange.Exchange.cancel_order', side_effect=InvalidOrderException)
+-    assert not freqtrade.handle_timedout_limit_buy(trade, limit_buy_order)
++    assert not freqtrade.handle_cancel_buy(trade, limit_buy_order, reason)
+ 
+ 
+ @pytest.mark.parametrize('cancelorder', [
+@@ -2343,17 +2345,19 @@ def test_handle_timedout_limit_buy_corder_empty(mocker, default_conf, limit_buy_
+     )
+ 
+     freqtrade = FreqtradeBot(default_conf)
++    freqtrade._notify_buy_cancel = MagicMock()
+ 
+     Trade.session = MagicMock()
+     trade = MagicMock()
+     trade.pair = 'LTC/ETH'
+     limit_buy_order['remaining'] = limit_buy_order['amount']
+-    assert freqtrade.handle_timedout_limit_buy(trade, limit_buy_order)
++    reason = CANCEL_REASON['TIMEOUT']
++    assert freqtrade.handle_cancel_buy(trade, limit_buy_order, reason)
+     assert cancel_order_mock.call_count == 1
+ 
+     cancel_order_mock.reset_mock()
+     limit_buy_order['amount'] = 2
+-    assert not freqtrade.handle_timedout_limit_buy(trade, limit_buy_order)
++    assert not freqtrade.handle_cancel_buy(trade, limit_buy_order, reason)
+     assert cancel_order_mock.call_count == 1
+ 
+ 
+@@ -2367,16 +2371,18 @@ def test_handle_timedout_limit_sell(mocker, default_conf) -> None:
+     )
+ 
+     freqtrade = FreqtradeBot(default_conf)
++    freqtrade._notify_sell_cancel = MagicMock()
+ 
+     trade = MagicMock()
+     order = {'remaining': 1,
+              'amount': 1,
+              'status': "open"}
+-    assert freqtrade.handle_timedout_limit_sell(trade, order)
++    reason = CANCEL_REASON['TIMEOUT']
++    assert freqtrade.handle_cancel_sell(trade, order, reason)
+     assert cancel_order_mock.call_count == 1
+     order['amount'] = 2
+-    assert (freqtrade.handle_timedout_limit_sell(trade, order)
+-            == 'partially filled - keeping order open')
++    assert (freqtrade.handle_cancel_sell(trade, order, reason)
++            == CANCEL_REASON['PARTIALLY_FILLED'])
+     # Assert cancel_order was not called (callcount remains unchanged)
+     assert cancel_order_mock.call_count == 1
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,219 @@
+  Task-ID: certbot__certbot-9208@2584184
+  Please checkout to this commit first: c96420dbe0b9c6950b4fd862cd5a43e565b14834
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Feature Request] Print output on how to validate challenges with --debug-challenges
+Can you please add a parameter, that keeps certbot running after the challenge is served in standalone mode?
+So that the internal webserver is still running, that would simplify debugging complex network issues.
+Currently with "--debug-challenge --test-cert", one is asked to press return *before* the internal webserver is up. And after one pressed return it exites immediately after the challenge is completed or has failed.
+Or just add a "--debug-internal-webserver" parameter that starts the internal webserver, serves a debug page, shows it's url and waits until it gets killed.
+  </issue>
+  
+  <patch>
+  diff --git a/certbot/CHANGELOG.md b/certbot/CHANGELOG.md
+index 9794e84268f..73d2a5a7cba 100644
+--- a/certbot/CHANGELOG.md
++++ b/certbot/CHANGELOG.md
+@@ -6,6 +6,9 @@ Certbot adheres to [Semantic Versioning](https://semver.org/).
+ 
+ ### Added
+ 
++* When the `--debug-challenges` option is used in combination with `-v`, Certbot
++  now displays the challenge URLs (for `http-01` challenges) or FQDNs (for
++  `dns-01` challenges) and their expected return values.
+ *
+ 
+ ### Changed
+diff --git a/certbot/certbot/_internal/auth_handler.py b/certbot/certbot/_internal/auth_handler.py
+index 16b8dfdbe47..3bdaa3d9c38 100644
+--- a/certbot/certbot/_internal/auth_handler.py
++++ b/certbot/certbot/_internal/auth_handler.py
+@@ -87,9 +87,34 @@ def handle_authorizations(self, orderr: messages.OrderResource,
+ 
+                 # If debug is on, wait for user input before starting the verification process.
+                 if config.debug_challenges:
++                    msg = []
++                    if config.verbose_count > 0:
++                        http01_achalls = {}
++                        dns01_achalls = {}
++                        for achall in achalls:
++                            if isinstance(achall.chall, challenges.HTTP01):
++                                http01_achalls[achall.chall.uri(achall.domain)] = (
++                                    achall.validation(achall.account_key) + "\n"
++                                )
++                            if isinstance(achall.chall, challenges.DNS01):
++                                dns01_achalls[achall.validation_domain_name(achall.domain)] = (
++                                    achall.validation(achall.account_key) + "\n"
++                                )
++                        if http01_achalls:
++                            msg.append("\nThe following URLs should be accessible from the world "
++                                       "wide web and return the value mentioned:\n")
++                            for uri, token in http01_achalls.items():
++                                msg.append(f"{uri}: {token}")
++                        if dns01_achalls:
++                            msg.append("\nThe following FQDNs should return a TXT resource "
++                                       "record with the value mentioned:\n")
++                            for fqdn, token in dns01_achalls.items():
++                                msg.append(f"{fqdn}: {token}")
++                    else:
++                        msg = ['Pass "-v" for more info about challenges.']
+                     display_util.notification(
+-                        'Challenges loaded. Press continue to submit to CA. '
+-                        'Pass "-v" for more info about challenges.', pause=True)
++                        'Challenges loaded. Press continue to submit to CA.\n' + '\n'.join(msg),
++                        pause=True)
+             except errors.AuthorizationError as error:
+                 logger.critical('Failure in setting up challenges.')
+                 logger.info('Attempting to clean up outstanding challenges...')
+diff --git a/certbot/certbot/_internal/cli/__init__.py b/certbot/certbot/_internal/cli/__init__.py
+index a69f9666680..d11a454b146 100644
+--- a/certbot/certbot/_internal/cli/__init__.py
++++ b/certbot/certbot/_internal/cli/__init__.py
+@@ -264,7 +264,9 @@ def prepare_and_parse_args(plugins: plugins_disco.PluginsRegistry, args: List[st
+         [None, "certonly", "run"], "--debug-challenges", action="store_true",
+         default=flag_default("debug_challenges"),
+         help="After setting up challenges, wait for user input before "
+-             "submitting to CA")
++             "submitting to CA. When used in combination with the `-v` "
++             "option, the challenge URLs or FQDNs and their expected "
++             "return values are shown.")
+     helpful.add(
+         "testing", "--no-verify-ssl", action="store_true",
+         help=config_help("no_verify_ssl"),
+diff --git a/certbot/tests/auth_handler_test.py b/certbot/tests/auth_handler_test.py
+index a94259a7991..fe9e22f06d3 100644
+--- a/certbot/tests/auth_handler_test.py
++++ b/certbot/tests/auth_handler_test.py
+@@ -3,6 +3,7 @@
+ import logging
+ import unittest
+ 
++from josepy import b64encode
+ try:
+     import mock
+ except ImportError:  # pragma: no cover
+@@ -72,13 +73,13 @@ def setUp(self):
+         with mock.patch("zope.component.provideUtility"):
+             display_obj.set_display(self.mock_display)
+ 
+-        self.mock_auth = mock.MagicMock(name="ApacheConfigurator")
++        self.mock_auth = mock.MagicMock(name="Authenticator")
+ 
+         self.mock_auth.get_chall_pref.return_value = [challenges.HTTP01]
+ 
+         self.mock_auth.perform.side_effect = gen_auth_resp
+ 
+-        self.mock_account = mock.Mock(key=util.Key("file_path", "PEM"))
++        self.mock_account = mock.MagicMock()
+         self.mock_net = mock.MagicMock(spec=acme_client.ClientV2)
+         self.mock_net.acme_version = 1
+         self.mock_net.retry_after.side_effect = acme_client.ClientV2.retry_after
+@@ -191,15 +192,73 @@ def test_name3_http_01_3_common_acme_2(self):
+ 
+     def test_debug_challenges(self):
+         config = mock.Mock(debug_challenges=True)
+-        authzrs = [gen_dom_authzr(domain="0", challs=acme_util.CHALLENGES)]
++        config.verbose_count = 0
++        authzrs = [gen_dom_authzr(domain="0", challs=[acme_util.HTTP01])]
++        mock_order = mock.MagicMock(authorizations=authzrs)
++
++        account_key_thumbprint = b"foobarbaz"
++        self.mock_account.key.thumbprint.return_value = account_key_thumbprint
++
++        self.mock_net.poll.side_effect = _gen_mock_on_poll()
++
++        self.handler.handle_authorizations(mock_order, config)
++
++        self.assertEqual(self.mock_net.answer_challenge.call_count, 1)
++        self.assertEqual(self.mock_display.notification.call_count, 1)
++        self.assertIn('Pass "-v" for more info',
++                      self.mock_display.notification.call_args[0][0])
++        self.assertNotIn(f"http://{authzrs[0].body.identifier.value}/.well-known/acme-challenge/" +
++                         b64encode(authzrs[0].body.challenges[0].chall.token).decode(),
++                         self.mock_display.notification.call_args[0][0])
++        self.assertNotIn(b64encode(account_key_thumbprint).decode(),
++                      self.mock_display.notification.call_args[0][0])
++
++    def test_debug_challenges_verbose_http01(self):
++        config = mock.Mock(debug_challenges=True)
++        config.verbose_count = 1
++        authzrs = [gen_dom_authzr(domain="0", challs=[acme_util.HTTP01])]
++        mock_order = mock.MagicMock(authorizations=authzrs)
++
++        account_key_thumbprint = b"foobarbaz"
++        self.mock_account.key.thumbprint.return_value = account_key_thumbprint
++
++        self.mock_net.poll.side_effect = _gen_mock_on_poll()
++
++        self.handler.handle_authorizations(mock_order, config)
++
++        self.assertEqual(self.mock_net.answer_challenge.call_count, 1)
++        self.assertEqual(self.mock_display.notification.call_count, 1)
++        self.assertNotIn('Pass "-v" for more info',
++                         self.mock_display.notification.call_args[0][0])
++        self.assertIn(f"http://{authzrs[0].body.identifier.value}/.well-known/acme-challenge/" +
++                      b64encode(authzrs[0].body.challenges[0].chall.token).decode(),
++                      self.mock_display.notification.call_args[0][0])
++        self.assertIn(b64encode(account_key_thumbprint).decode(),
++                      self.mock_display.notification.call_args[0][0])
++
++    def test_debug_challenges_verbose_dns01(self):
++        config = mock.Mock(debug_challenges=True)
++        config.verbose_count = 1
++        authzrs = [gen_dom_authzr(domain="0", challs=[acme_util.DNS01])]
+         mock_order = mock.MagicMock(authorizations=authzrs)
+ 
++        account_key_thumbprint = b"foobarbaz"
++        self.mock_account.key.thumbprint.return_value = account_key_thumbprint
++
+         self.mock_net.poll.side_effect = _gen_mock_on_poll()
+ 
++        self.mock_auth.get_chall_pref.return_value = [challenges.DNS01]
++
+         self.handler.handle_authorizations(mock_order, config)
+ 
+         self.assertEqual(self.mock_net.answer_challenge.call_count, 1)
+         self.assertEqual(self.mock_display.notification.call_count, 1)
++        self.assertNotIn('Pass "-v" for more info',
++                         self.mock_display.notification.call_args[0][0])
++        self.assertIn(f"_acme-challenge.{authzrs[0].body.identifier.value}",
++                      self.mock_display.notification.call_args[0][0])
++        self.assertIn(authzrs[0].body.challenges[0].validation(self.mock_account.key),
++                      self.mock_display.notification.call_args[0][0])
+ 
+     def test_perform_failure(self):
+         authzrs = [gen_dom_authzr(domain="0", challs=acme_util.CHALLENGES)]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

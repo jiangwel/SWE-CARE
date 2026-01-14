@@ -1,0 +1,501 @@
+  Task-ID: scrapy__scrapy-2456@c7bb2fa
+  Please checkout to this commit first: 7fc11c13486ad47aaa007ec330e10075f2237064
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  XMLGenerated xml looks ugly
+Whenever i trying to get output items in xml i get something like:
+
+``` xml
+<?xml version="1.0" encoding="utf8"?>
+<news><item><name>0</name><content>00000</content></item><item><name>1</name><content>11111</content></item><item><name>2</name><content>22222</content></item></news>
+```
+
+Maybe scrapy have some already provided ways to "beautify" it to something like (like xmls i found in all docs examples):
+
+``` xml
+<?xml version="1.0" encoding="UTF-8"?>
+<news>
+   <item>
+      <name>0</name>
+      <content>00000</content>
+   </item>
+   <item>
+      <name>1</name>
+      <content>11111</content>
+   </item>
+   <item>
+      <name>2</name>
+      <content>22222</content>
+   </item>
+</news>
+```
+  </issue>
+  
+  <patch>
+  diff --git a/docs/topics/exporters.rst b/docs/topics/exporters.rst
+index 85c73222d26..2ad77c905fe 100644
+--- a/docs/topics/exporters.rst
++++ b/docs/topics/exporters.rst
+@@ -140,7 +140,7 @@ output examples, which assume you're exporting these two items::
+ BaseItemExporter
+ ----------------
+ 
+-.. class:: BaseItemExporter(fields_to_export=None, export_empty_fields=False, encoding='utf-8')
++.. class:: BaseItemExporter(fields_to_export=None, export_empty_fields=False, encoding='utf-8', indent=0)
+ 
+    This is the (abstract) base class for all Item Exporters. It provides
+    support for common features used by all (concrete) Item Exporters, such as
+@@ -149,7 +149,7 @@ BaseItemExporter
+ 
+    These features can be configured through the constructor arguments which
+    populate their respective instance attributes: :attr:`fields_to_export`,
+-   :attr:`export_empty_fields`, :attr:`encoding`.
++   :attr:`export_empty_fields`, :attr:`encoding`, :attr:`indent`.
+ 
+    .. method:: export_item(item)
+ 
+@@ -216,6 +216,15 @@ BaseItemExporter
+       encoding). Other value types are passed unchanged to the specific
+       serialization library.
+ 
++   .. attribute:: indent
++
++      Amount of spaces used to indent the output on each level. Defaults to ``0``.
++
++      * ``indent=None`` selects the most compact representation,
++        all items in the same line with no indentation
++      * ``indent<=0`` each item on it's own line, no indentation
++      * ``indent>0`` each item on it's own line, indentated with the provided numeric value
++
+ .. highlight:: none
+ 
+ XmlItemExporter
+diff --git a/docs/topics/feed-exports.rst b/docs/topics/feed-exports.rst
+index efdd8c46bb1..e57a4e77625 100644
+--- a/docs/topics/feed-exports.rst
++++ b/docs/topics/feed-exports.rst
+@@ -209,6 +209,7 @@ These are the settings used for configuring the feed exports:
+  * :setting:`FEED_STORE_EMPTY`
+  * :setting:`FEED_EXPORT_ENCODING`
+  * :setting:`FEED_EXPORT_FIELDS`
++ * :setting:`FEED_EXPORT_INDENT`
+ 
+ .. currentmodule:: scrapy.extensions.feedexport
+ 
+@@ -266,6 +267,21 @@ If an exporter requires a fixed set of fields (this is the case for
+ is empty or None, then Scrapy tries to infer field names from the
+ exported data - currently it uses field names from the first item.
+ 
++.. setting:: FEED_EXPORT_INDENT
++
++FEED_EXPORT_INDENT
++------------------
++
++Default: ``0``
++
++Amount of spaces used to indent the output on each level. If ``FEED_EXPORT_INDENT``
++is a non-negative integer, then array elements and object members will be pretty-printed
++with that indent level. An indent level of ``0``, or negative, will put each item on a new line.
++``None`` selects the most compact representation
++
++Currently used by :class:`~scrapy.exporters.JsonItemExporter`
++and :class:`~scrapy.exporters.XmlItemExporter`
++
+ .. setting:: FEED_STORE_EMPTY
+ 
+ FEED_STORE_EMPTY
+diff --git a/scrapy/exporters.py b/scrapy/exporters.py
+index c4b1b34766f..e2d42b6abcb 100644
+--- a/scrapy/exporters.py
++++ b/scrapy/exporters.py
+@@ -36,6 +36,7 @@ def _configure(self, options, dont_fail=False):
+         self.encoding = options.pop('encoding', None)
+         self.fields_to_export = options.pop('fields_to_export', None)
+         self.export_empty_fields = options.pop('export_empty_fields', False)
++        self.indent = options.pop('indent', None)
+         if not dont_fail and options:
+             raise TypeError("Unexpected options: %s" % ', '.join(options.keys()))
+ 
+@@ -98,21 +99,33 @@ class JsonItemExporter(BaseItemExporter):
+     def __init__(self, file, **kwargs):
+         self._configure(kwargs, dont_fail=True)
+         self.file = file
++        # there is a small difference between the behaviour or JsonItemExporter.indent
++        # and ScrapyJSONEncoder.indent. ScrapyJSONEncoder.indent=None is needed to prevent
++        # the addition of newlines everywhere
++        json_indent = self.indent if self.indent is not None and self.indent > 0 else None
++        kwargs.setdefault('indent', json_indent)
+         kwargs.setdefault('ensure_ascii', not self.encoding)
+         self.encoder = ScrapyJSONEncoder(**kwargs)
+         self.first_item = True
+ 
++    def _beautify_newline(self):
++        if self.indent is not None:
++            self.file.write(b'\n')
++
+     def start_exporting(self):
+-        self.file.write(b"[\n")
++        self.file.write(b"[")
++        self._beautify_newline()
+ 
+     def finish_exporting(self):
+-        self.file.write(b"\n]")
++        self._beautify_newline()
++        self.file.write(b"]")
+ 
+     def export_item(self, item):
+         if self.first_item:
+             self.first_item = False
+         else:
+-            self.file.write(b',\n')
++            self.file.write(b',')
++            self._beautify_newline()
+         itemdict = dict(self._get_serialized_fields(item))
+         data = self.encoder.encode(itemdict)
+         self.file.write(to_bytes(data, self.encoding))
+@@ -128,33 +141,52 @@ def __init__(self, file, **kwargs):
+             self.encoding = 'utf-8'
+         self.xg = XMLGenerator(file, encoding=self.encoding)
+ 
++    def _beautify_newline(self, new_item=False):
++        if self.indent is not None and (self.indent > 0 or new_item):
++            self._xg_characters('\n')
++
++    def _beautify_indent(self, depth=1):
++        if self.indent:
++            self._xg_characters(' ' * self.indent * depth)
++
+     def start_exporting(self):
+         self.xg.startDocument()
+         self.xg.startElement(self.root_element, {})
++        self._beautify_newline(new_item=True)
+ 
+     def export_item(self, item):
++        self._beautify_indent(depth=1)
+         self.xg.startElement(self.item_element, {})
++        self._beautify_newline()
+         for name, value in self._get_serialized_fields(item, default_value=''):
+-            self._export_xml_field(name, value)
++            self._export_xml_field(name, value, depth=2)
++        self._beautify_indent(depth=1)
+         self.xg.endElement(self.item_element)
++        self._beautify_newline(new_item=True)
+ 
+     def finish_exporting(self):
+         self.xg.endElement(self.root_element)
+         self.xg.endDocument()
+ 
+-    def _export_xml_field(self, name, serialized_value):
++    def _export_xml_field(self, name, serialized_value, depth):
++        self._beautify_indent(depth=depth)
+         self.xg.startElement(name, {})
+         if hasattr(serialized_value, 'items'):
++            self._beautify_newline()
+             for subname, value in serialized_value.items():
+-                self._export_xml_field(subname, value)
++                self._export_xml_field(subname, value, depth=depth+1)
++            self._beautify_indent(depth=depth)
+         elif is_listlike(serialized_value):
++            self._beautify_newline()
+             for value in serialized_value:
+-                self._export_xml_field('value', value)
++                self._export_xml_field('value', value, depth=depth+1)
++            self._beautify_indent(depth=depth)
+         elif isinstance(serialized_value, six.text_type):
+             self._xg_characters(serialized_value)
+         else:
+             self._xg_characters(str(serialized_value))
+         self.xg.endElement(name)
++        self._beautify_newline()
+ 
+     # Workaround for http://bugs.python.org/issue17606
+     # Before Python 2.7.4 xml.sax.saxutils required bytes;
+diff --git a/scrapy/extensions/feedexport.py b/scrapy/extensions/feedexport.py
+index 85d32852817..5f133fbde4c 100644
+--- a/scrapy/extensions/feedexport.py
++++ b/scrapy/extensions/feedexport.py
+@@ -172,6 +172,9 @@ def __init__(self, settings):
+         self.store_empty = settings.getbool('FEED_STORE_EMPTY')
+         self._exporting = False
+         self.export_fields = settings.getlist('FEED_EXPORT_FIELDS') or None
++        self.indent = None
++        if settings.get('FEED_EXPORT_INDENT') is not None:
++            self.indent = settings.getint('FEED_EXPORT_INDENT')
+         uripar = settings['FEED_URI_PARAMS']
+         self._uripar = load_object(uripar) if uripar else lambda x, y: None
+ 
+@@ -188,7 +191,7 @@ def open_spider(self, spider):
+         storage = self._get_storage(uri)
+         file = storage.open(spider)
+         exporter = self._get_exporter(file, fields_to_export=self.export_fields,
+-            encoding=self.export_encoding)
++            encoding=self.export_encoding, indent=self.indent)
+         if self.store_empty:
+             exporter.start_exporting()
+             self._exporting = True
+diff --git a/scrapy/settings/default_settings.py b/scrapy/settings/default_settings.py
+index d73c595d21e..bbc02cfdb3a 100644
+--- a/scrapy/settings/default_settings.py
++++ b/scrapy/settings/default_settings.py
+@@ -161,6 +161,7 @@
+     'marshal': 'scrapy.exporters.MarshalItemExporter',
+     'pickle': 'scrapy.exporters.PickleItemExporter',
+ }
++FEED_EXPORT_INDENT = 0
+ 
+ FILES_STORE_S3_ACL = 'private'
+ 
+diff --git a/tests/test_feedexport.py b/tests/test_feedexport.py
+index 2d137edf48a..c66c470a8fa 100644
+--- a/tests/test_feedexport.py
++++ b/tests/test_feedexport.py
+@@ -319,14 +319,14 @@ def test_export_no_items_not_store_empty(self):
+     @defer.inlineCallbacks
+     def test_export_no_items_store_empty(self):
+         formats = (
+-            ('json', b'[\n\n]'),
++            ('json', b'[]'),
+             ('jsonlines', b''),
+             ('xml', b'<?xml version="1.0" encoding="utf-8"?>\n<items></items>'),
+             ('csv', b''),
+         )
+ 
+         for fmt, expctd in formats:
+-            settings = {'FEED_FORMAT': fmt, 'FEED_STORE_EMPTY': True}
++            settings = {'FEED_FORMAT': fmt, 'FEED_STORE_EMPTY': True, 'FEED_EXPORT_INDENT': None}
+             data = yield self.exported_no_data(settings)
+             self.assertEqual(data, expctd)
+ 
+@@ -425,25 +425,190 @@ def test_export_encoding(self):
+         header = ['foo']
+ 
+         formats = {
+-            'json': u'[\n{"foo": "Test\\u00d6"}\n]'.encode('utf-8'),
++            'json': u'[{"foo": "Test\\u00d6"}]'.encode('utf-8'),
+             'jsonlines': u'{"foo": "Test\\u00d6"}\n'.encode('utf-8'),
+             'xml': u'<?xml version="1.0" encoding="utf-8"?>\n<items><item><foo>Test\xd6</foo></item></items>'.encode('utf-8'),
+             'csv': u'foo\r\nTest\xd6\r\n'.encode('utf-8'),
+         }
+ 
+-        for format in formats:
+-            settings = {'FEED_FORMAT': format}
++        for format, expected in formats.items():
++            settings = {'FEED_FORMAT': format, 'FEED_EXPORT_INDENT': None}
+             data = yield self.exported_data(items, settings)
+-            self.assertEqual(formats[format], data)
++            self.assertEqual(expected, data)
+ 
+         formats = {
+-            'json': u'[\n{"foo": "Test\xd6"}\n]'.encode('latin-1'),
++            'json': u'[{"foo": "Test\xd6"}]'.encode('latin-1'),
+             'jsonlines': u'{"foo": "Test\xd6"}\n'.encode('latin-1'),
+             'xml': u'<?xml version="1.0" encoding="latin-1"?>\n<items><item><foo>Test\xd6</foo></item></items>'.encode('latin-1'),
+             'csv': u'foo\r\nTest\xd6\r\n'.encode('latin-1'),
+         }
+ 
+-        for format in formats:
+-            settings = {'FEED_FORMAT': format, 'FEED_EXPORT_ENCODING': 'latin-1'}
++        settings = {'FEED_EXPORT_INDENT': None, 'FEED_EXPORT_ENCODING': 'latin-1'}
++        for format, expected in formats.items():
++            settings['FEED_FORMAT'] = format
+             data = yield self.exported_data(items, settings)
+-            self.assertEqual(formats[format], data)
++            self.assertEqual(expected, data)
++
++    @defer.inlineCallbacks
++    def test_export_indentation(self):
++        items = [
++            {'foo': ['bar']},
++            {'key': 'value'},
++        ]
++
++        test_cases = [
++            # JSON
++            {
++                'format': 'json',
++                'indent': None,
++                'expected': b'[{"foo": ["bar"]},{"key": "value"}]',
++            },
++            {
++                'format': 'json',
++                'indent': -1,
++                'expected': b"""
++[
++{"foo": ["bar"]},
++{"key": "value"}
++]
++""",
++            },
++            {
++                'format': 'json',
++                'indent': 0,
++                'expected': b"""
++[
++{"foo": ["bar"]},
++{"key": "value"}
++]
++""",
++            },
++            {
++                'format': 'json',
++                'indent': 2,
++                'expected': b"""
++[
++{
++  "foo": [
++    "bar"
++  ]
++},
++{
++  "key": "value"
++}
++]""",
++            },
++            {
++                'format': 'json',
++                'indent': 4,
++                'expected': b"""
++[
++{
++    "foo": [
++        "bar"
++    ]
++},
++{
++    "key": "value"
++}
++]""",
++            },
++            {
++                'format': 'json',
++                'indent': 5,
++                'expected': b"""
++[
++{
++     "foo": [
++          "bar"
++     ]
++},
++{
++     "key": "value"
++}
++]""",
++            },
++
++            # XML
++            {
++                'format': 'xml',
++                'indent': None,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items><item><foo><value>bar</value></foo></item><item><key>value</key></item></items>""",
++            },
++            {
++                'format': 'xml',
++                'indent': -1,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items>
++<item><foo><value>bar</value></foo></item>
++<item><key>value</key></item>
++</items>""",
++            },
++            {
++                'format': 'xml',
++                'indent': 0,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items>
++<item><foo><value>bar</value></foo></item>
++<item><key>value</key></item>
++</items>""",
++            },
++            {
++                'format': 'xml',
++                'indent': 2,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items>
++  <item>
++    <foo>
++      <value>bar</value>
++    </foo>
++  </item>
++  <item>
++    <key>value</key>
++  </item>
++</items>""",
++            },
++            {
++                'format': 'xml',
++                'indent': 4,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items>
++    <item>
++        <foo>
++            <value>bar</value>
++        </foo>
++    </item>
++    <item>
++        <key>value</key>
++    </item>
++</items>""",
++            },
++            {
++                'format': 'xml',
++                'indent': 5,
++                'expected': b"""
++<?xml version="1.0" encoding="utf-8"?>
++<items>
++     <item>
++          <foo>
++               <value>bar</value>
++          </foo>
++     </item>
++     <item>
++          <key>value</key>
++     </item>
++</items>""",
++            },
++        ]
++
++        for row in test_cases:
++            settings = {'FEED_FORMAT': row['format'], 'FEED_EXPORT_INDENT': row['indent']}
++            data = yield self.exported_data(items, settings)
++            print(row['format'], row['indent'])
++            self.assertEqual(row['expected'].strip(), data)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

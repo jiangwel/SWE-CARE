@@ -1,0 +1,164 @@
+  Task-ID: modin-project__modin-4215@69f9652
+  Please checkout to this commit first: a6acfe269c4812da3898231a54bb8e66ce96e82d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [omnisci] Exception when trying to access datetime column via .dt accessor and add new column
+### System information
+- **OS Platform and Distribution (e.g., Linux Ubuntu 16.04)**:
+
+Ubuntu 20.04.1 LTS
+
+- **Modin version** (`modin.__version__`):
+
+0.10.2+26.gda2ad792
+
+- **Python version**:
+
+Python 3.9.7
+
+- **Code we can use to reproduce**:
+
+```python
+import modin.pandas as pd
+import pandas
+
+MULTIPLIER = 100000
+
+df = pd.DataFrame({
+    "a": [1] * MULTIPLIER,
+    "t": [pandas.to_datetime("2014-01-09 20:45:25")] * MULTIPLIER})
+
+print(df.dtypes)
+df['year'] = df['t'].dt.day
+df['month'] = df['t'].dt.month
+df['day'] = df['t'].dt.day
+df['hour'] = df['t'].dt.day
+print(df)
+```
+
+<!--
+You can obtain the Modin version with
+
+python -c "import modin; print(modin.__version__)"
+-->
+
+### Describe the problem
+<!-- Describe the problem clearly here. -->
+
+When running Modin with latest omnisci engine from conda-forge 5.7.0 I get an exception from the above code with large values of `MULTIPLIER`. With small (1000) values it works with no exception. Old version of omnisci 5.4.1 also works correctly.
+```
+Traceback (most recent call last):
+  File "/nfs/site/proj/scripting_tools/gashiman/tests/omnisci_datetime2.py", line 13, in <module>
+    df['day'] = df['t'].dt.day
+  File "/localdisk/gashiman/modin/modin/pandas/series_utils.py", line 484, in day
+    return Series(query_compiler=self._query_compiler.dt_day())
+  File "/localdisk/gashiman/modin/modin/backends/base/query_compiler.py", line 2830, in dt_day
+    return DateTimeDefault.register(pandas.Series.dt.day)(self)
+  File "/localdisk/gashiman/modin/modin/data_management/functions/default_methods/default.py", line 159, in args_cast
+    return wrapper(self, *args, **kwargs)
+  File "/localdisk/gashiman/modin/modin/data_management/functions/default_methods/default.py", line 206, in wrapper
+    return self.default_to_pandas(fn, *args, **kwargs)
+  File "/localdisk/gashiman/modin/modin/backends/pandas/query_compiler.py", line 241, in default_to_pandas
+    result = pandas_op(self.to_pandas(), *args, **kwargs)
+  File "/localdisk/gashiman/modin/modin/experimental/backends/omnisci/query_compiler.py", line 184, in to_pandas
+    return self._modin_frame.to_pandas()
+  File "/localdisk/gashiman/modin/modin/experimental/engines/omnisci_on_native/frame/data.py", line 2202, in to_pandas
+    self._execute()
+  File "/localdisk/gashiman/modin/modin/experimental/engines/omnisci_on_native/frame/data.py", line 1708, in _execute
+    new_partitions = self._partition_mgr_cls.run_exec_plan(
+  File "/localdisk/gashiman/modin/modin/experimental/engines/omnisci_on_native/frame/partition_manager.py", line 252, in run_exec_plan
+    curs = omniSession.executeRA(cmd_prefix + calcite_json)
+  File "/localdisk/gashiman/modin/modin/experimental/engines/omnisci_on_native/frame/omnisci_worker.py", line 110, in executeRA
+    r = cls._server.executeRA(query)
+  File "dbe.pyx", line 196, in omniscidbe.PyDbEngine.executeRA
+RuntimeError: TException - service has thrown: TOmniSciException(error_msg=Hash join failed, reason(s): Could not build a 1-to-1 correspondence for columns involved in equijoin | Cannot join on rowid | Cannot fall back to loop join for non-trivial inner table size)
+```
+
+### Source code / logs
+<!-- Include any logs or source code that would be helpful to diagnose the problem. If including tracebacks, please include the full traceback. Large logs and files should be attached. Try to provide a reproducible test case that is the bare minimum necessary to generate the problem. -->
+  </issue>
+  
+  <patch>
+  diff --git a/modin/experimental/core/execution/native/implementations/omnisci_on_native/test/test_dataframe.py b/modin/experimental/core/execution/native/implementations/omnisci_on_native/test/test_dataframe.py
+index 6e3c003b6f7..5e26a70b5bd 100644
+--- a/modin/experimental/core/execution/native/implementations/omnisci_on_native/test/test_dataframe.py
++++ b/modin/experimental/core/execution/native/implementations/omnisci_on_native/test/test_dataframe.py
+@@ -161,6 +161,7 @@ def test_time_parsing(self):
+                 df_equals(rm["timestamp"].dt.year, rp["timestamp"].dt.year)
+                 df_equals(rm["timestamp"].dt.month, rp["timestamp"].dt.month)
+                 df_equals(rm["timestamp"].dt.day, rp["timestamp"].dt.day)
++                df_equals(rm["timestamp"].dt.hour, rp["timestamp"].dt.hour)
+ 
+     def test_csv_fillna(self):
+         csv_file = os.path.join(self.root, "examples/data/boston_housing.csv")
+@@ -1723,6 +1724,7 @@ class TestDateTime:
+         "c": pandas.to_datetime(
+             ["20190902", "20180913", "20190921", "20180903"], format="%Y%m%d"
+         ),
++        "d": pandas.to_datetime(["2018-10-26 12:00", "2018-10-26 13:00:15"]),
+     }
+ 
+     def test_dt_year(self):
+@@ -1743,6 +1745,12 @@ def dt_day(df, **kwargs):
+ 
+         run_and_compare(dt_day, data=self.datetime_data)
+ 
++    def test_dt_hour(self):
++        def dt_hour(df, **kwargs):
++            return df["d"].dt.hour
++
++        run_and_compare(dt_hour, data=self.datetime_data)
++
+ 
+ class TestCategory:
+     data = {
+diff --git a/modin/experimental/core/storage_formats/omnisci/query_compiler.py b/modin/experimental/core/storage_formats/omnisci/query_compiler.py
+index c20a33bf815..36cd7d8bb81 100644
+--- a/modin/experimental/core/storage_formats/omnisci/query_compiler.py
++++ b/modin/experimental/core/storage_formats/omnisci/query_compiler.py
+@@ -565,6 +565,11 @@ def dt_day(self):
+             self._modin_frame.dt_extract("day"), self._shape_hint
+         )
+ 
++    def dt_hour(self):
++        return self.__constructor__(
++            self._modin_frame.dt_extract("hour"), self._shape_hint
++        )
++
+     def _bin_op(self, other, op_name, **kwargs):
+         """
+         Perform a binary operation on a frame.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

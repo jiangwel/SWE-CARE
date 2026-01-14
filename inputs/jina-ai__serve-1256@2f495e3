@@ -1,0 +1,693 @@
+  Task-ID: jina-ai__serve-1256@2f495e3
+  Please checkout to this commit first: 8b324ab96e6abc6133768163ea576ed4ac5836f8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  replace `'%s'` with new string formatting f`{var}` with best reasonable effort
+**Describe your problem**
+
+##Good first issue##
+
+In the current codebase, there are two types of string formating, would be nice to replace `'%s'` with new string formatting f`{var}` with the best reasonable effort.
+
+**What is your guess?**
+<!-- Do you have a guess where the problem could be? -->
+
+---
+
+<!-- Optional, but really help us locate the problem faster -->
+
+**Environment**
+<!-- Run `jina --version-full` and copy paste the output here -->
+
+**Screenshots**
+<!-- If applicable, add screenshots to help explain your problem. -->
+  </issue>
+  
+  <patch>
+  diff --git a/jina/__init__.py b/jina/__init__.py
+index fb61c353402df..2b9aaaf8842d1 100644
+--- a/jina/__init__.py
++++ b/jina/__init__.py
+@@ -15,7 +15,7 @@
+ # do some os-wise patches
+ 
+ if sys.version_info < (3, 7, 0):
+-    raise OSError('Jina requires Python 3.7 and above, but yours is %s' % sys.version_info)
++    raise OSError(f'Jina requires Python 3.7 and above, but yours is {sys.version_info}')
+ 
+ if sys.version_info >= (3, 8, 0) and platform.system() == 'Darwin':
+     # temporary fix for python 3.8 on macos where the default start is set to "spawn"
+diff --git a/jina/checker.py b/jina/checker.py
+index b616d3119e351..b74437affda0d 100644
+--- a/jina/checker.py
++++ b/jina/checker.py
+@@ -42,7 +42,7 @@ def __init__(self, args: 'argparse.Namespace'):
+         # check available driver group
+ 
+         default_logger.info('\nenvironment variables\n'.upper())
+-        default_logger.info('\n'.join('%-20s\t%s' % (k, os.environ.get(k, colored('(unset)', 'yellow'))) for k in
++        default_logger.info('\n'.join(f'{k:<20}\t{os.environ.get(k, colored("(unset)", "yellow"))}' for k in
+                                       __jina_env__))
+ 
+ 
+@@ -55,12 +55,12 @@ def __init__(self, args: 'argparse.Namespace'):
+         from jina.logging.profile import TimeContext
+         from google.protobuf.json_format import MessageToJson
+         import time
+-        ctrl_addr = 'tcp://%s:%d' % (args.host, args.port)
++        ctrl_addr = f'tcp://{args.host}:{args.port:d}'
+         try:
+             total_time = 0
+             total_success = 0
+             for j in range(args.retries):
+-                with TimeContext('ping %s at %d round' % (ctrl_addr, j), default_logger) as tc:
++                with TimeContext(f'ping {ctrl_addr} at {j:d} round', default_logger) as tc:
+                     r = send_ctrl_message(ctrl_addr, jina_pb2.Request.ControlRequest.STATUS, timeout=args.timeout)
+                     if not r:
+                         default_logger.warning('not responding, retry (%d/%d) in 1s' % (j + 1, args.retries))
+diff --git a/jina/clients/python/grpc.py b/jina/clients/python/grpc.py
+index 39d7d96eecf06..022a97d37f222 100644
+--- a/jina/clients/python/grpc.py
++++ b/jina/clients/python/grpc.py
+@@ -30,7 +30,7 @@ def __init__(self, args: 'argparse.Namespace'):
+         self.logger.debug('setting up grpc insecure channel...')
+         # A gRPC channel provides a connection to a remote gRPC server.
+         self._channel = grpc.insecure_channel(
+-            '%s:%d' % (args.host, args.port_expose),
++            f'{args.host}:{args.port_expose:d}',
+             options={
+                 'grpc.max_send_message_length': -1,
+                 'grpc.max_receive_message_length': -1,
+@@ -41,17 +41,17 @@ def __init__(self, args: 'argparse.Namespace'):
+             grpc.channel_ready_future(self._channel).result(
+                 timeout=(args.timeout_ready / 1000) if args.timeout_ready > 0 else None)
+         except grpc.FutureTimeoutError:
+-            self.logger.critical('can not connect to the server at %s:%d after %d ms, please double check the '
+-                                 'ip and grpc port number of the server'
+-                                 % (args.host, args.port_expose, args.timeout_ready))
+-            raise GRPCServerError('can not connect to the server at %s:%d' % (args.host, args.port_expose))
++            self.logger.critical(f'can not connect to the server at {args.host}:{args.port_expose} after '
++                                 f'{args.timeout_ready} ms, please double check the ip and grpc port number'
++                                 f' of the server')
++            raise GRPCServerError(f'can not connect to the server at {args.host}:{args.port_expose}')
+ 
+             # create new stub
+         self.logger.debug('create new stub...')
+         self._stub = jina_pb2_grpc.JinaRPCStub(self._channel)
+ 
+         # attache response handler
+-        self.logger.success('connected to the gateway at %s:%d!' % (self.args.host, self.args.port_expose))
++        self.logger.success(f'connected to the gateway at {self.args.host}:{self.args.port_expose}!')
+         self.is_closed = False
+ 
+     def call(self, *args, **kwargs):
+@@ -80,9 +80,9 @@ def start(self, *args, **kwargs) -> 'GrpcClient':
+             elif my_code == grpc.StatusCode.INTERNAL:
+                 self.logger.error('internal error on the server side')
+             else:
+-                raise BadClient('%s error in grpc: %s '
++                raise BadClient(f'{my_code} error in grpc: {my_details} '
+                                 'often the case is that you define/send a bad input iterator to jina, '
+-                                'please double check your input iterator' % (my_code, my_details))
++                                'please double check your input iterator')
+         finally:
+             self.close()
+ 
+diff --git a/jina/clients/python/helper.py b/jina/clients/python/helper.py
+index 6d7382166775e..99e75caf3bf79 100644
+--- a/jina/clients/python/helper.py
++++ b/jina/clients/python/helper.py
+@@ -86,7 +86,7 @@ def _exit_msg(self):
+             speed = self.num_docs / self.duration
+         else:
+             speed = self.num_reqs / self.duration
+-        sys.stdout.write('\t%s\n' % colored(f'✅ done in ⏱ {self.readable_duration} 🐎 {speed:3.1f}/s', 'green'))
++        sys.stdout.write(f'\t{colored(f"✅ done in ⏱ {self.readable_duration} 🐎 {speed:3.1f}/s", "green")}\n')
+ 
+ 
+ def pprint_routes(routes: Sequence['jina_pb2.Route'],
+diff --git a/jina/docker/hubio.py b/jina/docker/hubio.py
+index f197b2183f128..d368af236a9f0 100644
+--- a/jina/docker/hubio.py
++++ b/jina/docker/hubio.py
+@@ -441,7 +441,7 @@ def _check_completeness(self) -> Dict:
+ 
+         self.logger.info(
+             f'completeness check\n' +
+-            '\n'.join('%4s %-20s %s' % (colored('✓', 'green') if v else colored('✗', 'red'), k, v) for k, v in
++            '\n'.join(f'{colored("✓", "green") if v else colored("✗", "red"):>4} {k:<20} {v}' for k, v in
+                       completeness.items()) + '\n')
+ 
+         if completeness['Dockerfile'] and completeness['manifest.yml']:
+diff --git a/jina/executors/__init__.py b/jina/executors/__init__.py
+index dd0680a9275cc..8561e56c7ec27 100644
+--- a/jina/executors/__init__.py
++++ b/jina/executors/__init__.py
+@@ -195,9 +195,9 @@ def _fill_metas(self, _metas):
+             _name = f'{self.__class__.__name__}-{_id}'
+             if self.warn_unnamed:
+                 self.logger.warning(
+-                    'this executor is not named, i will call it "%s". '
++                    f'this executor is not named, i will call it "{_name}". '
+                     'naming is important as it provides an unique identifier when '
+-                    'persisting this executor on disk.' % _name)
++                    'persisting this executor on disk.')
+             setattr(self, 'name', _name)
+         if unresolved_attr:
+             _tmp = vars(self)
+@@ -300,7 +300,7 @@ def __setstate__(self, d):
+             self._post_init_wrapper(fill_in_metas=False)
+         except ImportError as ex:
+             self.logger.warning('ImportError is often caused by a missing component, '
+-                                'which often can be solved by "pip install" relevant package. %s' % ex, exc_info=True)
++                                f'which often can be solved by "pip install" relevant package. {ex}', exc_info=True)
+ 
+     def train(self, *args, **kwargs) -> None:
+         """
+@@ -344,7 +344,7 @@ def save(self, filename: str = None) -> bool:
+             f = tempfile.NamedTemporaryFile('w', delete=False, dir=os.environ.get('JINA_EXECUTOR_WORKDIR', None)).name
+ 
+         if self.max_snapshot > 0 and os.path.exists(f):
+-            bak_f = f + '.snapshot-%s' % (self._last_snapshot_ts.strftime('%Y%m%d%H%M%S') or 'NA')
++            bak_f = f + f'.snapshot-{self._last_snapshot_ts.strftime("%Y%m%d%H%M%S") or "NA"}'
+             os.rename(f, bak_f)
+             self._snapshot_files.append(bak_f)
+             if len(self._snapshot_files) > self.max_snapshot:
+@@ -372,7 +372,7 @@ def save_config(self, filename: str = None) -> bool:
+             f = tempfile.NamedTemporaryFile('w', delete=False, dir=os.environ.get('JINA_EXECUTOR_WORKDIR', None)).name
+         with open(f, 'w', encoding='utf8') as fp:
+             yaml.dump(self, fp)
+-        self.logger.info('executor\'s yaml config is save to %s' % f)
++        self.logger.info(f'executor\'s yaml config is save to {f}')
+ 
+         self.is_updated = _updated
+         return True
+diff --git a/jina/executors/compound.py b/jina/executors/compound.py
+index a91a2178099e7..48afef1e179a6 100644
+--- a/jina/executors/compound.py
++++ b/jina/executors/compound.py
+@@ -324,8 +324,7 @@ def _set_routes(self) -> None:
+                     new_routes.append(new_r)
+                 else:
+                     self.logger.warning(
+-                        'function "%s" appears multiple times in %s, it needs to be resolved manually before using.' % (
+-                            k, v))
++                        f'function "{k}" appears multiple times in {v}, it needs to be resolved manually before using.')
+                     bad_routes.append(k)
+         if new_routes:
+             self.logger.debug(f'new functions added: {new_routes!r}')
+diff --git a/jina/executors/decorators.py b/jina/executors/decorators.py
+index 06efadbaf5f32..7e07d95562553 100644
+--- a/jina/executors/decorators.py
++++ b/jina/executors/decorators.py
+@@ -51,8 +51,8 @@ def as_train_method(func: Callable) -> Callable:
+     @wraps(func)
+     def arg_wrapper(self, *args, **kwargs):
+         if self.is_trained:
+-            self.logger.warning('"%s" has been trained already, '
+-                                'training it again will override the previous training' % self.__class__.__name__)
++            self.logger.warning(f'"{self.__class__.__name__}" has been trained already, '
++                                'training it again will override the previous training')
+         f = func(self, *args, **kwargs)
+         self.is_trained = True
+         return f
+diff --git a/jina/executors/requests.py b/jina/executors/requests.py
+index b2d53a741659c..e53ce884e46e9 100644
+--- a/jina/executors/requests.py
++++ b/jina/executors/requests.py
+@@ -21,7 +21,7 @@ def get_default_reqs(cls_mro: List[type]) -> Dict:
+             if cls.__name__ not in _defaults:
+                 from pkg_resources import resource_stream
+                 with resource_stream('jina',
+-                                     '/'.join(('resources', 'executors.requests.%s.yml' % cls.__name__))) as fp:
++                                     '/'.join(('resources', f'executors.requests.{cls.__name__}.yml'))) as fp:
+                     _defaults[cls.__name__] = \
+                         yaml.load(fp)  # do not expand variables at here, i.e. DO NOT USE expand_dict(yaml.load(fp))
+ 
+diff --git a/jina/flow/__init__.py b/jina/flow/__init__.py
+index 9d3d2c7ffb7f5..f1b6d90203e25 100644
+--- a/jina/flow/__init__.py
++++ b/jina/flow/__init__.py
+@@ -130,7 +130,7 @@ def save_config(self, filename: str = None) -> bool:
+ 
+         with open(f, 'w', encoding='utf8') as fp:
+             yaml.dump(self, fp)
+-        self.logger.info(f'{self}\'s yaml config is save to %s' % f)
++        self.logger.info(f'{self}\'s yaml config is save to {f}')
+         return True
+ 
+     @property
+@@ -838,9 +838,9 @@ def plot(self, output: str = None,
+                 for j in range(v._args.parallel):
+                     r = node + (f'_{j}' if v._args.parallel > 1 else '')
+                     if v.is_head_router:
+-                        mermaid_graph.append('\t%s%s:::pea-->%s%s:::pea' % (head_router, p_r % 'head', r, p_e % r))
++                        mermaid_graph.append(f'\t{head_router}{p_r % "head"}:::pea-->{r}{p_e % r}:::pea')
+                     if v.is_tail_router:
+-                        mermaid_graph.append('\t%s%s:::pea-->%s%s:::pea' % (r, p_e % r, tail_router, p_r % 'tail'))
++                        mermaid_graph.append(f'\t{r}{p_e % r}:::pea-->{tail_router}{p_r % "tail"}:::pea')
+                 mermaid_graph.append('end')
+ 
+         for node, v in op_flow._pod_nodes.items():
+diff --git a/jina/flow/builder.py b/jina/flow/builder.py
+index a6d943bdd699e..067198bf1c272 100644
+--- a/jina/flow/builder.py
++++ b/jina/flow/builder.py
+@@ -34,8 +34,7 @@ def arg_wrapper(self, *args, **kwargs):
+                     return func(self, *args, **kwargs)
+                 else:
+                     raise FlowBuildLevelError(
+-                        'build_level check failed for %r, required level: %s, actual level: %s' % (
+-                            func, required_level, self._build_level))
++                        f'build_level check failed for {func!r}, required level: {required_level}, actual level: {self._build_level}')
+             else:
+                 raise AttributeError(f'{self!r} has no attribute "_build_level"')
+ 
+diff --git a/jina/helper.py b/jina/helper.py
+index ffac179452d34..15ef1d2888d3b 100644
+--- a/jina/helper.py
++++ b/jina/helper.py
+@@ -74,9 +74,8 @@ def print_load_table(load_stat: Dict[str, List[Any]]):
+     for k, v in load_stat.items():
+         for cls_name, import_stat, err_reason in v:
+             if cls_name not in cached:
+-                load_table.append('%-5s %-25s %-40s %s' % (
+-                    colored('✓', 'green') if import_stat else colored('✗', 'red'),
+-                    cls_name if cls_name else colored('Module load error', 'red'), k, str(err_reason)))
++                load_table.append(
++                    f'{colored("✓", "green") if import_stat else colored("✗", "red"):<5} {cls_name if cls_name else colored("Module load error", "red"):<25} {k:<40} {str(err_reason)}')
+                 cached.add(cls_name)
+     if load_table:
+         load_table.sort()
+@@ -91,9 +90,8 @@ def print_load_csv_table(load_stat: Dict[str, List[Any]]):
+     load_table = []
+     for k, v in load_stat.items():
+         for cls_name, import_stat, err_reason in v:
+-            load_table.append('%s %s %s %s' % (
+-                colored('✓', 'green') if import_stat else colored('✗', 'red'),
+-                cls_name if cls_name else colored('Module_load_error', 'red'), k, str(err_reason)))
++            load_table.append(
++                f'{colored("✓", "green") if import_stat else colored("✗", "red")} {cls_name if cls_name else colored("Module_load_error", "red")} {k} {str(err_reason)}')
+     if load_table:
+         default_logger.info('\n'.join(load_table))
+ 
+@@ -254,7 +252,7 @@ def _get_module_name(path: str, use_abspath: bool = False, use_basename: bool =
+     def add_modules(*paths) -> Optional[ModuleType]:
+         for p in paths:
+             if not os.path.exists(p):
+-                raise FileNotFoundError('cannot import module from %s, file not exist', p)
++                raise FileNotFoundError(f'cannot import module from {p}, file not exist')
+             module = PathImporter._path_import(p)
+         return module
+ 
+@@ -520,8 +518,8 @@ def get_local_config_source(path: str, to_stream: bool = False) -> Union[StringI
+         _p = complete_path(path)
+         return open(_p, encoding='utf8') if to_stream else _p
+     elif path.startswith('_') and os.path.exists(
+-            resource_filename('jina', '/'.join(('resources', 'executors.%s.yml' % path)))):
+-        return resource_filename('jina', '/'.join(('resources', 'executors.%s.yml' % path)))
++            resource_filename('jina', '/'.join(('resources', f'executors.{path}.yml')))):
++        return resource_filename('jina', '/'.join(('resources', f'executors.{path}.yml')))
+     elif path.startswith('!'):
+         # possible YAML content
+         path = path.replace('|', '\n    with: ')
+@@ -564,8 +562,8 @@ def get_parsed_args(kwargs: Dict[str, Union[str, int, bool]],
+                 f'they are ignored. if you are using them from a global args (e.g. Flow), '
+                 f'then please ignore this message')
+     except SystemExit:
+-        raise ValueError('bad arguments "%s" with parser %r, '
+-                         'you may want to double check your args ' % (args, parser))
++        raise ValueError(f'bad arguments "{args}" with parser {parser}, '
++                         'you may want to double check your args ')
+     return args, p_args, unknown_args
+ 
+ 
+diff --git a/jina/logging/profile.py b/jina/logging/profile.py
+index af0c2afe528f0..3fa34edf97a90 100644
+--- a/jina/logging/profile.py
++++ b/jina/logging/profile.py
+@@ -107,7 +107,7 @@ def reset(self):
+             self._pending_reset = False
+ 
+     def __str__(self):
+-        return ' '.join('%s: %3.1fs' % (k, v) for k, v in self.accum_time.items())
++        return ' '.join(f'{k}: {v:3.1f}s' for k, v in self.accum_time.items())
+ 
+ 
+ class TimeContext:
+diff --git a/jina/parser.py b/jina/parser.py
+index bc756b3e4dbbe..bc3cb33ed0252 100644
+--- a/jina/parser.py
++++ b/jina/parser.py
+@@ -682,10 +682,10 @@ def _get_help_string(self, action):
+                 if isinstance(action, argparse._StoreTrueAction):
+ 
+                     help += colored(' (default: %s)' % (
+-                        'enabled' if action.default else 'disabled, use "--%s" to enable it' % action.dest),
++                        'enabled' if action.default else f'disabled, use "--{action.dest}" to enable it'),
+                                     attrs=['dark'])
+                 elif action.choices:
+-                    choices_str = '{%s}' % ', '.join([str(c) for c in action.choices])
++                    choices_str = f'{{{", ".join([str(c) for c in action.choices])}}}'
+                     help += colored(' (choose from: ' + choices_str + '; default: %(default)s)', attrs=['dark'])
+                 elif action.option_strings or action.nargs in defaulting_nargs:
+                     help += colored(' (type: %(type)s; default: %(default)s)', attrs=['dark'])
+@@ -714,10 +714,10 @@ def _metavar_formatter(self, action, default_metavar):
+ 
+             if len(action.choices) > 4:
+                 choice_strs = ', '.join([str(c) for c in action.choices][:4])
+-                result = '{%s ... %d more choices}' % (choice_strs, len(action.choices) - 4)
++                result = f'{{{choice_strs} ... {len(action.choices) - 4:d} more choices}}'
+             else:
+                 choice_strs = ', '.join([str(c) for c in action.choices])
+-                result = '{%s}' % choice_strs
++                result = f'{{{choice_strs}}}'
+         else:
+             result = default_metavar
+ 
+diff --git a/jina/peapods/pea.py b/jina/peapods/pea.py
+index 3f4a07cf8e383..9d359caa6358c 100644
+--- a/jina/peapods/pea.py
++++ b/jina/peapods/pea.py
+@@ -139,7 +139,7 @@ def __init__(self, args: Union['argparse.Namespace', Dict]):
+             if self.args.name:
+                 self.name = self.args.name
+             if self.args.role == PeaRoleType.PARALLEL:
+-                self.name = '%s-%d' % (self.name, self.args.pea_id)
++                self.name = f'{self.name}-{self.args.pea_id:d}'
+             self.ctrl_addr, self.ctrl_with_ipc = Zmqlet.get_ctrl_address(self.args)
+             if self.args.name:
+                 # everything in this Pea (process) will use the same name for display the log
+@@ -223,7 +223,7 @@ def load_executor(self):
+ 
+     def print_stats(self):
+         self.logger.info(
+-            ' '.join('%s: %.2f' % (k, v / self._timer.accum_time['loop']) for k, v in self._timer.accum_time.items()))
++            ' '.join(f'{k}: {v / self._timer.accum_time["loop"]:.2f}' for k, v in self._timer.accum_time.items()))
+ 
+     def save_executor(self, dump_interval: int = 0):
+         """Save the contained executor
+diff --git a/jina/peapods/zmq.py b/jina/peapods/zmq.py
+index 174a91e02b050..26e461e975fa1 100644
+--- a/jina/peapods/zmq.py
++++ b/jina/peapods/zmq.py
+@@ -88,7 +88,7 @@ def get_ctrl_address(args: 'argparse.Namespace') -> Tuple[str, bool]:
+         if ctrl_with_ipc:
+             return _get_random_ipc(), ctrl_with_ipc
+         else:
+-            return 'tcp://%s:%d' % (args.host, args.port_ctrl), ctrl_with_ipc
++            return f'tcp://{args.host}:{args.port_ctrl:d}', ctrl_with_ipc
+ 
+     def _pull(self, interval: int = 1):
+         socks = dict(self.poller.poll(interval))
+@@ -143,10 +143,7 @@ def init_sockets(self) -> Tuple:
+             self.logger.debug(f'output {self.args.host_out}:{colored(self.args.port_out, "yellow")}')
+ 
+             self.logger.info(
+-                'input %s (%s) \t output %s (%s)\t control over %s (%s)' %
+-                (colored(in_addr, 'yellow'), self.args.socket_in,
+-                 colored(out_addr, 'yellow'), self.args.socket_out,
+-                 colored(ctrl_addr, 'yellow'), SocketType.PAIR_BIND))
++                f'input {colored(in_addr, "yellow")} ({self.args.socket_in}) \t output {colored(out_addr, "yellow")} ({self.args.socket_out})\t control over {colored(ctrl_addr, "yellow")} ({SocketType.PAIR_BIND})')
+ 
+             self.in_sock_type = in_sock.type
+             self.out_sock_type = out_sock.type
+@@ -387,9 +384,8 @@ def send_message(sock: Union['zmq.Socket', 'ZMQStream'], msg: 'ProtoMessage', ti
+         num_bytes = msg.size
+     except zmq.error.Again:
+         raise TimeoutError(
+-            'cannot send message to sock %s after timeout=%dms, please check the following:'
+-            'is the server still online? is the network broken? are "port" correct? ' % (
+-                sock, timeout))
++            f'cannot send message to sock {sock} after timeout={timeout}ms, please check the following:'
++            'is the server still online? is the network broken? are "port" correct?')
+     except zmq.error.ZMQError as ex:
+         default_logger.critical(ex)
+     finally:
+@@ -430,9 +426,8 @@ async def send_message_async(sock: 'zmq.Socket', msg: 'ProtoMessage', timeout: i
+         return msg.size
+     except zmq.error.Again:
+         raise TimeoutError(
+-            'cannot send message to sock %s after timeout=%dms, please check the following:'
+-            'is the server still online? is the network broken? are "port" correct? ' % (
+-                sock, timeout))
++            f'cannot send message to sock {sock} after timeout={timeout}ms, please check the following:'
++            'is the server still online? is the network broken? are "port" correct? ')
+     except zmq.error.ZMQError as ex:
+         default_logger.critical(ex)
+     except asyncio.CancelledError:
+@@ -463,9 +458,8 @@ def recv_message(sock: 'zmq.Socket', timeout: int = -1, **kwargs) -> 'ProtoMessa
+ 
+     except zmq.error.Again:
+         raise TimeoutError(
+-            'no response from sock %s after timeout=%dms, please check the following:'
+-            'is the server still online? is the network broken? are "port" correct? ' % (
+-                sock, timeout))
++            f'no response from sock {sock} after timeout={timeout}ms, please check the following:'
++            'is the server still online? is the network broken? are "port" correct? ')
+     except Exception as ex:
+         raise ex
+     finally:
+@@ -491,9 +485,8 @@ async def recv_message_async(sock: 'zmq.Socket', timeout: int = -1,
+ 
+     except zmq.error.Again:
+         raise TimeoutError(
+-            'no response from sock %s after timeout=%dms, please check the following:'
+-            'is the server still online? is the network broken? are "port" correct? ' % (
+-                sock, timeout))
++            f'no response from sock {sock} after timeout={timeout}ms, please check the following:'
++            'is the server still online? is the network broken? are "port" correct? ')
+     except zmq.error.ZMQError as ex:
+         default_logger.critical(ex)
+     except asyncio.CancelledError:
+diff --git a/jina/proto/message/__init__.py b/jina/proto/message/__init__.py
+index 9b23af8789c14..a3a3b21ac9aae 100644
+--- a/jina/proto/message/__init__.py
++++ b/jina/proto/message/__init__.py
+@@ -244,8 +244,8 @@ def _check_version(self):
+                                        'otherwise please check if gateway service set correct version')
+             elif __version__ != self.envelope.version.jina:
+                 raise MismatchedVersion('mismatched JINA version! '
+-                                        'incoming message has JINA version %s, whereas local JINA version %s' % (
+-                                            self.envelope.version.jina, __version__))
++                                        f'incoming message has JINA version {self.envelope.version.jina}, '
++                                        f'whereas local JINA version {__version__}')
+ 
+             if not self.envelope.version.proto:
+                 # only happen in unittest
+@@ -254,8 +254,8 @@ def _check_version(self):
+                                        'otherwise please check if gateway service set correct version')
+             elif __proto_version__ != self.envelope.version.proto:
+                 raise MismatchedVersion('mismatched protobuf version! '
+-                                        'incoming message has protobuf version %s, whereas local protobuf version %s' % (
+-                                            self.envelope.version.proto, __proto_version__))
++                                        f'incoming message has protobuf version {self.envelope.version.proto}, '
++                                        f'whereas local protobuf version {__proto_version__}')
+ 
+             if not self.envelope.version.vcs or not os.environ.get('JINA_VCS_VERSION'):
+                 default_logger.warning('incoming message contains empty "version.vcs", '
+@@ -264,9 +264,9 @@ def _check_version(self):
+                                        'otherwise please check if gateway service set correct version')
+             elif os.environ.get('JINA_VCS_VERSION') != self.envelope.version.vcs:
+                 raise MismatchedVersion('mismatched vcs version! '
+-                                        'incoming message has vcs_version %s, '
+-                                        'whereas local environment vcs_version is %s' % (
+-                                            self.envelope.version.vcs, os.environ.get('JINA_VCS_VERSION')))
++                                        f'incoming message has vcs_version {self.envelope.version.vcs}, '
++                                        f'whereas local environment vcs_version is '
++                                        f'{os.environ.get("JINA_VCS_VERSION")}')
+ 
+         else:
+             raise MismatchedVersion('version_check=True locally, '
+diff --git a/setup.py b/setup.py
+index caaa2531a9b87..c6b6cc32d020c 100644
+--- a/setup.py
++++ b/setup.py
+@@ -14,7 +14,7 @@
+ elif sys.version_info >= (3, 7, 0):
+     py_tag = PY37
+ else:
+-    raise OSError('Jina requires Python 3.7 and above, but yours is %s' % sys.version)
++    raise OSError(f'Jina requires Python 3.7 and above, but yours is {sys.version}')
+ 
+ try:
+     pkg_name = 'jina'
+diff --git a/tests/unit/docker/hub-mwu-bad/bad-dockerfile/mwu_encoder.py b/tests/unit/docker/hub-mwu-bad/bad-dockerfile/mwu_encoder.py
+index b16b5cdc208d8..027002551a732 100644
+--- a/tests/unit/docker/hub-mwu-bad/bad-dockerfile/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu-bad/bad-dockerfile/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu-bad/bad-pythonfile/mwu_encoder.py b/tests/unit/docker/hub-mwu-bad/bad-pythonfile/mwu_encoder.py
+index bdc25986cdce7..8392a7b7ae94e 100644
+--- a/tests/unit/docker/hub-mwu-bad/bad-pythonfile/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu-bad/bad-pythonfile/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu-bad/fail-to-start/mwu_encoder.py b/tests/unit/docker/hub-mwu-bad/fail-to-start/mwu_encoder.py
+index b16b5cdc208d8..027002551a732 100644
+--- a/tests/unit/docker/hub-mwu-bad/fail-to-start/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu-bad/fail-to-start/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu-bad/missing-dockerfile/mwu_encoder.py b/tests/unit/docker/hub-mwu-bad/missing-dockerfile/mwu_encoder.py
+index b16b5cdc208d8..027002551a732 100644
+--- a/tests/unit/docker/hub-mwu-bad/missing-dockerfile/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu-bad/missing-dockerfile/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu-bad/missing-manifest/mwu_encoder.py b/tests/unit/docker/hub-mwu-bad/missing-manifest/mwu_encoder.py
+index b16b5cdc208d8..027002551a732 100644
+--- a/tests/unit/docker/hub-mwu-bad/missing-manifest/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu-bad/missing-manifest/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu/mwu_encoder.py b/tests/unit/docker/hub-mwu/mwu_encoder.py
+index b16b5cdc208d8..027002551a732 100644
+--- a/tests/unit/docker/hub-mwu/mwu_encoder.py
++++ b/tests/unit/docker/hub-mwu/mwu_encoder.py
+@@ -10,8 +10,8 @@ class MWUEncoder(BaseEncoder):
+     def __init__(self, greetings: str, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._greetings = greetings
+-        self.logger.success('look at me! %s' % greetings)
++        self.logger.success(f'look at me! {greetings}')
+ 
+     def encode(self, data: Any, *args, **kwargs) -> Any:
+-        self.logger.info('%s %s' % (self._greetings, data))
++        self.logger.info(f'{self._greetings} {data}')
+         return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/test_index.py b/tests/unit/test_index.py
+index 4e788915de5f4..000d0e8dc40c9 100644
+--- a/tests/unit/test_index.py
++++ b/tests/unit/test_index.py
+@@ -45,14 +45,12 @@ def add(self, keys: 'np.ndarray', vectors: 'np.ndarray', *args, **kwargs):
+                 (vectors.shape[0], vectors.shape[1], self.num_dim))
+         elif self.dtype != vectors.dtype.name:
+             raise TypeError(
+-                "vectors' dtype %s does not match with indexers's dtype: %s" %
+-                (vectors.dtype.name, self.dtype))
++                f"vectors' dtype {vectors.dtype.name} does not match with indexers's dtype: {self.dtype}")
+         elif keys.shape[0] != vectors.shape[0]:
+             raise ValueError('number of key %d not equal to number of vectors %d' % (keys.shape[0], vectors.shape[0]))
+         elif self.key_dtype != keys.dtype.name:
+             raise TypeError(
+-                "keys' dtype %s does not match with indexers keys's dtype: %s" %
+-                (keys.dtype.name, self.key_dtype))
++                f"keys' dtype {keys.dtype.name} does not match with indexers keys's dtype: {self.key_dtype}")
+ 
+         self.write_handler.write(vectors.tobytes())
+         self.key_bytes += keys.tobytes()
+diff --git a/tests/unit/test_index_remote.py b/tests/unit/test_index_remote.py
+index ed71280b720b9..6412d90348ff0 100644
+--- a/tests/unit/test_index_remote.py
++++ b/tests/unit/test_index_remote.py
+@@ -47,14 +47,12 @@ def add(self, keys: 'np.ndarray', vectors: 'np.ndarray', *args, **kwargs):
+                 (vectors.shape[0], vectors.shape[1], self.num_dim))
+         elif self.dtype != vectors.dtype.name:
+             raise TypeError(
+-                "vectors' dtype %s does not match with indexers's dtype: %s" %
+-                (vectors.dtype.name, self.dtype))
++                f"vectors' dtype {vectors.dtype.name} does not match with indexers's dtype: {self.dtype}")
+         elif keys.shape[0] != vectors.shape[0]:
+             raise ValueError('number of key %d not equal to number of vectors %d' % (keys.shape[0], vectors.shape[0]))
+         elif self.key_dtype != keys.dtype.name:
+             raise TypeError(
+-                "keys' dtype %s does not match with indexers keys's dtype: %s" %
+-                (keys.dtype.name, self.key_dtype))
++                f"keys' dtype {keys.dtype.name} does not match with indexers keys's dtype: {self.key_dtype}")
+ 
+         self.write_handler.write(vectors.tobytes())
+         self.key_bytes += keys.tobytes()
+diff --git a/tests/unit/test_yamlparser.py b/tests/unit/test_yamlparser.py
+index c3dcfba55ff31..83a3514900963 100644
+--- a/tests/unit/test_yamlparser.py
++++ b/tests/unit/test_yamlparser.py
+@@ -73,7 +73,7 @@ class DummyClass:
+     assert type(a) == DummyClass
+ 
+     with open(resource_filename('jina',
+-                                '/'.join(('resources', 'executors.requests.%s.yml' % 'BaseExecutor')))) as fp:
++                                '/'.join(('resources', f'executors.requests.{"BaseExecutor"}.yml')))) as fp:
+         b = fp.read()
+         print(b)
+         c = yaml.load(b)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

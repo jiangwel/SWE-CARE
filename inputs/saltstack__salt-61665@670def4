@@ -1,0 +1,222 @@
+  Task-ID: saltstack__salt-61665@670def4
+  Please checkout to this commit first: cbb22cfd2bb939864657df99f798443a48bde797
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [BUG] Deltaproxy should skip failed sub proxy devices
+**Description**
+When using deltaproxy with multiple sub proxy minions, if the connection phase of one sub proxy fails it should be skipped.
+
+**Setup**
+Configure deltaproxy with multiple proxy minion ids.
+
+**Steps to Reproduce the behavior**
+Ensure at least one proxy minion will have an error.
+
+**Expected behavior**
+The control proxy minion will get stuck attempting to connect to the failing minion and will not completely the remaining sub proxy minions or it's own initialization.
+  </issue>
+  
+  <patch>
+  diff --git a/changelog/61377.fixed b/changelog/61377.fixed
+new file mode 100644
+index 000000000000..6c10147038a6
+--- /dev/null
++++ b/changelog/61377.fixed
+@@ -0,0 +1 @@
++Do not block the deltaproxy startup.  Wrap the call to the individual proxy initialization functions in a try...except, catching the exception, logging an error and moving onto the next proxy minion.
+diff --git a/salt/metaproxy/deltaproxy.py b/salt/metaproxy/deltaproxy.py
+index a5d5910ca241..c09b5ca93392 100644
+--- a/salt/metaproxy/deltaproxy.py
++++ b/salt/metaproxy/deltaproxy.py
+@@ -418,7 +418,14 @@ def post_master_init(self, master):
+         _fq_proxyname = proxyopts["proxy"]["proxytype"]
+ 
+         proxy_init_fn = _proxy_minion.proxy[_fq_proxyname + ".init"]
+-        proxy_init_fn(proxyopts)
++        try:
++            proxy_init_fn(proxyopts)
++        except Exception:  # pylint: disable=broad-except
++            msg = "An exception occured during the initialization of minion {}. Skipping.".format(
++                _id
++            )
++            log.error(msg, exc_info=True)
++            continue
+ 
+         # Reload the grains
+         self.proxy_grains[_id] = salt.loader.grains(
+diff --git a/salt/proxy/dummy.py b/salt/proxy/dummy.py
+index 4a0a6c047bdb..d470c1082a79 100644
+--- a/salt/proxy/dummy.py
++++ b/salt/proxy/dummy.py
+@@ -10,6 +10,7 @@
+ 
+ import salt.utils.files
+ import salt.utils.msgpack
++from salt.exceptions import CommandExecutionError, MinionError
+ 
+ # This must be present or the Salt loader won't load this module
+ __proxyenabled__ = ["dummy"]
+@@ -85,6 +86,12 @@ def init(opts):
+     Required.
+     Can be used to initialize the server connection.
+     """
++    # Added to test situation when a proxy minion throws
++    # an exception during init.
++    if opts["proxy"].get("raise_minion_error"):
++        raise MinionError(message="Raising A MinionError.")
++    if opts["proxy"].get("raise_commandexec_error"):
++        raise CommandExecutionError(message="Raising A CommandExecutionError.")
+     __context__["dummy_proxy"] = {"id": opts["id"]}
+     log.debug("dummy proxy init() called...")
+     with _loaded_state(opts) as state:
+diff --git a/tests/pytests/integration/cli/test_salt_deltaproxy.py b/tests/pytests/integration/cli/test_salt_deltaproxy.py
+index 12d6e25cd839..527970a7c041 100644
+--- a/tests/pytests/integration/cli/test_salt_deltaproxy.py
++++ b/tests/pytests/integration/cli/test_salt_deltaproxy.py
+@@ -286,3 +286,112 @@ def test_missing_pillar_file(
+         # Terminate the proxy minion
+         ret = factory.terminate()
+         assert ret.exitcode == salt.defaults.exitcodes.EX_OK, ret
++
++
++# Hangs on Windows. You can add a timeout to the proxy.run command, but then
++# it just times out.
++@pytest.mark.skip_on_windows(reason=PRE_PYTEST_SKIP_REASON)
++def test_invalid_connection(
++    salt_factories,
++    base_env_pillar_tree_root_dir,
++    salt_master,
++    salt_cli,
++    proxy_minion_id,
++):
++    """
++    Ensure that the control proxy minion starts up when
++    pillar files for sub proxies are missing.
++
++    Skip on Windows because daemonization not supported
++    """
++
++    config_defaults = {
++        "metaproxy": "deltaproxy",
++    }
++
++    top_file = """
++    base:
++      '{}':
++        - controlproxy
++      dummy_proxy_one:
++        - dummy_proxy_one
++      broken_proxy_one:
++        - broken_proxy_one
++      broken_proxy_two:
++        - broken_proxy_two
++    """.format(
++        proxy_minion_id
++    )
++    controlproxy_pillar_file = """
++    proxy:
++        proxytype: deltaproxy
++        ids:
++          - broken_proxy_one
++          - broken_proxy_two
++          - dummy_proxy_one
++    """
++
++    dummy_proxy_one_pillar_file = """
++    proxy:
++      proxytype: dummy
++    """
++
++    broken_proxy_one_pillar_file = """
++    proxy:
++      proxytype: dummy
++      raise_minion_error: True
++    """
++
++    broken_proxy_two_pillar_file = """
++    proxy:
++      proxytype: dummy
++      raise_commandexec_error: True
++    """
++
++    top_tempfile = pytest.helpers.temp_file(
++        "top.sls", top_file, base_env_pillar_tree_root_dir
++    )
++    controlproxy_tempfile = pytest.helpers.temp_file(
++        "controlproxy.sls", controlproxy_pillar_file, base_env_pillar_tree_root_dir
++    )
++    dummy_proxy_one_tempfile = pytest.helpers.temp_file(
++        "dummy_proxy_one.sls",
++        dummy_proxy_one_pillar_file,
++        base_env_pillar_tree_root_dir,
++    )
++    broken_proxy_one_tempfile = pytest.helpers.temp_file(
++        "broken_proxy_one.sls",
++        broken_proxy_one_pillar_file,
++        base_env_pillar_tree_root_dir,
++    )
++    broken_proxy_two_tempfile = pytest.helpers.temp_file(
++        "broken_proxy_two.sls",
++        broken_proxy_two_pillar_file,
++        base_env_pillar_tree_root_dir,
++    )
++    with top_tempfile, controlproxy_tempfile, dummy_proxy_one_tempfile, broken_proxy_one_tempfile, broken_proxy_two_tempfile:
++        factory = salt_master.salt_proxy_minion_daemon(
++            proxy_minion_id,
++            defaults=config_defaults,
++            extra_cli_arguments_after_first_start_failure=["--log-level=debug"],
++            start_timeout=240,
++        )
++
++        factory.after_terminate(clear_proxy_minions, salt_master, factory.id)
++
++        factory.start()
++        assert factory.is_running()
++
++        # Let's issue a ping the control proxy
++        ret = salt_cli.run("test.ping", minion_tgt=proxy_minion_id)
++        assert ret.exitcode == 0
++        assert ret.json is True
++
++        # Let's issue a ping to one of the controlled proxies
++        ret = salt_cli.run("test.ping", minion_tgt="dummy_proxy_one")
++        assert ret.exitcode == 0
++        assert ret.json is True
++
++        # Terminate the proxy minion
++        ret = factory.terminate()
++        assert ret.exitcode == salt.defaults.exitcodes.EX_OK, ret
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

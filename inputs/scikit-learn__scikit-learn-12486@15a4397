@@ -1,0 +1,125 @@
+  Task-ID: scikit-learn__scikit-learn-12486@15a4397
+  Please checkout to this commit first: 02dc9ed680e7f53f1b0d410dcdd37341c7958eb1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: Using GridSearchCV with scoring='roc_auc' and GMM as classifier gives IndexError
+When performing grid search using GridSearchCV using ootb scoring method 'roc_auc' and ootb GMM classifier from sklearn.mixture.GMM I get an index error.
+Code to reproduce:
+
+```
+from sklearn import datasets
+from sklearn.grid_search import GridSearchCV
+from sklearn.mixture import GMM
+X,y = datasets.make_classification(n_samples = 10000, n_features=10,n_classes=2)
+# Vanilla GMM_model
+gmm_model = GMM()
+# Standard param grid
+param_grid = {'n_components' : [1,2,3,4],
+              'covariance_type': ['tied','full','spherical']}
+grid_search = GridSearchCV(gmm_model, param_grid, scoring='roc_auc')
+# Fit GS with this data
+grid_search.fit(X, y)
+```
+
+Sorry if the format is incorrect. First time I am posting.
+
+ERROR:
+  File "*/python2.7/site-packages/sklearn/metrics/scorer.py", line 175, in **call**
+    y_pred = y_pred[:, 1]
+IndexError: index 1 is out of bounds for axis 1 with size 1
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/metrics/scorer.py b/sklearn/metrics/scorer.py
+index 59ecd65386823..e500fab82a86c 100644
+--- a/sklearn/metrics/scorer.py
++++ b/sklearn/metrics/scorer.py
+@@ -126,7 +126,12 @@ def __call__(self, clf, X, y, sample_weight=None):
+         y_type = type_of_target(y)
+         y_pred = clf.predict_proba(X)
+         if y_type == "binary":
+-            y_pred = y_pred[:, 1]
++            if y_pred.shape[1] == 2:
++                y_pred = y_pred[:, 1]
++            else:
++                raise ValueError('Must use classifier with two classes'
++                                 ' for {} scoring'.format(
++                                     self._score_func.__name__))
+         if sample_weight is not None:
+             return self._sign * self._score_func(y, y_pred,
+                                                  sample_weight=sample_weight,
+@@ -183,7 +188,12 @@ def __call__(self, clf, X, y, sample_weight=None):
+                 y_pred = clf.predict_proba(X)
+ 
+                 if y_type == "binary":
+-                    y_pred = y_pred[:, 1]
++                    if y_pred.shape[1] == 2:
++                        y_pred = y_pred[:, 1]
++                    else:
++                        raise ValueError('Must use classifier with two classes'
++                                         ' for {} scoring'.format(
++                                             self._score_func.__name__))
+                 elif isinstance(y_pred, list):
+                     y_pred = np.vstack([p[:, -1] for p in y_pred]).T
+ 
+diff --git a/sklearn/metrics/tests/test_score_objects.py b/sklearn/metrics/tests/test_score_objects.py
+index a676541743b71..ef8d953526f85 100644
+--- a/sklearn/metrics/tests/test_score_objects.py
++++ b/sklearn/metrics/tests/test_score_objects.py
+@@ -370,7 +370,21 @@ def test_thresholded_scorers():
+     X, y = make_blobs(random_state=0, centers=3)
+     X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+     clf.fit(X_train, y_train)
+-    assert_raises(ValueError, get_scorer('roc_auc'), clf, X_test, y_test)
++    with pytest.raises(ValueError, match="multiclass format is not supported"):
++        get_scorer('roc_auc')(clf, X_test, y_test)
++
++    # test error is raised with a single class present in model
++    # (predict_proba shape is not suitable for binary auc)
++    X, y = make_blobs(random_state=0, centers=2)
++    X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
++    clf = DecisionTreeClassifier()
++    clf.fit(X_train, np.zeros_like(y_train))
++    with pytest.raises(ValueError, match="use classifier with two classes"):
++        get_scorer('roc_auc')(clf, X_test, y_test)
++
++    # for proba scorers
++    with pytest.raises(ValueError, match="use classifier with two classes"):
++        get_scorer('neg_log_loss')(clf, X_test, y_test)
+ 
+ 
+ def test_thresholded_scorers_multilabel_indicator_data():
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

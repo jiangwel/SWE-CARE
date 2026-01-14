@@ -1,0 +1,454 @@
+  Task-ID: scikit-learn__scikit-learn-28043@2c261c9
+  Please checkout to this commit first: c92330fee2f602802446a0c3c6023f1908004d13
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Handle np.nan / missing values in SplineTransformer
+I think it would be quite natural to add an option to `SplineTransformer` to accept inputs with missing values as follows:
+
+- `handle_missing="error"` the default (keep current behavior)
+- `handle_missing="zero"`/"constant": encode missing values by setting all output features for that input column to 0 (or some other constant, see discussion below),
+- `handle_missing="indicator"`: append an extra binary feature as missingness indicator and encode missing values as 0 on the remaining output features.
+
+Note that `handle_missing="indicator"` would be different and statistically more meaningful than  `SimpleImputer(strategy="mean", add_indicator=True)` with `SplineTransformer` and furthermore would make for leaner ML pipelines (better UX).
+
+I am not sure if we need to add the `handle_missing="zero"` option. It would break the property the sum of output values of a given `SplineTransformer` encoding always sum to 1 while `handle_missing="indicator"` would preserve this property (in addition to make missingness more explicit to the downstream model in case missingness is informative one way or another).
+
+If we want to preserve the sum to 1 property while not adding an explicit missingness indicator feature, maybe we could instead provide `handle_missing="constant"` (not sure about the name) that would encode missing values as `1 / n_outputs` to preserve the "sum to 1" property. Not entirely sure if this would result in a more interesting prior than the zero encoding.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/whats_new/v1.5.rst b/doc/whats_new/v1.5.rst
+index f313d0c675ceb..26010252f7abc 100644
+--- a/doc/whats_new/v1.5.rst
++++ b/doc/whats_new/v1.5.rst
+@@ -131,7 +131,7 @@ Changelog
+ ..........................
+ 
+ - |Fix| Fixed a regression in :class:`calibration.CalibratedClassifierCV` where
+-  an error was wrongly raised with string targets. 
++  an error was wrongly raised with string targets.
+   :pr:`28843` by :user:`Jérémie du Boisberranger <jeremiedbb>`.
+ 
+ :mod:`sklearn.cluster`
+@@ -411,6 +411,10 @@ Changelog
+ :mod:`sklearn.preprocessing`
+ ............................
+ 
++- |Enhancement| :class:`preprocessing.SplineTransformer` can now handle missing
++  values with the parameter `handle_missing`. :pr:`28043` by :user:`Stefanie
++  Senger <StefanieSenger>`.
++
+ - |Enhancement| :class:`preprocessing.QuantileTransformer` and
+   :func:`preprocessing.quantile_transform` now supports disabling
+   subsampling explicitly.
+diff --git a/sklearn/preprocessing/_polynomial.py b/sklearn/preprocessing/_polynomial.py
+index f4c9fb032cfb0..9254a20689812 100644
+--- a/sklearn/preprocessing/_polynomial.py
++++ b/sklearn/preprocessing/_polynomial.py
+@@ -14,6 +14,7 @@
+ 
+ from ..base import BaseEstimator, TransformerMixin, _fit_context
+ from ..utils import check_array
++from ..utils._mask import _get_mask
+ from ..utils._param_validation import Interval, StrOptions
+ from ..utils.fixes import parse_version, sp_version
+ from ..utils.stats import _weighted_percentile
+@@ -642,6 +643,14 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
+         Order of output array in the dense case. `'F'` order is faster to compute, but
+         may slow down subsequent estimators.
+ 
++    handle_missing : {'error', 'zeros'}, default='error'
++        Specifies the way missing values are handled.
++
++        - 'error' : Raise an error if np.nan values are present during :meth:`fit`
++        - 'zeros' : Encode missing values as splines with value `0`.
++
++        .. versionadded:: 1.5
++
+     sparse_output : bool, default=False
+         Will return sparse CSR matrix if set True else will return an array. This
+         option is only available with `scipy>=1.8`.
+@@ -709,6 +718,7 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
+         ],
+         "include_bias": ["boolean"],
+         "order": [StrOptions({"C", "F"})],
++        "handle_missing": [StrOptions({"error", "zeros"})],
+         "sparse_output": ["boolean"],
+     }
+ 
+@@ -721,6 +731,7 @@ def __init__(
+         extrapolation="constant",
+         include_bias=True,
+         order="C",
++        handle_missing="error",
+         sparse_output=False,
+     ):
+         self.n_knots = n_knots
+@@ -729,11 +740,12 @@ def __init__(
+         self.extrapolation = extrapolation
+         self.include_bias = include_bias
+         self.order = order
++        self.handle_missing = handle_missing
+         self.sparse_output = sparse_output
+ 
+     @staticmethod
+     def _get_base_knot_positions(X, n_knots=10, knots="uniform", sample_weight=None):
+-        """Calculate base knot positions.
++        """Calculate base knot positions for `knots` either "uniform" or "quantile".
+ 
+         Base knots such that first knot <= feature <= last knot. For the
+         B-spline construction with scipy.interpolate.BSpline, 2*degree knots
+@@ -750,8 +762,9 @@ def _get_base_knot_positions(X, n_knots=10, knots="uniform", sample_weight=None)
+             )
+ 
+             if sample_weight is None:
+-                knots = np.percentile(X, percentiles, axis=0)
++                knots = np.nanpercentile(X, percentiles, axis=0)
+             else:
++                # TODO: exclude possible nan values from _weighted_percentile:
+                 knots = np.array(
+                     [
+                         _weighted_percentile(X, sample_weight, percentile)
+@@ -765,8 +778,8 @@ def _get_base_knot_positions(X, n_knots=10, knots="uniform", sample_weight=None)
+             # `else` is therefore safe.
+             # Disregard observations with zero weight.
+             mask = slice(None, None, 1) if sample_weight is None else sample_weight > 0
+-            x_min = np.amin(X[mask], axis=0)
+-            x_max = np.amax(X[mask], axis=0)
++            x_min = np.nanmin(X[mask], axis=0)
++            x_max = np.nanmax(X[mask], axis=0)
+ 
+             knots = np.linspace(
+                 start=x_min,
+@@ -836,15 +849,28 @@ def fit(self, X, y=None, sample_weight=None):
+             accept_sparse=False,
+             ensure_min_samples=2,
+             ensure_2d=True,
++            force_all_finite=False,
+         )
+         if sample_weight is not None:
+             sample_weight = _check_sample_weight(sample_weight, X, dtype=X.dtype)
+ 
+         _, n_features = X.shape
+ 
++        if self.handle_missing == "error":
++            if np.isnan(X).any():
++                raise ValueError(
++                    "SplineTransformer object has `handle_missing='error'` set by "
++                    "default and `X` contains missing values (np.nan). Set "
++                    "handle_missing='zeros' to encode missing values as splines with "
++                    "value `0` or ensure no missing values in `X`."
++                )
++
+         if isinstance(self.knots, str):
+             base_knots = self._get_base_knot_positions(
+-                X, n_knots=self.n_knots, knots=self.knots, sample_weight=sample_weight
++                X,
++                n_knots=self.n_knots,
++                knots=self.knots,
++                sample_weight=sample_weight,
+             )
+         else:
+             base_knots = check_array(self.knots, dtype=np.float64)
+@@ -942,6 +968,24 @@ def fit(self, X, y=None, sample_weight=None):
+         self.n_features_out_ = n_out - n_features * (1 - self.include_bias)
+         return self
+ 
++    def _make_design_matrix(
++        self, ele, bsplines, extrapolation, degree, **kwargs_extrapolate
++    ):
++        """Return bspline design matrix per feature."""
++        design_matrix = BSpline.design_matrix(
++            ele, bsplines.t, bsplines.k, **kwargs_extrapolate
++        ).tolil()  # converting to lil to encounter
++        # scipy.sparse._base.SparseEfficiencyWarning
++
++        if extrapolation == "periodic":
++            # See the construction of coef in fit. We need to add the last
++            # degree spline basis function to the first degree ones and
++            # then drop the last ones.
++            design_matrix[:, :degree] += design_matrix[:, -degree:]
++            design_matrix = design_matrix[:, :-degree]
++
++        return design_matrix
++
+     def transform(self, X):
+         """Transform each feature data to B-splines.
+ 
+@@ -958,14 +1002,23 @@ def transform(self, X):
+         """
+         check_is_fitted(self)
+ 
+-        X = self._validate_data(X, reset=False, accept_sparse=False, ensure_2d=True)
++        X = self._validate_data(
++            X,
++            reset=False,
++            accept_sparse=False,
++            ensure_2d=True,
++            force_all_finite=False,
++        )
+ 
+         n_samples, n_features = X.shape
+         n_splines = self.bsplines_[0].c.shape[1]
+         degree = self.degree
+ 
++        # get indicator for nan values
++        nan_indicator = _get_mask(X, np.nan)
++
+         # TODO: Remove this condition, once scipy 1.10 is the minimum version.
+-        #       Only scipy => 1.10 supports design_matrix(.., extrapolate=..).
++        #       Only scipy >= 1.10 supports design_matrix(.., extrapolate=..).
+         #       The default (implicit in scipy < 1.10) is extrapolate=False.
+         scipy_1_10 = sp_version >= parse_version("1.10.0")
+         # Note: self.bsplines_[0].extrapolate is True for extrapolation in
+@@ -993,6 +1046,7 @@ def transform(self, X):
+             spl = self.bsplines_[i]
+ 
+             if self.extrapolation in ("continue", "error", "periodic"):
++
+                 if self.extrapolation == "periodic":
+                     # With periodic extrapolation we map x to the segment
+                     # [spl.t[k], spl.t[n]].
+@@ -1003,28 +1057,47 @@ def transform(self, X):
+                     x = spl.t[spl.k] + (X[:, i] - spl.t[spl.k]) % (
+                         spl.t[n] - spl.t[spl.k]
+                     )
+-                else:
++                else:  # self.extrapolation in ("continue", "error")
+                     x = X[:, i]
+ 
+                 if use_sparse:
+-                    XBS_sparse = BSpline.design_matrix(
+-                        x, spl.t, spl.k, **kwargs_extrapolate
+-                    )
+-                    if self.extrapolation == "periodic":
+-                        # See the construction of coef in fit. We need to add the last
+-                        # degree spline basis function to the first degree ones and
+-                        # then drop the last ones.
+-                        # Note: See comment about SparseEfficiencyWarning below.
+-                        XBS_sparse = XBS_sparse.tolil()
+-                        XBS_sparse[:, :degree] += XBS_sparse[:, -degree:]
+-                        XBS_sparse = XBS_sparse[:, :-degree]
++                    x = x.copy()  # copy to avoid inplace operation
++                    # we leave the nan values out of bsplining and make them into 0s
++                    # right away, since BSpline.design_matrix() would raise on the nans
++                    # when X is sparse:
++                    design_matrix = [
++                        (
++                            self._make_design_matrix(
++                                ele,
++                                spl,
++                                self.extrapolation,
++                                degree,
++                                **kwargs_extrapolate,
++                            )
++                            if not np.isnan(ele)
++                            else [0] * n_splines
++                        )
++                        for ele in x
++                    ]
++                    design_matrix_csr = [
++                        sparse.csr_matrix(arr) for arr in design_matrix
++                    ]
++                    XBS_sparse = sparse.vstack(design_matrix_csr)
++
+                 else:
+                     XBS[:, (i * n_splines) : ((i + 1) * n_splines)] = spl(x)
++                    # replace any indicated values with 0:
++                    extended_nan_indicator = np.repeat(nan_indicator, n_splines, axis=1)
++                    XBS[extended_nan_indicator] = 0
++                    if self.sparse_output:
++                        XBS = sparse.csr_matrix(XBS)
++
+             else:  # extrapolation in ("constant", "linear")
+                 xmin, xmax = spl.t[degree], spl.t[-degree - 1]
+                 # spline values at boundaries
+                 f_min, f_max = spl(xmin), spl(xmax)
+                 mask = (xmin <= X[:, i]) & (X[:, i] <= xmax)
++
+                 if use_sparse:
+                     mask_inv = ~mask
+                     x = X[:, i].copy()
+@@ -1039,6 +1112,7 @@ def transform(self, X):
+                     if np.any(mask_inv):
+                         XBS_sparse = XBS_sparse.tolil()
+                         XBS_sparse[mask_inv, :] = 0
++
+                 else:
+                     XBS[mask, (i * n_splines) : ((i + 1) * n_splines)] = spl(X[mask, i])
+ 
+@@ -1052,6 +1126,10 @@ def transform(self, X):
+                     and np.any(
+                         np.isnan(XBS[:, (i * n_splines) : ((i + 1) * n_splines)])
+                     )
++                    # to distinguish original np.nan values from the ones
++                    # created by any element in X < xmin (=spl.t[degree]) or >
++                    # xmax (=spl.t[-degree - 1])
++                    and np.any((X < spl.t[degree]) | (X > spl.t[-degree - 1]))
+                 ):
+                     raise ValueError(
+                         "X contains values beyond the limits of the knots."
+@@ -1150,9 +1228,6 @@ def transform(self, X):
+                     " transformer to produce fewer than 2^31 output features"
+                 )
+             XBS = sparse.hstack(output_list, format="csr")
+-        elif self.sparse_output:
+-            # TODO: Remove ones scipy 1.10 is the minimum version. See comments above.
+-            XBS = sparse.csr_matrix(XBS)
+ 
+         if self.include_bias:
+             return XBS
+@@ -1169,5 +1244,6 @@ def _more_tags(self):
+                     "Current Scipy implementation of _bsplines does not"
+                     "support const memory views."
+                 ),
+-            }
++            },
++            "allow_nan": True,
+         }
+diff --git a/sklearn/preprocessing/tests/test_polynomial.py b/sklearn/preprocessing/tests/test_polynomial.py
+index b97500d43ef73..6cd14455a8a40 100644
+--- a/sklearn/preprocessing/tests/test_polynomial.py
++++ b/sklearn/preprocessing/tests/test_polynomial.py
+@@ -19,7 +19,8 @@
+     _calc_total_nnz,
+     _get_sizeof_LARGEST_INT_t,
+ )
+-from sklearn.utils._testing import assert_array_almost_equal
++from sklearn.utils._mask import _get_mask
++from sklearn.utils._testing import assert_array_almost_equal, raises
+ from sklearn.utils.fixes import (
+     CSC_CONTAINERS,
+     CSR_CONTAINERS,
+@@ -68,7 +69,7 @@ def test_spline_transformer_integer_knots(extrapolation):
+ 
+ 
+ def test_spline_transformer_feature_names():
+-    """Test that SplineTransformer generates correct features name."""
++    """Test that SplineTransformer generates correct feature names."""
+     X = np.arange(20).reshape(10, 2)
+     splt = SplineTransformer(n_knots=3, degree=3, include_bias=True).fit(X)
+     feature_names = splt.get_feature_names_out()
+@@ -490,6 +491,88 @@ def test_spline_transformer_n_features_out(
+     assert splt.transform(X).shape[1] == splt.n_features_out_
+ 
+ 
++@pytest.mark.skipif(
++    sp_version < parse_version("1.8.0"),
++    reason="The option `sparse_output` is available as of scipy 1.8.0",
++)
++@pytest.mark.parametrize("knots", ["uniform", "quantile"])
++@pytest.mark.parametrize(
++    "extrapolation", ["error", "constant", "linear", "continue", "periodic"]
++)
++@pytest.mark.parametrize("sparse_output", [False, True])
++def test_spline_transformer_handles_missing_values(knots, extrapolation, sparse_output):
++    """Test that SplineTransformer handles missing values correctly."""
++    X_nan = np.array([[1, 1], [2, 2], [3, 3], [np.nan, 4], [4, 4]])
++    X = np.array([[1, 1], [2, 2], [3, 3], [4, 4]])
++
++    # check correct error message for handle_missing="error"
++    msg = "SplineTransformer object has `handle_missing='error'` set by default and `X`"
++    with raises(ValueError, match=msg):
++        spline = SplineTransformer(
++            degree=2,
++            n_knots=3,
++            knots=knots,
++            handle_missing="error",
++            extrapolation=extrapolation,
++        )
++        spline.fit_transform(X_nan)
++
++    # check correct results for handle_missing="zeros", remark: check only
++    # for knots="uniform", since for "quantile" the metrics are calculated
++    # differently with nan present and a different result is thus expected
++    spline = SplineTransformer(
++        degree=2,
++        n_knots=3,
++        knots="uniform",
++        handle_missing="zeros",
++        extrapolation=extrapolation,
++        sparse_output=sparse_output,
++    )
++
++    # check for generic invariants
++    X_nan_fit_transformed = spline.fit_transform(X_nan)
++    if sparse.issparse(X_nan_fit_transformed):
++        X_nan_fit_transformed = X_nan_fit_transformed.toarray()
++    assert (X_nan_fit_transformed >= 0).all()
++    assert (X_nan_fit_transformed <= 1).all()
++
++    X_nan_fit_then_transformed = spline.fit(X_nan).transform(X_nan)
++    if sparse.issparse(X_nan_fit_then_transformed):
++        X_nan_fit_then_transformed = X_nan_fit_then_transformed.toarray()
++    assert_allclose(X_nan_fit_transformed, X_nan_fit_then_transformed)
++
++    # check that B-splines sum to one * n_features also with nan values present in X
++    # assert_allclose(
++    #    X_nan_fit_transformed.sum(axis=1), np.ones(X_nan.shape[0]) * X_nan.shape[1]
++    # )
++
++    # check that transform works as expected when the passed data has not the same
++    # shape as the training set array:
++    X_transformed_same_shape = spline.fit_transform(X_nan)[::2]
++    if sparse.issparse(X_transformed_same_shape):
++        X_transformed_same_shape = X_transformed_same_shape.toarray()
++    X_transformed_different_shapes = spline.fit(X_nan).transform(X_nan[::2])
++    if sparse.issparse(X_transformed_different_shapes):
++        X_transformed_different_shapes = X_transformed_different_shapes.toarray()
++    assert_allclose(X_transformed_same_shape, X_transformed_different_shapes)
++
++    # check that additional nan values don't change the calculation of the other splines
++    mask = _get_mask(X_nan, np.nan)
++    X_transform = spline.fit_transform(X)
++    X_nan_transform_without_extra = X_nan_fit_transformed[~mask[:, 0], :]
++
++    if sparse.issparse(X_transform):
++        X_transform = X_transform.toarray()
++    if sparse.issparse(X_nan_transform_without_extra):
++        X_nan_transform_without_extra = X_nan_transform_without_extra.toarray()
++
++    # this assertion only holds as long as no np.nan value constructs the min or max
++    # value of the data space (in this case, SplineTransformer's stats would be
++    # calculated based on the other values and thus differ from another
++    # SplineTransformer fit on the whole range)
++    assert np.array_equal(X_transform, X_nan_transform_without_extra)
++
++
+ @pytest.mark.parametrize(
+     "params, err_msg",
+     [
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

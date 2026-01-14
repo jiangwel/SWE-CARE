@@ -1,0 +1,454 @@
+  Task-ID: dmlc__dgl-4620@5297d27
+  Please checkout to this commit first: 6c1500d49fdb3feb704b0693ce9dd9a1a9aa2f2b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support the input graph split into many files. Decouple number of data chunks & number of partitions
+## 🚀 Feature
+<!-- A brief description of the feature proposal -->
+
+## Motivation
+
+<!-- Please outline the motivation for the proposal. Is your feature request
+related to a problem? e.g., I'm always frustrated when [...]. If this is
+related to another GitHub issue, please link here too -->
+
+## Alternatives
+
+<!-- A clear and concise description of any alternative solutions or features you've considered, if any. -->
+
+## Pitch
+
+<!-- A clear and concise description of what you want to happen. -->
+
+## Additional context
+
+<!-- Add any other context or screenshots about the feature request here. -->
+  </issue>
+  
+  <patch>
+  diff --git a/tests/tools/test_dist_part.py b/tests/tools/test_dist_part.py
+index 9aee9d1462b8..13c3e6935199 100644
+--- a/tests/tools/test_dist_part.py
++++ b/tests/tools/test_dist_part.py
+@@ -80,7 +80,7 @@ def rand_edges(num_src, num_dst, num_edges):
+             np.save(f, write_year)
+ 
+         output_dir = os.path.join(root_dir, 'chunked-data')
+-        num_chunks = 2
++        num_chunks = 4
+         chunk_graph(
+             g,
+             'mag240m',
+@@ -152,11 +152,12 @@ def rand_edges(num_src, num_dst, num_edges):
+                 assert feat_array.shape[0] == num_edges[etype] // num_chunks
+ 
+         # Step1: graph partition
++        num_parts = 2
+         in_dir = os.path.join(root_dir, 'chunked-data')
+         output_dir = os.path.join(root_dir, '2parts')
+-        os.system('python tools/partition_algo/random_partition.py '\
++        os.system('python3 tools/partition_algo/random_partition.py '\
+                   '--in_dir {} --out_dir {} --num_partitions {}'.format(
+-                    in_dir, output_dir, num_chunks))
++                    in_dir, output_dir, num_parts))
+         for ntype in ['author', 'institution', 'paper']:
+             fname = os.path.join(output_dir, '{}.txt'.format(ntype))
+             with open(fname, 'r') as f:
+@@ -171,13 +172,14 @@ def rand_edges(num_src, num_dst, num_edges):
+             f.write('127.0.0.1\n')
+             f.write('127.0.0.2\n')
+ 
+-        cmd = 'python tools/dispatch_data.py'
++        cmd = 'python3 tools/dispatch_data.py'
+         cmd += f' --in-dir {in_dir}'
+         cmd += f' --partitions-dir {partition_dir}'
+         cmd += f' --out-dir {out_dir}'
+         cmd += f' --ip-config {ip_config}'
+         cmd += ' --ssh-port 22'
+         cmd += ' --process-group-timeout 60'
++        cmd += f' --num-parts {num_parts}'
+         os.system(cmd)
+ 
+         # check metadata.json
+@@ -187,19 +189,19 @@ def rand_edges(num_src, num_dst, num_edges):
+ 
+         all_etypes = ['affiliated_with', 'writes', 'cites', 'rev_writes']
+         for etype in all_etypes:
+-            assert len(meta_data['edge_map'][etype]) == num_chunks
++            assert len(meta_data['edge_map'][etype]) == num_parts
+         assert meta_data['etypes'].keys() == set(all_etypes)
+         assert meta_data['graph_name'] == 'mag240m'
+ 
+         all_ntypes = ['author', 'institution', 'paper']
+         for ntype in all_ntypes:
+-            assert len(meta_data['node_map'][ntype]) == num_chunks
++            assert len(meta_data['node_map'][ntype]) == num_parts
+         assert meta_data['ntypes'].keys() == set(all_ntypes)
+         assert meta_data['num_edges'] == 4200
+         assert meta_data['num_nodes'] == 720
+-        assert meta_data['num_parts'] == num_chunks
++        assert meta_data['num_parts'] == num_parts
+ 
+-        for i in range(num_chunks):
++        for i in range(num_parts):
+             sub_dir = 'part-' + str(i)
+             assert meta_data[sub_dir]['node_feats'] == 'part{}/node_feat.dgl'.format(i)
+             assert meta_data[sub_dir]['edge_feats'] == 'part{}/edge_feat.dgl'.format(i)
+diff --git a/tools/dispatch_data.py b/tools/dispatch_data.py
+index ff4e17b775fd..4997d2f305d3 100644
+--- a/tools/dispatch_data.py
++++ b/tools/dispatch_data.py
+@@ -40,7 +40,10 @@ def submit_jobs(args) -> str:
+     with open(os.path.join(args.in_dir, schema_path)) as schema:
+         schema_map = json.load(schema)
+ 
+-    num_parts = len(schema_map["num_nodes_per_chunk"][0])
++    num_chunks = len(schema_map["num_nodes_per_chunk"][0])
++    if args.num_parts > num_chunks:
++        raise Exception('Number of partitions should be less/equal than number of chunks.')
++    num_parts = num_chunks if args.num_parts <= 0 else args.num_parts
+     graph_name = schema_map["graph_name"]
+ 
+     argslist = ""
+@@ -75,6 +78,8 @@ def main():
+     parser.add_argument('--ssh-port', type=int, default=22, help='SSH Port.') 
+     parser.add_argument('--process-group-timeout', type=int, default=1800,
+                         help='timeout[seconds] for operations executed against the process group')
++    parser.add_argument('--num-parts', type=int, default=0,
++                        help='number of target partitions. If not specified, number of chunks are used.')
+ 
+     args, udf_command = parser.parse_known_args()
+ 
+diff --git a/tools/distpartitioning/convert_partition.py b/tools/distpartitioning/convert_partition.py
+index db7b05c76aab..28fc6e8e76a9 100644
+--- a/tools/distpartitioning/convert_partition.py
++++ b/tools/distpartitioning/convert_partition.py
+@@ -11,9 +11,7 @@
+ from pyarrow import csv
+ from utils import read_json, get_idranges
+ 
+-def create_dgl_object(graph_name, num_parts, \
+-                        schema, part_id, node_data, \
+-                        edge_data, nodeid_offset, edgeid_offset):
++def create_dgl_object(num_parts, schema, part_id, node_data, edge_data, edgeid_offset):
+     """
+     This function creates dgl objects for a given graph partition, as in function
+     arguments. 
+@@ -62,8 +60,6 @@ def create_dgl_object(graph_name, num_parts, \
+ 
+     Parameters:
+     -----------
+-    graph_name : string
+-        name of the graph
+     num_parts : int
+         total no. of partitions (of the original graph)
+     schame : json object
+@@ -76,8 +72,6 @@ def create_dgl_object(graph_name, num_parts, \
+     edge_data : numpy ndarray
+         edge_data, where each row is of the following format: 
+         <global_src_id> <global_dst_id> <etype_id> <global_type_eid>
+-    nodeid_offset : int
+-        offset to be used when assigning node global ids in the current partition
+     edgeid_offset : int
+         offset to be used when assigning edge global ids in the current partition
+ 
+@@ -95,11 +89,13 @@ def create_dgl_object(graph_name, num_parts, \
+         map between edge type(string)  and edge_type_id(int)
+     """
+     #create auxiliary data structures from the schema object
+-    ntid_dict, global_nid_ranges = get_idranges(schema[constants.STR_NODE_TYPE], 
+-                                    schema[constants.STR_NUM_NODES_PER_CHUNK])
++    _, global_nid_ranges = get_idranges(schema[constants.STR_NODE_TYPE],
++                                    schema[constants.STR_NUM_NODES_PER_CHUNK],
++                                    expected_num_chunks=num_parts)
+ 
+-    etid_dict, global_eid_ranges = get_idranges(schema[constants.STR_EDGE_TYPE], 
+-                                    schema[constants.STR_NUM_EDGES_PER_CHUNK])
++    _, global_eid_ranges = get_idranges(schema[constants.STR_EDGE_TYPE],
++                                    schema[constants.STR_NUM_EDGES_PER_CHUNK],
++                                    expected_num_chunks=num_parts)
+ 
+     id_map = dgl.distributed.id_map.IdMap(global_nid_ranges)
+ 
+@@ -110,7 +106,6 @@ def create_dgl_object(graph_name, num_parts, \
+     ntypes_map = {e: i for i, e in enumerate(ntypes)}
+     etypes = [(key, global_eid_ranges[key][0, 0]) for key in global_eid_ranges]
+     etypes.sort(key=lambda e: e[1])
+-    etype_offset_np = np.array([e[1] for e in etypes])
+     etypes = [e[0] for e in etypes]
+     etypes_map = {e.split(":")[1]: i for i, e in enumerate(etypes)}
+ 
+diff --git a/tools/distpartitioning/data_shuffle.py b/tools/distpartitioning/data_shuffle.py
+index 1dadbccebe63..db3ffb32989c 100644
+--- a/tools/distpartitioning/data_shuffle.py
++++ b/tools/distpartitioning/data_shuffle.py
+@@ -95,7 +95,8 @@ def gen_node_data(rank, world_size, id_lookup, ntid_ntype_map, schema_map):
+                         }
+ 
+     type_nid_dict, global_nid_dict = get_idranges(schema_map[constants.STR_NODE_TYPE],
+-                                        schema_map[constants.STR_NUM_NODES_PER_CHUNK])
++                                        schema_map[constants.STR_NUM_NODES_PER_CHUNK],
++                                        expected_num_chunks=world_size)
+ 
+     for ntype_id, ntype_name in ntid_ntype_map.items():
+         type_start, type_end = type_nid_dict[ntype_name][0][0], type_nid_dict[ntype_name][-1][1]
+@@ -288,7 +289,7 @@ def exchange_node_features(rank, world_size, node_feature_tids, ntype_gnid_map,
+     return own_node_features, own_global_nids
+ 
+ def exchange_graph_data(rank, world_size, node_features, node_feat_tids, edge_data,
+-        id_lookup, ntypes_ntypeid_map, ntypes_gnid_range_map, ntid_ntype_map, schema_map):
++        id_lookup, ntypes_gnid_range_map, ntid_ntype_map, schema_map):
+     """
+     Wrapper function which is used to shuffle graph data on all the processes.
+ 
+@@ -529,7 +530,8 @@ def gen_dist_partitions(rank, world_size, params):
+     #Initialize distributed lookup service for partition-id and shuffle-global-nids mappings
+     #for global-nids
+     _, global_nid_ranges = get_idranges(schema_map[constants.STR_NODE_TYPE], 
+-                                        schema_map[constants.STR_NUM_NODES_PER_CHUNK])
++                                        schema_map[constants.STR_NUM_NODES_PER_CHUNK],
++                                        expected_num_chunks=world_size)
+     id_map = dgl.distributed.id_map.IdMap(global_nid_ranges)
+     id_lookup = DistLookupService(os.path.join(params.input_dir, params.partitions_dir),\
+                                     schema_map[constants.STR_NODE_TYPE],\
+@@ -550,7 +552,7 @@ def gen_dist_partitions(rank, world_size, params):
+     ntypes_gnid_range_map = get_gnid_range_map(node_tids)
+     node_data, rcvd_node_features, rcvd_global_nids, edge_data  = \
+                     exchange_graph_data(rank, world_size, node_features, node_feat_tids, \
+-                                        edge_data, id_lookup, ntypes_ntypeid_map, ntypes_gnid_range_map, \
++                                        edge_data, id_lookup, ntypes_gnid_range_map, \
+                                         ntypeid_ntypes_map, schema_map)
+     logging.info(f'[Rank: {rank}] Done with data shuffling...')
+ 
+@@ -592,11 +594,13 @@ def gen_dist_partitions(rank, world_size, params):
+ 
+     #create dgl objects here
+     start = timer()
+-    num_nodes = 0
+-    num_edges = shuffle_global_eid_start
+-    graph_obj, ntypes_map_val, etypes_map_val, ntypes_ntypeid_map, etypes_map = create_dgl_object(\
+-            params.graph_name, params.num_parts, \
+-            schema_map, rank, node_data, edge_data, num_nodes, num_edges)
++    ret = create_dgl_object(params.num_parts, schema_map, rank, node_data,
++            edge_data, shuffle_global_eid_start)
++    graph_obj = ret[0]
++    ntypes_map_val = ret[1]
++    etypes_map_val = ret[2]
++    ntypes_ntypeid_map = ret[3]
++    etypes_map = ret[4]
+     write_dgl_objects(graph_obj, rcvd_node_features, edge_features, params.output, rank)
+ 
+     #get the meta-data
+diff --git a/tools/distpartitioning/dataset_utils.py b/tools/distpartitioning/dataset_utils.py
+index 3034e739ae62..e0d011650c50 100644
+--- a/tools/distpartitioning/dataset_utils.py
++++ b/tools/distpartitioning/dataset_utils.py
+@@ -108,18 +108,18 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+             #where key: feature_name, value: dictionary in which keys are "format", "data"
+             node_feature_tids[ntype_name] = []
+             for feat_name, feat_data in ntype_feature_data.items():
+-                assert len(feat_data[constants.STR_DATA]) == world_size
+                 assert feat_data[constants.STR_FORMAT][constants.STR_NAME] == constants.STR_NUMPY
+-                my_feat_data_fname = feat_data[constants.STR_DATA][rank] #this will be just the file name
+-                if (os.path.isabs(my_feat_data_fname)):
+-                    logging.info(f'Loading numpy from {my_feat_data_fname}')
+-                    node_features[ntype_name+'/'+feat_name] = \
+-                            torch.from_numpy(np.load(my_feat_data_fname))
+-                else:
+-                    numpy_path = os.path.join(input_dir, my_feat_data_fname)
+-                    logging.info(f'Loading numpy from {numpy_path}')
+-                    node_features[ntype_name+'/'+feat_name] = \
+-                            torch.from_numpy(np.load(numpy_path))
++                num_chunks = len(feat_data[constants.STR_DATA])
++                read_list = np.array_split(np.arange(num_chunks), world_size)
++                nfeat = []
++                for idx in read_list[rank]:
++                    nfeat_file = feat_data[constants.STR_DATA][idx]
++                    if not os.path.isabs(nfeat_file):
++                        nfeat_file = os.path.join(input_dir, nfeat_file)
++                    logging.info(f'Loading node feature[{feat_name}] of ntype[{ntype_name}] from {nfeat_file}')
++                    nfeat.append(np.load(nfeat_file))
++                nfeat = np.concatenate(nfeat)
++                node_features[ntype_name + '/' + feat_name] = torch.from_numpy(nfeat)
+ 
+                 node_feature_tids[ntype_name].append([feat_name, -1, -1])
+ 
+@@ -150,7 +150,8 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+ 
+     #read my nodes for each node type
+     node_tids, ntype_gnid_offset = get_idranges(schema_map[constants.STR_NODE_TYPE], 
+-                                    schema_map[constants.STR_NUM_NODES_PER_CHUNK])
++                                    schema_map[constants.STR_NUM_NODES_PER_CHUNK],
++                                    expected_num_chunks=world_size)
+     for ntype_name in schema_map[constants.STR_NODE_TYPE]: 
+         if ntype_name in node_feature_tids: 
+             for item in node_feature_tids[ntype_name]:
+@@ -209,8 +210,9 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+     #read my edges for each edge type
+     etype_names = schema_map[constants.STR_EDGE_TYPE]
+     etype_name_idmap = {e : idx for idx, e in enumerate(etype_names)}
+-    edge_tids, _ = get_idranges(schema_map[constants.STR_EDGE_TYPE], 
+-                                    schema_map[constants.STR_NUM_EDGES_PER_CHUNK])
++    edge_tids, _ = get_idranges(schema_map[constants.STR_EDGE_TYPE],
++                    schema_map[constants.STR_NUM_EDGES_PER_CHUNK],
++                    expected_num_chunks=world_size)
+ 
+     edge_datadict = {}
+     edge_data = schema_map[constants.STR_EDGES]
+@@ -224,26 +226,38 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+         assert etype_info[constants.STR_FORMAT][constants.STR_NAME] == constants.STR_CSV
+ 
+         edge_info = etype_info[constants.STR_DATA]
+-        assert len(edge_info) == world_size
+ 
+         #edgetype strings are in canonical format, src_node_type:edge_type:dst_node_type
+         tokens = etype_name.split(":")
+         assert len(tokens) == 3
+ 
+         src_ntype_name = tokens[0]
+-        rel_name = tokens[1]
+         dst_ntype_name = tokens[2]
+ 
+-        logging.info(f'Reading csv files from {edge_info[rank]}')
+-        data_df = csv.read_csv(edge_info[rank], read_options=pyarrow.csv.ReadOptions(autogenerate_column_names=True), 
+-                                    parse_options=pyarrow.csv.ParseOptions(delimiter=' '))
++        num_chunks = len(edge_info)
++        read_list = np.array_split(np.arange(num_chunks), world_size)
++        df_0 = []
++        df_1 = []
++        for idx in read_list[rank]:
++            edge_file = edge_info[idx]
++            if not os.path.isabs(edge_file):
++                edge_file = os.path.join(input_dir, edge_file)
++            logging.info(f'Loading edges of etype[{etype_name}] from {edge_file}')
++            data_df = csv.read_csv(edge_file,
++                        read_options=pyarrow.csv.ReadOptions(autogenerate_column_names=True), 
++                        parse_options=pyarrow.csv.ParseOptions(delimiter=' '))
++            df_0.append(data_df['f0'].to_numpy())
++            df_1.append(data_df['f1'].to_numpy())
++        df_0 = np.concatenate(df_0)
++        df_1 = np.concatenate(df_1)
++
+         #currently these are just type_edge_ids... which will be converted to global ids
+-        edge_datadict[constants.GLOBAL_SRC_ID].append(data_df['f0'].to_numpy() + ntype_gnid_offset[src_ntype_name][0, 0])
+-        edge_datadict[constants.GLOBAL_DST_ID].append(data_df['f1'].to_numpy() + ntype_gnid_offset[dst_ntype_name][0, 0])
++        edge_datadict[constants.GLOBAL_SRC_ID].append(df_0 + ntype_gnid_offset[src_ntype_name][0, 0])
++        edge_datadict[constants.GLOBAL_DST_ID].append(df_1 + ntype_gnid_offset[dst_ntype_name][0, 0])
+         edge_datadict[constants.GLOBAL_TYPE_EID].append(np.arange(edge_tids[etype_name][rank][0],\
+                 edge_tids[etype_name][rank][1] ,dtype=np.int64))
+         edge_datadict[constants.ETYPE_ID].append(etype_name_idmap[etype_name] * \
+-                np.ones(shape=(data_df['f0'].to_numpy().shape), dtype=np.int64))
++                np.ones(shape=(df_0.shape), dtype=np.int64))
+ 
+     #stitch together to create the final data on the local machine
+     for col in [constants.GLOBAL_SRC_ID, constants.GLOBAL_DST_ID, constants.GLOBAL_TYPE_EID, constants.ETYPE_ID]:
+diff --git a/tools/distpartitioning/utils.py b/tools/distpartitioning/utils.py
+index d2d27eaebd96..60c7cfff9842 100644
+--- a/tools/distpartitioning/utils.py
++++ b/tools/distpartitioning/utils.py
+@@ -81,15 +81,9 @@ def get_ntype_featnames(ntype_name, schema_map):
+     list : 
+         a list of feature names for a given node_type
+     """
+-    ntype_featdict = schema_map[constants.STR_NODE_DATA]
+-    if (ntype_name in ntype_featdict):
+-        featnames = []
+-        ntype_info = ntype_featdict[ntype_name]
+-        for k, v in ntype_info.items(): 
+-            featnames.append(k)
+-        return featnames
+-    else: 
+-        return []
++    node_data = schema_map[constants.STR_NODE_DATA]
++    feats = node_data.get(ntype_name, {})
++    return [feat for feat in feats]
+ 
+ def get_node_types(schema_map):
+     """ 
+@@ -377,7 +371,7 @@ def write_dgl_objects(graph_obj, node_features, edge_features, output_dir, part_
+     if (edge_features != None):
+         write_edge_features(edge_features, os.path.join(part_dir, "edge_feat.dgl"))
+ 
+-def get_idranges(names, counts): 
++def get_idranges(names, counts, expected_num_chunks):
+     """
+     Utility function to compute typd_id/global_id ranges for both nodes and edges. 
+ 
+@@ -387,6 +381,8 @@ def get_idranges(names, counts):
+         list of node/edge types as strings
+     counts : list of lists
+         each list contains no. of nodes/edges in a given chunk
++    expected_num_chunks : expected number of returned chunks
++        chunks are collapsed according to expected number of chunks
+ 
+     Returns:
+     --------
+@@ -402,21 +398,31 @@ def get_idranges(names, counts):
+     gnid_end = gnid_start
+     tid_dict = {}
+     gid_dict = {}
++    orig_num_chunks = 0
+     for idx, typename in enumerate(names): 
+         type_counts = counts[idx]
+         tid_start = np.cumsum([0] + type_counts[:-1])
+         tid_end = np.cumsum(type_counts)
+         tid_ranges = list(zip(tid_start, tid_end))
+ 
+-        type_start = tid_ranges[0][0]
+-        type_end = tid_ranges[-1][1]
+-
+         gnid_end += tid_ranges[-1][1]
+ 
+         tid_dict[typename] = tid_ranges
+         gid_dict[typename] = np.array([gnid_start, gnid_end]).reshape([1,2])
+ 
+         gnid_start = gnid_end
++        orig_num_chunks = len(tid_start)
++
++    assert expected_num_chunks <= orig_num_chunks, \
++        'expected num_chunks should be less/euqual than original one.'
++    if expected_num_chunks < orig_num_chunks:
++        chunk_list = np.array_split(np.arange(orig_num_chunks), expected_num_chunks)
++        for typename in tid_dict:
++            orig_tid_ranges = tid_dict[typename]
++            tid_ranges = []
++            for idx in chunk_list:
++                tid_ranges.append((orig_tid_ranges[idx[0]][0], orig_tid_ranges[idx[-1]][-1]))
++            tid_dict[typename] = tid_ranges
+ 
+     return tid_dict, gid_dict
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

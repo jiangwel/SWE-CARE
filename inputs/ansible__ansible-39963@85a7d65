@@ -1,0 +1,174 @@
+  Task-ID: ansible__ansible-39963@85a7d65
+  Please checkout to this commit first: 5f7c7becde1a7d4754bfbb8f97a7f76576768403
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  azure_rm_loadbalancer does not set tags
+##### ISSUE TYPE
+ - Bug Report
+
+##### COMPONENT NAME
+azure_rm_loadbalancer 
+
+##### ANSIBLE VERSION
+```
+ansible 2.6.0
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/local/lib/python2.7/dist-packages/ansible
+  executable location = /usr/local/bin/ansible
+```
+
+##### CONFIGURATION
+```
+DEFAULT_TIMEOUT(/etc/ansible/ansible.cfg) = 120
+RETRY_FILES_ENABLED(/etc/ansible/ansible.cfg) = False
+```
+
+##### OS / ENVIRONMENT
+N/A
+
+##### SUMMARY
+When creating a loadbalancer with tags, the tags do not show up in azure.
+
+##### STEPS TO REPRODUCE
+Create a load balancer with tags:
+```yaml
+    - name: Create loadbalancer
+      azure_rm_loadbalancer:
+        name: "mylb"
+...
+        tags:
+          "mytag": "myvalue"
+```
+
+##### EXPECTED RESULTS
+The tag has been added to the load balancer
+
+##### ACTUAL RESULTS
+The tag is not there
+
+##### Patch
+The following patch fixes my issue; not sure it will actually honor the update_tags parameter.
+
+```
+--- a/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
++++ b/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
+@@ -620,7 +620,7 @@ class AzureRMLoadBalancer(AzureRMModuleBase):
+
+     def exec_module(self, **kwargs):
+         """Main module execution method"""
+-        for key in self.module_args.keys():
++        for key in self.module_args.keys() + ['tags']:
+             setattr(self, key, kwargs[key])
+
+         changed = False
+@@ -761,6 +761,7 @@ class AzureRMLoadBalancer(AzureRMModuleBase):
+             param = self.network_models.LoadBalancer(
+                 sku=self.network_models.LoadBalancerSku(self.sku) if self.sku else None,
+                 location=self.location,
++                tags=self.tags,
+                 frontend_ip_configurations=frontend_ip_configurations_param,
+                 backend_address_pools=backend_address_pools_param,
+                 probes=probes_param,
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py b/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
+index 8eb43542731e69..8b2ebebd856684 100755
+--- a/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
++++ b/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
+@@ -610,6 +610,7 @@ def __init__(self):
+         self.natpool_frontend_port_end = None
+         self.natpool_backend_port = None
+         self.natpool_protocol = None
++        self.tags = None
+ 
+         self.results = dict(changed=False, state=dict())
+ 
+@@ -620,7 +621,7 @@ def __init__(self):
+ 
+     def exec_module(self, **kwargs):
+         """Main module execution method"""
+-        for key in self.module_args.keys():
++        for key in list(self.module_args.keys()) + ['tags']:
+             setattr(self, key, kwargs[key])
+ 
+         changed = False
+@@ -685,6 +686,13 @@ def exec_module(self, **kwargs):
+             changed = True
+ 
+         self.results['state'] = load_balancer_to_dict(load_balancer)
++        if 'tags' in self.results['state']:
++            update_tags, self.results['state']['tags'] = self.update_tags(self.results['state']['tags'])
++            if update_tags:
++                changed = True
++        else:
++            if self.tags:
++                changed = True
+         self.results['changed'] = changed
+ 
+         if self.state == 'present' and changed:
+@@ -761,6 +769,7 @@ def exec_module(self, **kwargs):
+             param = self.network_models.LoadBalancer(
+                 sku=self.network_models.LoadBalancerSku(self.sku) if self.sku else None,
+                 location=self.location,
++                tags=self.tags,
+                 frontend_ip_configurations=frontend_ip_configurations_param,
+                 backend_address_pools=backend_address_pools_param,
+                 probes=probes_param,
+diff --git a/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py b/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
+index 1a7f82425424aa..d067b6a53ec4f2 100644
+--- a/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
++++ b/lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
+@@ -44,6 +44,7 @@
+     resource_group:
+         description:
+             - The resource group to search for the desired load balancer
++        required: true
+     tags:
+         description:
+             - Limit results by providing a list of tags. Format tags as 'key' or 'key:value'.
+@@ -153,7 +154,7 @@ def list_items(self):
+         self.log('List all load balancers')
+ 
+         try:
+-            response = self.network_client.load_balancers.list()
++            response = self.network_client.load_balancers.list(self.resource_group)
+         except AzureHttpError as exc:
+             self.fail('Failed to list all items - {}'.format(str(exc)))
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

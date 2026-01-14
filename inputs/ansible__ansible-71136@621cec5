@@ -1,0 +1,381 @@
+  Task-ID: ansible__ansible-71136@621cec5
+  Please checkout to this commit first: 6ac4439a6abe8c87190d25d6ee53962c03b458a1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  winrm Kerberos automatic ticket management doesn't work
+<!--- Verify first that your issue is not already reported on GitHub -->
+<!--- Also test if the latest release and devel branch are affected too -->
+<!--- Complete *all* sections as described, this form is processed automatically -->
+
+##### SUMMARY
+<!--- Explain the problem briefly below -->
+WinRM kerberos tickets are not getting generated for the playbook tasks, the issue fails in 2.9.10 and 2.9.11 version, while it works with no code change in 2.9.9
+
+In affected Ansible version (2.9.10 and 2.9.11), if I generate a Kerberos ticket (via kinit) in awx_task docker before running the playm the play works, in Ansible 2.9.9 the play will run with no manual ticket creation.
+
+Beside realms configuration (which I am sure they are right as the code works for Ansible 2.9.9), below are other krb5 configuration and I had always default_ccache_name disabled.
+
+```
+bash-4.4# cat /etc/krb5.conf
+[logging]
+ default = FILE:/var/log/krb5libs.log
+ kdc = FILE:/var/log/krb5kdc.log
+ admin_server = FILE:/var/log/kadmind.log
+
+[libdefaults]
+ default_realm = <DOMAIN NAME>
+ dns_lookup_realm = false
+ dns_lookup_kdc = false
+ ticket_lifetime = 24h
+ renew_lifetime = 7d
+ forwardable = true
+ rdns = false
+# default_ccache_name = KEYRING:persistent:%{uid}
+```
+
+Although if fails in AWX, in awx_docker command line, below works:
+
+```
+bash-4.4# cat sam_inven
+[windows]
+<HOST FQDN>
+
+[windows:vars]
+ansible_user=<AD ACCOUNT>@<DOMAIN NAME>
+ansible_password=<AD ACCOUNT Password>
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=kerberos
+ansible_winrm_server_cert_validation=ignore
+ansible_winrm_kerberos_delegation=true
+become_method=runas
+```
+
+```
+bash-4.4# cat test-play.yml
+---
+- name: PROXY TEST
+  hosts: <HOST FQDN>
+  gather_facts: no
+  collections:
+    - community.vmware
+
+  tasks:
+    - name: Wait for system connection via WinRM
+      wait_for_connection:
+        timeout: 20
+      register: result_wait
+
+    - name: Show WinRM result
+      debug:
+        var: result_wait
+```
+
+
+```
+bash-4.4# ansible-playbook -i sam_inven test-play.yml
+
+PLAY [PROXY TEST] **************************************************************************************************************************************************
+
+
+TASK [Wait for system connection via WinRM] ************************************************************************************************************************
+
+ok: [<HOST FQDN>]
+
+TASK [Show WinRM result] *******************************************************************************************************************************************
+
+ok: [<HOST FQDN>] => {
+    "result_wait": {
+        "changed": false,
+        "elapsed": 1,
+        "failed": false
+    }
+}
+
+PLAY RECAP *********************************************************************************************************************************************************
+
+<HOST FQDN> : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+
+bash-4.4#
+```
+
+
+##### ISSUE TYPE
+- Bug Report
+
+##### COMPONENT NAME
+<!--- Write the short name of the module, plugin, task or feature below, use your best guess if unsure -->
+WINRM Kerberos
+
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes -->
+```paste below
+ansible 2.9.11
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = ['/var/lib/awx/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/local/lib/python3.6/site-packages/ansible
+  executable location = /usr/local/bin/ansible
+  python version = 3.6.8 (default, Nov 21 2019, 19:31:34) [GCC 8.3.1 20190507 (Red Hat 8.3.1-4)]
+```
+
+##### CONFIGURATION
+<!--- Paste verbatim output from "ansible-config dump --only-changed" between quotes -->
+```paste below
+
+bash-4.4# ansible-config dump --only-changed
+bash-4.4#
+
+```
+
+##### OS / ENVIRONMENT
+<!--- Provide all relevant information below, e.g. target OS versions, network device firmware, etc. -->
+Ansible running as AWX docker images (official) based on CentOS Linux release 8.1.1911 (Core)
+Target hosts are Windows machines running Windows Server 2016
+
+##### STEPS TO REPRODUCE
+<!--- Describe exactly how to reproduce the problem, using a minimal test-case -->
+
+<!--- Paste example playbooks or commands between quotes below -->
+In AWX inventory host var:
+
+ansible_connection: winrm
+ansible_winrm_transport: kerberos
+ansible_winrm_server_cert_validation: ignore 
+ansible_winrm_kerberos_delegation: true
+become_method: runas
+ansible_port: 5986
+
+```yaml
+---
+- name: TEST
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Wait for system connection via WinRM
+      wait_for_connection:
+        timeout: 60
+      register: result_wait
+      delegate_to: <host FQDN>
+      ignore_errors: yes
+    
+    - name: Show WinRM result
+      debug:
+        var: result_wait
+
+```
+
+<!--- HINT: You can paste gist.github.com links for larger files -->
+
+##### EXPECTED RESULTS
+<!--- Describe what you expected to happen when running the steps above -->
+
+```
+{
+    "elapsed": 1,
+    "_ansible_no_log": false,
+    "changed": false,
+    "_ansible_delegated_vars": {
+        "ansible_host": "<HOST FQDN>"
+    }
+}
+```
+
+##### ACTUAL RESULTS
+<!--- Describe what actually happened. If possible run with extra verbosity (-vvvv) -->
+
+<!--- Paste verbatim command output between quotes -->
+```paste below
+{
+    "msg": "timed out waiting for ping module test success: kerberos: authGSSClientInit() failed: (('Unspecified GSS failure.  Minor code may provide more information', 851968), (\"Can't find client principal <ACCOUNT NAME>@<DOMAIN NAME> in cache collection\", -1765328243))",
+    "elapsed": 60,
+    "_ansible_no_log": false,
+    "changed": false,
+    "_ansible_delegated_vars": {
+        "ansible_host": "<HOST FQDN>",
+        "ansible_port": 5986,
+        "ansible_user": "<acount name>@<DOMAIN NAME>"
+    }
+}
+```
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/delegation_password.yml b/changelogs/fragments/delegation_password.yml
+new file mode 100644
+index 00000000000000..c68191b25df86f
+--- /dev/null
++++ b/changelogs/fragments/delegation_password.yml
+@@ -0,0 +1,2 @@
++bugfixes:
++- Ensure password passed in by -k is used on delegated hosts that do not have ansible_password set
+diff --git a/lib/ansible/executor/task_executor.py b/lib/ansible/executor/task_executor.py
+index 2e64b613439c01..4b3c8265fc26dd 100644
+--- a/lib/ansible/executor/task_executor.py
++++ b/lib/ansible/executor/task_executor.py
+@@ -507,7 +507,8 @@ def _execute(self, variables=None):
+ 
+         if self._task.delegate_to:
+             # use vars from delegated host (which already include task vars) instead of original host
+-            cvars = variables.get('ansible_delegated_vars', {}).get(self._task.delegate_to, {})
++            delegate_vars = variables.get('ansible_delegated_vars', {}).get(self._task.delegate_to, {})
++            cvars = combine_vars(variables, delegate_vars)
+             orig_vars = templar.available_variables
+         else:
+             # just use normal host vars
+diff --git a/test/integration/targets/connection_delegation/action_plugins/delegation_action.py b/test/integration/targets/connection_delegation/action_plugins/delegation_action.py
+new file mode 100644
+index 00000000000000..9d419e75b083d6
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/action_plugins/delegation_action.py
+@@ -0,0 +1,12 @@
++from __future__ import (absolute_import, division, print_function)
++__metaclass__ = type
++
++from ansible.plugins.action import ActionBase
++
++
++class ActionModule(ActionBase):
++
++    def run(self, tmp=None, task_vars=None):
++        return {
++            'remote_password': self._connection.get_option('remote_password'),
++        }
+diff --git a/test/integration/targets/connection_delegation/aliases b/test/integration/targets/connection_delegation/aliases
+new file mode 100644
+index 00000000000000..9950a08844a192
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/aliases
+@@ -0,0 +1,4 @@
++shippable/posix/group1
++skip/freebsd  # No sshpass
++skip/osx  # No sshpass
++skip/rhel  # No sshpass
+diff --git a/test/integration/targets/connection_delegation/connection_plugins/delegation_connection.py b/test/integration/targets/connection_delegation/connection_plugins/delegation_connection.py
+new file mode 100644
+index 00000000000000..30f739aef07f2e
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/connection_plugins/delegation_connection.py
+@@ -0,0 +1,42 @@
++from __future__ import (absolute_import, division, print_function)
++__metaclass__ = type
++
++DOCUMENTATION = """
++author: Ansible Core Team
++connection: delegation_connection
++short_description: Test connection for delegated host check
++description:
++- Some further description that you don't care about.
++options:
++  remote_password:
++    description: The remote password
++    type: str
++    vars:
++    - name: ansible_password
++"""
++
++from ansible.plugins.connection import ConnectionBase
++
++
++class Connection(ConnectionBase):
++
++    transport = 'delegation_connection'
++    has_pipelining = True
++
++    def __init__(self, *args, **kwargs):
++        super(Connection, self).__init__(*args, **kwargs)
++
++    def _connect(self):
++        super(Connection, self)._connect()
++
++    def exec_command(self, cmd, in_data=None, sudoable=True):
++        super(Connection, self).exec_command(cmd, in_data, sudoable)
++
++    def put_file(self, in_path, out_path):
++        super(Connection, self).put_file(in_path, out_path)
++
++    def fetch_file(self, in_path, out_path):
++        super(Connection, self).fetch_file(in_path, out_path)
++
++    def close(self):
++        super(Connection, self).close()
+diff --git a/test/integration/targets/connection_delegation/inventory.ini b/test/integration/targets/connection_delegation/inventory.ini
+new file mode 100644
+index 00000000000000..e7f846d3ee9773
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/inventory.ini
+@@ -0,0 +1 @@
++my_host  ansible_host=127.0.0.1 ansible_connection=delegation_connection
+diff --git a/test/integration/targets/connection_delegation/runme.sh b/test/integration/targets/connection_delegation/runme.sh
+new file mode 100755
+index 00000000000000..cf047f1334490d
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/runme.sh
+@@ -0,0 +1,5 @@
++#!/usr/bin/env bash
++
++set -ux
++
++sshpass -p my_password ansible-playbook -i inventory.ini test.yml -k "$@"
+diff --git a/test/integration/targets/connection_delegation/test.yml b/test/integration/targets/connection_delegation/test.yml
+new file mode 100644
+index 00000000000000..678bef518b7bb5
+--- /dev/null
++++ b/test/integration/targets/connection_delegation/test.yml
+@@ -0,0 +1,23 @@
++---
++- hosts: localhost
++  gather_facts: no
++  tasks:
++  - name: test connection receives -k from play_context when delegating
++    delegation_action:
++    delegate_to: my_host
++    register: result
++
++  - assert:
++      that:
++      - result.remote_password == 'my_password'
++
++  - name: ensure vars set for that host take precedence over -k
++    delegation_action:
++    delegate_to: my_host
++    vars:
++      ansible_password: other_password
++    register: result
++
++  - assert:
++      that:
++      - result.remote_password == 'other_password'
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,143 @@
+  Task-ID: huggingface__diffusers-1096@7db319b
+  Please checkout to this commit first: 9e1102990ae91b776b95baabd788e1662d63aa49
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  JAX / Flax: avoid recompilation on params change: guidance scale, size, number of steps
+This is required to improve the demo(s), we currently have the sliders disabled.
+
+Some users are also requesting it in discord and the forums. Our demo notebook is very fast on TPU hardware but users can't quickly explore different parameters.
+  </issue>
+  
+  <patch>
+  diff --git a/src/diffusers/pipelines/stable_diffusion/pipeline_flax_stable_diffusion.py b/src/diffusers/pipelines/stable_diffusion/pipeline_flax_stable_diffusion.py
+index 23148dcfe2e3..335d46ef09ea 100644
+--- a/src/diffusers/pipelines/stable_diffusion/pipeline_flax_stable_diffusion.py
++++ b/src/diffusers/pipelines/stable_diffusion/pipeline_flax_stable_diffusion.py
+@@ -187,7 +187,6 @@ def _generate(
+         width: Optional[int] = None,
+         guidance_scale: float = 7.5,
+         latents: Optional[jnp.array] = None,
+-        debug: bool = False,
+         neg_prompt_ids: jnp.array = None,
+     ):
+         # 0. Default height and width to unet
+@@ -260,13 +259,7 @@ def loop_body(step, args):
+ 
+         # scale the initial noise by the standard deviation required by the scheduler
+         latents = latents * self.scheduler.init_noise_sigma
+-
+-        if debug:
+-            # run with python for loop
+-            for i in range(num_inference_steps):
+-                latents, scheduler_state = loop_body(i, (latents, scheduler_state))
+-        else:
+-            latents, _ = jax.lax.fori_loop(0, num_inference_steps, loop_body, (latents, scheduler_state))
++        latents, _ = jax.lax.fori_loop(0, num_inference_steps, loop_body, (latents, scheduler_state))
+ 
+         # scale and decode the image latents with vae
+         latents = 1 / 0.18215 * latents
+@@ -283,11 +276,10 @@ def __call__(
+         num_inference_steps: int = 50,
+         height: Optional[int] = None,
+         width: Optional[int] = None,
+-        guidance_scale: float = 7.5,
++        guidance_scale: Union[float, jnp.array] = 7.5,
+         latents: jnp.array = None,
+         return_dict: bool = True,
+         jit: bool = False,
+-        debug: bool = False,
+         neg_prompt_ids: jnp.array = None,
+     ):
+         r"""
+@@ -334,6 +326,12 @@ def __call__(
+         height = height or self.unet.config.sample_size * self.vae_scale_factor
+         width = width or self.unet.config.sample_size * self.vae_scale_factor
+ 
++        if isinstance(guidance_scale, float):
++            guidance_scale = jnp.array([guidance_scale] * prompt_ids.shape[0])
++            if len(prompt_ids.shape) > 2:
++                # Assume sharded
++                guidance_scale = guidance_scale.reshape(prompt_ids.shape[:2])
++
+         if jit:
+             images = _p_generate(
+                 self,
+@@ -345,7 +343,6 @@ def __call__(
+                 width,
+                 guidance_scale,
+                 latents,
+-                debug,
+                 neg_prompt_ids,
+             )
+         else:
+@@ -358,7 +355,6 @@ def __call__(
+                 width,
+                 guidance_scale,
+                 latents,
+-                debug,
+                 neg_prompt_ids,
+             )
+ 
+@@ -389,7 +385,11 @@ def __call__(
+ 
+ 
+ # TODO: maybe use a config dict instead of so many static argnums
+-@partial(jax.pmap, static_broadcasted_argnums=(0, 4, 5, 6, 7, 9))
++@partial(
++    jax.pmap,
++    in_axes=(None, 0, 0, 0, None, None, None, 0, 0, 0),
++    static_broadcasted_argnums=(0, 4, 5, 6),
++)
+ def _p_generate(
+     pipe,
+     prompt_ids,
+@@ -400,7 +400,6 @@ def _p_generate(
+     width,
+     guidance_scale,
+     latents,
+-    debug,
+     neg_prompt_ids,
+ ):
+     return pipe._generate(
+@@ -412,7 +411,6 @@ def _p_generate(
+         width,
+         guidance_scale,
+         latents,
+-        debug,
+         neg_prompt_ids,
+     )
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

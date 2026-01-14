@@ -1,0 +1,178 @@
+  Task-ID: getsentry__sentry-75210@d7f4634
+  Please checkout to this commit first: 71ecf42d18d6d6c05127f3d1c309274e7520a430
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [DevToolbar] Show an indicator on the Open/Close Releases button that indicates whether the latest release has more or less crashes than the prev release
+We could do like a subtle green indicator with a checkbox icon when things are good, and a red one with an arrow when things are bad. 
+
+Add a tooltip so we know if it's crash-free rate (which is what's inside the panel) or crash-count. 
+- Crash-free rate, higher is better, up to 100%
+- Crash-count, lower is better, down to zero.
+  </issue>
+  
+  <patch>
+  diff --git a/static/app/components/devtoolbar/components/indicatorBadge.tsx b/static/app/components/devtoolbar/components/indicatorBadge.tsx
+new file mode 100644
+index 00000000000000..f5cc67d9d586ea
+--- /dev/null
++++ b/static/app/components/devtoolbar/components/indicatorBadge.tsx
+@@ -0,0 +1,37 @@
++import type React from 'react';
++import {css} from '@emotion/react';
++
++import {smallCss} from '../styles/typography';
++
++const variants = {
++  red: css`
++    background: var(--red400);
++    color: var(--gray100);
++  `,
++};
++
++interface Props {
++  icon: React.ReactNode;
++  variant: keyof typeof variants;
++}
++
++export default function IndicatorBadge({icon, variant}: Props) {
++  return <div css={[smallCss, counterCss, variants[variant]]}>{icon}</div>;
++}
++
++const counterCss = css`
++  background: var(--red400);
++  border-radius: 50%;
++  border: 1px solid transparent;
++  box-sizing: content-box;
++  color: var(--gray100);
++  height: 1rem;
++  line-height: 1rem;
++  position: absolute;
++  right: -6px;
++  top: -6px;
++  width: 1rem;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++`;
+diff --git a/static/app/components/devtoolbar/components/navigation.tsx b/static/app/components/devtoolbar/components/navigation.tsx
+index 08d30818682fb3..24607c54b3750f 100644
+--- a/static/app/components/devtoolbar/components/navigation.tsx
++++ b/static/app/components/devtoolbar/components/navigation.tsx
+@@ -1,5 +1,6 @@
+ import type {ReactNode} from 'react';
+ 
++import SessionStatusBadge from 'sentry/components/devtoolbar/components/releases/sessionStatusBadge';
+ import {
+   IconClose,
+   IconFlag,
+@@ -54,7 +55,9 @@ export default function Navigation({
+         <AlertCountBadge />
+       </NavButton>
+       <NavButton panelName="featureFlags" label="Feature Flags" icon={<IconFlag />} />
+-      <NavButton panelName="releases" label="Releases" icon={<IconReleases />} />
++      <NavButton panelName="releases" label="Releases" icon={<IconReleases />}>
++        <SessionStatusBadge />
++      </NavButton>
+     </dialog>
+   );
+ }
+diff --git a/static/app/components/devtoolbar/components/releases/sessionStatusBadge.tsx b/static/app/components/devtoolbar/components/releases/sessionStatusBadge.tsx
+new file mode 100644
+index 00000000000000..bb1f8f7fcf871e
+--- /dev/null
++++ b/static/app/components/devtoolbar/components/releases/sessionStatusBadge.tsx
+@@ -0,0 +1,24 @@
++import IndicatorBadge from 'sentry/components/devtoolbar/components/indicatorBadge';
++import useSessionStatus from 'sentry/components/devtoolbar/components/releases/useSessionStatus';
++import {IconFire} from 'sentry/icons';
++
++export default function CrashCountBadge() {
++  const {data} = useSessionStatus();
++  const healthySessions = data?.json.groups.find(
++    g => g.by['session.status'] === 'healthy'
++  )?.totals['sum(session)'];
++  const crashSessions = data?.json.groups.find(g => g.by['session.status'] === 'crashed')
++    ?.totals['sum(session)'];
++
++  if (!crashSessions || !healthySessions) {
++    return null;
++  }
++
++  const crashPercent = (crashSessions / healthySessions) * 100;
++
++  // over 10% of sessions were crashes
++  if (crashPercent > 10) {
++    return <IndicatorBadge icon={<IconFire size="xs" />} variant="red" />;
++  }
++  return null;
++}
+diff --git a/static/app/components/devtoolbar/components/releases/useSessionStatus.tsx b/static/app/components/devtoolbar/components/releases/useSessionStatus.tsx
+new file mode 100644
+index 00000000000000..7ab262bf8d28f2
+--- /dev/null
++++ b/static/app/components/devtoolbar/components/releases/useSessionStatus.tsx
+@@ -0,0 +1,30 @@
++import {useMemo} from 'react';
++
++import useConfiguration from 'sentry/components/devtoolbar/hooks/useConfiguration';
++import useFetchApiData from 'sentry/components/devtoolbar/hooks/useFetchApiData';
++import type {ApiEndpointQueryKey} from 'sentry/components/devtoolbar/types';
++import type {SessionApiResponse} from 'sentry/types/organization';
++
++export default function useSessionStatus() {
++  const {organizationSlug, projectId} = useConfiguration();
++  return useFetchApiData<SessionApiResponse>({
++    queryKey: useMemo(
++      (): ApiEndpointQueryKey => [
++        'io.sentry.toolbar',
++        `/organizations/${organizationSlug}/sessions/`,
++        {
++          query: {
++            queryReferrer: 'devtoolbar',
++            project: [projectId],
++            field: ['sum(session)'],
++            interval: '10m',
++            statsPeriod: '24h',
++            groupBy: ['session.status'],
++          },
++        },
++      ],
++      [organizationSlug, projectId]
++    ),
++    cacheTime: 5000,
++  });
++}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

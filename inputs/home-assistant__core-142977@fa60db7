@@ -1,0 +1,329 @@
+  Task-ID: home-assistant__core-142977@fa60db7
+  Please checkout to this commit first: e7994b3da118fa5ccf35cf2d30b0739abf178dda
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Scripts/Automations - Sequence inside Parallel ignoring being disabled
+### The problem
+
+first noticed this in 2024.8 and remains in 2024.9.
+running haos on a HA yellow
+
+if you have a parallel building block that has sequence building blocks inside it then the sequences ignore "enabled: false" and run
+
+so you have
+
+parallel block
+> Sequence Block 1
+>>some stuff
+
+> Sequence Block 2
+>>some other stuff
+
+even if "Sequence Block 2" is disabled then "some other stuff" still runs
+
+have attached yaml for my repro script below using 2 dummy switch helpers and attached the trace showing both sequences running despite the 2nd one being disabled
+
+Obviously a highly specific situation but caused me some issues that I had to work around so felt I should report
+
+### What version of Home Assistant Core has the issue?
+
+2024.9.1
+
+### What was the last working version of Home Assistant Core?
+
+_No response_
+
+### What type of installation are you running?
+
+Home Assistant OS
+
+### Integration causing the issue
+
+_No response_
+
+### Link to integration documentation on our website
+
+_No response_
+
+### Diagnostics information
+
+_No response_
+
+### Example YAML snippet
+
+```yaml
+alias: bug repro
+sequence:
+  - parallel:
+      - sequence:
+          - action: input_boolean.toggle
+            target:
+              entity_id: input_boolean.dummy_switch_1
+            data: {}
+      - sequence:
+          - action: input_boolean.toggle
+            target:
+              entity_id: input_boolean.dummy_switch_2
+            data: {}
+            enabled: true
+        enabled: false
+description: ""
+```
+
+
+### Anything in the logs that might be useful for us?
+
+```txt
+{
+  "trace": {
+    "last_step": "sequence/0/parallel/1/sequence/0",
+    "run_id": "e72cbc4040455a101c6ef4ac9c20e63c",
+    "state": "stopped",
+    "script_execution": "finished",
+    "timestamp": {
+      "start": "2024-09-06T20:07:43.592581+00:00",
+      "finish": "2024-09-06T20:07:43.608815+00:00"
+    },
+    "domain": "script",
+    "item_id": "bug_repro",
+    "trace": {
+      "sequence/0": [
+        {
+          "path": "sequence/0",
+          "timestamp": "2024-09-06T20:07:43.593733+00:00",
+          "changed_variables": {
+            "this": {
+              "entity_id": "script.bug_repro",
+              "state": "off",
+              "attributes": {
+                "last_triggered": "2024-09-06T20:02:28.407484+00:00",
+                "mode": "single",
+                "current": 0,
+                "friendly_name": "bug repro"
+              },
+              "last_changed": "2024-09-06T20:02:53.486709+00:00",
+              "last_reported": "2024-09-06T20:02:53.486709+00:00",
+              "last_updated": "2024-09-06T20:02:53.486709+00:00",
+              "context": {
+                "id": "01J74EXDXER0BRVRV8GTNFVC4J",
+                "parent_id": null,
+                "user_id": null
+              }
+            },
+            "context": {
+              "id": "01J74F69783QXYRE0PE1EDHMYK",
+              "parent_id": null,
+              "user_id": "47977d8561934a268fa577c524482c56"
+            }
+          }
+        }
+      ],
+      "sequence/0/parallel/0/sequence/0": [
+        {
+          "path": "sequence/0/parallel/0/sequence/0",
+          "timestamp": "2024-09-06T20:07:43.595173+00:00",
+          "result": {
+            "params": {
+              "domain": "input_boolean",
+              "service": "toggle",
+              "service_data": {},
+              "target": {
+                "entity_id": [
+                  "input_boolean.dummy_switch_1"
+                ]
+              }
+            },
+            "running_script": false
+          }
+        }
+      ],
+      "sequence/0/parallel/1/sequence/0": [
+        {
+          "path": "sequence/0/parallel/1/sequence/0",
+          "timestamp": "2024-09-06T20:07:43.598026+00:00",
+          "result": {
+            "params": {
+              "domain": "input_boolean",
+              "service": "toggle",
+              "service_data": {},
+              "target": {
+                "entity_id": [
+                  "input_boolean.dummy_switch_2"
+                ]
+              }
+            },
+            "running_script": false
+          }
+        }
+      ]
+    },
+    "config": {
+      "alias": "bug repro",
+      "sequence": [
+        {
+          "parallel": [
+            {
+              "sequence": [
+                {
+                  "action": "input_boolean.toggle",
+                  "target": {
+                    "entity_id": "input_boolean.dummy_switch_1"
+                  },
+                  "data": {}
+                }
+              ]
+            },
+            {
+              "sequence": [
+                {
+                  "action": "input_boolean.toggle",
+                  "target": {
+                    "entity_id": "input_boolean.dummy_switch_2"
+                  },
+                  "data": {},
+                  "enabled": true
+                }
+              ],
+              "enabled": false
+            }
+          ]
+        }
+      ],
+      "description": ""
+    },
+    "blueprint_inputs": null,
+    "context": {
+      "id": "01J74F69783QXYRE0PE1EDHMYK",
+      "parent_id": null,
+      "user_id": "47977d8561934a268fa577c524482c56"
+    }
+  },
+  "logbookEntries": []
+}
+```
+
+
+### Additional information
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/homeassistant/helpers/script.py b/homeassistant/helpers/script.py
+index 43429bdb1d26da..08af68742db1f8 100644
+--- a/homeassistant/helpers/script.py
++++ b/homeassistant/helpers/script.py
+@@ -653,6 +653,10 @@ async def async_run_with_trace(idx: int, script: Script) -> None:
+             """Run a script with a trace path."""
+             trace_path_stack_cv.set(copy(trace_path_stack_cv.get()))
+             with trace_path([str(idx), "sequence"]):
++                if not script.enabled:
++                    self._log("Skipping disabled parallel script: %s", script.name)
++                    trace_set_result(enabled=False)
++                    return
+                 await self._async_run_script(script, parallel=True)
+ 
+         results = await asyncio.gather(
+@@ -1442,6 +1446,7 @@ def __init__(
+         script_mode: str = DEFAULT_SCRIPT_MODE,
+         top_level: bool = True,
+         variables: ScriptVariables | None = None,
++        enabled: bool = True,
+     ) -> None:
+         """Initialize the script."""
+         if not (all_scripts := hass.data.get(DATA_SCRIPTS)):
+@@ -1462,6 +1467,7 @@ def __init__(
+         self.name = name
+         self.unique_id = f"{domain}.{name}-{id(self)}"
+         self.domain = domain
++        self.enabled = enabled
+         self.running_description = running_description or f"{domain} script"
+         self._change_listener = change_listener
+         self._change_listener_job = (
+@@ -2002,6 +2008,7 @@ async def _async_prep_parallel_scripts(self, step: int) -> list[Script]:
+                 max_runs=self.max_runs,
+                 logger=self._logger,
+                 top_level=False,
++                enabled=parallel_script.get(CONF_ENABLED, True),
+             )
+             parallel_script.change_listener = partial(
+                 self._chain_change_listener, parallel_script
+diff --git a/tests/helpers/test_script.py b/tests/helpers/test_script.py
+index 4c7075905284f1..9aa34c5d19bdb1 100644
+--- a/tests/helpers/test_script.py
++++ b/tests/helpers/test_script.py
+@@ -6658,3 +6658,40 @@ async def test_calling_service_backwards_compatible(
+             ],
+         }
+     )
++
++
++async def test_enabled_seq_in_para(
++    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
++) -> None:
++    """Test to ensure seqeuene inside parallel follows enabled tag."""
++    sequence = cv.SCRIPT_SCHEMA(
++        {
++            "parallel": [
++                {
++                    "sequence": [
++                        {"event": "test_event", "event_data": {"inside": "disabled"}}
++                    ],
++                    "enabled": "false",
++                },
++                {
++                    "sequence": [
++                        {"event": "test_event", "event_data": {"inside": "enabled"}}
++                    ],
++                    "enabled": "true",
++                },
++            ]
++        }
++    )
++
++    script_obj = script.Script(hass, sequence, "Test Name", "test_domain")
++
++    await script_obj.async_run(context=Context())
++    await hass.async_block_till_done()
++
++    expected_trace = {
++        "0": [{"result": {"enabled": False}}],
++        "0/parallel/1/sequence/0": [
++            {"result": {"event": "test_event", "event_data": {"inside": "enabled"}}}
++        ],
++    }
++    assert_action_trace(expected_trace)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

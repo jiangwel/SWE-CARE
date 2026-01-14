@@ -1,0 +1,373 @@
+  Task-ID: pandas-dev__pandas-27882@2e4e422
+  Please checkout to this commit first: 35821a5794e434117b14797f010602c8e412b36c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  import pandas error for missing compression libraries
+#### Code Sample
+
+```shell
+[dev]rbuhr:~% python
+Python 3.7.2 (default, Jul 24 2019, 19:27:42)
+[GCC 6.3.0 20170516] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+```
+
+```python
+>>> import pandas
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/__init__.py", line 55, in <module>
+    from pandas.core.api import (
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/core/api.py", line 24, in <module>
+    from pandas.core.groupby import Grouper, NamedAgg
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/core/groupby/__init__.py", line 1, in <module>
+    from pandas.core.groupby.generic import (  # noqa: F401
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/core/groupby/generic.py", line 44, in <module>
+    from pandas.core.frame import DataFrame
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/core/frame.py", line 88, in <module>
+    from pandas.core.generic import NDFrame, _shared_docs
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/core/generic.py", line 71, in <module>
+    from pandas.io.formats.format import DataFrameFormatter, format_percentiles
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/io/formats/format.py", line 47, in <module>
+    from pandas.io.common import _expand_user, _stringify_path
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/site-packages/pandas/io/common.py", line 9, in <module>
+    import lzma
+  File "/home/admin/.pyenv/versions/3.7.2/lib/python3.7/lzma.py", line 27, in <module>
+    from _lzma import *
+ModuleNotFoundError: No module named '_lzma'
+>>>
+```
+#### Problem description
+
+After installing pandas 0.25.0, I can't import the library because of missing compression libraries. First it returned the error message `ModuleNotFoundError: No module named '_bz2'`. I installed with `sudo apt-get install libbz2-dev` and tried again to get the error message from the code sample above, `ModuleNotFoundError: No module named '_lzma'`. 
+
+This was not an issue with the previous version of pandas and I tested by downgrading to pandas 0.24.0 and was able to import without the error messages. I feel like pandas should not prevent usage just because some _optional_ compression programs are not installed, like the default behavior of the last version.
+
+#### Expected Output
+
+```python
+>>> import pandas
+>>>
+```
+
+#### Output of ``pd.show_versions()``
+
+Unable to run because can't import pandas.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.25.1.rst b/doc/source/whatsnew/v0.25.1.rst
+index 7c2e488b98509..fd83222111330 100644
+--- a/doc/source/whatsnew/v0.25.1.rst
++++ b/doc/source/whatsnew/v0.25.1.rst
+@@ -103,7 +103,6 @@ MultiIndex
+ 
+ I/O
+ ^^^
+-
+ - Avoid calling ``S3File.s3`` when reading parquet, as this was removed in s3fs version 0.3.0 (:issue:`27756`)
+ -
+ -
+@@ -160,6 +159,15 @@ Other
+ -
+ -
+ 
++I/O and LZMA
++~~~~~~~~~~~~
++
++- Issue: Some users may unknowingly have an incomplete Python installation, which lacks the `lzma` module from the standard library. In this case, `import pandas` fails due to an `ImportError`; (:issue: `27575`)
++- Change: Pandas will now warn, rather than raising an `ImportError` if the `lzma` module is not present. Any subsequent attempt to use `lzma` methods will raise a `RuntimeError`;
++- Possible Fix: Ensure you have the necessary libraries and reinstall Python;
++- Example: On MacOS, installing Python with `pyenv` may lead to an incomplete Python installation due to unmet system dependencies at compilation time (like `xz`). Compilation will succeed, but Python might fail at run time.
++
++
+ .. _whatsnew_0.251.contributors:
+ 
+ Contributors
+diff --git a/pandas/_libs/parsers.pyx b/pandas/_libs/parsers.pyx
+index cafc31dad3568..dca925ac99179 100644
+--- a/pandas/_libs/parsers.pyx
++++ b/pandas/_libs/parsers.pyx
+@@ -2,7 +2,6 @@
+ # See LICENSE for the license
+ import bz2
+ import gzip
+-import lzma
+ import os
+ import sys
+ import time
+@@ -59,9 +58,12 @@ from pandas.core.arrays import Categorical
+ from pandas.core.dtypes.concat import union_categoricals
+ import pandas.io.common as icom
+ 
++from pandas.compat import import_lzma
+ from pandas.errors import (ParserError, DtypeWarning,
+                            EmptyDataError, ParserWarning)
+ 
++lzma = import_lzma()
++
+ # Import CParserError as alias of ParserError for backwards compatibility.
+ # Ultimately, we want to remove this import. See gh-12665 and gh-14479.
+ CParserError = ParserError
+@@ -644,6 +646,11 @@ cdef class TextReader:
+                     raise ValueError('Multiple files found in compressed '
+                                      'zip file %s', str(zip_names))
+             elif self.compression == 'xz':
++                if lzma is None:
++                    raise RuntimeError("lzma module not available. "
++                                       "A Python re-install with the proper "
++                                       "dependencies might be required to "
++                                       "solve this issue.")
+                 if isinstance(source, str):
+                     source = lzma.LZMAFile(source, 'rb')
+                 else:
+diff --git a/pandas/compat/__init__.py b/pandas/compat/__init__.py
+index 5ecd641fc68be..71f072e4cd9fe 100644
+--- a/pandas/compat/__init__.py
++++ b/pandas/compat/__init__.py
+@@ -10,6 +10,7 @@
+ import platform
+ import struct
+ import sys
++import warnings
+ 
+ PY35 = sys.version_info[:2] == (3, 5)
+ PY36 = sys.version_info >= (3, 6)
+@@ -65,3 +66,16 @@ def is_platform_mac():
+ 
+ def is_platform_32bit():
+     return struct.calcsize("P") * 8 < 64
++
++
++def import_lzma():
++    try:
++        import lzma
++
++        return lzma
++    except ImportError:
++        msg = (
++            "Could not import the lzma module. Your installed Python is incomplete. "
++            "Attempting to use `lzma` compression will result in a RuntimeError."
++        )
++        warnings.warn(msg)
+diff --git a/pandas/io/common.py b/pandas/io/common.py
+index e01e473047b88..5bb47a45dea5e 100644
+--- a/pandas/io/common.py
++++ b/pandas/io/common.py
+@@ -6,7 +6,6 @@
+ import gzip
+ from http.client import HTTPException  # noqa
+ from io import BytesIO
+-import lzma
+ import mmap
+ import os
+ import pathlib
+@@ -23,6 +22,7 @@
+ from urllib.request import pathname2url, urlopen
+ import zipfile
+ 
++from pandas.compat import import_lzma
+ from pandas.errors import (  # noqa
+     AbstractMethodError,
+     DtypeWarning,
+@@ -35,6 +35,8 @@
+ 
+ from pandas._typing import FilePathOrBuffer
+ 
++lzma = import_lzma()
++
+ # gh-12665: Alias for now and remove later.
+ CParserError = ParserError
+ 
+@@ -395,7 +397,15 @@ def _get_handle(
+ 
+         # XZ Compression
+         elif compression == "xz":
+-            f = lzma.LZMAFile(path_or_buf, mode)
++            if lzma is None:
++                raise RuntimeError(
++                    "lzma module not available. "
++                    "A Python re-install with the proper "
++                    "dependencies might be required to "
++                    "solve this issue."
++                )
++            else:
++                f = lzma.LZMAFile(path_or_buf, mode)
+ 
+         # Unrecognized Compression
+         else:
+diff --git a/pandas/tests/io/test_compression.py b/pandas/tests/io/test_compression.py
+index ce459ab24afe0..31866b075d5ca 100644
+--- a/pandas/tests/io/test_compression.py
++++ b/pandas/tests/io/test_compression.py
+@@ -1,5 +1,7 @@
+ import contextlib
+ import os
++import subprocess
++import textwrap
+ import warnings
+ 
+ import pytest
+@@ -125,3 +127,15 @@ def test_compression_warning(compression_only):
+         with tm.assert_produces_warning(RuntimeWarning, check_stacklevel=False):
+             with f:
+                 df.to_csv(f, compression=compression_only)
++
++
++def test_with_missing_lzma():
++    # https://github.com/pandas-dev/pandas/issues/27575
++    code = textwrap.dedent(
++        """\
++        import sys
++        sys.modules['lzma'] = None
++        import pandas
++        """
++    )
++    subprocess.check_output(["python", "-c", code])
+diff --git a/pandas/tests/io/test_pickle.py b/pandas/tests/io/test_pickle.py
+index 076d0c9f947c7..aefd550489d4d 100644
+--- a/pandas/tests/io/test_pickle.py
++++ b/pandas/tests/io/test_pickle.py
+@@ -13,7 +13,6 @@
+ import bz2
+ import glob
+ import gzip
+-import lzma
+ import os
+ import pickle
+ import shutil
+@@ -22,7 +21,7 @@
+ 
+ import pytest
+ 
+-from pandas.compat import is_platform_little_endian
++from pandas.compat import import_lzma, is_platform_little_endian
+ 
+ import pandas as pd
+ from pandas import Index
+@@ -30,6 +29,8 @@
+ 
+ from pandas.tseries.offsets import Day, MonthEnd
+ 
++lzma = import_lzma()
++
+ 
+ @pytest.fixture(scope="module")
+ def current_pickle_data():
+@@ -270,7 +271,15 @@ def compress_file(self, src_path, dest_path, compression):
+             with zipfile.ZipFile(dest_path, "w", compression=zipfile.ZIP_DEFLATED) as f:
+                 f.write(src_path, os.path.basename(src_path))
+         elif compression == "xz":
+-            f = lzma.LZMAFile(dest_path, "w")
++            if lzma is None:
++                raise RuntimeError(
++                    "lzma module not available. "
++                    "A Python re-install with the proper "
++                    "dependencies might be required to "
++                    "solve this issue."
++                )
++            else:
++                f = lzma.LZMAFile(dest_path, "w")
+         else:
+             msg = "Unrecognized compression type: {}".format(compression)
+             raise ValueError(msg)
+diff --git a/pandas/util/testing.py b/pandas/util/testing.py
+index cf8452cdd0c59..131471fcd61e3 100644
+--- a/pandas/util/testing.py
++++ b/pandas/util/testing.py
+@@ -5,7 +5,6 @@
+ from functools import wraps
+ import gzip
+ import http.client
+-import lzma
+ import os
+ import re
+ from shutil import rmtree
+@@ -26,7 +25,7 @@
+ )
+ 
+ import pandas._libs.testing as _testing
+-from pandas.compat import raise_with_traceback
++from pandas.compat import import_lzma, raise_with_traceback
+ 
+ from pandas.core.dtypes.common import (
+     is_bool,
+@@ -70,6 +69,8 @@
+ from pandas.io.common import urlopen
+ from pandas.io.formats.printing import pprint_thing
+ 
++lzma = import_lzma()
++
+ N = 30
+ K = 4
+ _RAISE_NETWORK_ERROR_DEFAULT = False
+@@ -211,7 +212,15 @@ def decompress_file(path, compression):
+     elif compression == "bz2":
+         f = bz2.BZ2File(path, "rb")
+     elif compression == "xz":
+-        f = lzma.LZMAFile(path, "rb")
++        if lzma is None:
++            raise RuntimeError(
++                "lzma module not available. "
++                "A Python re-install with the proper "
++                "dependencies might be required to "
++                "solve this issue."
++            )
++        else:
++            f = lzma.LZMAFile(path, "rb")
+     elif compression == "zip":
+         zip_file = zipfile.ZipFile(path)
+         zip_names = zip_file.namelist()
+@@ -264,9 +273,15 @@ def write_to_compressed(compression, path, data, dest="test"):
+ 
+         compress_method = bz2.BZ2File
+     elif compression == "xz":
+-        import lzma
+-
+-        compress_method = lzma.LZMAFile
++        if lzma is None:
++            raise RuntimeError(
++                "lzma module not available. "
++                "A Python re-install with the proper "
++                "dependencies might be required to "
++                "solve this issue."
++            )
++        else:
++            compress_method = lzma.LZMAFile
+     else:
+         msg = "Unrecognized compression type: {}".format(compression)
+         raise ValueError(msg)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

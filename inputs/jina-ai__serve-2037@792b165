@@ -1,0 +1,254 @@
+  Task-ID: jina-ai__serve-2037@792b165
+  Please checkout to this commit first: f45ec5d01f9c6aafcc6376b11b317debd88bba58
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Enable the `jina hub build` to use Dockerfile with multi-stage building
+**Describe the feature**
+Enable the `jina hub build` to use Dockerfile with multi-stage building
+
+
+**Your proposal**
+<!-- copy past your code/pull request link -->
+
+---
+<!-- Optional, but really help us locate the problem faster -->
+
+**Environment**
+<!-- Run `jina --version-full` and copy paste the output here -->
+
+**Screenshots**
+<!-- If applicable, add screenshots to help explain your problem. -->
+  </issue>
+  
+  <patch>
+  diff --git a/jina/docker/hubio.py b/jina/docker/hubio.py
+index 53c21942e8f68..ed2f94fa2596e 100644
+--- a/jina/docker/hubio.py
++++ b/jina/docker/hubio.py
+@@ -309,15 +309,18 @@ def build(self) -> Dict:
+ 
+             with TimeContext(f'building {colored(self.args.path, "green")}', self.logger) as tc:
+                 try:
+-                    self._check_completeness()
++                    _check_result = self._check_completeness()
+                     self._freeze_jina_version()
+ 
++                    _dockerfile_path = _check_result['Dockerfile']
++                    _labels = {_label_prefix + k: str(v) for k, v in self.manifest.items()}
+                     streamer = self._raw_client.build(
+                         decode=True,
+                         path=self.args.path,
+                         tag=self.tag,
+                         pull=self.args.pull,
+-                        dockerfile=self.dockerfile_path_revised,
++                        dockerfile=_dockerfile_path,
++                        labels=_labels,
+                         rm=True
+                     )
+ 
+@@ -344,7 +347,8 @@ def build(self) -> Dict:
+                 image, log = self._client.images.build(path=self.args.path,
+                                                        tag=self.tag,
+                                                        pull=self.args.pull,
+-                                                       dockerfile=self.dockerfile_path_revised,
++                                                       dockerfile=_dockerfile_path,
++                                                       labels=_labels,
+                                                        rm=True)
+ 
+                 # success
+@@ -594,7 +598,6 @@ def _check_completeness(self) -> Dict:
+ 
+         self.manifest = self._read_manifest(manifest_path)
+         self.manifest['jina_version'] = jina_version
+-        self.dockerfile_path_revised = self._get_revised_dockerfile(dockerfile_path, self.manifest)
+         self.executor_name = safe_url_name(
+             f'{self.args.repository}/' + f'{self.manifest["type"]}.{self.manifest["kind"]}.{self.manifest["name"]}')
+         self.tag = self.executor_name + f':{self.manifest["version"]}-{jina_version}'
+@@ -647,25 +650,6 @@ def _validate_manifest(self, manifest: Dict) -> None:
+         for k, v in manifest.items():
+             self.logger.debug(f'{k}: {v}')
+ 
+-    def _get_revised_dockerfile(self, dockerfile_path: str, manifest: Dict) -> str:
+-        # modify dockerfile
+-        revised_dockerfile = []
+-        with open(dockerfile_path) as fp:
+-            for l in fp:
+-                revised_dockerfile.append(l)
+-                if l.startswith('FROM'):
+-                    revised_dockerfile.append('LABEL ')
+-                    revised_dockerfile.append(
+-                        ' \\      \n'.join(f'{_label_prefix}{k}="{v}"' for k, v in manifest.items()))
+-
+-        f = tempfile.NamedTemporaryFile('w', delete=False).name
+-        with open(f, 'w', encoding='utf8') as fp:
+-            fp.writelines(revised_dockerfile)
+-
+-        for k in revised_dockerfile:
+-            self.logger.debug(k)
+-        return f
+-
+     def _write_slack_message(self, *args):
+         def _expand_fn(v):
+             if isinstance(v, str):
+diff --git a/tests/unit/docker/hub-mwu-multistage/Dockerfile b/tests/unit/docker/hub-mwu-multistage/Dockerfile
+new file mode 100644
+index 0000000000000..b4df1c0161180
+--- /dev/null
++++ b/tests/unit/docker/hub-mwu-multistage/Dockerfile
+@@ -0,0 +1,11 @@
++FROM jinaai/jina:test-pip as base
++
++ADD *.py mwu_encoder.yml ./
++
++FROM base
++
++ADD README.md ./
++
++FROM base
++
++ENTRYPOINT ["jina", "pod", "--uses", "mwu_encoder.yml"]
+\ No newline at end of file
+diff --git a/tests/unit/docker/hub-mwu-multistage/README.md b/tests/unit/docker/hub-mwu-multistage/README.md
+new file mode 100644
+index 0000000000000..2826920f84173
+--- /dev/null
++++ b/tests/unit/docker/hub-mwu-multistage/README.md
+@@ -0,0 +1,3 @@
++# MWUEncoder
++
++A dummy encoder encodes any input into a random 3-dimensional vector. This encoder has a dummy parameter `greetings` which prints a greeting message on start and on every encode. 
+\ No newline at end of file
+diff --git a/tests/unit/docker/hub-mwu-multistage/__init__.py b/tests/unit/docker/hub-mwu-multistage/__init__.py
+new file mode 100644
+index 0000000000000..e69de29bb2d1d
+diff --git a/tests/unit/docker/hub-mwu-multistage/manifest.yml b/tests/unit/docker/hub-mwu-multistage/manifest.yml
+new file mode 100644
+index 0000000000000..1fddc6ecbb12c
+--- /dev/null
++++ b/tests/unit/docker/hub-mwu-multistage/manifest.yml
+@@ -0,0 +1,16 @@
++manifest_version: 1
++name: Dummy MWU Encoder
++description: a minimum working unit of a containerized encoder, used for tutorial only
++author: Jina AI Dev-Team (dev-team@jina.ai)
++url: https://jina.ai
++documentation: https://github.com/jina-ai/jina-hub
++version: 0.0.6
++vendor: Jina AI Limited
++license: apache-2.0
++update: nightly
++keywords: 
++  - example
++  - demo
++  - toy-example
++kind: encoder
++type: pod
+diff --git a/tests/unit/docker/hub-mwu-multistage/mwu_encoder.py b/tests/unit/docker/hub-mwu-multistage/mwu_encoder.py
+new file mode 100644
+index 0000000000000..027002551a732
+--- /dev/null
++++ b/tests/unit/docker/hub-mwu-multistage/mwu_encoder.py
+@@ -0,0 +1,17 @@
++from typing import Any
++
++import numpy as np
++
++from jina.executors.encoders import BaseEncoder
++
++
++class MWUEncoder(BaseEncoder):
++
++    def __init__(self, greetings: str, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self._greetings = greetings
++        self.logger.success(f'look at me! {greetings}')
++
++    def encode(self, data: Any, *args, **kwargs) -> Any:
++        self.logger.info(f'{self._greetings} {data}')
++        return np.random.random([data.shape[0], 3])
+diff --git a/tests/unit/docker/hub-mwu-multistage/mwu_encoder.yml b/tests/unit/docker/hub-mwu-multistage/mwu_encoder.yml
+new file mode 100644
+index 0000000000000..23b9927d74473
+--- /dev/null
++++ b/tests/unit/docker/hub-mwu-multistage/mwu_encoder.yml
+@@ -0,0 +1,7 @@
++!MWUEncoder
++with:
++  greetings: im from internal yaml!
++metas:
++  name: my-mwu-encoder
++  py_modules: mwu_encoder.py
++  workspace: ./
+\ No newline at end of file
+diff --git a/tests/unit/docker/test_hub_build.py b/tests/unit/docker/test_hub_build.py
+index 9111cc60234f4..eea13a1fc5b80 100644
+--- a/tests/unit/docker/test_hub_build.py
++++ b/tests/unit/docker/test_hub_build.py
+@@ -86,3 +86,32 @@ def test_jina_version_freeze_no_jina_dependency(requirements, tmpdir):
+     with open(requirements_file, 'r') as fp:
+         requirements = pkg_resources.parse_requirements(fp)
+         assert len(list(filter(lambda x: 'jina' in str(x), requirements))) == 0
++
++
++def test_labels():
++    class MockContainers:
++        def __init__(self):
++            pass
++
++        def build(self, *args, **kwargs):
++            labels = kwargs['labels']
++            assert all([isinstance(v, str) for k, v in labels.items()])
++            assert 'ai.jina.hub.version' in labels
++            assert 'ai.jina.hub.name' in labels
++
++            raise BaseException('labels all good')
++
++    args = set_hub_build_parser().parse_args(
++        [os.path.join(cur_dir, 'hub-mwu'), '--test-uses', '--raise-error'])
++    hubio = HubIO(args)
++    hubio._raw_client = MockContainers()
++
++    with pytest.raises(BaseException, match='labels all good'):
++        hubio.build()
++
++
++@pytest.mark.timeout(360)
++def test_hub_build_multistage():
++    args = set_hub_build_parser().parse_args(
++        [os.path.join(cur_dir, 'hub-mwu-multistage'), '--test-uses', '--raise-error'])
++    HubIO(args).build()
+\ No newline at end of file
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

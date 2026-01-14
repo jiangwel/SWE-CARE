@@ -1,0 +1,490 @@
+  Task-ID: saleor__saleor-13159@25829f6
+  Please checkout to this commit first: 961f8b3c180d9dd0cace56276b06e690c39bfcd8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Unify fetching addresses for checkouts and orders
+Review the logic for patterns used to get users' address or their parts in the logic and possibly unify them to follow the same rules. One example is `get_tax_country`, which follows this logic: 
+- get the country from the shipping address if it exists and shipping is required
+- get the country from the billing address if it exists and shipping is not required
+- if none of the above returned a value, fallback to channel's default country
+
+If possible everywhere we should use the same logic, or at least have some unified functions to reuse in different cases.
+  </issue>
+  
+  <patch>
+  diff --git a/saleor/core/utils/country.py b/saleor/core/utils/country.py
+new file mode 100644
+index 00000000000..c86a4d648da
+--- /dev/null
++++ b/saleor/core/utils/country.py
+@@ -0,0 +1,33 @@
++from typing import Any, Dict, Optional
++
++from saleor.account.models import Address
++from saleor.channel.models import Channel
++
++
++def get_active_country(
++    channel: "Channel",
++    shipping_address: Optional["Address"] = None,
++    billing_address: Optional["Address"] = None,
++    address_data: Optional[Dict[str, Any]] = None,
++):
++    """Get country code for orders, checkouts and tax calculations.
++
++    For checkouts and orders, there are following rules for determining the country
++    code that should be used for tax calculations:
++    - use country code from shipping address if it's provided in the first place
++    - use country code from billing address if shipping address is not provided
++    - if both shipping and billing addresses are not provided use the default country
++    from channel
++
++    To get country code from address data from mutation input use address_data parameter
++    """
++    if address_data is not None:
++        return address_data.country
++
++    if shipping_address:
++        return shipping_address.country.code
++
++    if billing_address:
++        return billing_address.country.code
++
++    return channel.default_country.code
+diff --git a/saleor/graphql/checkout/mutations/checkout_create.py b/saleor/graphql/checkout/mutations/checkout_create.py
+index bd8347b4632..bdc89e73be3 100644
+--- a/saleor/graphql/checkout/mutations/checkout_create.py
++++ b/saleor/graphql/checkout/mutations/checkout_create.py
+@@ -7,6 +7,7 @@
+ from ....checkout.error_codes import CheckoutErrorCode
+ from ....checkout.utils import add_variants_to_checkout
+ from ....core.tracing import traced_atomic_transaction
++from ....core.utils.country import get_active_country
+ from ....product import models as product_models
+ from ....warehouse.reservations import get_reservation_length, is_reservation_enabled
+ from ...account.i18n import I18nMixin
+@@ -278,12 +279,11 @@ def clean_input(cls, info: ResolveInfo, instance: models.Checkout, data, **kwarg
+         shipping_address = cls.retrieve_shipping_address(user, data)
+         billing_address = cls.retrieve_billing_address(user, data)
+ 
+-        if shipping_address:
+-            country = shipping_address.country.code
+-        else:
+-            country = channel.default_country
+-
+-        # Resolve and process the lines, retrieving the variants and quantities
++        country = get_active_country(
++            channel,
++            shipping_address,
++            billing_address,
++        )
+         lines = data.pop("lines", None)
+         if lines:
+             (
+diff --git a/saleor/graphql/checkout/mutations/checkout_create_from_order.py b/saleor/graphql/checkout/mutations/checkout_create_from_order.py
+index 732d79e140b..c7780cd182c 100644
+--- a/saleor/graphql/checkout/mutations/checkout_create_from_order.py
++++ b/saleor/graphql/checkout/mutations/checkout_create_from_order.py
+@@ -6,6 +6,7 @@
+ from ....checkout import models as checkout_models
+ from ....checkout.utils import add_variants_to_checkout
+ from ....core.exceptions import InsufficientStock
++from ....core.utils.country import get_active_country
+ from ....order import models as order_models
+ from ....product import models as product_models
+ from ....product.models import ProductVariant
+@@ -318,10 +319,9 @@ def clean_order_lines(
+             ],
+         )
+         valid_order_lines: list[order_models.OrderLine] = []
+-        if order.shipping_address:
+-            country = order.shipping_address.country.code
+-        else:
+-            country = order.channel.default_country
++        country = get_active_country(
++            order.channel, order.shipping_address, order.billing_address
++        )
+         try:
+             check_stock_and_preorder_quantity_bulk(
+                 variants,
+diff --git a/saleor/graphql/checkout/tests/benchmark/test_checkout_mutations.py b/saleor/graphql/checkout/tests/benchmark/test_checkout_mutations.py
+index f390070e389..dc7acd8ebdb 100644
+--- a/saleor/graphql/checkout/tests/benchmark/test_checkout_mutations.py
++++ b/saleor/graphql/checkout/tests/benchmark/test_checkout_mutations.py
+@@ -391,7 +391,7 @@ def test_create_checkout_with_reservations(
+         }
+     }
+ 
+-    with django_assert_num_queries(67):
++    with django_assert_num_queries(66):
+         response = api_client.post_graphql(query, variables)
+         assert get_graphql_content(response)["data"]["checkoutCreate"]
+         assert Checkout.objects.first().lines.count() == 1
+@@ -409,7 +409,7 @@ def test_create_checkout_with_reservations(
+         }
+     }
+ 
+-    with django_assert_num_queries(67):
++    with django_assert_num_queries(66):
+         response = api_client.post_graphql(query, variables)
+         assert get_graphql_content(response)["data"]["checkoutCreate"]
+         assert Checkout.objects.first().lines.count() == 10
+@@ -660,7 +660,7 @@ def test_update_checkout_lines_with_reservations(
+         reservation_length=5,
+     )
+ 
+-    with django_assert_num_queries(75):
++    with django_assert_num_queries(74):
+         variant_id = graphene.Node.to_global_id("ProductVariant", variants[0].pk)
+         variables = {
+             "id": to_global_id_or_none(checkout),
+@@ -674,7 +674,7 @@ def test_update_checkout_lines_with_reservations(
+         assert not data["errors"]
+ 
+     # Updating multiple lines in checkout has same query count as updating one
+-    with django_assert_num_queries(75):
++    with django_assert_num_queries(74):
+         variables = {
+             "id": to_global_id_or_none(checkout),
+             "lines": [],
+@@ -919,7 +919,7 @@ def test_add_checkout_lines_with_reservations(
+         new_lines.append({"quantity": 2, "variantId": variant_id})
+ 
+     # Adding multiple lines to checkout has same query count as adding one
+-    with django_assert_num_queries(74):
++    with django_assert_num_queries(73):
+         variables = {
+             "id": Node.to_global_id("Checkout", checkout.pk),
+             "lines": [new_lines[0]],
+@@ -932,7 +932,7 @@ def test_add_checkout_lines_with_reservations(
+ 
+     checkout.lines.exclude(id=line.id).delete()
+ 
+-    with django_assert_num_queries(74):
++    with django_assert_num_queries(73):
+         variables = {
+             "id": Node.to_global_id("Checkout", checkout.pk),
+             "lines": new_lines,
+diff --git a/saleor/graphql/product/types/channels.py b/saleor/graphql/product/types/channels.py
+index ead24131351..61e69fa87f5 100644
+--- a/saleor/graphql/product/types/channels.py
++++ b/saleor/graphql/product/types/channels.py
+@@ -6,6 +6,7 @@
+ from promise import Promise
+ 
+ from ....core.utils import get_currency_for_country
++from ....core.utils.country import get_active_country
+ from ....graphql.core.types import Money, MoneyRange
+ from ....permission.enums import ProductPermissions
+ from ....product import models
+@@ -215,14 +216,13 @@ def resolve_is_available_for_purchase(root: models.ProductChannelListing, _info)
+     @staticmethod
+     def resolve_pricing(root: models.ProductChannelListing, info, *, address=None):
+         context = info.context
+-        address_country = address.country if address is not None else None
+ 
+         channel = ChannelByIdLoader(context).load(root.channel_id)
+         product = ProductByIdLoader(context).load(root.product_id)
+ 
+         def load_tax_configuration(data):
+             channel, product = data
+-            country_code = address_country or channel.default_country.code
++            country_code = get_active_country(channel, address_data=address)
+ 
+             def load_tax_country_exceptions(tax_config):
+                 tax_class = TaxClassByProductIdLoader(info.context).load(product.id)
+diff --git a/saleor/graphql/product/types/products.py b/saleor/graphql/product/types/products.py
+index 312b51d9b91..32f3c1f7b4b 100644
+--- a/saleor/graphql/product/types/products.py
++++ b/saleor/graphql/product/types/products.py
+@@ -10,6 +10,7 @@
+ 
+ from ....attribute import models as attribute_models
+ from ....core.utils import build_absolute_uri, get_currency_for_country
++from ....core.utils.country import get_active_country
+ from ....core.weight import convert_weight_to_default_weight_unit
+ from ....permission.auth_filters import AuthorizationFilters
+ from ....permission.enums import OrderPermissions, ProductPermissions
+@@ -575,8 +576,6 @@ def resolve_pricing(
+         channel = ChannelBySlugLoader(context).load(channel_slug)
+         tax_class = TaxClassByVariantIdLoader(context).load(root.node.id)
+ 
+-        address_country = address.country if address is not None else None
+-
+         def load_tax_configuration(data):
+             (
+                 product_channel_listing,
+@@ -587,8 +586,7 @@ def load_tax_configuration(data):
+ 
+             if not variant_channel_listing or not product_channel_listing:
+                 return None
+-
+-            country_code = address_country or channel.default_country.code
++            country_code = get_active_country(channel, address_data=address)
+ 
+             def load_tax_country_exceptions(tax_config):
+                 def load_default_tax_rate(tax_configs_per_country):
+@@ -1067,7 +1065,6 @@ def resolve_pricing(root: ChannelContext[models.Product], info, *, address=None)
+ 
+         channel_slug = str(root.channel_slug)
+         context = info.context
+-        address_country = address.country if address is not None else None
+ 
+         channel = ChannelBySlugLoader(context).load(channel_slug)
+         product_channel_listing = ProductChannelListingByProductIdAndChannelSlugLoader(
+@@ -1090,8 +1087,7 @@ def load_tax_configuration(data):
+ 
+             if not variants_channel_listing:
+                 return None
+-
+-            country_code = address_country or channel.default_country.code
++            country_code = get_active_country(channel, address_data=address)
+ 
+             def load_tax_country_exceptions(tax_config):
+                 def load_default_tax_rate(tax_configs_per_country):
+diff --git a/saleor/order/utils.py b/saleor/order/utils.py
+index 36a5e1d0738..dfe4435405a 100644
+--- a/saleor/order/utils.py
++++ b/saleor/order/utils.py
+@@ -11,6 +11,7 @@
+ from ..core.prices import quantize_price
+ from ..core.taxes import zero_money
+ from ..core.tracing import traced_atomic_transaction
++from ..core.utils.country import get_active_country
+ from ..core.weight import zero_weight
+ from ..discount import DiscountType
+ from ..discount.models import NotApplicable, OrderDiscount, Voucher, VoucherType
+@@ -30,11 +31,7 @@
+     convert_to_shipping_method_data,
+     initialize_shipping_method_active_status,
+ )
+-from ..tax.utils import (
+-    get_display_gross_prices,
+-    get_tax_class_kwargs_for_order_line,
+-    get_tax_country,
+-)
++from ..tax.utils import get_display_gross_prices, get_tax_class_kwargs_for_order_line
+ from ..warehouse.management import (
+     decrease_allocations,
+     get_order_lines_with_track_inventory,
+@@ -63,12 +60,9 @@
+ 
+ def get_order_country(order: Order) -> str:
+     """Return country to which order will be shipped."""
+-    address = order.billing_address
+-    if order.is_shipping_required():
+-        address = order.shipping_address
+-    if address is None:
+-        return order.channel.default_country.code
+-    return address.country.code
++    return get_active_country(
++        order.channel, order.shipping_address, order.billing_address
++    )
+ 
+ 
+ def order_line_needs_automatic_fulfillment(line_data: OrderLineInfo) -> bool:
+@@ -1048,9 +1042,8 @@ def update_order_display_gross_prices(order: "Order"):
+     """
+     channel = order.channel
+     tax_configuration = channel.tax_configuration
+-    country_code = get_tax_country(
++    country_code = get_active_country(
+         channel,
+-        order.is_shipping_required(),
+         order.shipping_address,
+         order.billing_address,
+     )
+diff --git a/saleor/tax/calculations/checkout.py b/saleor/tax/calculations/checkout.py
+index 3f99dfcdeff..a674f57ffdc 100644
+--- a/saleor/tax/calculations/checkout.py
++++ b/saleor/tax/calculations/checkout.py
+@@ -6,6 +6,7 @@
+ from ...checkout import base_calculations
+ from ...core.prices import quantize_price
+ from ...core.taxes import zero_taxed_money
++from ...core.utils.country import get_active_country
+ from ..models import TaxClassCountryRate
+ from ..utils import get_tax_rate_for_tax_class, normalize_tax_rate_for_db
+ from . import calculate_flat_rate_tax
+@@ -23,9 +24,7 @@ def update_checkout_prices_with_flat_rates(
+     prices_entered_with_tax: bool,
+     address: Optional["Address"] = None,
+ ):
+-    country_code = (
+-        address.country.code if address else checkout_info.channel.default_country.code
+-    )
++    country_code = get_active_country(checkout_info.channel, address)
+     default_country_rate_obj = TaxClassCountryRate.objects.filter(
+         country=country_code, tax_class=None
+     ).first()
+diff --git a/saleor/tax/tests/test_utils.py b/saleor/tax/tests/test_utils.py
+index 23efdfd5088..1806a2cfcd7 100644
+--- a/saleor/tax/tests/test_utils.py
++++ b/saleor/tax/tests/test_utils.py
+@@ -1,4 +1,5 @@
+-from ..utils import get_charge_taxes, get_display_gross_prices, get_tax_country
++from ...core.utils.country import get_active_country
++from ..utils import get_charge_taxes, get_display_gross_prices
+ 
+ 
+ def test_get_display_gross_prices(channel_USD):
+@@ -42,14 +43,11 @@ def test_get_tax_country_use_shipping_address(
+     channel_USD, address_usa, address_other_country
+ ):
+     # given
+-    is_shipping_required = True
+     shipping_address = address_usa
+     billing_address = address_other_country
+ 
+     # when
+-    country = get_tax_country(
+-        channel_USD, is_shipping_required, shipping_address, billing_address
+-    )
++    country = get_active_country(channel_USD, shipping_address, billing_address)
+ 
+     # then
+     assert country == address_usa.country.code
+@@ -59,14 +57,12 @@ def test_get_tax_country_use_billing_address(
+     channel_USD, address_usa, address_other_country
+ ):
+     # given
+-    is_shipping_required = False
+-    shipping_address = address_usa
++
++    shipping_address = None
+     billing_address = address_other_country
+ 
+     # when
+-    country = get_tax_country(
+-        channel_USD, is_shipping_required, shipping_address, billing_address
+-    )
++    country = get_active_country(channel_USD, shipping_address, billing_address)
+ 
+     # then
+     assert country == address_other_country.country.code
+@@ -78,7 +74,7 @@ def test_get_tax_country_fallbacks_to_channel_country(channel_USD):
+     billing_address = None
+ 
+     # when
+-    country = get_tax_country(channel_USD, True, shipping_address, billing_address)
++    country = get_active_country(channel_USD, shipping_address, billing_address)
+ 
+     # then
+     assert country == channel_USD.default_country.code
+diff --git a/saleor/tax/utils.py b/saleor/tax/utils.py
+index c60172cf1be..73644650cb2 100644
+--- a/saleor/tax/utils.py
++++ b/saleor/tax/utils.py
+@@ -3,41 +3,16 @@
+ 
+ from prices import TaxedMoney
+ 
++from ..core.utils.country import get_active_country
+ from . import TaxCalculationStrategy
+ 
+ if TYPE_CHECKING:
+-    from ..account.models import Address
+-    from ..channel.models import Channel
+     from ..checkout.fetch import CheckoutInfo, CheckoutLineInfo
+     from ..order.models import Order
+     from ..tax.models import TaxClass, TaxClassCountryRate
+     from .models import TaxConfiguration, TaxConfigurationPerCountry
+ 
+ 
+-def get_tax_country(
+-    channel: "Channel",
+-    is_shipping_required: bool,
+-    shipping_address: Optional["Address"] = None,
+-    billing_address: Optional["Address"] = None,
+-):
+-    """Get country code for tax calculations.
+-
+-    For checkouts and orders, there are following rules for determining the country
+-    code that should be used for tax calculations:
+-    - when shipping is required, use the shipping address's country code,
+-    - when shipping is not required (e.g. because of having only digital products), use
+-    the billing address's country code,
+-    - fallback to channel's default country when addresses are not provided.
+-    """
+-    if shipping_address and is_shipping_required:
+-        return shipping_address.country.code
+-
+-    if billing_address and not is_shipping_required:
+-        return billing_address.country.code
+-
+-    return channel.default_country.code
+-
+-
+ def get_display_gross_prices(
+     channel_tax_configuration: "TaxConfiguration",
+     country_tax_configuration: Optional["TaxConfigurationPerCountry"],
+@@ -93,9 +68,8 @@ def get_charge_taxes_for_order(order: "Order") -> bool:
+     """Get charge_taxes value for order."""
+     channel = order.channel
+     tax_configuration = channel.tax_configuration
+-    country_code = get_tax_country(
++    country_code = get_active_country(
+         channel,
+-        order.is_shipping_required(),
+         order.shipping_address,
+         order.billing_address,
+     )
+@@ -114,9 +88,8 @@ def get_tax_calculation_strategy_for_order(order: "Order"):
+     """Get tax_calculation_strategy value for order."""
+     channel = order.channel
+     tax_configuration = channel.tax_configuration
+-    country_code = get_tax_country(
++    country_code = get_active_country(
+         channel,
+-        order.is_shipping_required(),
+         order.shipping_address,
+         order.billing_address,
+     )
+@@ -134,12 +107,9 @@ def get_tax_calculation_strategy_for_order(order: "Order"):
+ def _get_tax_configuration_for_checkout(
+     checkout_info: "CheckoutInfo", lines: Iterable["CheckoutLineInfo"]
+ ) -> Tuple["TaxConfiguration", Optional["TaxConfigurationPerCountry"]]:
+-    from ..checkout.utils import is_shipping_required
+-
+     tax_configuration = checkout_info.tax_configuration
+-    country_code = get_tax_country(
++    country_code = get_active_country(
+         checkout_info.channel,
+-        is_shipping_required(lines),
+         checkout_info.shipping_address,
+         checkout_info.billing_address,
+     )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

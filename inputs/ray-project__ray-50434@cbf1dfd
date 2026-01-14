@@ -1,0 +1,453 @@
+  Task-ID: ray-project__ray-50434@cbf1dfd
+  Please checkout to this commit first: 95fd73efc15522e6fcd90fc671dec3c3c5491349
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [core][compiled graphs] Ray 2.42 got RayCgraphCapacityExceeded in vLLM
+### What happened + What you expected to happen
+
+```
+INFO 02-10 16:54:48 async_llm_engine.py:211] Added request cmpl-409c81096d49467f9d71b9c645820aa1-0.
+ERROR 02-10 16:54:48 async_llm_engine.py:68] Engine background task failed
+ERROR 02-10 16:54:48 async_llm_engine.py:68] Traceback (most recent call last):
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 58, in _log_task_completion
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     return_value = task.result()
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 825, in run_engine_loop
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     result = task.result()
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 748, in engine_step
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     request_outputs = await self.engine.step_async(virtual_engine)
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 353, in step_async
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     outputs = await self.model_executor.execute_model_async(
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/home/ubuntu/vllm/vllm/executor/ray_distributed_executor.py", line 584, in execute_model_async
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     dag_future = await self.forward_dag.execute_async(serialized_data)
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/opt/conda/envs/vllm-env/lib/python3.10/site-packages/ray/dag/compiled_dag_node.py", line 2348, in execute_async
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     self._raise_if_too_many_inflight_executions()
+ERROR 02-10 16:54:48 async_llm_engine.py:68]   File "/opt/conda/envs/vllm-env/lib/python3.10/site-packages/ray/dag/compiled_dag_node.py", line 2048, in _raise_if_too_many_inflight_executions
+ERROR 02-10 16:54:48 async_llm_engine.py:68]     raise ray.exceptions.RayCgraphCapacityExceeded(
+ERROR 02-10 16:54:48 async_llm_engine.py:68] ray.exceptions.RayCgraphCapacityExceeded: System error: The compiled graph can't have more than 10 in-flight executions, and you currently have 10 in-flight executions. Retrieve an output using ray.get before submitting more requests or increase `_max_inflight_executions`. `dag.experimental_compile(_max_inflight_executions=...)`
+Exception in callback functools.partial(<function _log_task_completion at 0x7f9519680dc0>, error_callback=<bound method AsyncLLMEngine._error_callback of <vllm.engine.async_llm_engine.AsyncLLMEngine object at 0x7f95122a6080>>)
+handle: <Handle functools.partial(<function _log_task_completion at 0x7f9519680dc0>, error_callback=<bound method AsyncLLMEngine._error_callback of <vllm.engine.async_llm_engine.AsyncLLMEngine object at 0x7f95122a6080>>)>
+Traceback (most recent call last):
+  File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 58, in _log_task_completion
+    return_value = task.result()
+  File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 825, in run_engine_loop
+    result = task.result()
+  File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 748, in engine_step
+    request_outputs = await self.engine.step_async(virtual_engine)
+  File "/home/ubuntu/vllm/vllm/engine/async_llm_engine.py", line 353, in step_async
+    outputs = await self.model_executor.execute_model_async(
+  File "/home/ubuntu/vllm/vllm/executor/ray_distributed_executor.py", line 584, in execute_model_async
+    dag_future = await self.forward_dag.execute_async(serialized_data)
+  File "/opt/conda/envs/vllm-env/lib/python3.10/site-packages/ray/dag/compiled_dag_node.py", line 2348, in execute_async
+    self._raise_if_too_many_inflight_executions()
+  File "/opt/conda/envs/vllm-env/lib/python3.10/site-packages/ray/dag/compiled_dag_node.py", line 2048, in _raise_if_too_many_inflight_executions
+    raise ray.exceptions.RayCgraphCapacityExceeded(
+ray.exceptions.RayCgraphCapacityExceeded: System error: The compiled graph can't have more than 10 in-flight executions, and you currently have 10 in-flight executions. Retrieve an output using ray.get before submitting more requests or increase `_max_inflight_executions`. `dag.experimental_compile(_max_inflight_executions=...)`
+```
+
+### Versions / Dependencies
+
+2.42
+
+### Reproduction script
+
+N/A
+
+### Issue Severity
+
+None
+  </issue>
+  
+  <patch>
+  diff --git a/python/ray/dag/compiled_dag_node.py b/python/ray/dag/compiled_dag_node.py
+index 28709285d9ae..573f3d5025a4 100644
+--- a/python/ray/dag/compiled_dag_node.py
++++ b/python/ray/dag/compiled_dag_node.py
+@@ -1018,11 +1018,16 @@ def _create_proxy_actor() -> "ray.actor.ActorHandle":
+         self._proxy_actor = _create_proxy_actor()
+         # Set to True when `teardown` API is called.
+         self._is_teardown = False
+-        # execution indices -> set of channel indices of destructed CompiledDAGRefs
+-        # When a CompiledDagRef is destructed and its result has not been cached and
+-        # ray.get has not been called on it, we will add it to this dict, so that
+-        # we can lazily release the native buffers
+-        self._destructed_ref_idxs: Dict[int, Set[Optional[int]]] = defaultdict(set)
++        # Execution index to set of channel indices for CompiledDAGRefs
++        # or CompiledDAGFuture whose destructor has been called. A "None"
++        # channel index means all channels, and when that happens, "None"
++        # should be the only value in the set.
++        self._destructed_ref_idxs: Dict[int, Set[Optional[int]]] = dict()
++        # Execution index to set of channel indices for CompiledDAGRefs
++        # or CompiledDAGFuture whose get() has been called. A "None"
++        # channel index means all channels, and when that happens, "None"
++        # should be the only value in the set.
++        self._got_ref_idxs: Dict[int, Set[Optional[int]]] = dict()
+ 
+     @property
+     def is_teardown(self) -> bool:
+@@ -2204,12 +2209,7 @@ def _cache_execution_results(
+         """
+         if not self._has_execution_results(execution_index):
+             for chan_idx, res in enumerate(result):
+-                # avoid caching for any CompiledDAGRef that has already been destructed.
+-                if not (
+-                    execution_index in self._destructed_ref_idxs
+-                    and chan_idx in self._destructed_ref_idxs[execution_index]
+-                ):
+-                    self._result_buffer[execution_index][chan_idx] = res
++                self._result_buffer[execution_index][chan_idx] = res
+ 
+     def _get_execution_results(
+         self, execution_index: int, channel_index: Optional[int]
+@@ -2247,50 +2247,169 @@ def _get_execution_results(
+             ]
+         else:
+             result = [self._result_buffer[execution_index].pop(channel_index)]
+-            if len(self._result_buffer[execution_index]) == 0:
+-                del self._result_buffer[execution_index]
++
++        if execution_index not in self._got_ref_idxs:
++            self._got_ref_idxs[execution_index] = set()
++        self._got_ref_idxs[execution_index].add(channel_index)
++        self._clean_up_buffers(execution_index)
+         return result
+ 
+-    def _next_execution_can_be_released(self) -> bool:
++    def _delete_execution_results(self, execution_index: int, channel_index: int):
+         """
+-        Check if the next buffers for the next execution which will be completed
+-        can be released. The next execution can be released if the next
+-        execution index is in _destructed_ref_idxs and the number of destructed
+-        channel indices is equal to the number of output channels.
++        Delete the execution results for the given execution index and channel index.
++        This method should be called when a CompiledDAGRef or CompiledDAGFuture is
++        destructed.
++
++        Note that this method maintains metadata for the deleted execution results,
++        and only actually deletes the buffers lazily when the buffer is not needed
++        anymore.
++
++        Args:
++            execution_index: The execution index to destruct results from.
++            channel_index: The index of the output channel corresponding to the result.
+         """
+-        return (
+-            self._max_finished_execution_index + 1 in self._destructed_ref_idxs
+-            and len(self._destructed_ref_idxs[self._max_finished_execution_index + 1])
+-            == len(self.dag_output_channels)
+-        )
++        if execution_index not in self._destructed_ref_idxs:
++            self._destructed_ref_idxs[execution_index] = set()
++        self._destructed_ref_idxs[execution_index].add(channel_index)
++        self._clean_up_buffers(execution_index)
++
++    def _try_release_result_buffer(self, execution_index: int):
++        """
++        Try to release the result buffer for the given execution index.
++        """
++
++        should_release = False
++        got_channel_idxs = self._got_ref_idxs.get(execution_index, set())
++        if None in got_channel_idxs:
++            assert len(got_channel_idxs) == 1, (
++                "when None exists in got_channel_idxs, it means all channels, and "
++                "it should be the only value in the set",
++            )
++            should_release = True
++        else:
++            destructed_channel_idxs = self._destructed_ref_idxs.get(
++                execution_index, set()
++            )
++            processed_channel_idxs = got_channel_idxs.union(destructed_channel_idxs)
++            # No more processing is needed for this execution index.
++            should_release = processed_channel_idxs == set(
++                range(len(self.dag_output_channels))
++            )
++
++        if not should_release:
++            return False
++
++        self._result_buffer.pop(execution_index, None)
++        self._destructed_ref_idxs.pop(execution_index, None)
++        self._got_ref_idxs.pop(execution_index, None)
++        return True
++
++    def _try_release_native_buffer(
++        self, idx_to_release: int, timeout: Optional[float] = None
++    ) -> bool:
++        """
++        Try to release the native buffer for the given execution index.
++
++        Args:
++            idx_to_release: The execution index to release buffers from.
++            timeout: The maximum time in seconds to wait for the release.
++
++        Returns:
++            Whether the buffers have been released.
++        """
++        if idx_to_release != self._max_finished_execution_index + 1:
++            # Native buffer can only be released for the next execution index.
++            return False
++
++        destructed_channel_idxs = self._destructed_ref_idxs.get(idx_to_release, set())
++        should_release = False
++        if None in destructed_channel_idxs:
++            assert len(destructed_channel_idxs) == 1, (
++                "when None exists in destructed_channel_idxs, it means all channels, "
++                "and it should be the only value in the set",
++            )
++            should_release = True
++        elif len(destructed_channel_idxs) == len(self.dag_output_channels):
++            should_release = True
++
++        if not should_release:
++            return False
++
++        assert idx_to_release not in self._result_buffer
++        try:
++            self._dag_output_fetcher.release_channel_buffers(timeout)
++        except RayChannelTimeoutError as e:
++            raise RayChannelTimeoutError(
++                "Releasing native buffers corresponding to a stale CompiledDAGRef "
++                "is taking a long time. If this is expected, increase "
++                f"RAY_CGRAPH_get_timeout which is currently {self._get_timeout} "
++                "seconds. Otherwise, this may indicate that the execution "
++                "is hanging."
++            ) from e
++        self._destructed_ref_idxs.pop(idx_to_release)
++        # Releasing native buffer means the corresponding execution result
++        # is consumed (and discarded).
++        self._max_finished_execution_index += 1
++        return True
++
++    def _try_release_buffer(
++        self, idx_to_release: int, timeout: Optional[float] = None
++    ) -> bool:
++        """
++        Try to release the buffer for the given execution index.
++        First try to release the native buffer, then try to release the result buffer.
++
++        Args:
++            idx_to_release: The execution index to release buffers from.
++            timeout: The maximum time in seconds to wait for the release.
++
++        Returns:
++            Whether the native buffer or result buffer has been released.
++        """
++        return self._try_release_native_buffer(
++            idx_to_release, timeout
++        ) or self._try_release_result_buffer(idx_to_release)
+ 
+     def _try_release_buffers(self):
+         """
+-        This will try to repeatedly release channel buffers as long as
+-        max_finished_execution_index + 1 is in the set of destructed indices.
+-        We should be checking to release buffers any time we are incrementing
+-        or checking the max_finished_execution_index or the _destructed_ref_idxs.
++        Repeatedly release buffer if possible.
++
++        This method starts from _max_finished_execution_index + 1 and tries to release
++        as many buffers as possible. If a native buffer is released,
++        _max_finished_execution_index will be incremented.
+         """
+         timeout = self._get_timeout
+-        while self._next_execution_can_be_released():
++        while True:
+             start_time = time.monotonic()
+-            try:
+-                self._dag_output_fetcher.release_channel_buffers(timeout)
+-            except RayChannelTimeoutError as e:
+-                raise RayChannelTimeoutError(
+-                    "Releasing native buffers corresponding to a stale CompiledDAGRef "
+-                    "is taking a long time. If this is expected, increase "
+-                    f"RAY_CGRAPH_get_timeout which is currently {self._get_timeout} "
+-                    "seconds. Otherwise, this may indicate that the execution "
+-                    "is hanging."
+-                ) from e
+-
+-            self._max_finished_execution_index += 1
++            if not self._try_release_buffer(
++                self._max_finished_execution_index + 1, timeout
++            ):
++                break
+ 
+             if timeout != -1:
+                 timeout -= time.monotonic() - start_time
+                 timeout = max(timeout, 0)
+ 
++    def _clean_up_buffers(self, idx_to_release: int):
++        """
++        Clean up native and result buffers.
++
++        This method:
++        1. Tries to release the buffer for the given execution index.
++           This index is the specific one that requires a clean up,
++           e.g., right after get() is called or a CompiledDAGRef/CompiledDAGFuture
++           is destructed.
++        2. Tries to release all buffers starting from _max_finished_execution_index + 1.
++           This step is to clean up buffers that are no longer needed.
++
++        Args:
++            idx_to_release: The execution index that requires a clean up,
++                e.g., right after get() is called or a CompiledDAGRef/CompiledDAGFuture
++                is destructed.
++        """
++        self._try_release_buffer(idx_to_release)
++        self._try_release_buffers()
++
+     def _execute_until(
+         self,
+         execution_index: int,
+@@ -2338,14 +2457,15 @@ def _execute_until(
+             # If a CompiledDagRef for a specific execution index has been destructed,
+             # release the channel buffers for that execution index instead of caching
+             try:
+-                if self._next_execution_can_be_released():
+-                    self._dag_output_fetcher.release_channel_buffers(timeout)
+-                else:
++                if not self._try_release_native_buffer(
++                    self._max_finished_execution_index + 1, timeout
++                ):
+                     result = self._dag_output_fetcher.read(timeout)
+                     self._cache_execution_results(
+                         self._max_finished_execution_index + 1,
+                         result,
+                     )
++                    self._max_finished_execution_index += 1
+             except RayChannelTimeoutError as e:
+                 raise RayChannelTimeoutError(
+                     "If the execution is expected to take a long time, increase "
+@@ -2354,8 +2474,6 @@ def _execute_until(
+                     "hanging."
+                 ) from e
+ 
+-            self._max_finished_execution_index += 1
+-
+             if timeout != -1:
+                 timeout -= time.monotonic() - start_time
+                 timeout = max(timeout, 0)
+diff --git a/python/ray/dag/tests/experimental/test_accelerated_dag.py b/python/ray/dag/tests/experimental/test_accelerated_dag.py
+index a9eaf8f47cb6..4d1bff821479 100644
+--- a/python/ray/dag/tests/experimental/test_accelerated_dag.py
++++ b/python/ray/dag/tests/experimental/test_accelerated_dag.py
+@@ -265,13 +265,43 @@ def test_destruct_and_get_multioutput_no_leak(self, ray_start_regular):
+             dag = MultiOutputNode([a.inc.bind(inp), a.inc.bind(inp)])
+         compiled_dag = dag.experimental_compile()
+         ref_list = compiled_dag.execute(1)
++        assert compiled_dag._result_buffer == {}
++        assert compiled_dag._destructed_ref_idxs == {}
++        assert compiled_dag._got_ref_idxs == {}
+         ref1, ref2 = compiled_dag.execute(2)
+         del ref1
++        assert compiled_dag._result_buffer == {}
++        assert compiled_dag._destructed_ref_idxs == {1: {0}}
++        assert compiled_dag._got_ref_idxs == {}
+         ray.get(ref2)
++        assert compiled_dag._result_buffer == {0: {0: 1, 1: 2}}
+         ray.get(ref_list)
+         # Test that that ref1 doesn't stay in result_buffer
+         assert len(compiled_dag._result_buffer) == 0
+ 
++    def test_asyncio_destruction(self, ray_start_regular):
++        a = Actor.remote(0)
++        b = Actor.remote(0)
++        with InputNode() as i:
++            dag = MultiOutputNode([a.echo.bind(i), b.echo.bind(i)])
++
++        loop = get_or_create_event_loop()
++        compiled_dag = dag.experimental_compile(enable_asyncio=True)
++
++        async def main(i):
++            # use asyncio.sleep to give back control so GC has
++            # a chance to run
++            await asyncio.sleep(i * 0.1)
++            futs = await compiled_dag.execute_async(i)
++            assert len(futs) == 2
++            result = await futs[0]
++            assert result == i
++
++        loop.run_until_complete(asyncio.gather(*[main(i) for i in range(5)]))
++        assert compiled_dag._result_buffer == {}
++        assert compiled_dag._destructed_ref_idxs == {}
++        assert compiled_dag._got_ref_idxs == {}
++
+ 
+ @pytest.mark.parametrize("single_fetch", [True, False])
+ def test_two_returns_one_reader(ray_start_regular, single_fetch):
+diff --git a/python/ray/experimental/compiled_dag_ref.py b/python/ray/experimental/compiled_dag_ref.py
+index f79f26f425fb..d624457b8b53 100644
+--- a/python/ray/experimental/compiled_dag_ref.py
++++ b/python/ray/experimental/compiled_dag_ref.py
+@@ -97,20 +97,11 @@ def __del__(self):
+         if self._dag.is_teardown:
+             return
+ 
+-        # If we've already cached the result in the buffer, get it to remove it
+-        # from the buffer. Else add this CompiledDAGRef's execution and channel indices
+-        # to the dag's _destructed_ref_idxs, and try to release any buffers we
+-        # can based on the dag's current max_finished_execution_index.
+-        if not self._ray_get_called:
+-            if self._execution_index in self._dag._result_buffer:
+-                self._dag._get_execution_results(
+-                    self._execution_index, self._channel_index
+-                )
+-            else:
+-                self._dag._destructed_ref_idxs[self._execution_index].add(
+-                    self._channel_index
+-                )
+-                self._dag._try_release_buffers()
++        if self._ray_get_called:
++            # get() was already called, no further cleanup is needed.
++            return
++
++        self._dag._delete_execution_results(self._execution_index, self._channel_index)
+ 
+     def get(self, timeout: Optional[float] = None):
+         if self._ray_get_called:
+@@ -225,3 +216,13 @@ def __await__(self):
+             self._execution_index, self._channel_index
+         )
+         return _process_return_vals(return_vals, True)
++
++    def __del__(self):
++        if self._dag.is_teardown:
++            return
++
++        if self._fut is None:
++            # await() was already called, no further cleanup is needed.
++            return
++
++        self._dag._delete_execution_results(self._execution_index, self._channel_index)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

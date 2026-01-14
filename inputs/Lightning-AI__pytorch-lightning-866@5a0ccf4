@@ -1,0 +1,193 @@
+  Task-ID: Lightning-AI__pytorch-lightning-866@5a0ccf4
+  Please checkout to this commit first: 6029fad989bcf6e9e630385e77ae7d0dbf112bac
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Epoch end checkpoint restarts previous epoch
+## 🐛 Bug
+
+If restarting the training and reloading the model, the epoch that the checkpoint had just completed is restarted rather than beginning the next.
+
+### Expected behavior
+
+When a checkpoint upon epoch end is saved, restarting it should resume its state and start the next epoch.
+  </issue>
+  
+  <patch>
+  diff --git a/pytorch_lightning/trainer/training_io.py b/pytorch_lightning/trainer/training_io.py
+index 2ee77ada4c5c4..7ae2d53609758 100644
+--- a/pytorch_lightning/trainer/training_io.py
++++ b/pytorch_lightning/trainer/training_io.py
+@@ -125,6 +125,7 @@ def __init__(self):
+         self.early_stop_callback = None
+         self.lr_schedulers = None
+         self.optimizers = None
++        self.num_training_batches = None
+ 
+     def get_model(self):
+         is_dp_module = isinstance(self.model, (LightningDistributedDataParallel,
+@@ -305,10 +306,9 @@ def restore(self, checkpoint_path, on_gpu):
+         self.restore_training_state(checkpoint)
+ 
+     def dump_checkpoint(self):
+-
+         checkpoint = {
+-            'epoch': self.current_epoch,
+-            'global_step': self.global_step
++            'epoch': self.current_epoch + 1,
++            'global_step': self.global_step + 1,
+         }
+ 
+         if self.checkpoint_callback is not None and self.checkpoint_callback is not False:
+@@ -388,6 +388,14 @@ def restore_training_state(self, checkpoint):
+         self.global_step = checkpoint['global_step']
+         self.current_epoch = checkpoint['epoch']
+ 
++        # Deals with peculiarity of different global step for odd vs even num_training_batches
++        if abs((self.global_step + 1) % self.num_training_batches) > 1:
++            warnings.warn(
++                "You're resuming from a checkpoint that ended mid-epoch. "
++                "This can cause unreliable results if further training is done, "
++                "consider using an end of epoch checkpoint. "
++            )
++
+         # restore the optimizers
+         optimizer_states = checkpoint['optimizer_states']
+         for optimizer, opt_state in zip(self.optimizers, optimizer_states):
+diff --git a/tests/test_restore_models.py b/tests/test_restore_models.py
+index 92ab71364ccae..2bd033b09756f 100644
+--- a/tests/test_restore_models.py
++++ b/tests/test_restore_models.py
+@@ -214,8 +214,8 @@ def test_dp_resume(tmpdir):
+     trainer.is_slurm_managing_tasks = True
+     result = trainer.fit(model)
+ 
+-    # track epoch before saving
+-    real_global_epoch = trainer.current_epoch
++    # track epoch before saving. Increment since we finished the current epoch, don't want to rerun
++    real_global_epoch = trainer.current_epoch + 1
+ 
+     # correct result and ok accuracy
+     assert result == 1, 'amp + dp model failed to complete'
+@@ -282,7 +282,8 @@ def test_cpu_restore_training(tmpdir):
+     # fit model
+     trainer = Trainer(**trainer_options)
+     result = trainer.fit(model)
+-    real_global_epoch = trainer.current_epoch
++    # Increment since we've finished the current epoch, don't want to rerun
++    real_global_epoch = trainer.current_epoch + 1
+ 
+     # traning complete
+     assert result == 1, 'amp + ddp model failed to complete'
+diff --git a/tests/test_trainer.py b/tests/test_trainer.py
+index 06cd8a7de93cd..c4b5098e905ad 100644
+--- a/tests/test_trainer.py
++++ b/tests/test_trainer.py
+@@ -410,6 +410,74 @@ class CurrentTestModel(
+         tutils.run_prediction(dataloader, trainer.model)
+ 
+ 
++def test_resume_from_checkpoint_epoch_restored(tmpdir):
++    """Verify resuming from checkpoint runs the right number of epochs"""
++    import types
++
++    tutils.reset_seed()
++
++    hparams = tutils.get_hparams()
++
++    def new_model():
++        # Create a model that tracks epochs and batches seen
++        model = LightningTestModel(hparams)
++        model.num_epochs_seen = 0
++        model.num_batches_seen = 0
++
++        def increment_epoch(self):
++            self.num_epochs_seen += 1
++
++        def increment_batch(self, _):
++            self.num_batches_seen += 1
++
++        # Bind the increment_epoch function on_epoch_end so that the
++        # model keeps track of the number of epochs it has seen.
++        model.on_epoch_end = types.MethodType(increment_epoch, model)
++        model.on_batch_start = types.MethodType(increment_batch, model)
++        return model
++
++    model = new_model()
++
++    trainer_options = dict(
++        show_progress_bar=False,
++        max_epochs=2,
++        train_percent_check=0.65,
++        val_percent_check=1,
++        checkpoint_callback=ModelCheckpoint(tmpdir, save_top_k=-1),
++        logger=False,
++        default_save_path=tmpdir,
++        early_stop_callback=False,
++        val_check_interval=0.5,
++    )
++
++    # fit model
++    trainer = Trainer(**trainer_options)
++    trainer.fit(model)
++
++    training_batches = trainer.num_training_batches
++
++    assert model.num_epochs_seen == 2
++    assert model.num_batches_seen == training_batches * 2
++
++    # Other checkpoints can be uncommented if/when resuming mid-epoch is supported
++    checkpoints = [
++        # os.path.join(trainer.checkpoint_callback.filepath, "_ckpt_epoch_0.ckpt"),
++        os.path.join(trainer.checkpoint_callback.filepath, "_ckpt_epoch_0_v0.ckpt"),
++        # os.path.join(trainer.checkpoint_callback.filepath, "_ckpt_epoch_1.ckpt"),
++        os.path.join(trainer.checkpoint_callback.filepath, "_ckpt_epoch_1_v0.ckpt"),
++    ]
++
++    for check in checkpoints:
++        next_model = new_model()
++        state = torch.load(check)
++
++        # Resume training
++        trainer_options['max_epochs'] = 4
++        new_trainer = Trainer(**trainer_options, resume_from_checkpoint=check)
++        new_trainer.fit(next_model)
++        assert state['global_step'] + next_model.num_batches_seen == training_batches * 4
++
++
+ def test_multiple_test_dataloader(tmpdir):
+     """Verify multiple test_dataloader."""
+     tutils.reset_seed()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

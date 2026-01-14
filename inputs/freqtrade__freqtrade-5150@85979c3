@@ -1,0 +1,224 @@
+  Task-ID: freqtrade__freqtrade-5150@85979c3
+  Please checkout to this commit first: e8f85aed6b45c8af61474fceb7a9bfab956784dc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Backtesting: Filter for Pairs with TotalProfit/Win%
+<!-- 
+Note: this section will not show up in the issue.
+Have you search for this feature before requesting it? It's highly likely that a similar request was already filed.
+-->
+
+## Describe your environment
+(if applicable)
+
+  * Operating system: Ubuntu SMP
+  * Python Version: Python 3.8.5
+  * CCXT version: not found
+  * Freqtrade Version: freqtrade docker-e2bbc0aa
+
+
+## Describe the enhancement
+
+Extension for backtesting with additional pairlist filter parameters `--list-total-profit-percent="<0"` or `--list-win-percent=">95"` . The Filter could correspond to the Reportcolumns.
+
+ This filters then outputs a pair list which could be easy transferred into the config as black or white list, depends on Filter.
+
+Outputline could be look like this in den end of the Backtesting Report:
+
+```
+list-total-profit-percent: Choosen Pairlist Filter *Total Profit percent* corresponds "<0":
+"BNB/BUSD",
+"JUV/BUSD",
+"OM/BUSD",
+"ADA/BUSD",
+"PERP/BUSD",
+"AERGO/BUSD",
+"AUCTION/BUSD"
+```
+  </issue>
+  
+  <patch>
+  diff --git a/freqtrade/commands/__init__.py b/freqtrade/commands/__init__.py
+index 784b99bedb5..ecce709e5d2 100644
+--- a/freqtrade/commands/__init__.py
++++ b/freqtrade/commands/__init__.py
+@@ -16,7 +16,7 @@
+ from freqtrade.commands.list_commands import (start_list_exchanges, start_list_hyperopts,
+                                               start_list_markets, start_list_strategies,
+                                               start_list_timeframes, start_show_trades)
+-from freqtrade.commands.optimize_commands import start_backtesting, start_edge, start_hyperopt
++from freqtrade.commands.optimize_commands import start_backtest_filter, start_backtesting, start_edge, start_hyperopt
+ from freqtrade.commands.pairlist_commands import start_test_pairlist
+ from freqtrade.commands.plot_commands import start_plot_dataframe, start_plot_profit
+ from freqtrade.commands.trade_commands import start_trading
+diff --git a/freqtrade/commands/arguments.py b/freqtrade/commands/arguments.py
+index 7f4f7edd698..f5b9f9cc296 100644
+--- a/freqtrade/commands/arguments.py
++++ b/freqtrade/commands/arguments.py
+@@ -2,6 +2,7 @@
+ This module contains the argument manager class
+ """
+ import argparse
++from freqtrade.commands.optimize_commands import start_backtest_filter
+ from functools import partial
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional
+@@ -37,6 +38,8 @@
+ 
+ ARGS_LIST_HYPEROPTS = ["hyperopt_path", "print_one_column", "print_colorized"]
+ 
++ARGS_BACKTEST_FILTER = ["backtest_path"]
++
+ ARGS_LIST_EXCHANGES = ["print_one_column", "list_exchanges_all"]
+ 
+ ARGS_LIST_TIMEFRAMES = ["exchange", "print_one_column"]
+@@ -89,7 +92,7 @@
+ 
+ NO_CONF_REQURIED = ["convert-data", "convert-trade-data", "download-data", "list-timeframes",
+                     "list-markets", "list-pairs", "list-strategies", "list-data",
+-                    "list-hyperopts", "hyperopt-list", "hyperopt-show",
++                    "list-hyperopts", "hyperopt-list", "backtest-filter", "hyperopt-show",
+                     "plot-dataframe", "plot-profit", "show-trades"]
+ 
+ NO_CONF_ALLOWED = ["create-userdir", "list-exchanges", "new-hyperopt", "new-strategy"]
+@@ -168,7 +171,7 @@ def _build_subcommands(self) -> None:
+         self.parser = argparse.ArgumentParser(description='Free, open source crypto trading bot')
+         self._build_args(optionlist=['version'], parser=self.parser)
+ 
+-        from freqtrade.commands import (start_backtesting, start_convert_data, start_create_userdir,
++        from freqtrade.commands import (start_backtesting, start_backtest_filter, start_convert_data, start_create_userdir,
+                                         start_download_data, start_edge, start_hyperopt,
+                                         start_hyperopt_list, start_hyperopt_show, start_install_ui,
+                                         start_list_data, start_list_exchanges, start_list_hyperopts,
+@@ -256,6 +259,15 @@ def _build_subcommands(self) -> None:
+         backtesting_cmd.set_defaults(func=start_backtesting)
+         self._build_args(optionlist=ARGS_BACKTEST, parser=backtesting_cmd)
+ 
++        # Add backtest-filter subcommand
++        backtest_filter_cmd = subparsers.add_parser(
++            'backtest-filter',
++            help='Filter Backtest results',
++            parents=[_common_parser],
++        )
++        backtest_filter_cmd.set_defaults(func=start_backtest_filter)
++        self._build_args(optionlist=ARGS_BACKTEST_FILTER, parser=backtest_filter_cmd)
++
+         # Add edge subcommand
+         edge_cmd = subparsers.add_parser('edge', help='Edge module.',
+                                          parents=[_common_parser, _strategy_parser])
+diff --git a/freqtrade/commands/cli_options.py b/freqtrade/commands/cli_options.py
+index d832693ee10..8ba66b32d9b 100644
+--- a/freqtrade/commands/cli_options.py
++++ b/freqtrade/commands/cli_options.py
+@@ -202,6 +202,11 @@ def __init__(self, *args, **kwargs):
+         help='Specify additional lookup path for Hyperopt and Hyperopt Loss functions.',
+         metavar='PATH',
+     ),
++    "backtest_path": Arg(
++        '--backtest-path',
++        help='Specify lookup file path for backtest filter.',
++        metavar='PATH',
++    ),
+     "epochs": Arg(
+         '-e', '--epochs',
+         help='Specify number of epochs (default: %(default)d).',
+diff --git a/freqtrade/commands/optimize_commands.py b/freqtrade/commands/optimize_commands.py
+index a84b3b3bdcd..3165852fac0 100644
+--- a/freqtrade/commands/optimize_commands.py
++++ b/freqtrade/commands/optimize_commands.py
+@@ -1,3 +1,7 @@
++from freqtrade.data.btanalysis import get_latest_backtest_filename
++import pandas
++from pandas.io import json
++from freqtrade.optimize import backtesting
+ import logging
+ from typing import Any, Dict
+ 
+@@ -52,6 +56,30 @@ def start_backtesting(args: Dict[str, Any]) -> None:
+     backtesting = Backtesting(config)
+     backtesting.start()
+ 
++def start_backtest_filter(args: Dict[str, Any]) -> None:
++    """
++    List backtest pairs previously filtered
++    """
++
++    config = setup_utils_configuration(args, RunMode.UTIL_NO_EXCHANGE)
++
++    no_header = config.get('backtest_show_pair_list', False)
++    results_file = get_latest_backtest_filename(
++        config['user_data_dir'] / 'backtest_results/')
++
++    logger.info("Using Backtesting result {results_file}")
++
++    # load data using Python JSON module
++    with open(config['user_data_dir'] / 'backtest_results/' / results_file,'r') as f:
++        data = json.loads(f.read())
++        strategy = list(data["strategy"])[0]
++        trades = data["strategy"][strategy]
++
++        print(trades)
++
++
++    logger.info("Backtest filtering complete. ")
++
+ 
+ def start_hyperopt(args: Dict[str, Any]) -> None:
+     """
+diff --git a/freqtrade/optimize/optimize_reports.py b/freqtrade/optimize/optimize_reports.py
+index 84e052ac46c..f401614c5d2 100644
+--- a/freqtrade/optimize/optimize_reports.py
++++ b/freqtrade/optimize/optimize_reports.py
+@@ -668,3 +668,18 @@ def show_backtest_results(config: Dict, backtest_stats: Dict):
+         print(table)
+         print('=' * len(table.splitlines()[0]))
+         print('\nFor more details, please look at the detail tables above')
++
++def show_backtest_results_filtered(config: Dict, backtest_stats: Dict):
++    stake_currency = config['stake_currency']
++
++    for strategy, results in backtest_stats['strategy'].items():
++        show_backtest_result(strategy, results, stake_currency)
++
++    if len(backtest_stats['strategy']) > 1:
++        # Print Strategy summary table
++
++        table = text_table_strategy(backtest_stats['strategy_comparison'], stake_currency)
++        print(' STRATEGY SUMMARY '.center(len(table.splitlines()[0]), '='))
++        print(table)
++        print('=' * len(table.splitlines()[0]))
++        print('\nFor more details, please look at the detail tables above')
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

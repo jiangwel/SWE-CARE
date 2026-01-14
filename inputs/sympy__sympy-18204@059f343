@@ -1,0 +1,165 @@
+  Task-ID: sympy__sympy-18204@059f343
+  Please checkout to this commit first: c559a8421ac4865ebfe66024be6cd43a6103a62b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `ask` function needs `except KeyError: ` condition
+I am deeply interested in new assumption system, and trying with custom queries. But this led to an error when I meddled with assumptions.
+
+I'll exemplify with `Q.mersenne`, which is provided as an example in sympy's documentation page.
+
+```
+>>> from sympy.assumptions import register_handler, ask, Q
+>>> from sympy.assumptions.handlers import AskHandler
+>>> class MersenneHandler(AskHandler):
+...     # Mersenne numbers are in the form 2**n - 1, n integer
+...     @staticmethod
+...     def Integer(expr, assumptions):
+...         from sympy import log
+...         return ask(Q.integer(log(expr + 1, 2)))
+>>> register_handler('mersenne', MersenneHandler)
+>>> ask(Q.mersenne(7))
+```
+
+So far, so good.
+But when I extended this to Symbol and taught it a silly fact: "If n is mersenne, then n is mersenne.", it raised an error.
+
+```
+>>> from sympy.assumptions import register_handler, ask, Q
+>>> from sympy.assumptions.handlers import AskHandler
+>>> from sympy.logic.boolalg import conjuncts
+>>> class MersenneHandler(AskHandler):
+...     # Mersenne numbers are in the form 2**n - 1, n integer
+...     @staticmethod
+...     def Integer(expr, assumptions):
+...         from sympy import log
+...         if ask(Q.integer(log(expr + 1, 2))):
+...             return True
+...     @staticmethod
+...     def Symbol(expr, assumptions):
+...         if expr in conjuncts(assumptions):
+...             return True
+>>> register_handler('mersenne', MersenneHandler)
+
+>>> from sympy import Symbol
+>>> n = Symbol('n', integer=True)
+>>> ask(Q.mersenne(n), Q.mersenne(n))
+```
+This raised:
+```
+ Traceback (most recent call last)
+   1300         # See if there's a straight-forward conclusion we can make for the inference
+   1301         if local_facts_.is_Atom:
+-> 1302             if key in known_facts_dict[local_facts_]:
+   1303                 return True
+   1304             if Not(key) in known_facts_dict[local_facts_]:
+
+KeyError: Q.mersenne
+```
+
+(Of course, my original code wasn't about simply adding this kind of tautologic fact.)
+I tested by adding `except KeyError: pass` condition and it resolved the error.
+
+Maybe this small condition will be harmless to be added in the code?
+  </issue>
+  
+  <patch>
+  diff --git a/sympy/assumptions/ask.py b/sympy/assumptions/ask.py
+index b699fdab8727..d3595be56cba 100644
+--- a/sympy/assumptions/ask.py
++++ b/sympy/assumptions/ask.py
+@@ -1294,32 +1294,35 @@ def ask(proposition, assumptions=True, context=global_assumptions):
+     if local_facts.clauses and satisfiable(enc_cnf) is False:
+         raise ValueError("inconsistent assumptions %s" % assumptions)
+ 
+-    if local_facts.clauses:
+-        local_facts_ = CNF.CNF_to_cnf(local_facts)
+-
+-        # See if there's a straight-forward conclusion we can make for the inference
+-        if local_facts_.is_Atom:
+-            if key in known_facts_dict[local_facts_]:
+-                return True
+-            if Not(key) in known_facts_dict[local_facts_]:
+-                return False
+-        elif (isinstance(local_facts_, And) and
+-              all(k in known_facts_dict for k in local_facts_.args)):
+-            for assum in local_facts_.args:
+-                if assum.is_Atom:
+-                    if key in known_facts_dict[assum]:
+-                        return True
+-                    if Not(key) in known_facts_dict[assum]:
+-                        return False
+-                elif isinstance(assum, Not) and assum.args[0].is_Atom:
+-                    if key in known_facts_dict[assum]:
+-                        return False
+-                    if Not(key) in known_facts_dict[assum]:
+-                        return True
+-        elif (isinstance(key, Predicate) and
+-              isinstance(local_facts_, Not) and local_facts_.args[0].is_Atom):
+-            if local_facts_.args[0] in known_facts_dict[key]:
+-                return False
++    try:
++        if local_facts.clauses:
++            local_facts_ = CNF.CNF_to_cnf(local_facts)
++
++            # See if there's a straight-forward conclusion we can make for the inference
++            if local_facts_.is_Atom:
++                if key in known_facts_dict[local_facts_]:
++                    return True
++                if Not(key) in known_facts_dict[local_facts_]:
++                    return False
++            elif (isinstance(local_facts_, And) and
++                  all(k in known_facts_dict for k in local_facts_.args)):
++                for assum in local_facts_.args:
++                    if assum.is_Atom:
++                        if key in known_facts_dict[assum]:
++                            return True
++                        if Not(key) in known_facts_dict[assum]:
++                            return False
++                    elif isinstance(assum, Not) and assum.args[0].is_Atom:
++                        if key in known_facts_dict[assum]:
++                            return False
++                        if Not(key) in known_facts_dict[assum]:
++                            return True
++            elif (isinstance(key, Predicate) and
++                  isinstance(local_facts_, Not) and local_facts_.args[0].is_Atom):
++                if local_facts_.args[0] in known_facts_dict[key]:
++                    return False
++    except KeyError:
++        pass
+ 
+     # direct resolution method, no logic
+     res = key(expr)._eval_ask(assumptions)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

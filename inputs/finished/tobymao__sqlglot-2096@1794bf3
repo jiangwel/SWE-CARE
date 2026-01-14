@@ -1,0 +1,639 @@
+  Task-ID: tobymao__sqlglot-2096@1794bf3
+  Please checkout to this commit first: a20794ab986b3b6401b016132cf2c5e36d50f4a9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  add support for table cast to parse the tables correctly.
+Hello,
+
+Parser is unable to parse the query when there is a table cast function used in the query.
+
+**Code for your reference -**
+
+```
+import sqlglot.expressions as exp
+
+query ="""
+SELECT count(1)
+INTO V_Temp
+FROM TABLE(CAST(somelist as data_list))
+WHERE col like '%contact'
+"""
+
+expressions = sqlglot.parse_one(query, read='oracle')
+x = list(expressions.find_all(exp.Table))
+
+for i in x:
+listTables = str(i).split(' ')[0]
+print(listTables)
+```
+
+Above code fails as it cannot process table casting and throws the error as 'Expected TYPE after CAST'
+Request you to add support for table cast in query parsing.
+  </issue>
+  
+  <patch>
+  diff --git a/README.md b/README.md
+index 7bb895d5a8..6fa89d50f5 100644
+--- a/README.md
++++ b/README.md
+@@ -178,7 +178,7 @@ for table in parse_one("SELECT * FROM x JOIN y JOIN z").find_all(exp.Table):
+ 
+ ### Parser Errors
+ 
+-When the parser detects an error in the syntax, it raises a ParserError:
++When the parser detects an error in the syntax, it raises a ParseError:
+ 
+ ```python
+ import sqlglot
+diff --git a/sqlglot/dialects/bigquery.py b/sqlglot/dialects/bigquery.py
+index 917ee7b2bc..84ead67314 100644
+--- a/sqlglot/dialects/bigquery.py
++++ b/sqlglot/dialects/bigquery.py
+@@ -270,6 +270,8 @@ class Parser(parser.Parser):
+         LOG_BASE_FIRST = False
+         LOG_DEFAULTS_TO_LN = True
+ 
++        SUPPORTS_USER_DEFINED_TYPES = False
++
+         FUNCTIONS = {
+             **parser.Parser.FUNCTIONS,
+             "DATE": _parse_date,
+@@ -585,7 +587,7 @@ def attimezone_sql(self, expression: exp.AtTimeZone) -> str:
+ 
+             # BigQuery allows CAST(.. AS {STRING|TIMESTAMP} [FORMAT <fmt> [AT TIME ZONE <tz>]]).
+             # Only the TIMESTAMP one should use the below conversion, when AT TIME ZONE is included.
+-            if not isinstance(parent, exp.Cast) or not parent.to.is_type("text"):
++            if not isinstance(parent, exp.Cast) or not parent.to.is_type("text", only_kind=True):
+                 return self.func(
+                     "TIMESTAMP", self.func("DATETIME", expression.this, expression.args.get("zone"))
+                 )
+diff --git a/sqlglot/dialects/clickhouse.py b/sqlglot/dialects/clickhouse.py
+index fdab1209ba..20b33132e1 100644
+--- a/sqlglot/dialects/clickhouse.py
++++ b/sqlglot/dialects/clickhouse.py
+@@ -63,6 +63,8 @@ class Tokenizer(tokens.Tokenizer):
+         }
+ 
+     class Parser(parser.Parser):
++        SUPPORTS_USER_DEFINED_TYPES = False
++
+         FUNCTIONS = {
+             **parser.Parser.FUNCTIONS,
+             "ANY": exp.AnyValue.from_arg_list,
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index 06e111f12d..e7bffc0ee1 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -541,7 +541,7 @@ def date_trunc_to_time(args: t.List) -> exp.DateTrunc | exp.TimestampTrunc:
+     unit = seq_get(args, 0)
+     this = seq_get(args, 1)
+ 
+-    if isinstance(this, exp.Cast) and this.is_type("date"):
++    if isinstance(this, exp.Cast) and this.is_type("date", only_kind=True):
+         return exp.DateTrunc(unit=unit, this=this)
+     return exp.TimestampTrunc(this=this, unit=unit)
+ 
+diff --git a/sqlglot/dialects/drill.py b/sqlglot/dialects/drill.py
+index b63c945a71..bb87f0cc12 100644
+--- a/sqlglot/dialects/drill.py
++++ b/sqlglot/dialects/drill.py
+@@ -80,6 +80,7 @@ class Tokenizer(tokens.Tokenizer):
+     class Parser(parser.Parser):
+         STRICT_CAST = False
+         CONCAT_NULL_OUTPUTS_STRING = True
++        SUPPORTS_USER_DEFINED_TYPES = False
+ 
+         FUNCTIONS = {
+             **parser.Parser.FUNCTIONS,
+diff --git a/sqlglot/dialects/duckdb.py b/sqlglot/dialects/duckdb.py
+index 7e1ddf5d76..dae33508d9 100644
+--- a/sqlglot/dialects/duckdb.py
++++ b/sqlglot/dialects/duckdb.py
+@@ -87,11 +87,11 @@ def _struct_sql(self: generator.Generator, expression: exp.Struct) -> str:
+ 
+ 
+ def _datatype_sql(self: generator.Generator, expression: exp.DataType) -> str:
+-    if expression.is_type("array"):
++    if expression.is_type("array", only_kind=True):
+         return f"{self.expressions(expression, flat=True)}[]"
+ 
+     # Type TIMESTAMP / TIME WITH TIME ZONE does not support any modifiers
+-    if expression.is_type("timestamptz", "timetz"):
++    if expression.is_type("timestamptz", "timetz", only_kind=True):
+         return expression.this.value
+ 
+     return self.datatype_sql(expression)
+@@ -134,6 +134,7 @@ class Tokenizer(tokens.Tokenizer):
+ 
+     class Parser(parser.Parser):
+         CONCAT_NULL_OUTPUTS_STRING = True
++        SUPPORTS_USER_DEFINED_TYPES = False
+ 
+         BITWISE = {
+             **parser.Parser.BITWISE,
+@@ -190,11 +191,7 @@ def _parse_types(
+ 
+             # DuckDB treats NUMERIC and DECIMAL without precision as DECIMAL(18, 3)
+             # See: https://duckdb.org/docs/sql/data_types/numeric
+-            if (
+-                isinstance(this, exp.DataType)
+-                and this.is_type("numeric", "decimal")
+-                and not this.expressions
+-            ):
++            if isinstance(this, exp.DataType) and this.is_type("numeric", "decimal"):
+                 return exp.DataType.build("DECIMAL(18, 3)")
+ 
+             return this
+diff --git a/sqlglot/dialects/hive.py b/sqlglot/dialects/hive.py
+index b87ce5903a..74a529100d 100644
+--- a/sqlglot/dialects/hive.py
++++ b/sqlglot/dialects/hive.py
+@@ -89,7 +89,7 @@ def _date_diff_sql(self: generator.Generator, expression: exp.DateDiff) -> str:
+ 
+ def _json_format_sql(self: generator.Generator, expression: exp.JSONFormat) -> str:
+     this = expression.this
+-    if isinstance(this, exp.Cast) and this.is_type("json") and this.this.is_string:
++    if isinstance(this, exp.Cast) and this.is_type("json", only_kind=True) and this.this.is_string:
+         # Since FROM_JSON requires a nested type, we always wrap the json string with
+         # an array to ensure that "naked" strings like "'a'" will be handled correctly
+         wrapped_json = exp.Literal.string(f"[{this.this.name}]")
+@@ -220,6 +220,7 @@ class Tokenizer(tokens.Tokenizer):
+     class Parser(parser.Parser):
+         LOG_DEFAULTS_TO_LN = True
+         STRICT_CAST = False
++        SUPPORTS_USER_DEFINED_TYPES = False
+ 
+         FUNCTIONS = {
+             **parser.Parser.FUNCTIONS,
+@@ -343,7 +344,8 @@ def _parse_types(
+             if this and not schema:
+                 return this.transform(
+                     lambda node: node.replace(exp.DataType.build("text"))
+-                    if isinstance(node, exp.DataType) and node.is_type("char", "varchar")
++                    if isinstance(node, exp.DataType)
++                    and node.is_type("char", "varchar", only_kind=True)
+                     else node,
+                     copy=False,
+                 )
+@@ -488,7 +490,7 @@ def datatype_sql(self, expression: exp.DataType) -> str:
+                 expression = exp.DataType.build("text")
+             elif expression.this in exp.DataType.TEMPORAL_TYPES:
+                 expression = exp.DataType.build(expression.this)
+-            elif expression.is_type("float"):
++            elif expression.is_type("float", only_kind=True):
+                 size_expression = expression.find(exp.DataTypeParam)
+                 if size_expression:
+                     size = int(size_expression.name)
+diff --git a/sqlglot/dialects/mysql.py b/sqlglot/dialects/mysql.py
+index 9fa7562bee..26e3a6e60c 100644
+--- a/sqlglot/dialects/mysql.py
++++ b/sqlglot/dialects/mysql.py
+@@ -185,6 +185,8 @@ class Tokenizer(tokens.Tokenizer):
+         COMMANDS = tokens.Tokenizer.COMMANDS - {TokenType.SHOW}
+ 
+     class Parser(parser.Parser):
++        SUPPORTS_USER_DEFINED_TYPES = False
++
+         FUNC_TOKENS = {
+             *parser.Parser.FUNC_TOKENS,
+             TokenType.DATABASE,
+diff --git a/sqlglot/dialects/postgres.py b/sqlglot/dialects/postgres.py
+index 139282ae6c..6e22d51ba1 100644
+--- a/sqlglot/dialects/postgres.py
++++ b/sqlglot/dialects/postgres.py
+@@ -109,7 +109,7 @@ def _string_agg_sql(self: generator.Generator, expression: exp.GroupConcat) -> s
+ 
+ 
+ def _datatype_sql(self: generator.Generator, expression: exp.DataType) -> str:
+-    if expression.is_type("array"):
++    if expression.is_type("array", only_kind=True):
+         return f"{self.expressions(expression, flat=True)}[]"
+     return self.datatype_sql(expression)
+ 
+diff --git a/sqlglot/dialects/presto.py b/sqlglot/dialects/presto.py
+index 6784188f8c..cf3155d64d 100644
+--- a/sqlglot/dialects/presto.py
++++ b/sqlglot/dialects/presto.py
+@@ -377,7 +377,7 @@ def generateseries_sql(self, expression: exp.GenerateSeries) -> str:
+             else:
+                 target_type = None
+ 
+-            if target_type and target_type.is_type("timestamp"):
++            if target_type and target_type.is_type("timestamp", only_kind=True):
+                 to = target_type.copy()
+ 
+                 if target_type is start.to:
+diff --git a/sqlglot/dialects/redshift.py b/sqlglot/dialects/redshift.py
+index 772e62880c..caf4c1b92d 100644
+--- a/sqlglot/dialects/redshift.py
++++ b/sqlglot/dialects/redshift.py
+@@ -37,6 +37,8 @@ class Redshift(Postgres):
+     }
+ 
+     class Parser(Postgres.Parser):
++        SUPPORTS_USER_DEFINED_TYPES = False
++
+         FUNCTIONS = {
+             **Postgres.Parser.FUNCTIONS,
+             "ADD_MONTHS": lambda args: exp.DateAdd(
+@@ -61,7 +63,7 @@ def _parse_types(
+ 
+             if (
+                 isinstance(this, exp.DataType)
+-                and this.is_type("varchar")
++                and this.is_type("varchar", only_kind=True)
+                 and this.expressions
+                 and this.expressions[0].this == exp.column("MAX")
+             ):
+@@ -159,7 +161,7 @@ def datatype_sql(self, expression: exp.DataType) -> str:
+             without precision we convert it to `VARCHAR(max)` and if it does have precision then we just convert
+             `TEXT` to `VARCHAR`.
+             """
+-            if expression.is_type("text"):
++            if expression.is_type("text", only_kind=True):
+                 expression = expression.copy()
+                 expression.set("this", exp.DataType.Type.VARCHAR)
+                 precision = expression.args.get("expressions")
+diff --git a/sqlglot/dialects/snowflake.py b/sqlglot/dialects/snowflake.py
+index 87cfe2f213..3f22c63d12 100644
+--- a/sqlglot/dialects/snowflake.py
++++ b/sqlglot/dialects/snowflake.py
+@@ -157,9 +157,9 @@ def _nullifzero_to_if(args: t.List) -> exp.If:
+ 
+ 
+ def _datatype_sql(self: generator.Generator, expression: exp.DataType) -> str:
+-    if expression.is_type("array"):
++    if expression.is_type("array", only_kind=True):
+         return "ARRAY"
+-    elif expression.is_type("map"):
++    elif expression.is_type("map", only_kind=True):
+         return "OBJECT"
+     return self.datatype_sql(expression)
+ 
+@@ -216,6 +216,7 @@ class Snowflake(Dialect):
+ 
+     class Parser(parser.Parser):
+         IDENTIFY_PIVOT_STRINGS = True
++        SUPPORTS_USER_DEFINED_TYPES = False
+ 
+         FUNCTIONS = {
+             **parser.Parser.FUNCTIONS,
+diff --git a/sqlglot/dialects/spark2.py b/sqlglot/dialects/spark2.py
+index f5c00ae0de..117d5d6dbf 100644
+--- a/sqlglot/dialects/spark2.py
++++ b/sqlglot/dialects/spark2.py
+@@ -242,10 +242,12 @@ class Generator(Hive.Generator):
+         CREATE_FUNCTION_RETURN_AS = False
+ 
+         def cast_sql(self, expression: exp.Cast, safe_prefix: t.Optional[str] = None) -> str:
+-            if isinstance(expression.this, exp.Cast) and expression.this.is_type("json"):
++            if isinstance(expression.this, exp.Cast) and expression.this.is_type(
++                "json", only_kind=True
++            ):
+                 schema = f"'{self.sql(expression, 'to')}'"
+                 return self.func("FROM_JSON", expression.this.this, schema)
+-            if expression.is_type("json"):
++            if expression.is_type("json", only_kind=True):
+                 return self.func("TO_JSON", expression.this)
+ 
+             return super(Hive.Generator, self).cast_sql(expression, safe_prefix=safe_prefix)
+@@ -255,7 +257,7 @@ def columndef_sql(self, expression: exp.ColumnDef, sep: str = " ") -> str:
+                 expression,
+                 sep=": "
+                 if isinstance(expression.parent, exp.DataType)
+-                and expression.parent.is_type("struct")
++                and expression.parent.is_type("struct", only_kind=True)
+                 else sep,
+             )
+ 
+diff --git a/sqlglot/dialects/sqlite.py b/sqlglot/dialects/sqlite.py
+index 99fb39b0ee..92d1cc2357 100644
+--- a/sqlglot/dialects/sqlite.py
++++ b/sqlglot/dialects/sqlite.py
+@@ -140,7 +140,7 @@ class Generator(generator.Generator):
+         LIMIT_FETCH = "LIMIT"
+ 
+         def cast_sql(self, expression: exp.Cast, safe_prefix: t.Optional[str] = None) -> str:
+-            if expression.is_type("date"):
++            if expression.is_type("date", only_kind=True):
+                 return self.func("DATE", expression.this)
+ 
+             return super().cast_sql(expression)
+diff --git a/sqlglot/dialects/trino.py b/sqlglot/dialects/trino.py
+index af0f78db7f..0c953a1f36 100644
+--- a/sqlglot/dialects/trino.py
++++ b/sqlglot/dialects/trino.py
+@@ -13,3 +13,6 @@ class Generator(Presto.Generator):
+ 
+     class Tokenizer(Presto.Tokenizer):
+         HEX_STRINGS = [("X'", "'")]
++
++    class Parser(Presto.Parser):
++        SUPPORTS_USER_DEFINED_TYPES = False
+diff --git a/sqlglot/expressions.py b/sqlglot/expressions.py
+index b34e833dc6..e7bebae9bc 100644
+--- a/sqlglot/expressions.py
++++ b/sqlglot/expressions.py
+@@ -3399,6 +3399,7 @@ class DataTypeParam(Expression):
+ class DataType(Expression):
+     arg_types = {
+         "this": True,
++        "expression": False,
+         "expressions": False,
+         "nested": False,
+         "values": False,
+@@ -3515,7 +3516,10 @@ class Type(AutoName):
+         Type.DOUBLE,
+     }
+ 
+-    NUMERIC_TYPES = {*INTEGER_TYPES, *FLOAT_TYPES}
++    NUMERIC_TYPES = {
++        *INTEGER_TYPES,
++        *FLOAT_TYPES,
++    }
+ 
+     TEMPORAL_TYPES = {
+         Type.TIME,
+@@ -3532,8 +3536,25 @@ class Type(AutoName):
+ 
+     @classmethod
+     def build(
+-        cls, dtype: str | DataType | DataType.Type, dialect: DialectType = None, **kwargs
++        cls,
++        dtype: str | DataType | DataType.Type,
++        dialect: DialectType = None,
++        udt: bool = False,
++        **kwargs,
+     ) -> DataType:
++        """
++        Constructs a DataType object.
++
++        Args:
++            dtype: the data type of interest.
++            dialect: the dialect to use for parsing `dtype`, in case it's a string.
++            udt: when set to True, `dtype` will be used as-is if it can't be parsed into a
++                DataType, thus creating a user-defined type.
++            kawrgs: additional arguments to pass in the constructor of DataType.
++
++        Returns:
++            The constructed DataType object.
++        """
+         from sqlglot import parse_one
+ 
+         if isinstance(dtype, str):
+@@ -3541,7 +3562,13 @@ def build(
+             if upper in DataType.META_TYPES:
+                 data_type_exp: t.Optional[Expression] = DataType(this=DataType.Type[upper])
+             else:
+-                data_type_exp = parse_one(dtype, read=dialect, into=DataType)
++                try:
++                    data_type_exp = parse_one(dtype, read=dialect, into=DataType)
++                except ParseError as ex:
++                    if udt:
++                        return DataType(this=DataType.Type.USERDEFINED, expression=dtype, **kwargs)
++
++                    raise ValueError(f"Unparsable data type value: {dtype}. {ex}")
+ 
+             if data_type_exp is None:
+                 raise ValueError(f"Unparsable data type value: {dtype}")
+@@ -3554,8 +3581,22 @@ def build(
+ 
+         return DataType(**{**data_type_exp.args, **kwargs})
+ 
+-    def is_type(self, *dtypes: str | DataType | DataType.Type) -> bool:
+-        return any(self.this == DataType.build(dtype).this for dtype in dtypes)
++    def is_type(self, *dtypes: str | DataType | DataType.Type, only_kind: bool = False) -> bool:
++        """
++        Checks whether this DataType matches one of the provided data types.
++
++        Args:
++            dtypes: the data types to compare this DataType to.
++            only_kind: when True, the only the "kind" of the DataType is checked, i.e. its Type value.
++                Otherwise, the type is checked using "structural equivalence" semantics, so that for
++                example array<int> will be different from array<float>.
++
++        Returns:
++            True, if and only if there is a type in `dtype` which is equal to this DataType.
++        """
++        if only_kind:
++            return any(self.this == DataType.build(dtype, udt=True).this for dtype in dtypes)
++        return any(self == DataType.build(dtype, udt=True) for dtype in dtypes)
+ 
+ 
+ # https://www.postgresql.org/docs/15/datatype-pseudo.html
+@@ -4111,19 +4152,31 @@ def to(self) -> DataType:
+     def output_name(self) -> str:
+         return self.name
+ 
+-    def is_type(self, *dtypes: str | DataType | DataType.Type) -> bool:
+-        return self.to.is_type(*dtypes)
++    def is_type(self, *dtypes: str | DataType | DataType.Type, only_kind: bool = False) -> bool:
++        """
++        Checks whether this Cast's DataType matches one of the provided data types.
+ 
++        Args:
++            dtypes: the data types to compare this Cast's DataType to.
++            only_kind: when True, the only the "kind" of the DataType is checked, i.e. its Type value.
++                Otherwise, the type is checked using "structural equality" semantics, so that for example
++                array<int> will be treated as a different type compared to array<float>.
+ 
+-class CastToStrType(Func):
+-    arg_types = {"this": True, "expression": True}
++        Returns:
++            True, if and only if there is a type in `dtype` which is equal to this Cast's DataType.
++        """
++        return self.to.is_type(*dtypes, only_kind=only_kind)
+ 
+ 
+-class Collate(Binary):
++class TryCast(Cast):
+     pass
+ 
+ 
+-class TryCast(Cast):
++class CastToStrType(Func):
++    arg_types = {"this": True, "to": True}
++
++
++class Collate(Binary):
+     pass
+ 
+ 
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 7fa75046d3..eb42673e3e 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -842,11 +842,14 @@ def datatypeparam_sql(self, expression: exp.DataTypeParam) -> str:
+     def datatype_sql(self, expression: exp.DataType) -> str:
+         type_value = expression.this
+ 
+-        type_sql = (
+-            self.TYPE_MAPPING.get(type_value, type_value.value)
+-            if isinstance(type_value, exp.DataType.Type)
+-            else type_value
+-        )
++        if type_value == exp.DataType.Type.USERDEFINED and expression.expression:
++            type_sql = self.sql(expression.expression)
++        else:
++            type_sql = (
++                self.TYPE_MAPPING.get(type_value, type_value.value)
++                if isinstance(type_value, exp.DataType.Type)
++                else type_value
++            )
+ 
+         nested = ""
+         interior = self.expressions(expression, flat=True)
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+index 9c3d762295..7014edc5f5 100644
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -833,6 +833,8 @@ class Parser(metaclass=_Parser):
+     LOG_BASE_FIRST = True
+     LOG_DEFAULTS_TO_LN = False
+ 
++    SUPPORTS_USER_DEFINED_TYPES = True
++
+     __slots__ = (
+         "error_level",
+         "error_message_context",
+@@ -3853,17 +3855,17 @@ def _parse_cast(self, strict: bool) -> exp.Expression:
+ 
+         if not self._match(TokenType.ALIAS):
+             if self._match(TokenType.COMMA):
+-                return self.expression(
+-                    exp.CastToStrType, this=this, expression=self._parse_string()
+-                )
+-            else:
+-                self.raise_error("Expected AS after CAST")
++                return self.expression(exp.CastToStrType, this=this, to=self._parse_string())
++
++            self.raise_error("Expected AS after CAST")
+ 
+         fmt = None
+-        to = self._parse_types()
++        to = self._parse_types() or (self.SUPPORTS_USER_DEFINED_TYPES and self._parse_id_var())
+ 
+         if not to:
+             self.raise_error("Expected TYPE after CAST")
++        elif isinstance(to, exp.Identifier):
++            to = exp.DataType.build(to.name, udt=True)
+         elif to.this == exp.DataType.Type.CHAR:
+             if self._match(TokenType.CHARACTER_SET):
+                 to = self.expression(exp.CharacterSet, this=self._parse_var_or_string())
+diff --git a/tests/dialects/test_dialect.py b/tests/dialects/test_dialect.py
+index 5f2afd75ac..29507cdce5 100644
+--- a/tests/dialects/test_dialect.py
++++ b/tests/dialects/test_dialect.py
+@@ -1,6 +1,13 @@
+ import unittest
+ 
+-from sqlglot import Dialect, Dialects, ErrorLevel, UnsupportedError, parse_one
++from sqlglot import (
++    Dialect,
++    Dialects,
++    ErrorLevel,
++    ParseError,
++    UnsupportedError,
++    parse_one,
++)
+ from sqlglot.dialects import Hive
+ 
+ 
+@@ -1764,3 +1771,19 @@ def test_count_if(self):
+                 "tsql": "SELECT COUNT_IF(col % 2 = 0) FILTER(WHERE col < 1000) FROM foo",
+             },
+         )
++
++    def test_cast_to_user_defined_type(self):
++        self.validate_all(
++            "CAST(x AS some_udt)",
++            write={
++                "": "CAST(x AS some_udt)",
++                "oracle": "CAST(x AS some_udt)",
++                "postgres": "CAST(x AS some_udt)",
++                "presto": "CAST(x AS some_udt)",
++                "teradata": "CAST(x AS some_udt)",
++                "tsql": "CAST(x AS some_udt)",
++            },
++        )
++
++        with self.assertRaises(ParseError):
++            parse_one("CAST(x AS some_udt)", read="bigquery")
+diff --git a/tests/dialects/test_oracle.py b/tests/dialects/test_oracle.py
+index 6403daa0bb..7d9ab90034 100644
+--- a/tests/dialects/test_oracle.py
++++ b/tests/dialects/test_oracle.py
+@@ -23,6 +23,9 @@ def test_oracle(self):
+         self.validate_identity("SELECT * FROM table_name@dblink_name.database_link_domain")
+         self.validate_identity("SELECT * FROM table_name SAMPLE (25) s")
+         self.validate_identity("SELECT * FROM V$SESSION")
++        self.validate_identity(
++            "SELECT COUNT(1) INTO V_Temp FROM TABLE(CAST(somelist AS data_list)) WHERE col LIKE '%contact'"
++        )
+         self.validate_identity(
+             "SELECT MIN(column_name) KEEP (DENSE_RANK FIRST ORDER BY column_name DESC) FROM table_name"
+         )
+diff --git a/tests/test_expressions.py b/tests/test_expressions.py
+index 64ef11f4cf..03debe6bea 100644
+--- a/tests/test_expressions.py
++++ b/tests/test_expressions.py
+@@ -896,3 +896,25 @@ def test_unnest(self):
+         second_subquery = ast.args["from"].this.this
+         innermost_subquery = list(ast.find_all(exp.Select))[1].parent
+         self.assertIs(second_subquery, innermost_subquery.unwrap())
++
++    def test_is_type(self):
++        ast = parse_one("CAST(x AS INT)")
++        assert ast.is_type("INT")
++        assert not ast.is_type("FLOAT")
++
++        ast = parse_one("CAST(x AS ARRAY<INT>)")
++        assert ast.is_type("ARRAY", only_kind=True)
++        assert ast.is_type("ARRAY<INT>", only_kind=True)
++        assert not ast.is_type("ARRAY<FLOAT>")
++
++        ast = parse_one("CAST(x AS STRUCT<a INT, b FLOAT>)")
++        assert ast.is_type("STRUCT", only_kind=True)
++        assert ast.is_type("STRUCT<a INT, b FLOAT>")
++        assert not ast.is_type("STRUCT<a VARCHAR, b INT>")
++
++        dtype = exp.DataType.build("foo", udt=True)
++        assert dtype.is_type("foo")
++        assert not dtype.is_type("bar")
++
++        with self.assertRaises(ValueError):
++            exp.DataType.build("foo")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

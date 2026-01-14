@@ -1,0 +1,195 @@
+  Task-ID: qutebrowser__qutebrowser-5498@d4a7d8e
+  Please checkout to this commit first: 58019cf809f22963abb8f6613676e80513b7428e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Show when in insert mode when using 'ui hide-statusbar true'
+I have the statusbar hidden apart from when there's a message/download.  However, its sometimes difficult to remember whether i've left a window in insert mode, or also whether I've entered it, having a similar effect to leaving caps-lock on in vim where, before you realise, you've already clicked a load of things.
+As such, it would be nice if the big green statusbar or even just a little icon would pop up when insert mode is active as an exception for hide-statusbar mode.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/help/settings.asciidoc b/doc/help/settings.asciidoc
+index cc020ea8830..82588c9a0ac 100644
+--- a/doc/help/settings.asciidoc
++++ b/doc/help/settings.asciidoc
+@@ -277,9 +277,9 @@
+ |<<session.default_name,session.default_name>>|Name of the session to save by default.
+ |<<session.lazy_restore,session.lazy_restore>>|Load a restored tab as soon as it takes focus.
+ |<<spellcheck.languages,spellcheck.languages>>|Languages to use for spell checking.
+-|<<statusbar.hide,statusbar.hide>>|Hide the statusbar unless a message is shown.
+ |<<statusbar.padding,statusbar.padding>>|Padding (in pixels) for the statusbar.
+ |<<statusbar.position,statusbar.position>>|Position of the status bar.
++|<<statusbar.show,statusbar.show>>|When to show the statusbar.
+ |<<statusbar.widgets,statusbar.widgets>>|List of widgets displayed in the statusbar.
+ |<<tabs.background,tabs.background>>|Open new tabs (middleclick/ctrl+click) in the background.
+ |<<tabs.close_mouse_button,tabs.close_mouse_button>>|Mouse button with which to close tabs.
+@@ -3540,14 +3540,6 @@ On QtWebEngine, this setting requires Qt 5.8 or newer.
+ 
+ On QtWebKit, this setting is unavailable.
+ 
+-[[statusbar.hide]]
+-=== statusbar.hide
+-Hide the statusbar unless a message is shown.
+-
+-Type: <<types,Bool>>
+-
+-Default: +pass:[false]+
+-
+ [[statusbar.padding]]
+ === statusbar.padding
+ Padding (in pixels) for the statusbar.
+@@ -3574,6 +3566,20 @@ Valid values:
+ 
+ Default: +pass:[bottom]+
+ 
++[[statusbar.show]]
++=== statusbar.show
++When to show the statusbar.
++
++Type: <<types,String>>
++
++Valid values:
++
++ * +always+: Always show the statusbar.
++ * +never+: Always hide the statusbar unless a message is shown.
++ * +in_mode+: Only show the statusbar when in modes other than normal mode or when a message is shown.
++
++Default: +pass:[always]+
++
+ [[statusbar.widgets]]
+ === statusbar.widgets
+ List of widgets displayed in the statusbar.
+diff --git a/qutebrowser/config/configdata.yml b/qutebrowser/config/configdata.yml
+index 664f9facfd8..4ca2231a3dc 100644
+--- a/qutebrowser/config/configdata.yml
++++ b/qutebrowser/config/configdata.yml
+@@ -1559,10 +1559,17 @@ spellcheck.languages:
+ 
+ ## statusbar
+ 
+-statusbar.hide:
+-  type: Bool
+-  default: false
+-  desc: Hide the statusbar unless a message is shown.
++statusbar.show:
++  default: always
++  type:
++    name: String
++    valid_values:
++    - always: Always show the statusbar.
++    - never: Always hide the statusbar unless a message is shown.
++    - in_mode: >- 
++        Only show the statusbar when in modes other than normal mode or
++        when a message is shown.
++  desc: When to show the statusbar.
+ 
+ statusbar.padding:
+   type: Padding
+diff --git a/qutebrowser/config/configfiles.py b/qutebrowser/config/configfiles.py
+index 7d567ebd3ce..498f2ae5d50 100644
+--- a/qutebrowser/config/configfiles.py
++++ b/qutebrowser/config/configfiles.py
+@@ -332,6 +332,11 @@ def migrate(self) -> None:
+             new_name='tabs.mode_on_change',
+             true_value='persist',
+             false_value='normal')
++        self._migrate_renamed_bool(
++            old_name='statusbar.hide',
++            new_name='statusbar.show',
++            true_value='never',
++            false_value='always')
+ 
+         for setting in ['tabs.title.format',
+                         'tabs.title.format_pinned',
+diff --git a/qutebrowser/mainwindow/statusbar/bar.py b/qutebrowser/mainwindow/statusbar/bar.py
+index 91bdb0b6e29..8ccfc20700e 100644
+--- a/qutebrowser/mainwindow/statusbar/bar.py
++++ b/qutebrowser/mainwindow/statusbar/bar.py
+@@ -203,7 +203,7 @@ def __repr__(self):
+ 
+     @pyqtSlot(str)
+     def _on_config_changed(self, option):
+-        if option == 'statusbar.hide':
++        if option == 'statusbar.show':
+             self.maybe_hide()
+         elif option == 'statusbar.padding':
+             self._set_hbox_padding()
+@@ -254,11 +254,23 @@ def _draw_widgets(self):
+     @pyqtSlot()
+     def maybe_hide(self):
+         """Hide the statusbar if it's configured to do so."""
++        strategy = config.val.statusbar.show
+         tab = self._current_tab()
+-        hide = config.val.statusbar.hide
+-        if hide or (tab is not None and tab.data.fullscreen):
++        if tab is not None and tab.data.fullscreen:
+             self.hide()
+-        else:
++        elif strategy == 'never':
++            self.hide()
++        elif strategy == 'in_mode':
++            try:
++                mode_manager = modeman.instance(self._win_id)
++                if mode_manager.mode == usertypes.KeyMode.normal:
++                    self.hide()
++                else:
++                    self.show()
++            except KeyError:
++                # If modeman hasn't been initialized, hide the bar.
++                self.hide()
++        elif strategy == 'always':
+             self.show()
+ 
+     def _set_hbox_padding(self):
+@@ -336,6 +348,8 @@ def set_text(self, val):
+     def on_mode_entered(self, mode):
+         """Mark certain modes in the commandline."""
+         mode_manager = modeman.instance(self._win_id)
++        if config.val.statusbar.show == 'in_mode':
++            self.show()
+         if mode_manager.parsers[mode].passthrough:
+             self._set_mode_text(mode.name)
+         if mode in [usertypes.KeyMode.insert,
+@@ -350,6 +364,8 @@ def on_mode_entered(self, mode):
+     def on_mode_left(self, old_mode, new_mode):
+         """Clear marked mode."""
+         mode_manager = modeman.instance(self._win_id)
++        if config.val.statusbar.show == 'in_mode':
++            self.hide()
+         if mode_manager.parsers[old_mode].passthrough:
+             if mode_manager.parsers[new_mode].passthrough:
+                 self._set_mode_text(new_mode.name)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

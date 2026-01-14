@@ -1,0 +1,150 @@
+  Task-ID: python__mypy-15941@1eb1abc
+  Please checkout to this commit first: 39b9b899178e6a30e7e8664c12f0eb610b8a44a5
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Possible `truthy-bool` false positive with `:=`
+Consider this code with `truthy-bool`:
+
+```python
+class A:
+    def method(self) -> bool:
+        return True  # whatever
+
+
+if (a := A()) and a.method():
+    print(a)
+```
+
+It will output:
+
+```
+» mypy ex.py --enable-error-code=truthy-bool
+ex.py:6: error: "ex.a" has type "A" which does not implement __bool__ or __len__ so it could always be true in boolean context  [truthy-bool]
+ex.py:6: error: "ex.A" returns "A" which does not implement __bool__ or __len__ so it could always be true in boolean context  [truthy-bool]
+```
+
+Two questions:
+1. Why two errors?
+2. Maybe we should skip this rule completely for `(:=) and ...`, because `a` is not really the main thing we check here?
+
+CC @ikonst
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 87dff91758f5..ba11e3341a48 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -5502,7 +5502,9 @@ def combine_maps(list_maps: list[TypeMap]) -> TypeMap:
+             else_map = {}
+         return if_map, else_map
+ 
+-    def find_isinstance_check(self, node: Expression) -> tuple[TypeMap, TypeMap]:
++    def find_isinstance_check(
++        self, node: Expression, *, is_walrus_value: bool = False
++    ) -> tuple[TypeMap, TypeMap]:
+         """Find any isinstance checks (within a chain of ands).  Includes
+         implicit and explicit checks for None and calls to callable.
+         Also includes TypeGuard functions.
+@@ -5516,12 +5518,14 @@ def find_isinstance_check(self, node: Expression) -> tuple[TypeMap, TypeMap]:
+         May return {}, {}.
+         Can return None, None in situations involving NoReturn.
+         """
+-        if_map, else_map = self.find_isinstance_check_helper(node)
++        if_map, else_map = self.find_isinstance_check_helper(node, is_walrus_value=is_walrus_value)
+         new_if_map = self.propagate_up_typemap_info(if_map)
+         new_else_map = self.propagate_up_typemap_info(else_map)
+         return new_if_map, new_else_map
+ 
+-    def find_isinstance_check_helper(self, node: Expression) -> tuple[TypeMap, TypeMap]:
++    def find_isinstance_check_helper(
++        self, node: Expression, *, is_walrus_value: bool = False
++    ) -> tuple[TypeMap, TypeMap]:
+         if is_true_literal(node):
+             return {}, None
+         if is_false_literal(node):
+@@ -5759,7 +5763,9 @@ def has_no_custom_eq_checks(t: Type) -> bool:
+             if else_assignment_map is not None:
+                 else_map.update(else_assignment_map)
+ 
+-            if_condition_map, else_condition_map = self.find_isinstance_check(node.value)
++            if_condition_map, else_condition_map = self.find_isinstance_check(
++                node.value, is_walrus_value=True
++            )
+ 
+             if if_condition_map is not None:
+                 if_map.update(if_condition_map)
+@@ -5797,7 +5803,10 @@ def has_no_custom_eq_checks(t: Type) -> bool:
+         # Restrict the type of the variable to True-ish/False-ish in the if and else branches
+         # respectively
+         original_vartype = self.lookup_type(node)
+-        self._check_for_truthy_type(original_vartype, node)
++        if not is_walrus_value:
++            # We don't check `:=` values in expresions like `(a := A())`,
++            # because they produce two error messages.
++            self._check_for_truthy_type(original_vartype, node)
+         vartype = try_expanding_sum_type_to_union(original_vartype, "builtins.bool")
+ 
+         if_type = true_only(vartype)
+diff --git a/test-data/unit/check-errorcodes.test b/test-data/unit/check-errorcodes.test
+index 796e1c1ea98e..55b7a49a3111 100644
+--- a/test-data/unit/check-errorcodes.test
++++ b/test-data/unit/check-errorcodes.test
+@@ -892,6 +892,9 @@ if a:
+ any_or_object: Union[object, Any]
+ if any_or_object:
+     pass
++
++if (my_foo := Foo()):  # E: "__main__.my_foo" has type "Foo" which does not implement __bool__ or __len__ so it could always be true in boolean context  [truthy-bool]
++    pass
+ [builtins fixtures/list.pyi]
+ 
+ [case testTruthyFunctions]
+diff --git a/test-data/unit/check-python38.test b/test-data/unit/check-python38.test
+index d83f29f2186a..697eae5076c9 100644
+--- a/test-data/unit/check-python38.test
++++ b/test-data/unit/check-python38.test
+@@ -310,8 +310,7 @@ def f(x: int = (c := 4)) -> int:
+         z2: NT  # E: Variable "NT" is not valid as a type \
+                 # N: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases
+ 
+-    if Alias := int:  # E: Function "Alias" could always be true in boolean context \
+-                      # E: Function "int" could always be true in boolean context
++    if Alias := int:  # E: Function "Alias" could always be true in boolean context
+         z3: Alias  # E: Variable "Alias" is not valid as a type \
+                    # N: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

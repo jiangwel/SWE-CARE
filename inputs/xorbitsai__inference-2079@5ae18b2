@@ -1,0 +1,2005 @@
+  Task-ID: xorbitsai__inference-2079@5ae18b2
+  Please checkout to this commit first: f5229a2354cd1592abdd8f3c757fc02be90a744c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  intervl2不支持流式请求
+### System Info / 系統信息
+
+cuda 11.8
+python3.9 
+xinference 0.14.0
+
+### Running Xinference with Docker? / 是否使用 Docker 运行 Xinfernece？
+
+- [X] docker / docker
+- [ ] pip install / 通过 pip install 安装
+- [ ] installation from source / 从源码安装
+
+### Version info / 版本信息
+
+0.14.0
+
+### The command used to start Xinference / 用以启动 xinference 的命令
+
+docker run --name xinference-19997-0807 \
+--shm-size="200g" \
+-p 19997:9997 \
+-e XINFERENCE_MODEL_SRC=modelscope \
+--gpus all \
+-v /home/llm/models:/llm/models \
+-d xprobe/xinference:v0.14.0 xinference-local -H 0.0.0.0
+docker
+
+### Reproduction / 复现过程
+
+webui流式请求 报错
+内部日志如下
+2024-08-07 08:43:45,385 xinference.api.restful_api 1 ERROR    Chat completion stream got an error: [address=0.0.0.0:35579, pid=838] Chat with model internvl-chat does not support stream.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/xinference/api/restful_api.py", line 1671, in stream_results
+    iterator = await model.chat(
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/backends/context.py", line 231, in send
+    return self._process_result_message(result)
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/backends/context.py", line 102, in _process_result_message
+    raise message.as_instanceof_cause()
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/backends/pool.py", line 656, in send
+    result = await self._run_coro(message.message_id, coro)
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/backends/pool.py", line 367, in _run_coro
+    return await coro
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/api.py", line 384, in __on_receive__
+    return await super().__on_receive__(message)  # type: ignore
+  File "xoscar/core.pyx", line 558, in __on_receive__
+    raise ex
+  File "xoscar/core.pyx", line 520, in xoscar.core._BaseActor.__on_receive__
+    async with self._lock:
+  File "xoscar/core.pyx", line 521, in xoscar.core._BaseActor.__on_receive__
+    with debug_async_timeout('actor_lock_timeout',
+  File "xoscar/core.pyx", line 526, in xoscar.core._BaseActor.__on_receive__
+    result = await result
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/utils.py", line 45, in wrapped
+    ret = await func(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/model.py", line 90, in wrapped_func
+    ret = await fn(self, *args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xoscar/api.py", line 462, in _wrapper
+    r = await func(self, *args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/model.py", line 523, in chat
+    response = await self._call_wrapper_json(
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/model.py", line 393, in _call_wrapper_json
+    return await self._call_wrapper("json", fn, *args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/model.py", line 114, in _async_wrapper
+    return await fn(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xinference/core/model.py", line 404, in _call_wrapper
+    ret = await asyncio.to_thread(fn, *args, **kwargs)
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/xinference/model/llm/pytorch/intern_vl.py", line 307, in chat
+    raise Exception(
+Exception: [address=0.0.0.0:35579, pid=838] Chat with model internvl-chat does not support stream.
+
+### Expected behavior / 期待表现
+
+期望能支持internvl2.0系列的流式请求
+  </issue>
+  
+  <patch>
+  diff --git a/xinference/model/llm/__init__.py b/xinference/model/llm/__init__.py
+index 749596fdbe..93342e86b5 100644
+--- a/xinference/model/llm/__init__.py
++++ b/xinference/model/llm/__init__.py
+@@ -129,7 +129,7 @@ def _install():
+     from .pytorch.vicuna import VicunaPytorchChatModel
+     from .pytorch.yi_vl import YiVLChatModel
+     from .sglang.core import SGLANGChatModel, SGLANGModel
+-    from .vllm.core import VLLMChatModel, VLLMModel
++    from .vllm.core import VLLMChatModel, VLLMModel, VLLMVisionModel
+ 
+     try:
+         from .pytorch.omnilmm import OmniLMMModel
+@@ -147,7 +147,7 @@ def _install():
+         ]
+     )
+     SGLANG_CLASSES.extend([SGLANGModel, SGLANGChatModel])
+-    VLLM_CLASSES.extend([VLLMModel, VLLMChatModel])
++    VLLM_CLASSES.extend([VLLMModel, VLLMChatModel, VLLMVisionModel])
+     MLX_CLASSES.extend([MLXModel, MLXChatModel])
+     TRANSFORMERS_CLASSES.extend(
+         [
+diff --git a/xinference/model/llm/llm_family.json b/xinference/model/llm/llm_family.json
+index a01f63569b..8ab94cfb19 100644
+--- a/xinference/model/llm/llm_family.json
++++ b/xinference/model/llm/llm_family.json
+@@ -7873,32 +7873,194 @@
+           "model_format": "pytorch",
+           "model_size_in_billions": 2,
+           "quantizations": [
+-              "none"
++            "4-bit",
++            "8-bit",
++            "none"
+           ],
+           "model_id": "OpenGVLab/Mini-InternVL-Chat-2B-V1-5",
+-          "model_revision": "ce3f67acff17281bacbf4b156f402a0580fb9605"
++          "model_revision": "ecbbd21dcf38caa74d925967b997167b0c7b3f47"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 4,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/Mini-InternVL-Chat-4B-V1-5",
++          "model_revision": "ce1559ddf9d87f5130aa5233b0e93b95e4e4161a"
+         },
+         {
+           "model_format": "pytorch",
+           "model_size_in_billions": 26,
+           "quantizations": [
+-              "none"
++            "8-bit",
++            "none"
+           ],
+           "model_id": "OpenGVLab/InternVL-Chat-V1-5",
+-          "model_revision": "e822119e5806946ce128043023a73d715ecabf8d"
++          "model_revision": "9db32d9127cac0c85961e169d75da57a18a847b1"
++        }
++    ],
++    "prompt_style": {
++        "style_name": "INTERNVL",
++        "system_prompt": "You are InternLM (书生·浦语), a helpful, honest, and harmless AI assistant developed by Shanghai AI Laboratory (上海人工智能实验室).",
++        "roles": [
++            "<|im_start|>user",
++            "<|im_start|>assistant"
++        ],
++        "intra_message_sep": "<|im_end|>",
++        "stop_token_ids": [
++            2,
++            92543,
++            92542
++        ],
++        "stop": [
++            "</s>",
++            "<|im_end|>",
++            "<|im_start|>"
++        ]
++    }
++  },
++  {
++    "version": 1,
++    "context_length": 32768,
++    "model_name": "internvl2",
++    "model_lang": [
++        "en",
++        "zh"
++    ],
++    "model_ability": [
++        "chat",
++        "vision"
++    ],
++    "model_description": "InternVL 2 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. ",
++    "model_specs": [
++      {
++          "model_format": "pytorch",
++          "model_size_in_billions": 1,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-1B",
++          "model_revision": "a9fc14aea824b6ea1d44f8778cad6b35512c4ce1"
+         },
+         {
+           "model_format": "pytorch",
++          "model_size_in_billions": 2,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-2B",
++          "model_revision": "422ad7c6335917bfb514958233955512338485a6"
++        },
++        {
++          "model_format": "awq",
++          "model_size_in_billions": 2,
++          "quantizations": [
++            "Int4"
++          ],
++          "model_id": "OpenGVLab/InternVL2-2B-AWQ",
++          "model_revision": "701bc3fc098a8a3b686b3b4135cfb77202be89e0"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 4,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-4B",
++          "model_revision": "b50544dafada6c41e80bfde2f57cc9b0140fc21c"
++        },
++        {
++          "model_format": "awq",
++          "model_size_in_billions": 4,
++          "quantizations": [
++            "Int4"
++          ],
++          "model_id": "OpenGVLab/InternVL2-8B-AWQ",
++          "model_revision": "9f1a4756b7ae18eb26d8a22b618dfc283e8193b3"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 8,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-8B",
++          "model_revision": "3bfd3664dea4f3da628785f5125d30f889701253"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 26,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-26B",
++          "model_revision": "b9f3c7e6d575b0115e076a3ffc46fd20b7586899"
++        },
++        {
++          "model_format": "awq",
+           "model_size_in_billions": 26,
+           "quantizations": [
+-              "Int8"
++            "Int4"
++          ],
++          "model_id": "OpenGVLab/InternVL2-26B-AWQ",
++          "model_revision": "469e0019ffd251e22ff6501a5c2321964e86ef0d"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 40,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-40B",
++          "model_revision": "725a12063bb855c966e30a0617d0ccd9e870d772"
++        },
++        {
++          "model_format": "awq",
++          "model_size_in_billions": 40,
++          "quantizations": [
++            "Int4"
++          ],
++          "model_id": "OpenGVLab/InternVL2-40B-AWQ",
++          "model_revision": "d92e140f6dfe8ea9679924c6a31898f42c4e1846"
++        },
++        {
++          "model_format": "pytorch",
++          "model_size_in_billions": 76,
++          "quantizations": [
++            "4-bit",
++            "8-bit",
++            "none"
++          ],
++          "model_id": "OpenGVLab/InternVL2-Llama3-76B",
++          "model_revision": "cf7914905f78e9e3560ddbd6f5dfc39becac494f"
++        },
++        {
++          "model_format": "awq",
++          "model_size_in_billions": 76,
++          "quantizations": [
++            "Int4"
+           ],
+-          "model_id": "OpenGVLab/InternVL-Chat-V1-5-{quantization}",
+-          "model_revision": "acaaed06937c603ab04f084216ecb0268160f538"
++          "model_id": "OpenGVLab/InternVL2-Llama3-76B-AWQ",
++          "model_revision": "1bc796bf80f2ebc7d6a14c15f55217a4600d50a4"
+         }
+     ],
+     "prompt_style": {
+-        "style_name": "INTERNLM2",
++        "style_name": "INTERNVL",
+         "system_prompt": "You are InternLM (书生·浦语), a helpful, honest, and harmless AI assistant developed by Shanghai AI Laboratory (上海人工智能实验室).",
+         "roles": [
+             "<|im_start|>user",
+@@ -7906,10 +8068,14 @@
+         ],
+         "intra_message_sep": "<|im_end|>",
+         "stop_token_ids": [
++            2,
++            92543,
+             92542
+         ],
+         "stop": [
+-            "<|im_end|>"
++            "</s>",
++            "<|im_end|>",
++            "<|im_start|>"
+         ]
+     }
+   },
+diff --git a/xinference/model/llm/llm_family_modelscope.json b/xinference/model/llm/llm_family_modelscope.json
+index 37f415a1f1..251b1002ea 100644
+--- a/xinference/model/llm/llm_family_modelscope.json
++++ b/xinference/model/llm/llm_family_modelscope.json
+@@ -4874,25 +4874,187 @@
+             "model_format": "pytorch",
+             "model_size_in_billions": 26,
+             "quantizations": [
+-                "none"
++              "4-bit",
++              "8-bit",
++              "none"
+             ],
+-          "model_hub": "modelscope",
+-            "model_id": "AI-ModelScope/InternVL-Chat-V1-5",
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL-Chat-V1-5",
++            "model_revision": "master"
++        }
++    ],
++    "prompt_style": {
++        "style_name": "INTERNVL",
++        "system_prompt": "You are InternLM (书生·浦语), a helpful, honest, and harmless AI assistant developed by Shanghai AI Laboratory (上海人工智能实验室).",
++        "roles": [
++            "<|im_start|>user",
++            "<|im_start|>assistant"
++        ],
++        "intra_message_sep": "<|im_end|>",
++        "stop_token_ids": [
++            2,
++            92543,
++            92542
++        ],
++        "stop": [
++            "</s>",
++            "<|im_end|>",
++            "<|im_start|>"
++        ]
++    }
++  },
++  {
++    "version": 1,
++    "context_length": 32768,
++    "model_name": "internvl2",
++    "model_lang": [
++        "en",
++        "zh"
++    ],
++    "model_ability": [
++        "chat",
++        "vision"
++    ],
++    "model_description": "InternVL 2 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. ",
++    "model_specs": [
++
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 1,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-1B",
++            "model_revision": "master"
++        },
++      {
++            "model_format": "pytorch",
++            "model_size_in_billions": 2,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-2B",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 2,
++            "quantizations": [
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-2B-AWQ",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 4,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-4B",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 8,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-8B",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 8,
++            "quantizations": [
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-8B-AWQ",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 26,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-26B",
+             "model_revision": "master"
+         },
+         {
+             "model_format": "pytorch",
+             "model_size_in_billions": 26,
+             "quantizations": [
+-                "Int8"
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-26B-AWQ",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 40,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-40B",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 40,
++            "quantizations": [
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-40B-AWQ",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 76,
++            "quantizations": [
++              "4-bit",
++              "8-bit",
++              "none"
++            ],
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-Llama3-76B",
++            "model_revision": "master"
++        },
++        {
++            "model_format": "pytorch",
++            "model_size_in_billions": 76,
++            "quantizations": [
++              "none"
+             ],
+-          "model_hub": "modelscope",
+-            "model_id": "AI-ModelScope/InternVL-Chat-V1-5-{quantization}",
++            "model_hub": "modelscope",
++            "model_id": "OpenGVLab/InternVL2-Llama3-76B-AWQ",
+             "model_revision": "master"
+         }
+     ],
+     "prompt_style": {
+-        "style_name": "INTERNLM2",
++        "style_name": "INTERNVL",
+         "system_prompt": "You are InternLM (书生·浦语), a helpful, honest, and harmless AI assistant developed by Shanghai AI Laboratory (上海人工智能实验室).",
+         "roles": [
+             "<|im_start|>user",
+@@ -4900,10 +5062,14 @@
+         ],
+         "intra_message_sep": "<|im_end|>",
+         "stop_token_ids": [
++            2,
++            92543,
+             92542
+         ],
+         "stop": [
+-            "<|im_end|>"
++            "</s>",
++            "<|im_end|>",
++            "<|im_start|>"
+         ]
+     }
+   },
+diff --git a/xinference/model/llm/pytorch/core.py b/xinference/model/llm/pytorch/core.py
+index ee5eb7ff70..09834155ab 100644
+--- a/xinference/model/llm/pytorch/core.py
++++ b/xinference/model/llm/pytorch/core.py
+@@ -69,7 +69,7 @@
+     "yi-vl-chat",
+     "deepseek-vl-chat",
+     "internvl-chat",
+-    "mini-internvl-chat",
++    "internvl2",
+     "cogvlm2",
+     "MiniCPM-Llama3-V-2_5",
+     "glm-4v",
+diff --git a/xinference/model/llm/pytorch/intern_vl.py b/xinference/model/llm/pytorch/intern_vl.py
+index d9155f3b4b..6e8dfdc93d 100644
+--- a/xinference/model/llm/pytorch/intern_vl.py
++++ b/xinference/model/llm/pytorch/intern_vl.py
+@@ -11,28 +11,25 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+-import base64
+ import logging
+ import time
+ import uuid
+ from concurrent.futures import ThreadPoolExecutor
+-from io import BytesIO
+-from typing import Dict, Iterator, List, Optional, Tuple, Union
++from typing import Dict, Iterator, List, Optional, Union
+ 
+-import requests
+ import torch
+-from PIL import Image
+ 
+-from ....model.utils import select_device
+ from ....types import (
+     ChatCompletion,
+     ChatCompletionChunk,
+     ChatCompletionMessage,
+     Completion,
+     CompletionChoice,
++    CompletionChunk,
+     CompletionUsage,
+ )
+ from ..llm_family import LLMFamilyV1, LLMSpecV1
++from ..utils import _decode_image
+ from .core import PytorchChatModel, PytorchGenerateConfig
+ 
+ logger = logging.getLogger(__name__)
+@@ -41,6 +38,142 @@
+ IMAGENET_STD = (0.229, 0.224, 0.225)
+ 
+ 
++def _message_content_to_intern(content, image_cnt):
++    if not isinstance(content, str):
++        texts = []
++        image_urls = []
++        for c in content:
++            c_type = c.get("type")
++            if c_type == "text":
++                texts.append(c["text"])
++            elif c_type == "image_url":
++                image_urls.append(c["image_url"]["url"])
++        image_futures = []
++        with ThreadPoolExecutor() as executor:
++            for image_url in image_urls:
++                fut = executor.submit(_decode_image, image_url)
++                image_futures.append(fut)
++        images = [fut.result() for fut in image_futures]
++        prefix = ""
++        for i, _ in enumerate(images):
++            prefix += f"Image-{image_cnt + i + 1}: <image>\n\n"
++        text = prefix + " ".join(texts)
++        if len(images) == 0:
++            return text, []
++        else:
++            return text, images
++    return content, []
++
++
++def _get_prompt_and_chat_history(
++    prompt: Union[str, List[Dict]],
++    chat_history: Optional[List[ChatCompletionMessage]] = None,
++):
++    # Convert openai history to intern vl history
++    images = []
++    history = []
++    image_cnt = 0
++    for h1, h2 in zip(*[iter(chat_history or [])] * 2):
++        content1, img = _message_content_to_intern(h1["content"], image_cnt)
++        content2, _ = _message_content_to_intern(h2["content"], image_cnt)
++        history.append([content1, content2])
++        images.extend(img)
++        image_cnt += len(img)
++
++    question, img = _message_content_to_intern(prompt, image_cnt)
++    images.extend(img)
++    return question, history, images
++
++
++def _build_transform(input_size=448):
++    import torchvision.transforms as T
++    from torchvision.transforms.functional import InterpolationMode
++
++    MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
++    transform = T.Compose(
++        [
++            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
++            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
++            T.ToTensor(),
++            T.Normalize(mean=MEAN, std=STD),
++        ]
++    )
++    return transform
++
++
++def _find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
++    best_ratio_diff = float("inf")
++    best_ratio = (1, 1)
++    area = width * height
++    for ratio in target_ratios:
++        target_aspect_ratio = ratio[0] / ratio[1]
++        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
++        if ratio_diff < best_ratio_diff:
++            best_ratio_diff = ratio_diff
++            best_ratio = ratio
++        elif ratio_diff == best_ratio_diff:
++            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
++                best_ratio = ratio
++    return best_ratio
++
++
++def _dynamic_preprocess(
++    image, min_num=1, max_num=12, image_size=448, use_thumbnail=False
++):
++    orig_width, orig_height = image.size
++    aspect_ratio = orig_width / orig_height
++
++    # calculate the existing image aspect ratio
++    target_ratios = set(
++        (i, j)
++        for n in range(min_num, max_num + 1)
++        for i in range(1, n + 1)
++        for j in range(1, n + 1)
++        if i * j <= max_num and i * j >= min_num
++    )
++    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
++
++    # find the closest aspect ratio to the target
++    target_aspect_ratio = _find_closest_aspect_ratio(
++        aspect_ratio, target_ratios, orig_width, orig_height, image_size
++    )
++
++    # calculate the target width and height
++    target_width = image_size * target_aspect_ratio[0]
++    target_height = image_size * target_aspect_ratio[1]
++    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
++
++    # resize the image
++    resized_img = image.resize((target_width, target_height))
++    processed_images = []
++    for i in range(blocks):
++        box = (
++            (i % (target_width // image_size)) * image_size,
++            (i // (target_width // image_size)) * image_size,
++            ((i % (target_width // image_size)) + 1) * image_size,
++            ((i // (target_width // image_size)) + 1) * image_size,
++        )
++        # split the image
++        split_img = resized_img.crop(box)
++        processed_images.append(split_img)
++    assert len(processed_images) == blocks
++    if use_thumbnail and len(processed_images) != 1:
++        thumbnail_img = image.resize((image_size, image_size))
++        processed_images.append(thumbnail_img)
++    return processed_images
++
++
++def _load_image(image_file, input_size=448, max_num=12):
++    image = image_file.convert("RGB")
++    transform = _build_transform(input_size=input_size)
++    images = _dynamic_preprocess(
++        image, image_size=input_size, use_thumbnail=True, max_num=max_num
++    )
++    pixel_values = [transform(image) for image in images]
++    pixel_values = torch.stack(pixel_values)
++    return pixel_values
++
++
+ class InternVLChatModel(PytorchChatModel):
+     def __init__(self, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+@@ -52,249 +185,89 @@ def match(
+         cls, model_family: "LLMFamilyV1", model_spec: "LLMSpecV1", quantization: str
+     ) -> bool:
+         family = model_family.model_family or model_family.model_name
+-        if "internvl" in family.lower():
+-            return True
+-        return False
++        if "internvl" not in family.lower():
++            return False
++        if "pytorch" not in model_spec.model_format:
++            return False
++        return True
+ 
+     def _get_model_class(self):
+         from transformers import AutoModel
+ 
+         return AutoModel
+ 
++    # Copy from InternVL page
++    # reference: https://huggingface.co/OpenGVLab/InternVL2-8B
++    def _split_model(self):
++        import math
++
++        device_map = {}
++        world_size = torch.cuda.device_count()
++        # single gpu
++        if world_size == 1:
++            return None
++        model_size = f"{self.model_spec.model_size_in_billions}B"
++        num_layers = {
++            "1B": 24,
++            "2B": 24,
++            "4B": 32,
++            "8B": 32,
++            "26B": 48,
++            "40B": 60,
++            "76B": 80,
++        }[model_size]
++        # Since the first GPU will be used for ViT, treat it as half a GPU.
++        num_layers_per_gpu = math.ceil(num_layers / (world_size - 0.5))
++        num_layers_per_gpu = [num_layers_per_gpu] * world_size
++        num_layers_per_gpu[0] = math.ceil(num_layers_per_gpu[0] * 0.5)
++        layer_cnt = 0
++        for i, num_layer in enumerate(num_layers_per_gpu):
++            for j in range(num_layer):
++                device_map[f"language_model.model.layers.{layer_cnt}"] = i
++                layer_cnt += 1
++        device_map["vision_model"] = 0
++        device_map["mlp1"] = 0
++        device_map["language_model.model.tok_embeddings"] = 0
++        device_map["language_model.model.embed_tokens"] = 0
++        device_map["language_model.output"] = 0
++        device_map["language_model.model.norm"] = 0
++        device_map["language_model.lm_head"] = 0
++        device_map[f"language_model.model.layers.{num_layers - 1}"] = 0
++        return device_map
++
+     def load(self, **kwargs):
+         from transformers import AutoModel, AutoTokenizer
+-        from transformers.generation import GenerationConfig
+ 
+         if self._check_tensorizer_integrity():
+             self._model, self._tokenizer = self._load_tensorizer()
+             return
+ 
+-        device = self._pytorch_model_config.get("device", "auto")
+-        device = select_device(device)
+-        # for multiple GPU, set back to auto to make multiple devices work
+-        device = "auto" if device == "cuda" else device
+-
+-        self._tokenizer = AutoTokenizer.from_pretrained(
+-            self.model_path,
+-            trust_remote_code=True,
+-        )
++        device = self._split_model()
+ 
+         kwargs = {
+             "torch_dtype": torch.bfloat16,
+             "low_cpu_mem_usage": True,
+             "trust_remote_code": True,
+-            "device_map": device,
+         }
+ 
+-        if "int8" in self.quantization.lower():
++        if device is not None:
++            kwargs["device_map"] = device
++
++        if "8-bit" in self.quantization.lower():
+             kwargs["load_in_8bit"] = True
+-        elif 2 == self.model_spec.model_size_in_billions:
+-            kwargs.pop("device_map")
++        elif "4-bit" in self.quantization.lower():
++            kwargs["load_in_4bit"] = True
+ 
+         self._model = AutoModel.from_pretrained(self.model_path, **kwargs).eval()
+ 
+-        if "int8" not in self.quantization.lower():
++        if device is None and "none" in self.quantization.lower():
+             self._model.cuda()
+ 
+-        # Specify hyperparameters for generation
+-        self._model.generation_config = GenerationConfig.from_pretrained(
++        self._tokenizer = AutoTokenizer.from_pretrained(
+             self.model_path,
+             trust_remote_code=True,
++            use_fast=False,
+         )
+-        self._save_tensorizer()
+-
+-    def _message_content_to_intern(self, content):
+-        def _load_image(_url):
+-            if _url.startswith("data:"):
+-                logging.info("Parse url by base64 decoder.")
+-                # https://platform.openai.com/docs/guides/vision/uploading-base-64-encoded-images
+-                # e.g. f"data:image/jpeg;base64,{base64_image}"
+-                _type, data = _url.split(";")
+-                _, ext = _type.split("/")
+-                data = data[len("base64,") :]
+-                data = base64.b64decode(data.encode("utf-8"))
+-                return Image.open(BytesIO(data)).convert("RGB")
+-            else:
+-                try:
+-                    response = requests.get(_url)
+-                except requests.exceptions.MissingSchema:
+-                    return Image.open(_url).convert("RGB")
+-                else:
+-                    return Image.open(BytesIO(response.content)).convert("RGB")
+-
+-        if not isinstance(content, str):
+-            texts = []
+-            image_urls = []
+-            for c in content:
+-                c_type = c.get("type")
+-                if c_type == "text":
+-                    texts.append(c["text"])
+-                elif c_type == "image_url":
+-                    image_urls.append(c["image_url"]["url"])
+-            image_futures = []
+-            with ThreadPoolExecutor() as executor:
+-                for image_url in image_urls:
+-                    fut = executor.submit(_load_image, image_url)
+-                    image_futures.append(fut)
+-            images = [fut.result() for fut in image_futures]
+-            text = " ".join(texts)
+-            if len(images) == 0:
+-                return text, None
+-            else:
+-                return text, images
+-        return content, None
+-
+-    def _history_content_to_intern(
+-        self,
+-        chat_history: List[ChatCompletionMessage],
+-        IMG_START_TOKEN="<img>",
+-        IMG_END_TOKEN="</img>",
+-        IMG_CONTEXT_TOKEN="<IMG_CONTEXT>",
+-    ):
+-        def _image_to_piexl_values(images):
+-            load_images = []
+-            for image in images:
+-                if image.startswith("data:"):
+-                    logging.info("Parse url by base64 decoder.")
+-                    # https://platform.openai.com/docs/guides/vision/uploading-base-64-encoded-images
+-                    # e.g. f"data:image/jpeg;base64,{base64_image}"
+-                    _type, data = image.split(";")
+-                    _, ext = _type.split("/")
+-                    data = data[len("base64,") :]
+-                    data = base64.b64decode(data.encode("utf-8"))
+-                    img = Image.open(BytesIO(data)).convert("RGB")
+-                    pixel_value = (
+-                        self._load_image(img, max_num=6).to(torch.bfloat16).cuda()
+-                    )
+-                    load_images.append(pixel_value)
+-                else:
+-                    try:
+-                        response = requests.get(image)
+-                    except requests.exceptions.MissingSchema:
+-                        img = Image.open(image).convert("RGB")
+-                    else:
+-                        img = Image.open(BytesIO(response.content)).convert("RGB")
+-                    pixel_value = (
+-                        self._load_image(img, max_num=6).to(torch.bfloat16).cuda()
+-                    )
+-                    load_images.append(pixel_value)
+-            return torch.cat(tuple(load_images), dim=0)
+-
+-        history: List[Tuple] = []
+-        pixel_values = None
+-        for i in range(0, len(chat_history), 2):
+-            tmp = []
+-            images: List[str] = []
+-            user = chat_history[i]["content"]
+-            if isinstance(user, List):
+-                for content in user:
+-                    c_type = content.get("type")
+-                    if c_type == "text":
+-                        tmp.append(content["text"])
+-                    elif c_type == "image_url" and not history:
+-                        images.append(content["image_url"]["url"])
+-                if not history:
+-                    pixel_values = _image_to_piexl_values(images)
+-                    image_bs = pixel_values.shape[0]
+-                    image_tokens = (
+-                        IMG_START_TOKEN
+-                        + IMG_CONTEXT_TOKEN * self._model.num_image_token * image_bs
+-                        + IMG_END_TOKEN
+-                    )
+-                    tmp[0] = image_tokens + "\n" + tmp[0]
+-            else:
+-                tmp.append(user)
+-            tmp.append(chat_history[i + 1]["content"])
+-            history.append(tuple(tmp))
+-        return history, pixel_values
+-
+-    def _find_closest_aspect_ratio(
+-        self, aspect_ratio, target_ratios, width, height, image_size
+-    ):
+-        best_ratio_diff = float("inf")
+-        best_ratio = (1, 1)
+-        area = width * height
+-        for ratio in target_ratios:
+-            target_aspect_ratio = ratio[0] / ratio[1]
+-            ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+-            if ratio_diff < best_ratio_diff:
+-                best_ratio_diff = ratio_diff
+-                best_ratio = ratio
+-            elif ratio_diff == best_ratio_diff:
+-                if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+-                    best_ratio = ratio
+-        return best_ratio
+-
+-    def _dynamic_preprocess(
+-        self, image, min_num=1, max_num=6, image_size=448, use_thumbnail=False
+-    ):
+-        orig_width, orig_height = image.size
+-        aspect_ratio = orig_width / orig_height
+-
+-        # calculate the existing image aspect ratio
+-        target_ratios = set(
+-            (i, j)
+-            for n in range(min_num, max_num + 1)
+-            for i in range(1, n + 1)
+-            for j in range(1, n + 1)
+-            if i * j <= max_num and i * j >= min_num
+-        )
+-        target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+-
+-        # find the closest aspect ratio to the target
+-        target_aspect_ratio = self._find_closest_aspect_ratio(
+-            aspect_ratio, target_ratios, orig_width, orig_height, image_size
+-        )
+-
+-        # calculate the target width and height
+-        target_width = image_size * target_aspect_ratio[0]
+-        target_height = image_size * target_aspect_ratio[1]
+-        blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+-
+-        # resize the image
+-        resized_img = image.resize((target_width, target_height))
+-        processed_images = []
+-        for i in range(blocks):
+-            box = (
+-                (i % (target_width // image_size)) * image_size,
+-                (i // (target_width // image_size)) * image_size,
+-                ((i % (target_width // image_size)) + 1) * image_size,
+-                ((i // (target_width // image_size)) + 1) * image_size,
+-            )
+-            # split the image
+-            split_img = resized_img.crop(box)
+-            processed_images.append(split_img)
+-        assert len(processed_images) == blocks
+-        if use_thumbnail and len(processed_images) != 1:
+-            thumbnail_img = image.resize((image_size, image_size))
+-            processed_images.append(thumbnail_img)
+-        return processed_images
+-
+-    def _build_transform(self, input_size):
+-        import torchvision.transforms as T
+-        from torchvision.transforms.functional import InterpolationMode
+-
+-        MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+-        transform = T.Compose(
+-            [
+-                T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+-                T.Resize(
+-                    (input_size, input_size), interpolation=InterpolationMode.BICUBIC
+-                ),
+-                T.ToTensor(),
+-                T.Normalize(mean=MEAN, std=STD),
+-            ]
+-        )
+-        return transform
+-
+-    def _load_image(self, image_file, input_size=448, max_num=6):
+-        transform = self._build_transform(input_size=input_size)
+-        images = self._dynamic_preprocess(
+-            image_file, image_size=input_size, use_thumbnail=True, max_num=max_num
+-        )
+-        pixel_values = [transform(image) for image in images]
+-        pixel_values = torch.stack(pixel_values)
+-        return pixel_values
+ 
+     def chat(
+         self,
+@@ -303,38 +276,82 @@ def chat(
+         chat_history: Optional[List[ChatCompletionMessage]] = None,
+         generate_config: Optional[PytorchGenerateConfig] = None,
+     ) -> Union[ChatCompletion, Iterator[ChatCompletionChunk]]:
+-        if generate_config and generate_config.get("stream"):
+-            raise Exception(
+-                f"Chat with model {self.model_family.model_name} does not support stream."
+-            )
+-        sanitized_config = {
+-            "num_beams": 1,
+-            "max_new_tokens": generate_config.get("max_tokens", 512)
++        generation_config = {
++            "max_new_tokens": generate_config.get("max_tokens", 1024)
+             if generate_config
+-            else 512,
++            else 1024,
+             "do_sample": False,
+         }
+ 
+-        content, image = self._message_content_to_intern(prompt)
++        stream = (
++            generate_config.get("stream", False)
++            if isinstance(generate_config, dict)
++            else False
++        )
++        stream_options = (
++            generate_config.get("stream_options", None)
++            if isinstance(generate_config, dict)
++            else False
++        )
++        include_usage = (
++            stream_options["include_usage"]
++            if isinstance(stream_options, dict)
++            else False
++        )
++
++        content, history, images = _get_prompt_and_chat_history(prompt, chat_history)
+ 
+-        history = None
+-        if chat_history:
+-            history, pixel_values = self._history_content_to_intern(chat_history)
++        num_patches_list = None
++        if len(images) == 1:
++            content = content.replace("Image-1: <image>\n\n", "<image>\n")
++            history = [
++                [item[0].replace("Image-1: <image>\n\n", "<image>\n"), item[1]]
++                for item in history
++            ]
++            pixel_values = _load_image(images[-1], max_num=12).to(torch.bfloat16).cuda()
++        elif len(images) > 1:
++            pixel_values = [
++                _load_image(img, max_num=12).to(torch.bfloat16).cuda() for img in images
++            ]
++            num_patches_list = [values.size(0) for values in pixel_values]
++            pixel_values = torch.cat(pixel_values, dim=0)
++        else:
++            pixel_values = None
++
++        if stream:
++            chunk = self._generate_stream(
++                pixel_values,
++                content,
++                generation_config,
++                num_patches_list,
++                history,
++                include_usage,
++            )
++            return self._to_chat_completion_chunks(chunk)
+         else:
+-            load_images = []
+-            for img in image:
+-                pixel_value = self._load_image(img, max_num=6).to(torch.bfloat16).cuda()
+-                load_images.append(pixel_value)
+-            pixel_values = torch.cat(tuple(load_images), dim=0)
++            chunk = self._generate(
++                pixel_values,
++                content,
++                generation_config,
++                num_patches_list,
++                history,
++            )
++            return self._to_chat_completion(chunk)
+ 
+-        response, history = self._model.chat(
++    def _generate(
++        self, pixel_values, content, generation_config, num_patches_list, history
++    ):
++        response = self._model.chat(
+             self._tokenizer,
+             pixel_values,
+             content,
+-            sanitized_config,
++            generation_config,
++            num_patches_list=num_patches_list,
+             history=history,
+-            return_history=True,
++            return_history=False,
+         )
++        prompt_tokens = self._get_input_tokens(content, history, num_patches_list)
++        completion_tokens = self._get_output_tokens(response)
+         chunk = Completion(
+             id=str(uuid.uuid1()),
+             object="text_completion",
+@@ -346,7 +363,121 @@ def chat(
+                 )
+             ],
+             usage=CompletionUsage(
+-                prompt_tokens=-1, completion_tokens=-1, total_tokens=-1
++                prompt_tokens=prompt_tokens,
++                completion_tokens=completion_tokens,
++                total_tokens=prompt_tokens + completion_tokens,
++            ),
++        )
++        return chunk
++
++    def _generate_stream(
++        self,
++        pixel_values,
++        content,
++        generation_config,
++        num_patches_list,
++        history,
++        include_usage,
++    ):
++        from threading import Thread
++
++        from transformers import TextIteratorStreamer
++
++        # Initialize the streamer
++        streamer = TextIteratorStreamer(
++            self._tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=10
++        )
++        # Define the generation configuration
++        generation_config["streamer"] = streamer
++        # Start the model chat in a separate thread
++        thread = Thread(
++            target=self._model.chat,
++            kwargs=dict(
++                tokenizer=self._tokenizer,
++                pixel_values=pixel_values,
++                question=content,
++                num_patches_list=num_patches_list,
++                history=history,
++                return_history=False,
++                generation_config=generation_config,
+             ),
+         )
+-        return self._to_chat_completion(chunk)
++        thread.start()
++
++        completion_id = str(uuid.uuid1())
++        prompt_tokens, completion_tokens, total_tokens = 0, 0, 0
++        prompt_tokens = self._get_input_tokens(content, history, num_patches_list)
++        # Loop through the streamer to get the new text as it is generated
++        for i, new_text in enumerate(streamer):
++            if new_text == self._model.conv_template.sep:
++                break
++            completion_choice = CompletionChoice(
++                text=new_text, index=0, logprobs=None, finish_reason=None
++            )
++            chunk = CompletionChunk(
++                id=completion_id,
++                object="text_completion",
++                created=int(time.time()),
++                model=self.model_uid,
++                choices=[completion_choice],
++            )
++            completion_tokens = i
++            total_tokens = prompt_tokens + completion_tokens
++            completion_usage = CompletionUsage(
++                prompt_tokens=prompt_tokens,
++                completion_tokens=completion_tokens,
++                total_tokens=total_tokens,
++            )
++            chunk["usage"] = completion_usage
++            yield chunk
++            if include_usage:
++                chunk = CompletionChunk(
++                    id=completion_id,
++                    object="text_completion",
++                    created=int(time.time()),
++                    model=self.model_uid,
++                    choices=[],
++                )
++                chunk["usage"] = CompletionUsage(
++                    prompt_tokens=prompt_tokens,
++                    completion_tokens=completion_tokens,
++                    total_tokens=total_tokens,
++                )
++                yield chunk
++
++    def _get_input_tokens(
++        self,
++        question,
++        history,
++        num_patches_list,
++        IMG_START_TOKEN="<img>",
++        IMG_END_TOKEN="</img>",
++        IMG_CONTEXT_TOKEN="<IMG_CONTEXT>",
++    ):
++        from ....thirdparty.internvl.conversation import get_conv_template
++
++        template = get_conv_template(self._model.template)
++        template.system_message = self._model.system_message
++
++        history = [] if history is None else history
++        for old_question, old_answer in history:
++            template.append_message(template.roles[0], old_question)
++            template.append_message(template.roles[1], old_answer)
++        template.append_message(template.roles[0], question)
++        template.append_message(template.roles[1], None)
++        query = template.get_prompt()
++
++        for num_patches in num_patches_list or []:
++            image_tokens = (
++                IMG_START_TOKEN
++                + IMG_CONTEXT_TOKEN * self._model.num_image_token * num_patches
++                + IMG_END_TOKEN
++            )
++            query = query.replace("<image>", image_tokens, 1)
++
++        model_inputs = self._tokenizer.encode(query, return_tensors="pt")
++        return len(model_inputs[0])
++
++    def _get_output_tokens(self, response):
++        output_ids = self._tokenizer.encode(response, return_tensors="pt")
++        return len(output_ids[0])
+diff --git a/xinference/model/llm/pytorch/utils.py b/xinference/model/llm/pytorch/utils.py
+index 3e29472880..f2b82923f0 100644
+--- a/xinference/model/llm/pytorch/utils.py
++++ b/xinference/model/llm/pytorch/utils.py
+@@ -42,7 +42,6 @@
+ if TYPE_CHECKING:
+     from ...llm.pytorch.core import PytorchModel
+ 
+-
+ logger = logging.getLogger(__name__)
+ 
+ 
+diff --git a/xinference/model/llm/utils.py b/xinference/model/llm/utils.py
+index aadcbf9471..8b4f9e3f99 100644
+--- a/xinference/model/llm/utils.py
++++ b/xinference/model/llm/utils.py
+@@ -11,14 +11,19 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import base64
+ import functools
+ import json
+ import logging
+ import os
+ import time
+ import uuid
++from io import BytesIO
+ from typing import AsyncGenerator, Dict, Iterator, List, Optional, Tuple, cast
+ 
++import requests
++from PIL import Image
++
+ from ...types import (
+     SPECIAL_TOOL_PROMPT,
+     ChatCompletion,
+@@ -60,7 +65,7 @@ def get_prompt(
+         chat_history: List[ChatCompletionMessage],
+         prompt_style: PromptStyleV1,
+         tools: Optional[List[Dict]] = None,
+-    ) -> str:
++    ):
+         """
+         Inspired by FastChat. Format chat history into a prompt according to the prompty style of
+         different models.
+@@ -504,6 +509,37 @@ def get_role(role_name: str):
+                 else:
+                     ret += role
+             return ret
++        elif prompt_style.style_name == "INTERNVL":
++            ret = []  # type: ignore
++            images = []  # type: ignore
++            for message in chat_history:
++                role = get_role(message["role"])
++                content = message["content"]
++                if isinstance(content, str):
++                    ret.append(message)  # type: ignore
++                elif isinstance(content, list):
++                    text = ""
++                    image_urls = []
++                    for c in content:
++                        c_type = c.get("type")
++                        if c_type == "text":
++                            text = c["text"]
++                        elif c_type == "image_url":
++                            image_urls.append(c["image_url"]["url"])
++                    image_futures = []
++                    from concurrent.futures import ThreadPoolExecutor
++
++                    with ThreadPoolExecutor() as executor:
++                        for image_url in image_urls:
++                            fut = executor.submit(_decode_image, image_url)
++                            image_futures.append(fut)
++                    images = [fut.result() for fut in image_futures]
++                    if len(image_futures) == 0:
++                        msg = {"role": role, "content": text}
++                    else:
++                        msg = {"role": role, "content": f"<image>\n{text}"}
++                    ret.append(msg)
++            return (ret, images)
+         else:
+             raise ValueError(f"Invalid prompt style: {prompt_style.style_name}")
+ 
+@@ -885,3 +921,22 @@ def get_model_version(
+     llm_family: LLMFamilyV1, llm_spec: LLMSpecV1, quantization: str
+ ) -> str:
+     return f"{llm_family.model_name}--{llm_spec.model_size_in_billions}B--{llm_spec.model_format}--{quantization}"
++
++
++def _decode_image(_url):
++    if _url.startswith("data:"):
++        logging.info("Parse url by base64 decoder.")
++        # https://platform.openai.com/docs/guides/vision/uploading-base-64-encoded-images
++        # e.g. f"data:image/jpeg;base64,{base64_image}"
++        _type, data = _url.split(";")
++        _, ext = _type.split("/")
++        data = data[len("base64,") :]
++        data = base64.b64decode(data.encode("utf-8"))
++        return Image.open(BytesIO(data)).convert("RGB")
++    else:
++        try:
++            response = requests.get(_url)
++        except requests.exceptions.MissingSchema:
++            return Image.open(_url).convert("RGB")
++        else:
++            return Image.open(BytesIO(response.content)).convert("RGB")
+diff --git a/xinference/model/llm/vllm/core.py b/xinference/model/llm/vllm/core.py
+index eb633db0b7..6b13963d3c 100644
+--- a/xinference/model/llm/vllm/core.py
++++ b/xinference/model/llm/vllm/core.py
+@@ -19,6 +19,7 @@
+ import uuid
+ from typing import (
+     TYPE_CHECKING,
++    Any,
+     AsyncGenerator,
+     Dict,
+     Iterable,
+@@ -28,6 +29,8 @@
+     Union,
+ )
+ 
++from transformers import AutoTokenizer
++
+ from ....types import (
+     ChatCompletion,
+     ChatCompletionChunk,
+@@ -86,6 +89,9 @@ class VLLMGenerateConfig(TypedDict, total=False):
+ except ImportError:
+     VLLM_INSTALLED = False
+ 
++VLLM_SUPPORTED_VISION_MODEL_LIST: List[str] = [
++    "internvl2",
++]
+ VLLM_SUPPORTED_MODELS = [
+     "llama-2",
+     "llama-3",
+@@ -158,6 +164,7 @@ class VLLMGenerateConfig(TypedDict, total=False):
+ if VLLM_INSTALLED and vllm.__version__ > "0.5.3":
+     VLLM_SUPPORTED_MODELS.append("llama-3.1")
+     VLLM_SUPPORTED_CHAT_MODELS.append("llama-3.1-instruct")
++    VLLM_SUPPORTED_CHAT_MODELS.append("internvl2")
+ 
+ 
+ class VLLMModel(LLM):
+@@ -383,7 +390,7 @@ def _convert_request_output_to_completion(
+ 
+     async def async_generate(
+         self,
+-        prompt: str,
++        prompt: Union[str, Dict[str, Any]],
+         generate_config: Optional[Dict] = None,
+         tools: object = False,
+     ) -> Union[Completion, AsyncGenerator[CompletionChunk, None]]:
+@@ -520,6 +527,11 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
+     def match(
+         cls, llm_family: "LLMFamilyV1", llm_spec: "LLMSpecV1", quantization: str
+     ) -> bool:
++        if (
++            llm_family.model_name in VLLM_SUPPORTED_VISION_MODEL_LIST
++            or llm_family.model_family in VLLM_SUPPORTED_VISION_MODEL_LIST
++        ):
++            return False
+         if llm_spec.model_format not in ["pytorch", "gptq", "awq"]:
+             return False
+         if llm_spec.model_format == "pytorch":
+@@ -606,3 +618,133 @@ async def async_chat(
+                     self.model_family, self.model_uid, c, tools
+                 )
+             return self._to_chat_completion(c)
++
++
++class VLLMVisionModel(VLLMModel, ChatModelMixin):
++    def __init__(
++        self,
++        model_uid: str,
++        model_family: "LLMFamilyV1",
++        model_spec: "LLMSpecV1",
++        quantization: str,
++        model_path: str,
++        model_config: Optional[VLLMModelConfig],
++        peft_model: Optional[List[LoRA]] = None,
++    ):
++        super().__init__(
++            model_uid,
++            model_family,
++            model_spec,
++            quantization,
++            model_path,
++            model_config,
++            peft_model,
++        )
++        self._tokenizer = None
++
++    def load(self):
++        try:
++            import vllm
++            from vllm.engine.arg_utils import AsyncEngineArgs
++            from vllm.engine.async_llm_engine import AsyncLLMEngine
++        except ImportError:
++            error_message = "Failed to import module 'vllm'"
++            installation_guide = [
++                "Please make sure 'vllm' is installed. ",
++                "You can install it by `pip install vllm`\n",
++            ]
++
++            raise ImportError(f"{error_message}\n\n{''.join(installation_guide)}")
++
++        if vllm.__version__ >= "0.3.1":
++            # from vllm v0.3.1, it uses cupy as NCCL backend
++            # in which cupy will fork a process
++            # only for xoscar >= 0.3.0, new process is allowed in subpool
++            # besides, xinference set start method as forkserver for unix
++            # we need to set it to fork to make cupy NCCL work
++            multiprocessing.set_start_method("fork", force=True)
++
++        self._model_config = self._sanitize_model_config(self._model_config)
++
++        logger.info(
++            f"Loading {self.model_uid} with following model config: {self._model_config}"
++        )
++
++        engine_args = AsyncEngineArgs(
++            model=self.model_path,
++            **self._model_config,
++        )
++        self._engine = AsyncLLMEngine.from_engine_args(engine_args)
++        self._tokenizer = AutoTokenizer.from_pretrained(
++            self.model_path, trust_remote_code=True
++        )
++
++    @classmethod
++    def match(
++        cls, llm_family: "LLMFamilyV1", llm_spec: "LLMSpecV1", quantization: str
++    ) -> bool:
++        if llm_spec.model_format != "pytorch":
++            return False
++        if llm_spec.model_format == "pytorch":
++            if quantization != "none" and not (quantization is None):
++                return False
++        if isinstance(llm_family, CustomLLMFamilyV1):
++            if llm_family.model_family not in VLLM_SUPPORTED_VISION_MODEL_LIST:
++                return False
++        else:
++            if llm_family.model_name not in VLLM_SUPPORTED_VISION_MODEL_LIST:
++                return False
++        if "chat" not in llm_family.model_ability:
++            return False
++        return VLLM_INSTALLED
++
++    def _sanitize_chat_config(
++        self,
++        generate_config: Optional[Dict] = None,
++    ) -> Dict:
++        if not generate_config:
++            generate_config = {}
++        if self.model_family.prompt_style:
++            if self.model_family.prompt_style.stop_token_ids:
++                generate_config.setdefault(
++                    "stop_token_ids",
++                    self.model_family.prompt_style.stop_token_ids.copy(),
++                )
++        return generate_config
++
++    async def async_chat(
++        self,
++        prompt: str,
++        system_prompt: Optional[str] = None,
++        chat_history: Optional[List[ChatCompletionMessage]] = None,
++        generate_config: Optional[Dict] = None,
++    ) -> Union[ChatCompletion, AsyncGenerator[ChatCompletionChunk, None]]:
++        # only support single image, waiting vllm support multi images
++        assert self.model_family.prompt_style is not None
++        prompt_style = self.model_family.prompt_style.copy()
++        chat_history = chat_history or []
++        messages, images = self.get_prompt(prompt, chat_history, prompt_style)
++        prompt = self._tokenizer.apply_chat_template(  # type: ignore
++            messages, tokenize=False, add_generation_prompt=True
++        )
++        if len(images) == 0:
++            inputs = {
++                "prompt": prompt,
++            }
++        else:
++            inputs = {
++                "prompt": prompt,
++                "multi_modal_data": {"image": images[-1]},  # type: ignore
++            }
++        generate_config = self._sanitize_chat_config(generate_config)
++
++        stream = generate_config.get("stream", None)
++
++        if stream:
++            agen = await self.async_generate(inputs, generate_config)
++            assert isinstance(agen, AsyncGenerator)
++            return self._async_to_chat_completion_chunks(agen)
++        else:
++            c = await self.async_generate(inputs, generate_config)
++            assert not isinstance(c, AsyncGenerator)
++            return self._to_chat_completion(c)
+diff --git a/xinference/thirdparty/internvl/__init__.py b/xinference/thirdparty/internvl/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/xinference/thirdparty/internvl/conversation.py b/xinference/thirdparty/internvl/conversation.py
+new file mode 100644
+index 0000000000..2fe37ad08c
+--- /dev/null
++++ b/xinference/thirdparty/internvl/conversation.py
+@@ -0,0 +1,393 @@
++"""
++Conversation prompt templates.
++
++We kindly request that you import fastchat instead of copying this file if you wish to use it.
++If you have changes in mind, please contribute back so the community can benefit collectively and continue to maintain these valuable templates.
++"""
++
++import dataclasses
++from enum import IntEnum, auto
++from typing import Any, Dict, List, Tuple, Union
++
++
++class SeparatorStyle(IntEnum):
++    """Separator styles."""
++
++    ADD_COLON_SINGLE = auto()
++    ADD_COLON_TWO = auto()
++    ADD_COLON_SPACE_SINGLE = auto()
++    NO_COLON_SINGLE = auto()
++    NO_COLON_TWO = auto()
++    ADD_NEW_LINE_SINGLE = auto()
++    LLAMA2 = auto()
++    CHATGLM = auto()
++    CHATML = auto()
++    CHATINTERN = auto()
++    DOLLY = auto()
++    RWKV = auto()
++    PHOENIX = auto()
++    ROBIN = auto()
++    FALCON_CHAT = auto()
++    CHATGLM3 = auto()
++    INTERNVL_ZH = auto()
++    MPT = auto()
++
++
++@dataclasses.dataclass
++class Conversation:
++    """A class that manages prompt templates and keeps all conversation history."""
++
++    # The name of this template
++    name: str
++    # The template of the system prompt
++    system_template: str = '{system_message}'
++    # The system message
++    system_message: str = ''
++    # The names of two roles
++    roles: Tuple[str] = ('USER', 'ASSISTANT')
++    # All messages. Each item is (role, message).
++    messages: List[List[str]] = ()
++    # The number of few shot examples
++    offset: int = 0
++    # The separator style and configurations
++    sep_style: SeparatorStyle = SeparatorStyle.ADD_COLON_SINGLE
++    sep: str = '\n'
++    sep2: str = None
++    # Stop criteria (the default one is EOS token)
++    stop_str: Union[str, List[str]] = None
++    # Stops generation if meeting any token in this list
++    stop_token_ids: List[int] = None
++
++    def get_prompt(self) -> str:
++        """Get the prompt for generation."""
++        system_prompt = self.system_template.format(system_message=self.system_message)
++        if self.sep_style == SeparatorStyle.ADD_COLON_SINGLE:
++            ret = system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    ret += role + ': ' + message + self.sep
++                else:
++                    ret += role + ':'
++            return ret
++        elif self.sep_style == SeparatorStyle.ADD_COLON_TWO:
++            seps = [self.sep, self.sep2]
++            ret = system_prompt + seps[0]
++            for i, (role, message) in enumerate(self.messages):
++                if message:
++                    ret += role + ': ' + message + seps[i % 2]
++                else:
++                    ret += role + ':'
++            return ret
++        elif self.sep_style == SeparatorStyle.ADD_COLON_SPACE_SINGLE:
++            ret = system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    ret += role + ': ' + message + self.sep
++                else:
++                    ret += role + ': '  # must be end with a space
++            return ret
++        elif self.sep_style == SeparatorStyle.ADD_NEW_LINE_SINGLE:
++            ret = '' if system_prompt == '' else system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    ret += role + '\n' + message + self.sep
++                else:
++                    ret += role + '\n'
++            return ret
++        elif self.sep_style == SeparatorStyle.NO_COLON_SINGLE:
++            ret = system_prompt
++            for role, message in self.messages:
++                if message:
++                    ret += role + message + self.sep
++                else:
++                    ret += role
++            return ret
++        elif self.sep_style == SeparatorStyle.NO_COLON_TWO:
++            seps = [self.sep, self.sep2]
++            ret = system_prompt
++            for i, (role, message) in enumerate(self.messages):
++                if message:
++                    ret += role + message + seps[i % 2]
++                else:
++                    ret += role
++            return ret
++        elif self.sep_style == SeparatorStyle.RWKV:
++            ret = system_prompt
++            for i, (role, message) in enumerate(self.messages):
++                if message:
++                    ret += (
++                        role
++                        + ': '
++                        + message.replace('\r\n', '\n').replace('\n\n', '\n')
++                    )
++                    ret += '\n\n'
++                else:
++                    ret += role + ':'
++            return ret
++        elif self.sep_style == SeparatorStyle.LLAMA2:
++            seps = [self.sep, self.sep2]
++            if self.system_message:
++                ret = system_prompt
++            else:
++                ret = '[INST] '
++            for i, (role, message) in enumerate(self.messages):
++                tag = self.roles[i % 2]
++                if message:
++                    if i == 0:
++                        ret += message + ' '
++                    else:
++                        ret += tag + ' ' + message + seps[i % 2]
++                else:
++                    ret += tag
++            return ret
++        elif self.sep_style == SeparatorStyle.CHATGLM:
++            # source: https://huggingface.co/THUDM/chatglm-6b/blob/1d240ba371910e9282298d4592532d7f0f3e9f3e/modeling_chatglm.py#L1302-L1308
++            # source2: https://huggingface.co/THUDM/chatglm2-6b/blob/e186c891cf64310ac66ef10a87e6635fa6c2a579/modeling_chatglm.py#L926
++            round_add_n = 1 if self.name == 'chatglm2' else 0
++            if system_prompt:
++                ret = system_prompt + self.sep
++            else:
++                ret = ''
++
++            for i, (role, message) in enumerate(self.messages):
++                if i % 2 == 0:
++                    ret += f'[Round {i//2 + round_add_n}]{self.sep}'
++
++                if message:
++                    ret += f'{role}：{message}{self.sep}'
++                else:
++                    ret += f'{role}：'
++            return ret
++        elif self.sep_style == SeparatorStyle.CHATML:
++            ret = '' if system_prompt == '' else system_prompt + self.sep + '\n'
++            for role, message in self.messages:
++                if message:
++                    ret += role + '\n' + message + self.sep + '\n'
++                else:
++                    ret += role + '\n'
++            return ret
++        elif self.sep_style == SeparatorStyle.CHATGLM3:
++            ret = ''
++            if self.system_message:
++                ret += system_prompt
++            for role, message in self.messages:
++                if message:
++                    ret += role + '\n' + ' ' + message
++                else:
++                    ret += role
++            return ret
++        elif self.sep_style == SeparatorStyle.CHATINTERN:
++            # source: https://huggingface.co/internlm/internlm-chat-7b-8k/blob/bd546fa984b4b0b86958f56bf37f94aa75ab8831/modeling_internlm.py#L771
++            seps = [self.sep, self.sep2]
++            ret = system_prompt
++            for i, (role, message) in enumerate(self.messages):
++                # if i % 2 == 0:
++                #     ret += "<s>"
++                if message:
++                    ret += role + ':' + message + seps[i % 2] + '\n'
++                else:
++                    ret += role + ':'
++            return ret
++        elif self.sep_style == SeparatorStyle.DOLLY:
++            seps = [self.sep, self.sep2]
++            ret = system_prompt
++            for i, (role, message) in enumerate(self.messages):
++                if message:
++                    ret += role + ':\n' + message + seps[i % 2]
++                    if i % 2 == 1:
++                        ret += '\n\n'
++                else:
++                    ret += role + ':\n'
++            return ret
++        elif self.sep_style == SeparatorStyle.PHOENIX:
++            ret = system_prompt
++            for role, message in self.messages:
++                if message:
++                    ret += role + ': ' + '<s>' + message + '</s>'
++                else:
++                    ret += role + ': ' + '<s>'
++            return ret
++        elif self.sep_style == SeparatorStyle.ROBIN:
++            ret = system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    ret += role + ':\n' + message + self.sep
++                else:
++                    ret += role + ':\n'
++            return ret
++        elif self.sep_style == SeparatorStyle.FALCON_CHAT:
++            ret = ''
++            if self.system_message:
++                ret += system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    ret += role + ': ' + message + self.sep
++                else:
++                    ret += role + ':'
++
++            return ret
++        elif self.sep_style == SeparatorStyle.INTERNVL_ZH:
++            seps = [self.sep, self.sep2]
++            ret = self.system_message + seps[0]
++            for i, (role, message) in enumerate(self.messages):
++                if message:
++                    ret += role + ': ' + message + seps[i % 2]
++                else:
++                    ret += role + ':'
++            return ret
++        elif self.sep_style == SeparatorStyle.MPT:
++            ret = system_prompt + self.sep
++            for role, message in self.messages:
++                if message:
++                    if type(message) is tuple:
++                        message, _, _ = message
++                    ret += role + message + self.sep
++                else:
++                    ret += role
++            return ret
++        else:
++            raise ValueError(f'Invalid style: {self.sep_style}')
++
++    def set_system_message(self, system_message: str):
++        """Set the system message."""
++        self.system_message = system_message
++
++    def append_message(self, role: str, message: str):
++        """Append a new message."""
++        self.messages.append([role, message])
++
++    def update_last_message(self, message: str):
++        """Update the last output.
++
++        The last message is typically set to be None when constructing the prompt,
++        so we need to update it in-place after getting the response from a model.
++        """
++        self.messages[-1][1] = message
++
++    def to_gradio_chatbot(self):
++        """Convert the conversation to gradio chatbot format."""
++        ret = []
++        for i, (role, msg) in enumerate(self.messages[self.offset :]):
++            if i % 2 == 0:
++                ret.append([msg, None])
++            else:
++                ret[-1][-1] = msg
++        return ret
++
++    def to_openai_api_messages(self):
++        """Convert the conversation to OpenAI chat completion format."""
++        ret = [{'role': 'system', 'content': self.system_message}]
++
++        for i, (_, msg) in enumerate(self.messages[self.offset :]):
++            if i % 2 == 0:
++                ret.append({'role': 'user', 'content': msg})
++            else:
++                if msg is not None:
++                    ret.append({'role': 'assistant', 'content': msg})
++        return ret
++
++    def copy(self):
++        return Conversation(
++            name=self.name,
++            system_template=self.system_template,
++            system_message=self.system_message,
++            roles=self.roles,
++            messages=[[x, y] for x, y in self.messages],
++            offset=self.offset,
++            sep_style=self.sep_style,
++            sep=self.sep,
++            sep2=self.sep2,
++            stop_str=self.stop_str,
++            stop_token_ids=self.stop_token_ids,
++        )
++
++    def dict(self):
++        return {
++            'template_name': self.name,
++            'system_message': self.system_message,
++            'roles': self.roles,
++            'messages': self.messages,
++            'offset': self.offset,
++        }
++
++
++# A global registry for all conversation templates
++conv_templates: Dict[str, Conversation] = {}
++
++
++def register_conv_template(template: Conversation, override: bool = False):
++    """Register a new conversation template."""
++    if not override:
++        assert (
++            template.name not in conv_templates
++        ), f'{template.name} has been registered.'
++
++    conv_templates[template.name] = template
++
++
++def get_conv_template(name: str) -> Conversation:
++    """Get a conversation template."""
++    return conv_templates[name].copy()
++
++
++# Both Hermes-2 and internlm2-chat are chatml-format conversation templates. The difference
++# is that during training, the preprocessing function for the Hermes-2 template doesn't add
++# <s> at the beginning of the tokenized sequence, while the internlm2-chat template does.
++# Therefore, they are completely equivalent during inference.
++register_conv_template(
++    Conversation(
++        name='Hermes-2',
++        system_template='<|im_start|>system\n{system_message}',
++        # note: The new system prompt was not used here to avoid changes in benchmark performance.
++        # system_message='我是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。',
++        system_message='你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。',
++        roles=('<|im_start|>user\n', '<|im_start|>assistant\n'),
++        sep_style=SeparatorStyle.MPT,
++        sep='<|im_end|>',
++        stop_token_ids=[
++            2,
++            6,
++            7,
++            8,
++        ],
++        stop_str='<|endoftext|>',
++    )
++)
++
++
++register_conv_template(
++    Conversation(
++        name='internlm2-chat',
++        system_template='<|im_start|>system\n{system_message}',
++        # note: The new system prompt was not used here to avoid changes in benchmark performance.
++        # system_message='我是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。',
++        system_message='你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。',
++        roles=('<|im_start|>user\n', '<|im_start|>assistant\n'),
++        sep_style=SeparatorStyle.MPT,
++        sep='<|im_end|>',
++        stop_token_ids=[
++            2,
++            92543,
++            92542
++        ]
++    )
++)
++
++
++register_conv_template(
++    Conversation(
++        name='phi3-chat',
++        system_template='<|system|>\n{system_message}',
++        # note: The new system prompt was not used here to avoid changes in benchmark performance.
++        # system_message='我是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。',
++        system_message='你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。',
++        roles=('<|user|>\n', '<|assistant|>\n'),
++        sep_style=SeparatorStyle.MPT,
++        sep='<|end|>',
++        stop_token_ids=[
++            2,
++            32000,
++            32007
++        ]
++    )
++)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

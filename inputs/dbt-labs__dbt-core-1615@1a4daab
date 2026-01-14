@@ -1,0 +1,401 @@
+  Task-ID: dbt-labs__dbt-core-1615@1a4daab
+  Please checkout to this commit first: 5a1f0bdda574022ef0ed3e93b5f94257b928d653
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Node selection is quadratic in running time
+## Issue
+The node selection algorithm is pretty obviously quadratic in running time and probably shouldn't be.
+
+### Issue description
+In particular, we make N^2+N calls to `is_selected_node`, where N is the number of nodes in the graph. At smallish numbers of nodes (~100-200) that's no big deal (~3-5% of runtime), but it begins to take up a disproportionate amount of running time - at 4k nodes it goes to 25% of runtime.
+
+I don't have a big problem with parsing and execution taking a long time for this number of nodes, but node selection? That's just silly!
+
+### Results
+I expected linear-time node selection. Or better, maybe? I don't want to think too hard about this, I just want to get from "pathologically bad" to "not noticeable".
+
+### System information
+This is on the current head of dev/louisa-may-alcott (72afd76e)
+
+OS/python isn't relevant
+
+### Steps to reproduce
+1) Make a project with 1k models and 1k schema.yml files, each with 3 tests
+2) Run the project `dbt --single-threaded -r output.profile run`
+3) Go out for a coffee, it'll be a bit!
+4) Check out your profile in snakeviz and see how enormous the "select_nodes" box is
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 08dcbe0e13d..72596c838c0 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,8 @@
++## dbt 0.14.1
++
++### Breaking changes
++ - the undocumented "graph" variable was removed from the parsing context ([#1615](https://github.com/fishtown-analytics/dbt/pull/1615))
++
+ ## dbt 0.14.0 - Wilt Chamberlain (July 10, 2019)
+ 
+ ### Overview
+diff --git a/core/dbt/context/common.py b/core/dbt/context/common.py
+index 858e71bfade..21e5eaf987d 100644
+--- a/core/dbt/context/common.py
++++ b/core/dbt/context/common.py
+@@ -398,8 +398,6 @@ def generate_base(model, model_dict, config, manifest, source_config,
+         "exceptions": dbt.exceptions.wrapped_exports(model),
+         "execute": provider.execute,
+         "flags": dbt.flags,
+-        # TODO: Do we have to leave this in?
+-        "graph": manifest.to_flat_graph(),
+         "log": log,
+         "model": model_dict,
+         "modules": get_context_modules(),
+diff --git a/core/dbt/contracts/graph/manifest.py b/core/dbt/contracts/graph/manifest.py
+index 7002b5af512..0fcadbdd36e 100644
+--- a/core/dbt/contracts/graph/manifest.py
++++ b/core/dbt/contracts/graph/manifest.py
+@@ -379,22 +379,6 @@ def patch_nodes(self, patches):
+                     'not found or is disabled').format(patch.name)
+                 )
+ 
+-    def to_flat_graph(self):
+-        """Convert the parsed manifest to the 'flat graph' that the compiler
+-        expects.
+-
+-        Kind of hacky note: everything in the code is happy to deal with
+-        macros as ParsedMacro objects (in fact, it's been changed to require
+-        that), so those can just be returned without any work. Nodes sadly
+-        require a lot of work on the compiler side.
+-
+-        Ideally in the future we won't need to have this method.
+-        """
+-        return {
+-            'nodes': {k: v.to_shallow_dict() for k, v in self.nodes.items()},
+-            'macros': self.macros,
+-        }
+-
+     def __getattr__(self, name):
+         raise AttributeError("'{}' object has no attribute '{}'".format(
+             type(self).__name__, name)
+diff --git a/core/dbt/graph/selector.py b/core/dbt/graph/selector.py
+index 6351c3fa4d4..0f37ce08347 100644
+--- a/core/dbt/graph/selector.py
++++ b/core/dbt/graph/selector.py
+@@ -1,7 +1,7 @@
+ import networkx as nx
+ from dbt.logger import GLOBAL_LOGGER as logger
+ 
+-from dbt.utils import is_enabled, get_materialization, coalesce
++from dbt.utils import is_enabled, coalesce
+ from dbt.node_types import NodeType
+ import dbt.exceptions
+ 
+@@ -315,40 +315,6 @@ def get_selected(self, include, exclude, resource_types, tags, required):
+ 
+         return filtered_nodes
+ 
+-    def is_ephemeral_model(self, node):
+-        is_model = node.get('resource_type') == NodeType.Model
+-        is_ephemeral = get_materialization(node) == 'ephemeral'
+-        return is_model and is_ephemeral
+-
+-    def get_ancestor_ephemeral_nodes(self, selected_nodes):
+-        node_names = {}
+-        for node_id in selected_nodes:
+-            if node_id not in self.manifest.nodes:
+-                continue
+-            node = self.manifest.nodes[node_id]
+-            # sources don't have ancestors and this results in a silly select()
+-            if node.resource_type == NodeType.Source:
+-                continue
+-            node_names[node_id] = node.name
+-
+-        include_spec = [
+-            '+{}'.format(node_names[node])
+-            for node in selected_nodes if node in node_names
+-        ]
+-        if not include_spec:
+-            return set()
+-
+-        all_ancestors = self.select_nodes(self.linker.graph, include_spec, [])
+-
+-        res = []
+-        for ancestor in all_ancestors:
+-            ancestor_node = self.manifest.nodes.get(ancestor, None)
+-
+-            if ancestor_node and self.is_ephemeral_model(ancestor_node):
+-                res.append(ancestor)
+-
+-        return set(res)
+-
+     def select(self, query):
+         include = query.get('include')
+         exclude = query.get('exclude')
+@@ -359,6 +325,15 @@ def select(self, query):
+         selected = self.get_selected(include, exclude, resource_types, tags,
+                                      required)
+ 
+-        addins = self.get_ancestor_ephemeral_nodes(selected)
++        # we used to carefully go through all node ancestors and add those if
++        # they were ephemeral. Sadly, the algorithm we used ended up being
++        # O(n^2). Instead, since ephemeral nodes are almost free, just add all
++        # ephemeral nodes in the graph.
++        # someday at large enough scale we might want to prune it to only be
++        # ancestors of the selected nodes so we can skip the compile.
++        addins = {
++            uid for uid, node in self.manifest.nodes.items()
++            if node.is_ephemeral_model
++        }
+ 
+         return selected | addins
+diff --git a/test/unit/test_manifest.py b/test/unit/test_manifest.py
+index 2bd4b0f087c..0992ff3a665 100644
+--- a/test/unit/test_manifest.py
++++ b/test/unit/test_manifest.py
+@@ -258,19 +258,6 @@ def test__nested_nodes(self):
+             []
+         )
+ 
+-    def test__to_flat_graph(self):
+-        nodes = copy.copy(self.nested_nodes)
+-        manifest = Manifest(nodes=nodes, macros={}, docs={},
+-                            generated_at=timestring(), disabled=[])
+-        flat_graph = manifest.to_flat_graph()
+-        flat_nodes = flat_graph['nodes']
+-        self.assertEqual(set(flat_graph), set(['nodes', 'macros']))
+-        self.assertEqual(flat_graph['macros'], {})
+-        self.assertEqual(set(flat_nodes), set(self.nested_nodes))
+-        expected_keys = set(ParsedNode.SCHEMA['required']) | {'agate_table'}
+-        for node in flat_nodes.values():
+-            self.assertEqual(set(node), expected_keys)
+-
+     @mock.patch.object(tracking, 'active_user')
+     def test_get_metadata(self, mock_user):
+         mock_user.id = 'cfc9500f-dc7f-4c83-9ea7-2c581c1b38cf'
+@@ -622,23 +609,3 @@ def test__nested_nodes(self):
+             child_map['model.snowplow.events'],
+             []
+         )
+-
+-    def test__to_flat_graph(self):
+-        nodes = copy.copy(self.nested_nodes)
+-        manifest = Manifest(nodes=nodes, macros={}, docs={},
+-                            generated_at=timestring(), disabled=[])
+-        flat_graph = manifest.to_flat_graph()
+-        flat_nodes = flat_graph['nodes']
+-        self.assertEqual(set(flat_graph), set(['nodes', 'macros']))
+-        self.assertEqual(flat_graph['macros'], {})
+-        self.assertEqual(set(flat_nodes), set(self.nested_nodes))
+-        parsed_keys = set(ParsedNode.SCHEMA['required']) | {'agate_table'}
+-        compiled_keys = set(CompiledNode.SCHEMA['required']) | {'agate_table'}
+-        compiled_count = 0
+-        for node in flat_nodes.values():
+-            if node.get('compiled'):
+-                self.assertEqual(set(node), compiled_keys)
+-                compiled_count += 1
+-            else:
+-                self.assertEqual(set(node), parsed_keys)
+-        self.assertEqual(compiled_count, 2)
+diff --git a/test/unit/test_parser.py b/test/unit/test_parser.py
+index a70d1d5b4ef..756d474bfc4 100644
+--- a/test/unit/test_parser.py
++++ b/test/unit/test_parser.py
+@@ -1692,88 +1692,82 @@ def test__process_refs__packages(self):
+ 
+         processed_manifest = ParserUtils.process_refs(manifest, 'root')
+         self.assertEqual(
+-            processed_manifest.to_flat_graph(),
++            processed_manifest.serialize()['nodes'],
+             {
+-                'macros': {},
+-                'nodes': {
+-                    'model.snowplow.events': {
+-                        'name': 'events',
+-                        'alias': 'events',
+-                        'database': 'test',
+-                        'schema': 'analytics',
+-                        'resource_type': 'model',
+-                        'unique_id': 'model.snowplow.events',
+-                        'fqn': ['snowplow', 'events'],
+-                        'empty': False,
+-                        'package_name': 'snowplow',
+-                        'refs': [],
+-                        'sources': [],
+-                        'depends_on': {
+-                            'nodes': [],
+-                            'macros': []
+-                        },
+-                        'config': self.disabled_config,
+-                        'tags': [],
+-                        'path': 'events.sql',
+-                        'original_file_path': 'events.sql',
+-                        'root_path': get_os_path('/usr/src/app'),
+-                        'raw_sql': 'does not matter',
+-                        'agate_table': None,
+-                        'columns': {},
+-                        'description': '',
++                'model.snowplow.events': {
++                    'name': 'events',
++                    'alias': 'events',
++                    'database': 'test',
++                    'schema': 'analytics',
++                    'resource_type': 'model',
++                    'unique_id': 'model.snowplow.events',
++                    'fqn': ['snowplow', 'events'],
++                    'empty': False,
++                    'package_name': 'snowplow',
++                    'refs': [],
++                    'sources': [],
++                    'depends_on': {
++                        'nodes': [],
++                        'macros': []
+                     },
+-                    'model.root.events': {
+-                        'name': 'events',
+-                        'alias': 'events',
+-                        'database': 'test',
+-                        'schema': 'analytics',
+-                        'resource_type': 'model',
+-                        'unique_id': 'model.root.events',
+-                        'fqn': ['root', 'events'],
+-                        'empty': False,
+-                        'package_name': 'root',
+-                        'refs': [],
+-                        'sources': [],
+-                        'depends_on': {
+-                            'nodes': [],
+-                            'macros': []
+-                        },
+-                        'config': self.model_config,
+-                        'tags': [],
+-                        'path': 'events.sql',
+-                        'original_file_path': 'events.sql',
+-                        'root_path': get_os_path('/usr/src/app'),
+-                        'raw_sql': 'does not matter',
+-                        'agate_table': None,
+-                        'columns': {},
+-                        'description': '',
++                    'config': self.disabled_config,
++                    'tags': [],
++                    'path': 'events.sql',
++                    'original_file_path': 'events.sql',
++                    'root_path': get_os_path('/usr/src/app'),
++                    'raw_sql': 'does not matter',
++                    'columns': {},
++                    'description': '',
++                },
++                'model.root.events': {
++                    'name': 'events',
++                    'alias': 'events',
++                    'database': 'test',
++                    'schema': 'analytics',
++                    'resource_type': 'model',
++                    'unique_id': 'model.root.events',
++                    'fqn': ['root', 'events'],
++                    'empty': False,
++                    'package_name': 'root',
++                    'refs': [],
++                    'sources': [],
++                    'depends_on': {
++                        'nodes': [],
++                        'macros': []
+                     },
+-                    'model.root.dep': {
+-                        'name': 'dep',
+-                        'alias': 'dep',
+-                        'database': 'test',
+-                        'schema': 'analytics',
+-                        'resource_type': 'model',
+-                        'unique_id': 'model.root.dep',
+-                        'fqn': ['root', 'dep'],
+-                        'empty': False,
+-                        'package_name': 'root',
+-                        'refs': [['events']],
+-                        'sources': [],
+-                        'depends_on': {
+-                            'nodes': ['model.root.events'],
+-                            'macros': []
+-                        },
+-                        'config': self.model_config,
+-                        'tags': [],
+-                        'path': 'multi.sql',
+-                        'original_file_path': 'multi.sql',
+-                        'root_path': get_os_path('/usr/src/app'),
+-                        'raw_sql': 'does not matter',
+-                        'agate_table': None,
+-                        'columns': {},
+-                        'description': '',
+-                    }
++                    'config': self.model_config,
++                    'tags': [],
++                    'path': 'events.sql',
++                    'original_file_path': 'events.sql',
++                    'root_path': get_os_path('/usr/src/app'),
++                    'raw_sql': 'does not matter',
++                    'columns': {},
++                    'description': '',
++                },
++                'model.root.dep': {
++                    'name': 'dep',
++                    'alias': 'dep',
++                    'database': 'test',
++                    'schema': 'analytics',
++                    'resource_type': 'model',
++                    'unique_id': 'model.root.dep',
++                    'fqn': ['root', 'dep'],
++                    'empty': False,
++                    'package_name': 'root',
++                    'refs': [['events']],
++                    'sources': [],
++                    'depends_on': {
++                        'nodes': ['model.root.events'],
++                        'macros': []
++                    },
++                    'config': self.model_config,
++                    'tags': [],
++                    'path': 'multi.sql',
++                    'original_file_path': 'multi.sql',
++                    'root_path': get_os_path('/usr/src/app'),
++                    'raw_sql': 'does not matter',
++                    'columns': {},
++                    'description': '',
+                 }
+             }
+         )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

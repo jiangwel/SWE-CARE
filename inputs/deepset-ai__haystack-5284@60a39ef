@@ -1,0 +1,145 @@
+  Task-ID: deepset-ai__haystack-5284@60a39ef
+  Please checkout to this commit first: ac412193ccca1abd624d9df67fe484146a39db43
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Improve robustness of get_task HF pipeline invocations
+**Is your feature request related to a problem? Please describe.**
+As a Haystack user, I noticed that when HF infra is temp down I can't use a newly added Cohere model. The issue has been traced to the `PromptModelInvocationLayer.supports` invocation order. Because HFLocalInvocationLayer is listed in `haystack/nodes/prompt/invocation_layer/__init__.py` before CohereInvocationLayer, HFLocalInvocationLayer gets registered via `__init_subclass__` mechanism before CohereInvocationLayer. Then when we invoke `HFLocalInvocationLayer.supports`, the get_task call blocks indefinitely, thus preventing the use of the Cohere-based PromptNode.  
+
+**Describe the solution you'd like**
+I would like Haystack PromptNode initialization to be as robust as possible and not dependent on HF infra outage, especially when I am not using one of the HF invocation layers for PromptNode. 
+
+**Describe alternatives you've considered**
+No resolution is possible atm aside from waiting for the outage to stop
+
+**Additional context**
+Add any other context or screenshots about the feature request here.
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/nodes/prompt/invocation_layer/__init__.py b/haystack/nodes/prompt/invocation_layer/__init__.py
+index 72df2edfda..a50aafc082 100644
+--- a/haystack/nodes/prompt/invocation_layer/__init__.py
++++ b/haystack/nodes/prompt/invocation_layer/__init__.py
+@@ -3,10 +3,10 @@
+ from haystack.nodes.prompt.invocation_layer.chatgpt import ChatGPTInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.azure_chatgpt import AzureChatGPTInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.handlers import TokenStreamingHandler, DefaultTokenStreamingHandler
+-from haystack.nodes.prompt.invocation_layer.hugging_face import HFLocalInvocationLayer
+-from haystack.nodes.prompt.invocation_layer.hugging_face_inference import HFInferenceEndpointInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.open_ai import OpenAIInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.anthropic_claude import AnthropicClaudeInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.cohere import CohereInvocationLayer
++from haystack.nodes.prompt.invocation_layer.hugging_face import HFLocalInvocationLayer
++from haystack.nodes.prompt.invocation_layer.hugging_face_inference import HFInferenceEndpointInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.sagemaker_hf_infer import SageMakerHFInferenceInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.sagemaker_hf_text_gen import SageMakerHFTextGenerationInvocationLayer
+diff --git a/haystack/nodes/prompt/invocation_layer/hugging_face.py b/haystack/nodes/prompt/invocation_layer/hugging_face.py
+index f7728b53fc..99d8d92ccf 100644
+--- a/haystack/nodes/prompt/invocation_layer/hugging_face.py
++++ b/haystack/nodes/prompt/invocation_layer/hugging_face.py
+@@ -21,7 +21,7 @@
+         GenerationConfig,
+         Pipeline,
+     )
+-    from transformers.pipelines import get_task
++    from huggingface_hub import model_info
+     from haystack.modeling.utils import initialize_device_settings  # pylint: disable=ungrouped-imports
+     from haystack.nodes.prompt.invocation_layer.handlers import HFTokenStreamingHandler
+ 
+@@ -43,6 +43,15 @@ def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwa
+             stop_result = torch.isin(self.stop_words["input_ids"], input_ids[-1])
+             return any(all(stop_word) for stop_word in stop_result)
+ 
++    def get_task(model: str, use_auth_token: Optional[Union[str, bool]] = None, timeout: float = 3.0) -> Optional[str]:
++        """
++        Simplified version of transformers.pipelines.get_task with support for timeouts
++        """
++        try:
++            return model_info(model, token=use_auth_token, timeout=timeout).pipeline_tag
++        except Exception as e:
++            raise RuntimeError(f"The task of {model} could not be checked because of the following error: {e}")
++
+ 
+ class HFLocalInvocationLayer(PromptModelInvocationLayer):
+     """
+diff --git a/test/prompt/invocation_layer/test_hugging_face.py b/test/prompt/invocation_layer/test_hugging_face.py
+index 5c30dd6b9c..80b00aa3fe 100644
+--- a/test/prompt/invocation_layer/test_hugging_face.py
++++ b/test/prompt/invocation_layer/test_hugging_face.py
+@@ -356,6 +356,10 @@ def test_streaming_stream_handler_param_in_constructor(mock_pipeline, mock_get_t
+     assert hf_streamer.token_handler == dtsh
+ 
+ 
++def raise_runtime_error(*args, **kwargs):
++    raise RuntimeError()
++
++
+ @pytest.mark.unit
+ def test_supports(tmp_path):
+     """
+@@ -368,7 +372,9 @@ def test_supports(tmp_path):
+         assert HFLocalInvocationLayer.supports("google/flan-t5-base")
+         assert HFLocalInvocationLayer.supports("mosaicml/mpt-7b")
+         assert HFLocalInvocationLayer.supports("CarperAI/stable-vicuna-13b-delta")
+-        assert mock_get_task.call_count == 3
++        mock_get_task.side_effect = raise_runtime_error
++        assert not HFLocalInvocationLayer.supports("google/flan-t5-base")
++        assert mock_get_task.call_count == 4
+ 
+     # some HF local model directory, let's use the one from test/prompt/invocation_layer
+     assert HFLocalInvocationLayer.supports(str(tmp_path))
+diff --git a/test/prompt/invocation_layer/test_invocation_layers.py b/test/prompt/invocation_layer/test_invocation_layers.py
+new file mode 100644
+index 0000000000..6004a9f7db
+--- /dev/null
++++ b/test/prompt/invocation_layer/test_invocation_layers.py
+@@ -0,0 +1,14 @@
++import pytest
++
++from haystack.nodes.prompt.prompt_model import PromptModelInvocationLayer
++from haystack.nodes.prompt.invocation_layer import HFLocalInvocationLayer, HFInferenceEndpointInvocationLayer
++
++
++@pytest.mark.unit
++def test_invocation_layer_order():
++    """
++    Checks that the huggingface invocation layer is checked late because it can timeout/be slow to respond.
++    """
++    last_invocation_layers = set(PromptModelInvocationLayer.invocation_layer_providers[-5:])
++    assert HFLocalInvocationLayer in last_invocation_layers
++    assert HFInferenceEndpointInvocationLayer in last_invocation_layers
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

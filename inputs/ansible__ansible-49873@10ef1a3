@@ -1,0 +1,207 @@
+  Task-ID: ansible__ansible-49873@10ef1a3
+  Please checkout to this commit first: 69988cfca01acd17e6a0a532933628a30c162c40
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  onyx_bgp - Support purge option to not delete existing bgp neighbors
+<!---
+Verify first that your issue/request is not already reported on GitHub.
+Also test if the latest release, and devel branch are affected too.
+Always add information AFTER of these html comments.
+-->
+
+##### ISSUE TYPE
+<!--- Pick one below and delete the rest -->
+ - Feature Idea
+ 
+
+##### COMPONENT NAME
+<!---
+Insert, BELOW THIS COMMENT, the name of the module, plugin, task or feature.
+Do not include extra details here, e.g. "vyos_command" not "the network module vyos_command" or the full path
+-->
+
+onyx_bgp 
+Adding neighbor(s) is a useful common task, adding a purge flag in the module and only if true will remove other neighbors, 
+##### ANSIBLE VERSION
+<!--- Paste, BELOW THIS COMMENT, verbatim output from "ansible --version" between quotes below -->
+```
+ansible 2.6.0 (devel db80504839) last updated 2018/04/12 16:53:04 (GMT +300)
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /root/ansible/ansible/lib/ansible
+  executable location = /root/ansible/ansible/bin/ansible
+  python version = 2.7.5 (default, Aug  2 2016, 04:20:16) [GCC 4.8.5 20150623 (Red Hat 4.8.5-4)]
+```
+
+##### CONFIGURATION
+<!---
+If using Ansible 2.4 or above, paste, BELOW THIS COMMENT, the results of "ansible-config dump --only-changed"
+Otherwise, mention any settings you have changed/added/removed in ansible.cfg
+(or using the ANSIBLE_* environment variables).
+-->
+HOST_KEY_CHECKING(/etc/ansible/ansible.cfg) = False
+PERSISTENT_CONNECT_TIMEOUT(/etc/ansible/ansible.cfg) = 300
+
+##### OS / ENVIRONMENT
+<!---
+Mention, BELOW THIS COMMENT, the OS you are running Ansible from, and the OS you are
+managing, or say "N/A" for anything that is not platform-specific.
+Also mention the specific version of what you are trying to control,
+e.g. if this is a network bug the version of firmware on the network device.
+
+-->
+N/A
+##### SUMMARY
+<!--- Explain the problem briefly -->
+
+##### STEPS TO REPRODUCE
+<!---
+For bugs, show exactly how to reproduce the problem, using a minimal test-case.
+For new features, show how the feature would be used.
+-->
+add the purge flag for the onyx_bgp module
+<!--- Paste example playbooks or commands between quotes below -->
+```yaml
+---
+- name: bgp neighbors
+  onyx_bgp:
+     as_number: 65000
+     router_id: 192.168.168.168
+     neighbors:
+        - remote_as: 65002
+          neighbor: 192.168.255.3
+     purge: no
+     state: present
+     networks:
+       - 192.168.168.168/32
+       -  192.168.100.0/24
+```
+
+<!--- You can also paste gist.github.com links for larger files -->
+
+##### EXPECTED RESULTS
+<!--- What did you expect to happen when running the steps above? -->
+when purge is set to no , the task won't delete the existing bgp neighbors on the Onyx device
+##### ACTUAL RESULTS
+<!--- What actually happened? If possible run with extra verbosity (-vvvv) -->
+
+<!--- Paste verbatim command output between quotes below -->
+```
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/network/onyx/onyx_bgp.py b/lib/ansible/modules/network/onyx/onyx_bgp.py
+index eb3a19326acebc..34bf477a4fc2bb 100644
+--- a/lib/ansible/modules/network/onyx/onyx_bgp.py
++++ b/lib/ansible/modules/network/onyx/onyx_bgp.py
+@@ -49,6 +49,11 @@
+       - BGP state.
+     default: present
+     choices: ['present', 'absent']
++  purge:
++    description:
++      - will remove all neighbors when it is True.
++    type: bool
++    default: false
+ """
+ 
+ EXAMPLES = """
+@@ -59,6 +64,7 @@
+     neighbors:
+       - remote_as: 321
+         neighbor: 10.3.3.4
++    purge: True
+     state: present
+     networks:
+       - 172.16.1.0/24
+@@ -93,6 +99,7 @@ class OnyxBgpModule(BaseOnyxModule):
+         r'^\s+router bgp\s+(\d+).*neighbor\s+(\S+)\s+remote\-as\s+(\S+).*')
+     NETWORK_REGEX = re.compile(
+         r'^\s+router bgp\s+(\d+).*network\s+(\S+)\s+(\S+).*')
++    _purge = False
+ 
+     def init_module(self):
+         """ initialize module
+@@ -108,6 +115,7 @@ def init_module(self):
+                            options=neighbor_spec),
+             networks=dict(type='list', elements='str'),
+             state=dict(choices=['present', 'absent'], default='present'),
++            purge=dict(default=False, type='bool'),
+         )
+         argument_spec = dict()
+ 
+@@ -126,6 +134,7 @@ def get_required_config(self):
+             neighbors=req_neighbors,
+             networks=module_params['networks'])
+         neighbors = module_params['neighbors'] or list()
++        self._purge = module_params.get('purge', False)
+         for neighbor_data in neighbors:
+             req_neighbors.append(
+                 (neighbor_data['neighbor'], neighbor_data['remote_as']))
+@@ -197,13 +206,10 @@ def _generate_bgp_cmds(self):
+     def _generate_neighbors_cmds(self, as_number, bgp_removed):
+         req_neighbors = self._required_config['neighbors']
+         curr_neighbors = self._current_config.get('neighbors', [])
+-        if not bgp_removed:
++        if self._purge:
+             for neighbor_data in curr_neighbors:
+-                if neighbor_data not in req_neighbors:
+-                    (neighbor, remote_as) = neighbor_data
+-                    self._commands.append(
+-                        'router bgp %s no neighbor %s remote-as %s' %
+-                        (as_number, neighbor, remote_as))
++                (neighbor, remote_as) = neighbor_data
++                self._commands.append('router bgp %s no neighbor %s remote-as %s' % (as_number, neighbor, remote_as))
+ 
+         for neighbor_data in req_neighbors:
+             if bgp_removed or neighbor_data not in curr_neighbors:
+diff --git a/test/units/modules/network/onyx/test_onyx_bgp.py b/test/units/modules/network/onyx/test_onyx_bgp.py
+index 75c7864de4a8e5..687693f08e209d 100644
+--- a/test/units/modules/network/onyx/test_onyx_bgp.py
++++ b/test/units/modules/network/onyx/test_onyx_bgp.py
+@@ -68,7 +68,8 @@ def test_bgp_add_neighbor(self):
+ 
+     def test_bgp_del_neighbor(self):
+         set_module_args(dict(as_number=172,
+-                             networks=['172.16.1.0/24']))
++                             networks=['172.16.1.0/24'],
++                             purge=True))
+         commands = ['router bgp 172 no neighbor 10.2.3.4 remote-as 173']
+         self.execute_module(changed=True, commands=commands)
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

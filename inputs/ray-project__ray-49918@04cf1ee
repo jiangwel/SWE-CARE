@@ -1,0 +1,476 @@
+  Task-ID: ray-project__ray-49918@04cf1ee
+  Please checkout to this commit first: ff59b415bc0b76a16481767d3bf6a88238be8d25
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Core] ray.actor.exit_actor() does not seem to work from within an async background thread
+### What happened + What you expected to happen
+
+In actor initialization, I want to spawn an async background routine that has the ability to call `ray.actor.exit_actor()`; however, that API doesn't seem to actually work - 
+```
+>>> AsyncActor.remote()
+2024-12-26 14:20:31,392 INFO worker.py:1743 -- Started a local Ray instance. View the dashboard at 127.0.0.1:8265 
+Actor(AsyncActor, e6db65d56c5f1e1f1122d91301000000)
+>>> (AsyncActor pid=2151093) Exiting actor
+```
+
+The actor stays alive (according to Ray dashboard) instead of exiting as I would expect.
+
+### Versions / Dependencies
+
+Ray 2.40.0
+
+### Reproduction script
+
+```py
+import ray
+import asyncio
+
+@ray.remote
+class AsyncActor:
+    def __init__(self) -> None:
+        self.task = asyncio.get_running_loop().create_task(
+            self.start()
+        )
+
+    async def start(self):
+        print("Exiting actor")
+        ray.actor.exit_actor()
+        print("Exited actor")
+```
+
+### Issue Severity
+
+Medium: It is a significant difficulty but I can work around it.
+  </issue>
+  
+  <patch>
+  diff --git a/python/ray/_raylet.pyx b/python/ray/_raylet.pyx
+index a5294c8290e4..b7bb98276191 100644
+--- a/python/ray/_raylet.pyx
++++ b/python/ray/_raylet.pyx
+@@ -1886,6 +1886,7 @@ cdef void execute_task(
+             # Execute the task.
+             with core_worker.profile_event(b"task:execute"):
+                 task_exception = True
++                task_exception_instance = None
+                 try:
+                     if debugger_breakpoint != b"":
+                         ray.util.pdb.set_trace(
+@@ -1986,10 +1987,14 @@ cdef void execute_task(
+                                      " {}.".format(
+                                         core_worker.get_current_task_id()),
+                                      exc_info=True)
+-                    raise e
++                    task_exception_instance = e
+                 finally:
+                     # Record the end of the task log.
+                     worker.record_task_log_end(task_id, attempt_number)
++                    if task_exception_instance is not None:
++                        raise task_exception_instance
++                    if core_worker.get_current_actor_should_exit():
++                        raise_sys_exit_with_custom_error_message("exit_actor() is called.")
+ 
+                 if (returns[0].size() == 1
+                         and not inspect.isgenerator(outputs)
+@@ -4671,6 +4676,14 @@ cdef class CoreWorker:
+         return (CCoreWorkerProcess.GetCoreWorker().GetWorkerContext()
+                 .CurrentActorIsAsync())
+ 
++    def set_current_actor_should_exit(self):
++        return (CCoreWorkerProcess.GetCoreWorker().GetWorkerContext()
++                .SetCurrentActorShouldExit())
++
++    def get_current_actor_should_exit(self):
++        return (CCoreWorkerProcess.GetCoreWorker().GetWorkerContext()
++                .GetCurrentActorShouldExit())
++
+     def current_actor_max_concurrency(self):
+         return (CCoreWorkerProcess.GetCoreWorker().GetWorkerContext()
+                 .CurrentActorMaxConcurrency())
+diff --git a/python/ray/actor.py b/python/ray/actor.py
+index b828122d755a..08144e7615f7 100644
+--- a/python/ray/actor.py
++++ b/python/ray/actor.py
+@@ -1771,7 +1771,10 @@ def exit_actor():
+     This API can be used only inside an actor. Use ray.kill
+     API if you'd like to kill an actor using actor handle.
+ 
+-    When the API is called, the actor raises an exception and exits.
++    When this API is called, an exception is raised and the actor
++    will exit immediately. For asyncio actors, there may be a short
++    delay before the actor exits if the API is called from a background
++    task.
+     Any queued methods will fail. Any ``atexit``
+     handlers installed in the actor will be run.
+ 
+@@ -1781,6 +1784,7 @@ def exit_actor():
+     """
+     worker = ray._private.worker.global_worker
+     if worker.mode == ray.WORKER_MODE and not worker.actor_id.is_nil():
++        worker.core_worker.set_current_actor_should_exit()
+         # In asyncio actor mode, we can't raise SystemExit because it will just
+         # quit the asycnio event loop thread, not the main thread. Instead, we
+         # raise a custom error to the main thread to tell it to exit.
+diff --git a/python/ray/includes/libcoreworker.pxd b/python/ray/includes/libcoreworker.pxd
+index 2375a236ca7d..d499411fb211 100644
+--- a/python/ray/includes/libcoreworker.pxd
++++ b/python/ray/includes/libcoreworker.pxd
+@@ -92,6 +92,8 @@ cdef extern from "ray/core_worker/experimental_mutable_object_manager.h" nogil:
+ cdef extern from "ray/core_worker/context.h" nogil:
+     cdef cppclass CWorkerContext "ray::core::WorkerContext":
+         c_bool CurrentActorIsAsync()
++        void SetCurrentActorShouldExit()
++        c_bool GetCurrentActorShouldExit()
+         const c_string &GetCurrentSerializedRuntimeEnv()
+         int CurrentActorMaxConcurrency()
+         const CActorID &GetRootDetachedActorID()
+diff --git a/python/ray/tests/test_actor_failures.py b/python/ray/tests/test_actor_failures.py
+index bf603b2197ec..4219ed1a3b1e 100644
+--- a/python/ray/tests/test_actor_failures.py
++++ b/python/ray/tests/test_actor_failures.py
+@@ -10,6 +10,7 @@
+ 
+ import ray
+ from ray.actor import exit_actor
++from ray.exceptions import AsyncioActorExit
+ import ray.cluster_utils
+ from ray._private.test_utils import (
+     wait_for_condition,
+@@ -891,7 +892,7 @@ def foo():
+         ray.get(ref)
+ 
+ 
+-def test_exit_actor(shutdown_only, tmp_path):
++def test_exit_actor_invalid_usage_error(shutdown_only):
+     """
+     Verify TypeError is raised when exit_actor is not used
+     inside an actor.
+@@ -910,19 +911,25 @@ def f():
+     ):
+         ray.get(f.remote())
+ 
+-    """
+-    Verify the basic case.
+-    """
++
++def test_exit_actor_normal_actor_raise_immediately(shutdown_only, tmp_path):
++    temp_file_atexit = tmp_path / "atexit.log"
++    temp_file_after_exit_actor = tmp_path / "after_exit_actor.log"
++    assert not temp_file_atexit.exists()
++    assert not temp_file_after_exit_actor.exists()
+ 
+     @ray.remote
+     class Actor:
+-        def exit(self):
+-            exit_actor()
++        def __init__(self):
++            def f():
++                temp_file_atexit.touch()
+ 
+-    @ray.remote
+-    class AsyncActor:
+-        async def exit(self):
++            atexit.register(f)
++
++        def exit(self):
+             exit_actor()
++            # The following code should not be executed.
++            temp_file_after_exit_actor.touch()
+ 
+     a = Actor.remote()
+     ray.get(a.__ray_ready__.remote())
+@@ -930,63 +937,149 @@ async def exit(self):
+         ray.get(a.exit.remote())
+     assert "exit_actor()" in str(exc_info.value)
+ 
+-    b = AsyncActor.remote()
+-    ray.get(b.__ray_ready__.remote())
+-    with pytest.raises(ray.exceptions.RayActorError) as exc_info:
+-        ray.get(b.exit.remote())
+-    assert "exit_actor()" in str(exc_info.value)
++    def verify():
++        return temp_file_atexit.exists()
+ 
+-    """
+-    Verify atexit handler is called correctly.
+-    """
+-    sync_temp_file = tmp_path / "actor.log"
+-    async_temp_file = tmp_path / "async_actor.log"
+-    sync_temp_file.touch()
+-    async_temp_file.touch()
++    wait_for_condition(verify)
++    time.sleep(3)
++    assert not temp_file_after_exit_actor.exists()
++
++
++def test_exit_actor_normal_actor_user_catch_err_should_still_exit(
++    shutdown_only, tmp_path
++):
++    temp_file = tmp_path / "actor.log"
++    assert not temp_file.exists()
+ 
+     @ray.remote
+     class Actor:
+-        def __init__(self):
+-            def f():
+-                print("atexit handler")
+-                with open(sync_temp_file, "w") as f:
+-                    f.write("Actor\n")
++        def exit(self):
++            try:
++                exit_actor()
++            except SystemExit:
++                pass
+ 
+-            atexit.register(f)
++        def create(self):
++            temp_file.touch()
+ 
+-        def exit(self):
+-            exit_actor()
++    a = Actor.remote()
++    ray.get(a.__ray_ready__.remote())
++    with pytest.raises(ray.exceptions.RayActorError):
++        ray.get(a.exit.remote())
++
++    with pytest.raises(ray.exceptions.RayActorError):
++        ray.get(a.create.remote())
++
++    assert not temp_file.exists()
++
++
++def test_exit_actor_async_actor_raise_immediately(shutdown_only, tmp_path):
++    temp_file_atexit = tmp_path / "atexit.log"
++    temp_file_after_exit_actor = tmp_path / "after_exit_actor.log"
++    assert not temp_file_atexit.exists()
++    assert not temp_file_after_exit_actor.exists()
+ 
+     @ray.remote
+     class AsyncActor:
+         def __init__(self):
+             def f():
+-                print("atexit handler")
+-                with open(async_temp_file, "w") as f:
+-                    f.write("Async Actor\n")
++                temp_file_atexit.touch()
+ 
+             atexit.register(f)
+ 
+         async def exit(self):
+             exit_actor()
++            # The following code should not be executed.
++            temp_file_after_exit_actor.touch()
+ 
+-    a = Actor.remote()
++    a = AsyncActor.remote()
++    ray.get(a.__ray_ready__.remote())
++
++    try:
++        ray.get(a.exit.remote())
++    except Exception:
++        pass
++
++    # with pytest.raises(ray.exceptions.RayActorError) as exc_info:
++    #     ray.get(a.exit.remote())
++    # assert (
++    #     # Exited when task execution returns
++    #     "exit_actor()" in str(exc_info.value)
++    #     # Exited during periodical check in worker
++    #     or "User requested to exit the actor" in str(exc_info.value)
++    # )
++
++    def verify():
++        return temp_file_atexit.exists()
++
++    # wait_for_condition(verify)
++    # time.sleep(3)
++    # assert not temp_file_after_exit_actor.exists()
++
++
++def test_exit_actor_async_actor_user_catch_err_should_still_exit(
++    shutdown_only, tmp_path
++):
++    temp_file = tmp_path / "actor.log"
++    assert not temp_file.exists()
++
++    @ray.remote
++    class AsyncActor:
++        async def exit(self):
++            try:
++                exit_actor()
++            except AsyncioActorExit:
++                pass
++
++        async def create(self):
++            temp_file.touch()
++
++    a = AsyncActor.remote()
+     ray.get(a.__ray_ready__.remote())
+-    b = AsyncActor.remote()
+-    ray.get(b.__ray_ready__.remote())
+     with pytest.raises(ray.exceptions.RayActorError):
+         ray.get(a.exit.remote())
++
+     with pytest.raises(ray.exceptions.RayActorError):
+-        ray.get(b.exit.remote())
++        ray.get(a.create.remote())
++    assert not temp_file.exists()
++
++
++def test_exit_actor_async_actor_nested_task(shutdown_only, tmp_path):
++    temp_file_atexit = tmp_path / "atexit.log"
++    temp_file_after_exit_actor = tmp_path / "after_exit_actor.log"
++    assert not temp_file_atexit.exists()
++    assert not temp_file_after_exit_actor.exists()
++
++    signal = SignalActor.remote()
++
++    @ray.remote
++    class AsyncActor:
++        def __init__(self):
++            def f():
++                temp_file_atexit.touch()
++
++            atexit.register(f)
++
++        async def start_exit_task(self, signal):
++            asyncio.create_task(self.exit(signal))
++
++        async def exit(self, signal):
++            await signal.wait.remote()
++            exit_actor()
++            # The following code should not be executed.
++            temp_file_after_exit_actor.touch()
++
++    a = AsyncActor.remote()
++    ray.get(a.__ray_ready__.remote())
++    ray.get(a.start_exit_task.remote(signal))
++    ray.get(signal.send.remote())
+ 
+     def verify():
+-        with open(async_temp_file) as f:
+-            assert f.readlines() == ["Async Actor\n"]
+-        with open(sync_temp_file) as f:
+-            assert f.readlines() == ["Actor\n"]
+-        return True
++        return temp_file_atexit.exists()
+ 
+     wait_for_condition(verify)
++    time.sleep(3)
++    assert not temp_file_after_exit_actor.exists()
+ 
+ 
+ def test_exit_actor_queued(shutdown_only):
+diff --git a/src/ray/core_worker/context.cc b/src/ray/core_worker/context.cc
+index d2b35724bf9c..d931851f4037 100644
+--- a/src/ray/core_worker/context.cc
++++ b/src/ray/core_worker/context.cc
+@@ -295,6 +295,7 @@ void WorkerContext::SetCurrentTask(const TaskSpecification &task_spec) {
+       RAY_CHECK(current_actor_id_ == task_spec.ActorCreationId());
+     }
+     current_actor_id_ = task_spec.ActorCreationId();
++    current_actor_should_exit_ = false;
+     current_actor_is_direct_call_ = true;
+     current_actor_max_concurrency_ = task_spec.MaxActorConcurrency();
+     current_actor_is_asyncio_ = task_spec.IsAsyncioActor();
+@@ -394,6 +395,17 @@ bool WorkerContext::CurrentActorIsAsync() const {
+   return current_actor_is_asyncio_;
+ }
+ 
++void WorkerContext::SetCurrentActorShouldExit() {
++  absl::WriterMutexLock lock(&mutex_);
++  RAY_CHECK(!current_actor_id_.IsNil());
++  current_actor_should_exit_ = true;
++}
++
++bool WorkerContext::GetCurrentActorShouldExit() const {
++  absl::ReaderMutexLock lock(&mutex_);
++  return current_actor_should_exit_;
++}
++
+ bool WorkerContext::CurrentActorDetached() const {
+   absl::ReaderMutexLock lock(&mutex_);
+   return is_detached_actor_;
+diff --git a/src/ray/core_worker/context.h b/src/ray/core_worker/context.h
+index 7b9cc010131f..f3168c652bf4 100644
+--- a/src/ray/core_worker/context.h
++++ b/src/ray/core_worker/context.h
+@@ -117,6 +117,10 @@ class WorkerContext {
+ 
+   bool CurrentActorIsAsync() const ABSL_LOCKS_EXCLUDED(mutex_);
+ 
++  void SetCurrentActorShouldExit() ABSL_LOCKS_EXCLUDED(mutex_);
++
++  bool GetCurrentActorShouldExit() const ABSL_LOCKS_EXCLUDED(mutex_);
++
+   bool CurrentActorDetached() const ABSL_LOCKS_EXCLUDED(mutex_);
+ 
+   uint64_t GetNextTaskIndex();
+@@ -145,6 +149,7 @@ class WorkerContext {
+   ActorID current_actor_id_ ABSL_GUARDED_BY(mutex_);
+   int current_actor_max_concurrency_ ABSL_GUARDED_BY(mutex_) = 1;
+   bool current_actor_is_asyncio_ ABSL_GUARDED_BY(mutex_) = false;
++  bool current_actor_should_exit_ ABSL_GUARDED_BY(mutex_) = false;
+   bool is_detached_actor_ ABSL_GUARDED_BY(mutex_) = false;
+   // The placement group id that the current actor belongs to.
+   PlacementGroupID current_actor_placement_group_id_ ABSL_GUARDED_BY(mutex_);
+diff --git a/src/ray/core_worker/core_worker.cc b/src/ray/core_worker/core_worker.cc
+index 37ce81b2f147..61bd0c1b6f7c 100644
+--- a/src/ray/core_worker/core_worker.cc
++++ b/src/ray/core_worker/core_worker.cc
+@@ -583,7 +583,8 @@ CoreWorker::CoreWorker(CoreWorkerOptions options, const WorkerID &worker_id)
+       /*publish_batch_size_=*/RayConfig::instance().publish_batch_size(),
+       GetWorkerID());
+   object_info_subscriber_ = std::make_unique<pubsub::Subscriber>(
+-      /*subscriber_id=*/GetWorkerID(),
++      /*subscriber_id=*/
++      GetWorkerID(),
+       /*channels=*/
+       std::vector<rpc::ChannelType>{rpc::ChannelType::WORKER_OBJECT_EVICTION,
+                                     rpc::ChannelType::WORKER_REF_REMOVED_CHANNEL,
+@@ -3157,6 +3158,11 @@ void CoreWorker::RunTaskExecutionLoop() {
+     signal_checker->RunFnPeriodically(
+         [this] {
+           /// The overhead of this is only a single digit microsecond.
++          if (worker_context_.GetCurrentActorShouldExit()) {
++            Exit(rpc::WorkerExitType::INTENDED_USER_EXIT,
++                 "User requested to exit the actor.",
++                 nullptr);
++          }
+           auto status = options_.check_signals();
+           if (status.IsIntentionalSystemExit()) {
+             Exit(rpc::WorkerExitType::INTENDED_USER_EXIT,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,161 @@
+  Task-ID: pandas-dev__pandas-23480@ab05b87
+  Please checkout to this commit first: 8586644429a8c0054a74e645830601419da6613f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Empty Series[datetime64[ns, tz]].reindex fails
+TZ-naive is fine.
+
+```python
+In [41]: pd.Series(dtype='datetime64[ns]').reindex([0, 1])
+Out[41]:
+0   NaT
+1   NaT
+dtype: datetime64[ns]
+
+In [42]: pd.Series(dtype='datetime64[ns, UTC]').reindex([0, 1])
+```
+
+```pytb
+---------------------------------------------------------------------------
+IndexError                                Traceback (most recent call last)
+<ipython-input-42-a882503115f7> in <module>()
+----> 1 pd.Series(dtype='datetime64[ns, UTC]').reindex([0, 1])
+
+~/sandbox/pandas/pandas/core/series.py in reindex(self, index, **kwargs)
+   3309     @Appender(generic._shared_docs['reindex'] % _shared_doc_kwargs)
+   3310     def reindex(self, index=None, **kwargs):
+-> 3311         return super(Series, self).reindex(index=index, **kwargs)
+   3312
+   3313     def drop(self, labels=None, axis=0, index=None, columns=None,
+
+~/sandbox/pandas/pandas/core/generic.py in reindex(self, *args, **kwargs)
+   3691         # perform the reindex on the axes
+   3692         return self._reindex_axes(axes, level, limit, tolerance, method,
+-> 3693                                   fill_value, copy).__finalize__(self)
+   3694
+   3695     def _reindex_axes(self, axes, level, limit, tolerance, method, fill_value,
+
+~/sandbox/pandas/pandas/core/generic.py in _reindex_axes(self, axes, level, limit, tolerance, method, fill_value, copy)
+   3709             obj = obj._reindex_with_indexers({axis: [new_index, indexer]},
+   3710                                              fill_value=fill_value,
+-> 3711                                              copy=copy, allow_dups=False)
+   3712
+   3713         return obj
+
+~/sandbox/pandas/pandas/core/generic.py in _reindex_with_indexers(self, reindexers, fill_value, copy, allow_dups)
+   3812                                                 fill_value=fill_value,
+   3813                                                 allow_dups=allow_dups,
+-> 3814                                                 copy=copy)
+   3815
+   3816         if copy and new_data is self._data:
+
+~/sandbox/pandas/pandas/core/internals.py in reindex_indexer(self, new_axis, indexer, axis, fill_value, allow_dups, copy)
+   4419         if axis == 0:
+   4420             new_blocks = self._slice_take_blocks_ax0(indexer,
+-> 4421                                                      fill_tuple=(fill_value,))
+   4422         else:
+   4423             new_blocks = [blk.take_nd(indexer, axis=axis, fill_tuple=(
+
+~/sandbox/pandas/pandas/core/internals.py in _slice_take_blocks_ax0(self, slice_or_indexer, fill_tuple)
+   4458                 return [blk.take_nd(slobj, axis=0,
+   4459                                     new_mgr_locs=slice(0, sllen),
+-> 4460                                     fill_tuple=fill_tuple)]
+   4461
+   4462         if sl_type in ('slice', 'mask'):
+
+~/sandbox/pandas/pandas/core/internals.py in take_nd(self, indexer, axis, new_mgr_locs, fill_tuple)
+   1256             fill_value = fill_tuple[0]
+   1257             new_values = algos.take_nd(values, indexer, axis=axis,
+-> 1258                                        allow_fill=True, fill_value=fill_value)
+   1259
+   1260         if new_mgr_locs is None:
+
+~/sandbox/pandas/pandas/core/algorithms.py in take_nd(arr, indexer, axis, out, fill_value, mask_info, allow_fill)
+   1580         return arr.take(indexer, fill_value=fill_value, allow_fill=allow_fill)
+   1581     elif is_datetimetz(arr):
+-> 1582         return arr.take(indexer, fill_value=fill_value, allow_fill=allow_fill)
+   1583     elif is_interval_dtype(arr):
+   1584         return arr.take(indexer, fill_value=fill_value, allow_fill=allow_fill)
+
+~/sandbox/pandas/pandas/core/indexes/datetimelike.py in take(self, indices, axis, allow_fill, fill_value, **kwargs)
+    497                                            allow_fill=allow_fill,
+    498                                            fill_value=fill_value,
+--> 499                                            na_value=iNaT)
+    500
+    501         # keep freq in PeriodIndex, reset otherwise
+
+~/sandbox/pandas/pandas/core/indexes/base.py in _assert_take_fillable(self, values, indices, allow_fill, fill_value, na_value)
+   2178                        'all indices must be >= -1')
+   2179                 raise ValueError(msg)
+-> 2180             taken = values.take(indices)
+   2181             mask = indices == -1
+   2182             if mask.any():
+
+IndexError: cannot do a non-empty take from an empty axes.
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.24.0.txt b/doc/source/whatsnew/v0.24.0.txt
+index b19003e1c1284..ea26a7882da13 100644
+--- a/doc/source/whatsnew/v0.24.0.txt
++++ b/doc/source/whatsnew/v0.24.0.txt
+@@ -1197,6 +1197,7 @@ Indexing
+ - The traceback from a ``KeyError`` when asking ``.loc`` for a single missing label is now shorter and more clear (:issue:`21557`)
+ - When ``.ix`` is asked for a missing integer label in a :class:`MultiIndex` with a first level of integer type, it now raises a ``KeyError``, consistently with the case of a flat :class:`Int64Index`, rather than falling back to positional indexing (:issue:`21593`)
+ - Bug in :meth:`DatetimeIndex.reindex` when reindexing a tz-naive and tz-aware :class:`DatetimeIndex` (:issue:`8306`)
++- Bug in :meth:`Series.reindex` when reindexing an empty series with a ``datetime64[ns, tz]`` dtype (:issue:`20869`)
+ - Bug in :class:`DataFrame` when setting values with ``.loc`` and a timezone aware :class:`DatetimeIndex` (:issue:`11365`)
+ - ``DataFrame.__getitem__`` now accepts dictionaries and dictionary keys as list-likes of labels, consistently with ``Series.__getitem__`` (:issue:`21294`)
+ - Fixed ``DataFrame[np.nan]`` when columns are non-unique (:issue:`21428`)
+diff --git a/pandas/tests/test_multilevel.py b/pandas/tests/test_multilevel.py
+index 2022340926cca..e1ec3f65883c9 100644
+--- a/pandas/tests/test_multilevel.py
++++ b/pandas/tests/test_multilevel.py
+@@ -218,6 +218,12 @@ def test_reindex_preserve_levels(self):
+         chunk = ymdT.loc[:, new_index]
+         assert chunk.columns is new_index
+ 
++    def test_reindex_empty_series_tz_dtype(self):
++        # GH 20869
++        result = Series(dtype='datetime64[ns, UTC]').reindex([0, 1])
++        expected = Series([pd.NaT] * 2, dtype='datetime64[ns, UTC]')
++        tm.assert_equal(result, expected)
++
+     def test_repr_to_string(self):
+         repr(self.frame)
+         repr(self.ymd)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

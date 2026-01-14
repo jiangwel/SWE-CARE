@@ -1,0 +1,533 @@
+  Task-ID: sqlfluff__sqlfluff-2553@2d7c8b2
+  Please checkout to this commit first: a8234db66bc6a3514c5d12c883dfb2af6b68cc53
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Issue with Databricks absolute path tables
+We're using DBT with Databricks and tried to implement sqlfluff for linting. However, we're seeing that the following syntax is unsupported:
+
+```sql
+SELECT *
+FROM delta.`/mnt/datalake/table`
+```
+
+Is this something that we want to support in sqlfluff? If so, I can try to come up with a PR.
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/dialects/dialect_spark3.py b/src/sqlfluff/dialects/dialect_spark3.py
+index 87287cdc986..2f9a8cf8551 100644
+--- a/src/sqlfluff/dialects/dialect_spark3.py
++++ b/src/sqlfluff/dialects/dialect_spark3.py
+@@ -207,7 +207,12 @@
+ )
+ 
+ spark3_dialect.add(
+-    # Add Hive Segments TODO : Is there a way to retrieve this w/o redefining?
++    BinaryfileKeywordSegment=StringParser(
++        "BINARYFILE",
++        KeywordSegment,
++        name="binary_file",
++        type="file_format",
++    ),
+     JsonfileKeywordSegment=StringParser(
+         "JSONFILE",
+         KeywordSegment,
+@@ -246,7 +251,6 @@
+         "BracketedPropertyListGrammar"
+     ),
+     CommentGrammar=hive_dialect.get_grammar("CommentGrammar"),
+-    FileFormatGrammar=hive_dialect.get_grammar("FileFormatGrammar"),
+     LocationGrammar=hive_dialect.get_grammar("LocationGrammar"),
+     PropertyGrammar=hive_dialect.get_grammar("PropertyGrammar"),
+     SerdePropertiesGrammar=hive_dialect.get_grammar("SerdePropertiesGrammar"),
+@@ -270,7 +274,11 @@
+     DatabasePropertiesGrammar=Sequence(
+         "DBPROPERTIES", Ref("BracketedPropertyListGrammar")
+     ),
+-    DataSourceFormatGrammar=OneOf(
++    DataSourcesV2FileTypeGrammar=OneOf(
++        # https://github.com/apache/spark/tree/master/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/v2 # noqa: E501
++        # Separated here because these allow for additional
++        # commands such as Select From File
++        # https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-file.html
+         # Spark Core Data Sources
+         # https://spark.apache.org/docs/latest/sql-data-sources.html
+         "AVRO",
+@@ -278,10 +286,31 @@
+         "JSON",
+         "PARQUET",
+         "ORC",
+-        "JDBC",
+-        # Community Contributed Data Sources
++        # Separated here because these allow for additional commands
++        # Similar to DataSourcesV2
+         "DELTA",  # https://github.com/delta-io/delta
+-        "XML",  # https://github.com/databricks/spark-xml
++        "CSV",
++        "TEXT",
++        "BINARYFILE",
++    ),
++    FileFormatGrammar=OneOf(
++        Ref("DataSourcesV2FileTypeGrammar"),
++        "SEQUENCEFILE",
++        "TEXTFILE",
++        "RCFILE",
++        "JSONFILE",
++        Sequence(
++            "INPUTFORMAT",
++            Ref("QuotedLiteralSegment"),
++            "OUTPUTFORMAT",
++            Ref("QuotedLiteralSegment"),
++        ),
++    ),
++    DataSourceFormatGrammar=OneOf(
++        Ref("FileFormatGrammar"),
++        # NB: JDBC is part of DataSourceV2 but not included
++        # there since there are no no significant syntax changes
++        "JDBC",
+     ),
+     # Adding Hint related segments so they are not treated as generic comments
+     # https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-hints.html
+@@ -1601,3 +1630,38 @@ class ValuesClauseSegment(BaseSegment):
+         Ref("DelimitedValues"),
+         Ref("AliasExpressionSegment", optional=True),
+     )
++
++
++@spark3_dialect.segment(replace=True)
++class TableExpressionSegment(BaseSegment):
++    """The main table expression e.g. within a FROM clause.
++
++    Enhance to allow for additional clauses allowed in Spark.
++    """
++
++    type = "table_expression"
++    match_grammar = OneOf(
++        Ref("ValuesClauseSegment"),
++        Ref("BareFunctionSegment"),
++        Ref("FunctionSegment"),
++        Ref("FileReferenceSegment"),
++        Ref("TableReferenceSegment"),
++        # Nested Selects
++        Bracketed(Ref("SelectableGrammar")),
++    )
++
++
++@spark3_dialect.segment()
++class FileReferenceSegment(BaseSegment):
++    """A reference to a file for direct query.
++
++    https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-file.html
++    """
++
++    type = "file_reference"
++
++    match_grammar = Sequence(
++        Ref("DataSourcesV2FileTypeGrammar"),
++        Ref("DotSegment"),
++        Ref("QuotedLiteralSegment"),
++    )
+diff --git a/test/fixtures/dialects/spark3/select_from_file.sql b/test/fixtures/dialects/spark3/select_from_file.sql
+new file mode 100644
+index 00000000000..7c9b57153a1
+--- /dev/null
++++ b/test/fixtures/dialects/spark3/select_from_file.sql
+@@ -0,0 +1,76 @@
++-- PARQUET file
++SELECT
++    a,
++    b,
++    c
++FROM parquet.`examples/src/main/resources/users.parquet`;
++
++-- Directory of Parquet Files
++SELECT
++    a,
++    b,
++    c
++FROM parquet.`examples/src/main/resources/users`;
++
++-- ORC file
++SELECT
++    a,
++    b,
++    c
++FROM orc.`examples/src/main/resources/users.orc`;
++
++-- JSON file
++SELECT
++    a,
++    b,
++    c
++FROM json.`examples/src/main/resources/people.json`;
++
++-- Directory of JSON files
++SELECT
++    a,
++    b,
++    c
++FROM json.`examples/src/main/resources/people`;
++
++-- Text File
++SELECT
++    a,
++    b,
++    c
++FROM text.`examples/src/main/resources/people.txt`;
++
++-- JSON treated as Text File
++SELECT
++    a,
++    b,
++    c
++FROM text.`examples/src/main/resources/people.json`;
++
++-- BinaryFile
++SELECT
++    a,
++    b,
++    c
++FROM binaryfile.`/events/events-kafka.json`;
++
++-- Directory of BinaryFiles
++SELECT
++    a,
++    b,
++    c
++FROM binaryfile.`/events/events-kafka`;
++
++-- CSV File
++SELECT
++    a,
++    b,
++    c
++FROM csv.`/sales/sales.csv`;
++
++-- Delta File; test for Issue #602
++SELECT
++    a,
++    b,
++    c
++FROM delta.`/mnt/datalake/table`;
+diff --git a/test/fixtures/dialects/spark3/select_from_file.yml b/test/fixtures/dialects/spark3/select_from_file.yml
+new file mode 100644
+index 00000000000..9b19fcdc04b
+--- /dev/null
++++ b/test/fixtures/dialects/spark3/select_from_file.yml
+@@ -0,0 +1,282 @@
++# YML test files are auto-generated from SQL files and should not be edited by
++# hand. To help enforce this, the "hash" field in the file must match a hash
++# computed by SQLFluff when running the tests. Please run
++# `python test/generate_parse_fixture_yml.py`  to generate them after adding or
++# altering SQL files.
++_hash: 72432be0024d6d35c89fc8f63024ab78271ac1187b19925a0fae2de3c90eae26
++file:
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: parquet
++              - dot: .
++              - identifier: '`examples/src/main/resources/users.parquet`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: parquet
++              - dot: .
++              - identifier: '`examples/src/main/resources/users`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: orc
++              - dot: .
++              - identifier: '`examples/src/main/resources/users.orc`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: json
++              - dot: .
++              - identifier: '`examples/src/main/resources/people.json`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: json
++              - dot: .
++              - identifier: '`examples/src/main/resources/people`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: text
++              - dot: .
++              - identifier: '`examples/src/main/resources/people.txt`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: text
++              - dot: .
++              - identifier: '`examples/src/main/resources/people.json`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: binaryfile
++              - dot: .
++              - identifier: '`/events/events-kafka.json`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: binaryfile
++              - dot: .
++              - identifier: '`/events/events-kafka`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: csv
++              - dot: .
++              - identifier: '`/sales/sales.csv`'
++- statement_terminator: ;
++- base:
++    select_statement:
++      select_clause:
++      - keyword: SELECT
++      - select_clause_element:
++          column_reference:
++            identifier: a
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: b
++      - comma: ','
++      - select_clause_element:
++          column_reference:
++            identifier: c
++      from_clause:
++        keyword: FROM
++        from_expression:
++          from_expression_element:
++            table_expression:
++              table_reference:
++              - identifier: delta
++              - dot: .
++              - identifier: '`/mnt/datalake/table`'
++- statement_terminator: ;
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

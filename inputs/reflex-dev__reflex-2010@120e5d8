@@ -1,0 +1,457 @@
+  Task-ID: reflex-dev__reflex-2010@120e5d8
+  Please checkout to this commit first: f404205c3fa11ff854ada60fd97e4d1725fb2eb8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  rx.foreach Union support
+In my app I'm trying to use an union to hold slightly different classes (common base members but extra members) and using rx.foreach to try to display those entities. If I specify the union, the foreach component won't run, citing :
+
+```AttributeError: The State var `_` has no attribute 'MY_ATTRIBUTE' or may have been annotated wrongly.```
+
+I've tried to simply make these classes inherit from a single class but I of course cannot access the other members not from the class.
+
+Could I request support for unions for rx.foreach? Would it be hard to implement?
+Edit: One option would be to provide a way of specifying a render_fn per type and a default one?
+
+
+My example setup:
+
+```python
+from pydantic import Field
+import reflex as rx
+
+class Reaction1(rx.Model):
+    reaction: str = Field("instant", const=True)
+
+class Reaction2(rx.Model):
+    reaction: str = Field("delay", const=True)
+    delay: int = Field(default=20)
+
+ReactionTypes = Reaction1 | Reaction2
+
+reaction_list: list[ReactionTypes] = [
+    Reaction1(**{"reaction": "instant"}),
+    Reaction2(**{"reaction": "delay", "delay": 40}),
+]
+
+class State(rx.State):
+
+    @rx.var
+    def reaction_list(self) -> list[ReactionTypes]:
+        return reaction_list
+    
+def show_entry(entry: ReactionTypes) -> rx.Component:
+    if isinstance(entry, Reaction2):
+        return rx.hstack(
+            rx.text(entry.reaction),
+            rx.text(f"delay: {entry.delay}"),
+        )
+    else:
+        return rx.text(entry.reaction)
+        
+def index() -> rx.Component:
+    return rx.vstack(
+        rx.foreach(
+            State.reaction_list,
+            show_entry,
+        ),
+    )
+
+
+app = rx.App()
+app.add_page(index)
+app.compile()
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/reflex/model.py b/reflex/model.py
+index 12703e7be2b..69a3bbf5369 100644
+--- a/reflex/model.py
++++ b/reflex/model.py
+@@ -15,6 +15,7 @@
+ import alembic.script
+ import alembic.util
+ import sqlalchemy
++import sqlalchemy.orm
+ import sqlmodel
+ 
+ from reflex import constants
+@@ -77,7 +78,22 @@ def dict(self, **kwargs):
+         Returns:
+             The object as a dictionary.
+         """
+-        return {name: getattr(self, name) for name in self.__fields__}
++        base_fields = {name: getattr(self, name) for name in self.__fields__}
++        relationships = {}
++        for name in self.__sqlmodel_relationships__:
++            try:
++                relationship_value = getattr(self, name)
++            except sqlalchemy.orm.exc.DetachedInstanceError:
++                continue
++            if hasattr(relationship_value, "dict"):
++                relationship_value = relationship_value.dict()
++            elif isinstance(relationship_value, list):
++                relationship_value = [item.dict() for item in relationship_value]
++            relationships[name] = relationship_value
++        return {
++            **base_fields,
++            **relationships,
++        }
+ 
+     @staticmethod
+     def create_all():
+diff --git a/reflex/state.py b/reflex/state.py
+index e7f4113b9c7..816048e614d 100644
+--- a/reflex/state.py
++++ b/reflex/state.py
+@@ -566,10 +566,18 @@ def _set_default_value(cls, prop: BaseVar):
+         """
+         # Get the pydantic field for the var.
+         field = cls.get_fields()[prop._var_name]
+-        default_value = prop.get_default_value()
+-        if field.required and default_value is not None:
+-            field.required = False
+-            field.default = default_value
++        if field.required:
++            default_value = prop.get_default_value()
++            if default_value is not None:
++                field.required = False
++                field.default = default_value
++        if (
++            not field.required
++            and field.default is None
++            and not types.is_optional(prop._var_type)
++        ):
++            # ensure frontend uses null coalescing when accessing
++            prop._var_type = Optional[prop._var_type]
+ 
+     @staticmethod
+     def _get_base_functions() -> dict[str, FunctionType]:
+diff --git a/reflex/utils/types.py b/reflex/utils/types.py
+index 973196af17e..08fcbf38ab8 100644
+--- a/reflex/utils/types.py
++++ b/reflex/utils/types.py
+@@ -3,8 +3,22 @@
+ from __future__ import annotations
+ 
+ import contextlib
+-import typing
+-from typing import Any, Callable, Literal, Type, Union, _GenericAlias  # type: ignore
++import types
++from typing import (
++    Any,
++    Callable,
++    Iterable,
++    Literal,
++    Optional,
++    Type,
++    Union,
++    _GenericAlias,  # type: ignore
++    get_args,
++    get_origin,
++    get_type_hints,
++)
++
++from pydantic.fields import ModelField
+ 
+ from reflex.base import Base
+ from reflex.utils import serializers
+@@ -21,18 +35,6 @@
+ ArgsSpec = Callable
+ 
+ 
+-def get_args(alias: _GenericAlias) -> tuple[Type, ...]:
+-    """Get the arguments of a type alias.
+-
+-    Args:
+-        alias: The type alias.
+-
+-    Returns:
+-        The arguments of the type alias.
+-    """
+-    return alias.__args__
+-
+-
+ def is_generic_alias(cls: GenericType) -> bool:
+     """Check whether the class is a generic alias.
+ 
+@@ -69,11 +71,11 @@ def is_union(cls: GenericType) -> bool:
+     Returns:
+         Whether the class is a Union.
+     """
+-    with contextlib.suppress(ImportError):
+-        from typing import _UnionGenericAlias  # type: ignore
++    # UnionType added in py3.10
++    if not hasattr(types, "UnionType"):
++        return get_origin(cls) is Union
+ 
+-        return isinstance(cls, _UnionGenericAlias)
+-    return cls.__origin__ == Union if is_generic_alias(cls) else False
++    return get_origin(cls) in [Union, types.UnionType]
+ 
+ 
+ def is_literal(cls: GenericType) -> bool:
+@@ -85,7 +87,58 @@ def is_literal(cls: GenericType) -> bool:
+     Returns:
+         Whether the class is a literal.
+     """
+-    return hasattr(cls, "__origin__") and cls.__origin__ is Literal
++    return get_origin(cls) is Literal
++
++
++def is_optional(cls: GenericType) -> bool:
++    """Check if a class is an Optional.
++
++    Args:
++        cls: The class to check.
++
++    Returns:
++        Whether the class is an Optional.
++    """
++    return is_union(cls) and type(None) in get_args(cls)
++
++
++def can_access_attribute(cls: GenericType, name: str) -> GenericType | None:
++    """Check if an attribute can be accessed on the cls.
++
++    Supports pydantic models, unions, and annotated attributes on rx.Model.
++
++    Args:
++        cls: The class to check.
++        name: The name of the attribute to check.
++
++    Returns:
++        The type of the attribute, if accessible, or None
++    """
++    from ..model import Model
++
++    # pydantic models
++    if hasattr(cls, "__fields__") and name in cls.__fields__:
++        field = cls.__fields__[name]
++        type_ = field.outer_type_
++        if isinstance(type_, ModelField):
++            type_ = type_.type_
++        if not field.required and field.default is None:
++            type_ = Optional[type_]
++        return type_
++    elif isinstance(cls, type) and issubclass(cls, Model):
++        # check in the annotations directly
++        hints = get_type_hints(cls)
++        if name in hints:
++            type_ = hints[name]
++            if isinstance(type_, ModelField):
++                return type_.type_
++            return type_
++    elif is_union(cls):
++        # check in each arg of the annotation
++        for arg in get_args(cls):
++            type_ = can_access_attribute(arg, name)
++            if type_ is not None:
++                return type_
+ 
+ 
+ def get_base_class(cls: GenericType) -> Type:
+@@ -171,7 +224,7 @@ def is_dataframe(value: Type) -> bool:
+     Returns:
+         Whether the value is a dataframe.
+     """
+-    if is_generic_alias(value) or value == typing.Any:
++    if is_generic_alias(value) or value == Any:
+         return False
+     return value.__name__ == "DataFrame"
+ 
+@@ -185,6 +238,8 @@ def is_valid_var_type(type_: Type) -> bool:
+     Returns:
+         Whether the type is a valid prop type.
+     """
++    if is_union(type_):
++        return all((is_valid_var_type(arg) for arg in get_args(type_)))
+     return _issubclass(type_, StateVar) or serializers.has_serializer(type_)
+ 
+ 
+@@ -200,9 +255,7 @@ def is_backend_variable(name: str) -> bool:
+     return name.startswith("_") and not name.startswith("__")
+ 
+ 
+-def check_type_in_allowed_types(
+-    value_type: Type, allowed_types: typing.Iterable
+-) -> bool:
++def check_type_in_allowed_types(value_type: Type, allowed_types: Iterable) -> bool:
+     """Check that a value type is found in a list of allowed types.
+ 
+     Args:
+diff --git a/reflex/vars.py b/reflex/vars.py
+index 862d4433761..61f66ac907f 100644
+--- a/reflex/vars.py
++++ b/reflex/vars.py
+@@ -15,17 +15,18 @@
+     Callable,
+     Dict,
+     List,
++    Literal,
+     Optional,
+     Tuple,
+     Type,
+     Union,
+     _GenericAlias,  # type: ignore
+     cast,
++    get_args,
++    get_origin,
+     get_type_hints,
+ )
+ 
+-from pydantic.fields import ModelField
+-
+ from reflex import constants
+ from reflex.base import Base
+ from reflex.utils import console, format, serializers, types
+@@ -417,15 +418,12 @@ def __getattr__(self, name: str) -> Var:
+                 raise TypeError(
+                     f"You must provide an annotation for the state var `{self._var_full_name}`. Annotation cannot be `{self._var_type}`"
+                 ) from None
+-            if (
+-                hasattr(self._var_type, "__fields__")
+-                and name in self._var_type.__fields__
+-            ):
+-                type_ = self._var_type.__fields__[name].outer_type_
+-                if isinstance(type_, ModelField):
+-                    type_ = type_.type_
++            is_optional = types.is_optional(self._var_type)
++            type_ = types.can_access_attribute(self._var_type, name)
++
++            if type_ is not None:
+                 return BaseVar(
+-                    _var_name=f"{self._var_name}.{name}",
++                    _var_name=f"{self._var_name}{'?' if is_optional else ''}.{name}",
+                     _var_type=type_,
+                     _var_state=self._var_state,
+                     _var_is_local=self._var_is_local,
+@@ -1232,11 +1230,17 @@ def get_default_value(self) -> Any:
+         Raises:
+             ImportError: If the var is a dataframe and pandas is not installed.
+         """
++        if types.is_optional(self._var_type):
++            return None
++
+         type_ = (
+-            self._var_type.__origin__
++            get_origin(self._var_type)
+             if types.is_generic_alias(self._var_type)
+             else self._var_type
+         )
++        if type_ is Literal:
++            args = get_args(self._var_type)
++            return args[0] if args else None
+         if issubclass(type_, str):
+             return ""
+         if issubclass(type_, types.get_args(Union[int, float])):
+diff --git a/tests/test_state.py b/tests/test_state.py
+index c3d3ab5195a..c42350ec762 100644
+--- a/tests/test_state.py
++++ b/tests/test_state.py
+@@ -7,7 +7,7 @@
+ import json
+ import os
+ import sys
+-from typing import Dict, Generator, List
++from typing import Dict, Generator, List, Optional, Union
+ from unittest.mock import AsyncMock, Mock
+ 
+ import pytest
+@@ -30,7 +30,7 @@
+     StateProxy,
+     StateUpdate,
+ )
+-from reflex.utils import prerequisites
++from reflex.utils import prerequisites, types
+ from reflex.utils.format import json_dumps
+ from reflex.vars import BaseVar, ComputedVar
+ 
+@@ -2182,3 +2182,52 @@ class MutableResetState(State):
+     instance.items.append([3, 3])
+     assert instance.items != default
+     assert instance.items != copied_default
++
++
++class Custom1(Base):
++    """A custom class with a str field."""
++
++    foo: str
++
++
++class Custom2(Base):
++    """A custom class with a Custom1 field."""
++
++    c1: Optional[Custom1] = None
++    c1r: Custom1
++
++
++class Custom3(Base):
++    """A custom class with a Custom2 field."""
++
++    c2: Optional[Custom2] = None
++    c2r: Custom2
++
++
++def test_state_union_optional():
++    """Test that state can be defined with Union and Optional vars."""
++
++    class UnionState(State):
++        int_float: Union[int, float] = 0
++        opt_int: Optional[int]
++        c3: Optional[Custom3]
++        c3i: Custom3  # implicitly required
++        c3r: Custom3 = Custom3(c2r=Custom2(c1r=Custom1(foo="")))
++        custom_union: Union[Custom1, Custom2, Custom3] = Custom1(foo="")
++
++    assert UnionState.c3.c2._var_name == "c3?.c2"  # type: ignore
++    assert UnionState.c3.c2.c1._var_name == "c3?.c2?.c1"  # type: ignore
++    assert UnionState.c3.c2.c1.foo._var_name == "c3?.c2?.c1?.foo"  # type: ignore
++    assert UnionState.c3.c2.c1r.foo._var_name == "c3?.c2?.c1r.foo"  # type: ignore
++    assert UnionState.c3.c2r.c1._var_name == "c3?.c2r.c1"  # type: ignore
++    assert UnionState.c3.c2r.c1.foo._var_name == "c3?.c2r.c1?.foo"  # type: ignore
++    assert UnionState.c3.c2r.c1r.foo._var_name == "c3?.c2r.c1r.foo"  # type: ignore
++    assert UnionState.c3i.c2._var_name == "c3i.c2"  # type: ignore
++    assert UnionState.c3r.c2._var_name == "c3r.c2"  # type: ignore
++    assert UnionState.custom_union.foo is not None  # type: ignore
++    assert UnionState.custom_union.c1 is not None  # type: ignore
++    assert UnionState.custom_union.c1r is not None  # type: ignore
++    assert UnionState.custom_union.c2 is not None  # type: ignore
++    assert UnionState.custom_union.c2r is not None  # type: ignore
++    assert types.is_optional(UnionState.opt_int._var_type)  # type: ignore
++    assert types.is_union(UnionState.int_float._var_type)  # type: ignore
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

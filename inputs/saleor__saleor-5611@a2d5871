@@ -1,0 +1,178 @@
+  Task-ID: saleor__saleor-5611@a2d5871
+  Please checkout to this commit first: a1ec77677e1a769ad7995e3163c7c35295c13ed6
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Warehouse slug migration failing
+Hey guys,
+
+Congratulations on the upcoming 2.10 release!
+
+Any tip on why would this migration fail?
+
+```
+ Applying warehouse.0003_warehouse_slug...Traceback (most recent call last):
+  File "manage.py", line 10, in <module>
+    execute_from_command_line(sys.argv)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/__init__.py", line 401, in execute_from_command_line
+    utility.execute()
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/__init__.py", line 395, in execute
+    self.fetch_command(subcommand).run_from_argv(self.argv)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/base.py", line 328, in run_from_argv
+    self.execute(*args, **cmd_options)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/base.py", line 369, in execute
+    output = self.handle(*args, **options)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/base.py", line 83, in wrapped
+    res = handle_func(*args, **kwargs)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/core/management/commands/migrate.py", line 231, in handle
+    post_migrate_state = executor.migrate(
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/db/migrations/executor.py", line 117, in migrate
+    state = self._migrate_all_forwards(state, plan, full_plan, fake=fake, fake_initial=fake_initial)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/db/migrations/executor.py", line 147, in _migrate_all_forwards
+    state = self.apply_migration(state, migration, fake=fake, fake_initial=fake_initial)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/db/migrations/executor.py", line 245, in apply_migration
+    state = migration.apply(state, schema_editor)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/db/migrations/migration.py", line 124, in apply
+    operation.database_forwards(self.app_label, schema_editor, old_state, project_state)
+  File "/Users/timur/Code/pyenv/lib/python3.8/site-packages/django/db/migrations/operations/special.py", line 190, in database_forwards
+    self.code(from_state.apps, schema_editor)
+  File "/Users/timur/Code/saleor/saleor/warehouse/migrations/0003_warehouse_slug.py", line 17, in create_unique_slug_for_warehouses
+    first_char = warehouse.name[0].lower()
+IndexError: string index out of range
+```
+  </issue>
+  
+  <patch>
+  diff --git a/saleor/warehouse/migrations/0001_initial.py b/saleor/warehouse/migrations/0001_initial.py
+index ce01e2486be..4d236a03606 100644
+--- a/saleor/warehouse/migrations/0001_initial.py
++++ b/saleor/warehouse/migrations/0001_initial.py
+@@ -23,7 +23,7 @@ def get_or_create_warehouse(apps):
+         Address = apps.get_model("account", "Address")
+         address = Address.objects.create()
+ 
+-    warehouse = Warehouse.objects.create(address=address)
++    warehouse = Warehouse.objects.create(name="Default warehouse", address=address)
+     warehouse.shipping_zones.add(*ShippingZone.objects.all())
+     return warehouse
+ 
+@@ -120,7 +120,7 @@ class Migration(migrations.Migration):
+                     models.ManyToManyField(blank=True, to="shipping.ShippingZone"),
+                 ),
+             ],
+-            options={"ordering": ("-name",),},
++            options={"ordering": ("-name",)},
+         ),
+         migrations.CreateModel(
+             name="Stock",
+@@ -152,7 +152,7 @@ class Migration(migrations.Migration):
+                     ),
+                 ),
+             ],
+-            options={"unique_together": {("warehouse", "product_variant")},},
++            options={"unique_together": {("warehouse", "product_variant")}},
+         ),
+         migrations.RunPython(forward, backward),
+     ]
+diff --git a/saleor/warehouse/migrations/0003_warehouse_slug.py b/saleor/warehouse/migrations/0003_warehouse_slug.py
+index 6ec0c3986be..ad9a63c8369 100644
+--- a/saleor/warehouse/migrations/0003_warehouse_slug.py
++++ b/saleor/warehouse/migrations/0003_warehouse_slug.py
+@@ -8,29 +8,38 @@
+ def create_unique_slug_for_warehouses(apps, schema_editor):
+     Warehouse = apps.get_model("warehouse", "Warehouse")
+ 
++    default_slug_value = "warehouse"
+     warehouses = (
+         Warehouse.objects.filter(slug__isnull=True).order_by(Lower("name")).iterator()
+     )
+-    previous_char = ""
++    previous_char = None
+     slug_values = []
+     for warehouse in warehouses:
+-        first_char = warehouse.name[0].lower()
+-        if first_char != previous_char:
+-            previous_char = first_char
+-            slug_values = list(
+-                Warehouse.objects.filter(slug__istartswith=first_char).values_list(
+-                    "slug", flat=True
++        if warehouse.name:
++            first_char = warehouse.name[0].lower()
++            if first_char != previous_char:
++                previous_char = first_char
++                slug_values = list(
++                    Warehouse.objects.filter(slug__istartswith=first_char).values_list(
++                        "slug", flat=True
++                    )
+                 )
++        elif previous_char is None:
++            previous_char = ""
++            slug_values = list(
++                Warehouse.objects.filter(
++                    slug__istartswith=default_slug_value
++                ).values_list("slug", flat=True)
+             )
+ 
+-        slug = generate_unique_slug(warehouse, slug_values)
++        slug = generate_unique_slug(warehouse, slug_values, default_slug_value)
+         warehouse.slug = slug
+         warehouse.save(update_fields=["slug"])
+         slug_values.append(slug)
+ 
+ 
+-def generate_unique_slug(instance, slug_values):
+-    slug = slugify(instance.name)
++def generate_unique_slug(instance, slug_values, default_slug_value):
++    slug = slugify(instance.name) if instance.name else default_slug_value
+     unique_slug = slug
+     extension = 1
+ 
+diff --git a/saleor/warehouse/migrations/0007_auto_20200406_0341.py b/saleor/warehouse/migrations/0007_auto_20200406_0341.py
+index 631b75cb36e..e414e513186 100644
+--- a/saleor/warehouse/migrations/0007_auto_20200406_0341.py
++++ b/saleor/warehouse/migrations/0007_auto_20200406_0341.py
+@@ -18,7 +18,10 @@ def create_allocations(apps, schema_editor):
+     OrderLine = apps.get_model("order", "OrderLine")
+     Warehouse = apps.get_model("warehouse", "Warehouse")
+     for warehouse in Warehouse.objects.iterator():
+-        shipping_zone_pk = warehouse.shipping_zones.first().pk
++        shipping_zone = warehouse.shipping_zones.first()
++        if not shipping_zone:
++            continue
++        shipping_zone_pk = shipping_zone.pk
+         for order_line in OrderLine.objects.filter(
+             order__shipping_method__shipping_zone__pk=shipping_zone_pk,
+         ).iterator():
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

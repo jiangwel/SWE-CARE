@@ -1,0 +1,137 @@
+  Task-ID: scikit-learn__scikit-learn-10099@33f7ffa
+  Please checkout to this commit first: effd75dda5f4afa61f988035ff8fe4b3a447464e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Duplicated input points silently create duplicated clusters in KMeans
+#### Description
+When there are duplicated input points to Kmeans resulting to number of unique points < number of requested clusters, there is no error thrown. Instead, clustering continues to (seemingly) produce the number of clusters requested, but some of them are exactly the same, so the cluster labels produced for the input points do not go all the way to number of requested clusters.
+
+#### Steps/Code to Reproduce
+```python
+from sklearn.cluster import KMeans
+import numpy as np
+
+# some input points here are identical, so that n_total=17, n_unique=9
+x2d = np.array([(1086, 348), (1087, 347), (1190, 244), (1190, 244), (1086, 348), (1185, 249), (1193, 241), (1185, 249), (1087, 347), (1188, 247), (1187, 233), (26, 111), (26, 111), (26, 110), (26, 110), (26, 110), (26, 110)])
+kmeans = KMeans(n_clusters=10) # n_clusters > n_unique
+c_labels = kmeans.fit_predict(x2d)
+c_centers = kmeans.cluster_centers_
+```
+#### Expected Results
+Either an error thrown, or the cluster labels produced should match the unique clusters only (i.e. no identical cluster centres)
+
+#### Actual Results
+```python
+>>> c_labels  # note there's no entry for cluster 9
+array([7, 2, 6, 6, 7, 5, 4, 5, 2, 1, 3, 8, 8, 0, 0, 0, 0], dtype=int32)
+>>> c_centers # two of these 10 clusters have identical centers, so only 9 of them are unique
+array([[   26.,   110.],
+       [ 1188.,   247.],
+       [ 1087.,   347.],
+       [ 1187.,   233.],
+       [ 1193.,   241.],
+       [ 1185.,   249.],
+       [ 1190.,   244.],
+       [ 1086.,   348.],
+       [   26.,   111.],
+       [   26.,   110.]]) 
+```
+
+#### Versions
+```python
+Darwin-16.7.0-x86_64-i386-64bit
+Python 3.6.1 |Continuum Analytics, Inc.| (default, May 11 2017, 13:04:09)
+[GCC 4.2.1 Compatible Apple LLVM 6.0 (clang-600.0.57)]
+NumPy 1.13.1
+SciPy 0.19.1
+Scikit-Learn 0.18.2
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/whats_new/v0.20.rst b/doc/whats_new/v0.20.rst
+index 5af76499bcb39..73cf84a56de9a 100644
+--- a/doc/whats_new/v0.20.rst
++++ b/doc/whats_new/v0.20.rst
+@@ -134,6 +134,11 @@ Decomposition, manifold learning and clustering
+ - Fixed a bug when setting parameters on meta-estimator, involving both a
+   wrapped estimator and its parameter. :issue:`9999` by :user:`Marcus Voss
+   <marcus-voss>` and `Joel Nothman`_.
++  
++- ```k_means``` now gives a warning, if the number of distinct clusters found
++  is smaller than ```n_clusters```. This may occur when the number of distinct 
++  points in the data set is actually smaller than the number of cluster one is 
++  looking for. :issue:`10059` by :user:`Christian Braune <christianbraune79>`.
+ 
+ Metrics
+ 
+diff --git a/sklearn/cluster/k_means_.py b/sklearn/cluster/k_means_.py
+index 0da0144172703..71ed97ea33a3b 100644
+--- a/sklearn/cluster/k_means_.py
++++ b/sklearn/cluster/k_means_.py
+@@ -374,6 +374,10 @@ def k_means(X, n_clusters, init='k-means++', precompute_distances='auto',
+             X += X_mean
+         best_centers += X_mean
+ 
++    if len(set(best_labels)) < n_clusters:
++        warnings.warn("number of distinct clusters found smaller than n_clusters. "
++                      "Possibly due to duplicate points in X", RuntimeWarning, stacklevel=2)
++
+     if return_n_iter:
+         return best_centers, best_labels, best_inertia, best_n_iter
+     else:
+diff --git a/sklearn/cluster/tests/test_k_means.py b/sklearn/cluster/tests/test_k_means.py
+index 080a31ba52f9d..2effbaea65cda 100644
+--- a/sklearn/cluster/tests/test_k_means.py
++++ b/sklearn/cluster/tests/test_k_means.py
+@@ -867,3 +867,16 @@ def test_sparse_validate_centers():
+     msg = "The shape of the initial centers \(\(4L?, 4L?\)\) " \
+           "does not match the number of clusters 3"
+     assert_raises_regex(ValueError, msg, classifier.fit, X)
++
++
++def test_less_centers_than_unique_points():
++    X = np.asarray([[0, 0],
++                    [0, 1],
++                    [1, 0],
++                    [1, 0]])  # last point is duplicated
++
++    km = KMeans(n_clusters=4).fit(X)
++
++    assert_equal(set(km.labels_), set(range(3)))
++    assert_warns(RuntimeWarning, k_means, X, n_clusters=4)
++
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

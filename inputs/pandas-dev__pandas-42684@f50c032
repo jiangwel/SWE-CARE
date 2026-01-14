@@ -1,0 +1,210 @@
+  Task-ID: pandas-dev__pandas-42684@f50c032
+  Please checkout to this commit first: f72c19b5db8773708d0cd384e8f3467163cd819b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: Raise error on ascending='False'
+#### Is your feature request related to a problem?
+
+when sort_values ascending parameter is set to a string (df.sort_values(col_name, ascending='False') it does not error although it's meaningless, this could be quite confusing.
+
+#### Describe the solution you'd like
+
+Raise an error if ascending is equal to values that are not boolean 
+
+#### API breaking implications
+
+Error raising
+
+#### Describe alternatives you've considered
+
+Warning is also good, but I think error makes more sense
+
+#### Additional context
+
+for an hour I was wondering why ascending='False'
+ is not working
+
+```python
+isinstance('False', bool) :)
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v1.4.0.rst b/doc/source/whatsnew/v1.4.0.rst
+index 8d96d49daba4f..bccc65a34d6a7 100644
+--- a/doc/source/whatsnew/v1.4.0.rst
++++ b/doc/source/whatsnew/v1.4.0.rst
+@@ -224,7 +224,8 @@ Indexing
+ - Bug in :meth:`Series.loc` when with a :class:`MultiIndex` whose first level contains only ``np.nan`` values (:issue:`42055`)
+ - Bug in indexing on a :class:`Series` or :class:`DataFrame` with a :class:`DatetimeIndex` when passing a string, the return type depended on whether the index was monotonic (:issue:`24892`)
+ - Bug in indexing on a :class:`MultiIndex` failing to drop scalar levels when the indexer is a tuple containing a datetime-like string (:issue:`42476`)
+--
++- Bug in :meth:`Dataframe.sort_values` when passing a ascending-incompatible value, failed to raise ``ValueError`` (:issue:`41634`)
++- Bug in :meth:`Series.sort_values` when passing a ascending-compatible value; int, raising ``ascending must be boolean`` error (:issue:`41634`)
+ 
+ Missing
+ ^^^^^^^
+diff --git a/pandas/core/frame.py b/pandas/core/frame.py
+index 8b82021375a28..ef4a94164216e 100644
+--- a/pandas/core/frame.py
++++ b/pandas/core/frame.py
+@@ -85,6 +85,7 @@
+     rewrite_axis_style_signature,
+ )
+ from pandas.util._validators import (
++    validate_ascending,
+     validate_axis_style_args,
+     validate_bool_kwarg,
+     validate_percentile,
+@@ -6190,7 +6191,7 @@ def sort_values(  # type: ignore[override]
+     ):
+         inplace = validate_bool_kwarg(inplace, "inplace")
+         axis = self._get_axis_number(axis)
+-
++        ascending = validate_ascending(ascending)
+         if not isinstance(by, list):
+             by = [by]
+         if is_sequence(ascending) and len(by) != len(ascending):
+diff --git a/pandas/core/series.py b/pandas/core/series.py
+index e61ce8e74629b..2f64a9b612095 100644
+--- a/pandas/core/series.py
++++ b/pandas/core/series.py
+@@ -57,6 +57,7 @@
+     doc,
+ )
+ from pandas.util._validators import (
++    validate_ascending,
+     validate_bool_kwarg,
+     validate_percentile,
+ )
+@@ -69,7 +70,6 @@
+ )
+ from pandas.core.dtypes.common import (
+     ensure_platform_int,
+-    is_bool,
+     is_dict_like,
+     is_integer,
+     is_iterator,
+@@ -3437,8 +3437,7 @@ def sort_values(
+                 )
+             ascending = ascending[0]
+ 
+-        if not is_bool(ascending):
+-            raise ValueError("ascending must be boolean")
++        ascending = validate_ascending(ascending)
+ 
+         if na_position not in ["first", "last"]:
+             raise ValueError(f"invalid na_position: {na_position}")
+diff --git a/pandas/tests/frame/methods/test_sort_values.py b/pandas/tests/frame/methods/test_sort_values.py
+index d46796bcd978b..76d675ee21007 100644
+--- a/pandas/tests/frame/methods/test_sort_values.py
++++ b/pandas/tests/frame/methods/test_sort_values.py
+@@ -868,3 +868,25 @@ def test_sort_values_pos_args_deprecation(self):
+             result = df.sort_values("a", 0)
+         expected = DataFrame({"a": [1, 2, 3]})
+         tm.assert_frame_equal(result, expected)
++
++    def test_sort_values_validate_ascending(self):
++        # GH41634
++        df = DataFrame({"D": [23, 7, 21]})
++        indexer = df["D"].argsort().values
++        r_indexer = indexer[::-1]
++
++        msg = 'For argument "ascending" expected type bool, received type str.'
++        with pytest.raises(ValueError, match=msg):
++            df.sort_values(by="D", ascending="False")
++
++        expected_df = df.loc[df.index[r_indexer]]
++        sorted_df = df.sort_values(by="D", ascending=False)
++        tm.assert_frame_equal(sorted_df, expected_df)
++
++        expected_df = df.loc[df.index[r_indexer]]
++        sorted_df = df.sort_values(by="D", ascending=0)
++        tm.assert_frame_equal(sorted_df, expected_df)
++
++        expected_df = df.loc[df.index[indexer]]
++        sorted_df = df.sort_values(by="D", ascending=1)
++        tm.assert_frame_equal(sorted_df, expected_df)
+diff --git a/pandas/tests/series/methods/test_sort_values.py b/pandas/tests/series/methods/test_sort_values.py
+index 67f986c0949ca..3b96c380ffd89 100644
+--- a/pandas/tests/series/methods/test_sort_values.py
++++ b/pandas/tests/series/methods/test_sort_values.py
+@@ -51,7 +51,7 @@ def test_sort_values(self, datetime_series):
+         expected = ts.sort_values(ascending=False, na_position="first")
+         tm.assert_series_equal(expected, ordered)
+ 
+-        msg = "ascending must be boolean"
++        msg = 'For argument "ascending" expected type bool, received type NoneType.'
+         with pytest.raises(ValueError, match=msg):
+             ts.sort_values(ascending=None)
+         msg = r"Length of ascending \(0\) must be 1 for Series"
+@@ -63,7 +63,7 @@ def test_sort_values(self, datetime_series):
+         msg = r"Length of ascending \(2\) must be 1 for Series"
+         with pytest.raises(ValueError, match=msg):
+             ts.sort_values(ascending=[False, False])
+-        msg = "ascending must be boolean"
++        msg = 'For argument "ascending" expected type bool, received type str.'
+         with pytest.raises(ValueError, match=msg):
+             ts.sort_values(ascending="foobar")
+ 
+@@ -206,6 +206,25 @@ def test_mergesort_decending_stability(self):
+         expected = Series([3, 2, 1, 1], ["c", "b", "first", "second"])
+         tm.assert_series_equal(result, expected)
+ 
++    def test_sort_values_validate_ascending(self):
++        # GH41634
++        ser = Series([23, 7, 21])
++        expected = np.sort(ser.values)[::-1]
++
++        msg = 'For argument "ascending" expected type bool, received type str.'
++        with pytest.raises(ValueError, match=msg):
++            ser.sort_values(ascending="False")
++
++        sorted_ser = ser.sort_values(ascending=False)
++        tm.assert_numpy_array_equal(sorted_ser.values, expected)
++
++        sorted_ser = ser.sort_values(ascending=0)
++        tm.assert_numpy_array_equal(sorted_ser.values, expected)
++
++        expected = expected[::-1]
++        sorted_ser = ser.sort_values(ascending=1)
++        tm.assert_numpy_array_equal(sorted_ser.values, expected)
++
+ 
+ class TestSeriesSortingKey:
+     def test_sort_values_key(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

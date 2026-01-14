@@ -1,0 +1,1261 @@
+  Task-ID: PostHog__posthog-15345@b104baf
+  Please checkout to this commit first: 7df9fb9d6bd4713406bb677c8753b6d4315e7b08
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Convert Recordings list to infinite scrollers
+## Is your feature request related to a problem?
+
+Currently we have pagination on our recordings lists allowing you to paginate through results in batches of 20. This has some flaws however:
+1. We cannot guarantee that the next page is the correct offset as we offset by number, not time. This affects any relative date ranges as new recordings entering the list change the offset.
+2. We are limited on our ability to do things like autoplay constantly as the list comes to an end. Does the next autoplay, paginate the list?
+3. Showing new recordings coming in has the same problem, we have to change back to the first page of results which breaks the flow.
+
+## Describe the solution you'd like
+
+Ditch pagination all-together and replace it with an infinite scroller.
+
+**Pros**
+* Greatly simplifies the logic. Pagination is just "fetch recordings older than the oldest in the list or newer than the newest".
+* Fixes the off-by-1 errors that occur as new recordings appear in the overall queryset
+* Makes "autoplay" simple in both directions as we just load more when we hit the end of the list
+
+**Cons**
+* No fixed url for pagination - refreshes by default would just go back to the top
+* No quick way to jump through multiple pages (currently you can just click multiple times to paginate back - although this is currently buggy as well)
+
+## Describe alternatives you've considered
+
+
+
+## Additional context
+
+User feedback on this (paraphrased):
+"I like pagination, it allows me to quickly jump back multiple pages. Without this I would have to change the date range filter which is way too many clicks. Switch to have both options would be best. If I know there was a time that people did a particular action, I can just paginate back."
+
+
+
+#### *Thank you* for your feature request – we love each and every one!
+  </issue>
+  
+  <patch>
+  diff --git a/frontend/src/layout/navigation-3000/Navigation.tsx b/frontend/src/layout/navigation-3000/Navigation.tsx
+index 70df3c7313ddc..25a1cb33aa18d 100644
+--- a/frontend/src/layout/navigation-3000/Navigation.tsx
++++ b/frontend/src/layout/navigation-3000/Navigation.tsx
+@@ -28,11 +28,12 @@ export function Navigation({ children }: { children: ReactNode }): JSX.Element {
+                 <Breadcrumbs />
+                 <div className="Navigation3000__scene">
+                     <div className="Navigation3000__content">{children}</div>
+-                    <FlaggedFeature flag={FEATURE_FLAGS.NOTEBOOKS} match>
+-                        <NotebookSideBar />
+-                    </FlaggedFeature>
+                 </div>
+             </main>
++            <FlaggedFeature flag={FEATURE_FLAGS.NOTEBOOKS} match>
++                <NotebookSideBar />
++            </FlaggedFeature>
++
+             <CommandPalette />
+         </div>
+     )
+diff --git a/frontend/src/scenes/feature-flags/FeatureFlag.tsx b/frontend/src/scenes/feature-flags/FeatureFlag.tsx
+index b82e329a22553..83b0bc8240722 100644
+--- a/frontend/src/scenes/feature-flags/FeatureFlag.tsx
++++ b/frontend/src/scenes/feature-flags/FeatureFlag.tsx
+@@ -487,7 +487,6 @@ export function FeatureFlag({ id }: { id?: string } = {}): JSX.Element {
+                                                             node={NotebookNodeType.FeatureFlag}
+                                                             properties={{ flag: id }}
+                                                             type="secondary"
+-                                                            size="medium"
+                                                         />
+                                                     </span>
+                                                 </FlaggedFeature>
+diff --git a/frontend/src/scenes/insights/InsightPageHeader.tsx b/frontend/src/scenes/insights/InsightPageHeader.tsx
+index 01e0ab0a3424c..b37caee7c4a4c 100644
+--- a/frontend/src/scenes/insights/InsightPageHeader.tsx
++++ b/frontend/src/scenes/insights/InsightPageHeader.tsx
+@@ -304,7 +304,6 @@ export function InsightPageHeader({ insightLogicProps }: { insightLogicProps: In
+                                     node={NotebookNodeType.Insight}
+                                     properties={{ shortId: insight.short_id }}
+                                     type="secondary"
+-                                    size="medium"
+                                 />
+                             )}
+ 
+diff --git a/frontend/src/scenes/notebooks/AddToNotebook/AddToNotebook.tsx b/frontend/src/scenes/notebooks/AddToNotebook/AddToNotebook.tsx
+index 02d07f7ed0252..c25f637a81a49 100644
+--- a/frontend/src/scenes/notebooks/AddToNotebook/AddToNotebook.tsx
++++ b/frontend/src/scenes/notebooks/AddToNotebook/AddToNotebook.tsx
+@@ -30,12 +30,11 @@ export function AddToNotebook({
+                 e.stopPropagation()
+                 addNodeToNotebook(node, properties)
+             }}
+-            size="small"
+             tooltip="Add to notebook"
++            icon={icon}
+             {...buttonProps}
+         >
+             {children}
+-            {icon}
+         </LemonButton>
+     )
+ }
+diff --git a/frontend/src/scenes/notebooks/Nodes/FeatureFlagNode.tsx b/frontend/src/scenes/notebooks/Nodes/NotebookNodeFlag.tsx
+similarity index 97%
+rename from frontend/src/scenes/notebooks/Nodes/FeatureFlagNode.tsx
+rename to frontend/src/scenes/notebooks/Nodes/NotebookNodeFlag.tsx
+index 53317077aa227..f2e2f577ad311 100644
+--- a/frontend/src/scenes/notebooks/Nodes/FeatureFlagNode.tsx
++++ b/frontend/src/scenes/notebooks/Nodes/NotebookNodeFlag.tsx
+@@ -43,7 +43,7 @@ const Component = (props: NodeViewProps): JSX.Element => {
+     )
+ }
+ 
+-export const FeatureFlagNode = Node.create({
++export const NotebookNodeFlag = Node.create({
+     name: NotebookNodeType.FeatureFlag,
+     group: 'block',
+     atom: true,
+diff --git a/frontend/src/scenes/notebooks/Nodes/InsightNode.tsx b/frontend/src/scenes/notebooks/Nodes/NotebookNodeInsight.tsx
+similarity index 92%
+rename from frontend/src/scenes/notebooks/Nodes/InsightNode.tsx
+rename to frontend/src/scenes/notebooks/Nodes/NotebookNodeInsight.tsx
+index 75ea8f1cdce70..b95e0d89c6f88 100644
+--- a/frontend/src/scenes/notebooks/Nodes/InsightNode.tsx
++++ b/frontend/src/scenes/notebooks/Nodes/NotebookNodeInsight.tsx
+@@ -11,8 +11,10 @@ const Component = (props: NodeViewProps): JSX.Element => {
+     const logic = insightLogic({ dashboardItemId: props.node.attrs.shortId })
+     const { insightProps } = useValues(logic)
+ 
++    const href = `/insights/${props.node.attrs.shortId}`
++
+     return (
+-        <NodeWrapper className={NotebookNodeType.Insight} title="Insight" {...props}>
++        <NodeWrapper className={NotebookNodeType.Insight} title="Insight" href={href} {...props}>
+             <BindLogic logic={insightLogic} props={insightProps}>
+                 <div className="insights-container" data-attr="insight-view">
+                     <InsightContainer
+@@ -28,7 +30,7 @@ const Component = (props: NodeViewProps): JSX.Element => {
+     )
+ }
+ 
+-export const InsightNode = Node.create({
++export const NotebookNodeInsight = Node.create({
+     name: NotebookNodeType.Insight,
+     group: 'block',
+     atom: true,
+diff --git a/frontend/src/scenes/notebooks/Nodes/RecordingPlaylistNode.tsx b/frontend/src/scenes/notebooks/Nodes/NotebookNodePlaylist.tsx
+similarity index 97%
+rename from frontend/src/scenes/notebooks/Nodes/RecordingPlaylistNode.tsx
+rename to frontend/src/scenes/notebooks/Nodes/NotebookNodePlaylist.tsx
+index e5b1b70ae4739..97aa45533d46b 100644
+--- a/frontend/src/scenes/notebooks/Nodes/RecordingPlaylistNode.tsx
++++ b/frontend/src/scenes/notebooks/Nodes/NotebookNodePlaylist.tsx
+@@ -33,7 +33,7 @@ const Component = (props: NodeViewProps): JSX.Element => {
+     )
+ }
+ 
+-export const RecordingPlaylistNode = Node.create({
++export const NotebookNodePlaylist = Node.create({
+     name: NotebookNodeType.RecordingPlaylist,
+     group: 'block',
+     atom: true,
+diff --git a/frontend/src/scenes/notebooks/Nodes/QueryNode.tsx b/frontend/src/scenes/notebooks/Nodes/NotebookNodeQuery.tsx
+similarity index 71%
+rename from frontend/src/scenes/notebooks/Nodes/QueryNode.tsx
+rename to frontend/src/scenes/notebooks/Nodes/NotebookNodeQuery.tsx
+index d0996054ff850..e06af9cd115a5 100644
+--- a/frontend/src/scenes/notebooks/Nodes/QueryNode.tsx
++++ b/frontend/src/scenes/notebooks/Nodes/NotebookNodeQuery.tsx
+@@ -5,6 +5,8 @@ import { Query } from '~/queries/Query/Query'
+ import { NodeKind, QuerySchema } from '~/queries/schema'
+ import { NodeWrapper } from 'scenes/notebooks/Nodes/NodeWrapper'
+ import { NotebookNodeType } from 'scenes/notebooks/Nodes/types'
++import { BindLogic, useValues } from 'kea'
++import { insightLogic } from 'scenes/insights/insightLogic'
+ 
+ const DEFAULT_QUERY: QuerySchema = {
+     kind: NodeKind.DataTableNode,
+@@ -21,9 +23,16 @@ const DEFAULT_QUERY: QuerySchema = {
+ 
+ const Component = (props: NodeViewProps): JSX.Element => {
+     let propQuery = props.node.attrs.query
+-    propQuery = typeof propQuery === 'string' ? JSON.parse(propQuery) : propQuery
++    try {
++        propQuery = typeof propQuery === 'string' ? JSON.parse(propQuery) : propQuery
++    } catch (e) {
++        console.error("Couldn't parse query", e)
++    }
+     const [query, setQuery] = useState<QuerySchema>(propQuery)
+ 
++    const logic = insightLogic({ dashboardItemId: 'new' })
++    const { insightProps } = useValues(logic)
++
+     useEffect(() => {
+         props.updateAttributes({
+             query: JSON.stringify(query),
+@@ -32,14 +41,16 @@ const Component = (props: NodeViewProps): JSX.Element => {
+ 
+     return (
+         <NodeWrapper className={NotebookNodeType.Query} title="Query" {...props}>
+-            <div className="max-h-120 overflow-y-auto">
+-                <Query query={query} setQuery={(t) => setQuery(t as any)} />
+-            </div>
++            <BindLogic logic={insightLogic} props={insightProps}>
++                <div className="max-h-120 overflow-y-auto">
++                    <Query query={query} setQuery={(t) => setQuery(t as any)} />
++                </div>
++            </BindLogic>
+         </NodeWrapper>
+     )
+ }
+ 
+-export const QueryNode = Node.create({
++export const NotebookNodeQuery = Node.create({
+     name: NotebookNodeType.Query,
+     group: 'block',
+     atom: true,
+diff --git a/frontend/src/scenes/notebooks/Nodes/RecordingNode.tsx b/frontend/src/scenes/notebooks/Nodes/NotebookNodeRecording.tsx
+similarity index 77%
+rename from frontend/src/scenes/notebooks/Nodes/RecordingNode.tsx
+rename to frontend/src/scenes/notebooks/Nodes/NotebookNodeRecording.tsx
+index bd63003b8511c..65cd69ebdec84 100644
+--- a/frontend/src/scenes/notebooks/Nodes/RecordingNode.tsx
++++ b/frontend/src/scenes/notebooks/Nodes/NotebookNodeRecording.tsx
+@@ -1,11 +1,15 @@
+ import { mergeAttributes, Node, NodeViewProps } from '@tiptap/core'
+ import { ReactNodeViewRenderer } from '@tiptap/react'
+-import { SessionRecordingPlayer } from 'scenes/session-recordings/player/SessionRecordingPlayer'
++import {
++    SessionRecordingPlayer,
++    SessionRecordingPlayerProps,
++} from 'scenes/session-recordings/player/SessionRecordingPlayer'
+ import { NodeWrapper } from 'scenes/notebooks/Nodes/NodeWrapper'
+ import { NotebookNodeType } from 'scenes/notebooks/Nodes/types'
++import { urls } from 'scenes/urls'
+ 
+ const Component = (props: NodeViewProps): JSX.Element => {
+-    const recordingLogicProps = {
++    const recordingLogicProps: SessionRecordingPlayerProps = {
+         embedded: true,
+         sessionRecordingId: props.node.attrs.sessionRecordingId,
+         playerKey: `notebook-${props.node.attrs.sessionRecordingId}`,
+@@ -16,18 +20,18 @@ const Component = (props: NodeViewProps): JSX.Element => {
+             {...props}
+             className={NotebookNodeType.Recording}
+             title="Recording"
++            href={urls.sessionRecording(recordingLogicProps.sessionRecordingId)}
+             // TODO: Fix "meta" preview
+             // preview={<PlayerMeta {...recordingLogicProps} />}
+         >
+-            {/* TODO: replace hardcoded height, 32 (top) + 500 (player) + 16 (margins) + 88 (seekbar) = 620 */}
+-            <div style={{ maxHeight: 636 }}>
++            <div style={{ height: 500 }}>
+                 <SessionRecordingPlayer {...recordingLogicProps} />
+             </div>
+         </NodeWrapper>
+     )
+ }
+ 
+-export const RecordingNode = Node.create({
++export const NotebookNodeRecording = Node.create({
+     name: NotebookNodeType.Recording,
+     group: 'block',
+     atom: true,
+diff --git a/frontend/src/scenes/notebooks/Notebook/Notebook.tsx b/frontend/src/scenes/notebooks/Notebook/Notebook.tsx
+index e7eca0019f7c2..484b7679a21d8 100644
+--- a/frontend/src/scenes/notebooks/Notebook/Notebook.tsx
++++ b/frontend/src/scenes/notebooks/Notebook/Notebook.tsx
+@@ -1,17 +1,18 @@
+ import { useEditor, EditorContent } from '@tiptap/react'
+ import StarterKit from '@tiptap/starter-kit'
+ import { useEffect } from 'react'
+-import { QueryNode } from 'scenes/notebooks/Nodes/QueryNode'
+-import { InsightNode } from 'scenes/notebooks/Nodes/InsightNode'
+-import { RecordingNode } from 'scenes/notebooks/Nodes/RecordingNode'
+ import { notebookLogic } from 'scenes/notebooks/Notebook/notebookLogic'
+ import { useActions, useValues } from 'kea'
+-import './Notebook.scss'
+-import { RecordingPlaylistNode } from 'scenes/notebooks/Nodes/RecordingPlaylistNode'
+ import { AutoSizer } from 'react-virtualized/dist/es/AutoSizer'
+ import MonacoEditor from '@monaco-editor/react'
+ import { Spinner } from 'lib/lemon-ui/Spinner'
+-import { FeatureFlagNode } from '../Nodes/FeatureFlagNode'
++import './Notebook.scss'
++
++import { NotebookNodeFlag } from '../Nodes/NotebookNodeFlag'
++import { NotebookNodeQuery } from 'scenes/notebooks/Nodes/NotebookNodeQuery'
++import { NotebookNodeInsight } from 'scenes/notebooks/Nodes/NotebookNodeInsight'
++import { NotebookNodeRecording } from 'scenes/notebooks/Nodes/NotebookNodeRecording'
++import { NotebookNodePlaylist } from 'scenes/notebooks/Nodes/NotebookNodePlaylist'
+ 
+ export type NotebookProps = {
+     id: string
+@@ -25,7 +26,14 @@ export function Notebook({ id, sourceMode, editable = false }: NotebookProps): J
+     const { setEditorRef, syncContent } = useActions(logic)
+ 
+     const editor = useEditor({
+-        extensions: [StarterKit, InsightNode, QueryNode, RecordingNode, RecordingPlaylistNode, FeatureFlagNode],
++        extensions: [
++            StarterKit,
++            NotebookNodeInsight,
++            NotebookNodeQuery,
++            NotebookNodeRecording,
++            NotebookNodePlaylist,
++            NotebookNodeFlag,
++        ],
+         content,
+         editorProps: {
+             attributes: {
+diff --git a/frontend/src/scenes/notebooks/Notebook/NotebookSideBar.tsx b/frontend/src/scenes/notebooks/Notebook/NotebookSideBar.tsx
+index 734735502e2fc..a52902e0dc159 100644
+--- a/frontend/src/scenes/notebooks/Notebook/NotebookSideBar.tsx
++++ b/frontend/src/scenes/notebooks/Notebook/NotebookSideBar.tsx
+@@ -41,7 +41,7 @@ export function NotebookSideBar(): JSX.Element {
+             <CSSTransition in={notebookSideBarShown} timeout={200} mountOnEnter unmountOnExit>
+                 <div className="NotebookSidebar__floater">
+                     <div className="NotebookSidebar__content">
+-                        <header className="flex items-center justify-between gap-2 font-semibold shrink-0 p-2 border-b">
++                        <header className="flex items-center justify-between gap-2 font-semibold shrink-0 p-1 border-b">
+                             <span className="flex items-center gap-1 text-primary-alt">
+                                 <LemonButtonWithDropdown
+                                     status="primary-alt"
+@@ -76,12 +76,10 @@ export function NotebookSideBar(): JSX.Element {
+                                     icon={<IconJournal />}
+                                     sideIcon={null}
+                                 >
+-                                    <span className="font-semibold">Notebooks</span>
++                                    <span className="font-semibold">{selectedNotebook}</span>
+                                 </LemonButtonWithDropdown>
+-                                <span>/</span>
+-                                <span className="font-semibold px-2">{selectedNotebook}</span>
+                             </span>
+-                            <span className="flex gap-2">
++                            <span className="flex gap-1 px-1">
+                                 <LemonButton
+                                     size="small"
+                                     onClick={() => setIsEditable(!isEditable)}
+diff --git a/frontend/src/scenes/session-recordings/SessionRecordings.tsx b/frontend/src/scenes/session-recordings/SessionRecordings.tsx
+index 72edd43ed5b9a..81feb6a8fb3e3 100644
+--- a/frontend/src/scenes/session-recordings/SessionRecordings.tsx
++++ b/frontend/src/scenes/session-recordings/SessionRecordings.tsx
+@@ -37,7 +37,7 @@ export function SessionsRecordings(): JSX.Element {
+ 
+     return (
+         // Margin bottom hacks the fact that our wrapping container has an annoyingly large padding
+-        <div className="-mb-12">
++        <div className="-mb-16">
+             <PageHeader
+                 title={<div>Session Recordings</div>}
+                 buttons={
+diff --git a/frontend/src/scenes/session-recordings/detail/SessionRecordingDetail.tsx b/frontend/src/scenes/session-recordings/detail/SessionRecordingDetail.tsx
+index d9a5dca3da6eb..442ce82b741d2 100644
+--- a/frontend/src/scenes/session-recordings/detail/SessionRecordingDetail.tsx
++++ b/frontend/src/scenes/session-recordings/detail/SessionRecordingDetail.tsx
+@@ -23,7 +23,7 @@ export const scene: SceneExport = {
+ export function SessionRecordingDetail({ id }: SessionRecordingDetailLogicProps = {}): JSX.Element {
+     const { currentTeam } = useValues(teamLogic)
+     return (
+-        <div>
++        <div className="flex flex-col overflow-hidden h-screen">
+             <PageHeader title={<div>Recording</div>} />
+             {currentTeam && !currentTeam?.session_recording_opt_in ? (
+                 <div className="mb-4">
+@@ -33,7 +33,7 @@ export function SessionRecordingDetail({ id }: SessionRecordingDetailLogicProps
+                     </LemonBanner>
+                 </div>
+             ) : null}
+-            <div className="mt-4">
++            <div className="mt-4 flex-1">
+                 {id ? (
+                     <SessionRecordingPlayer sessionRecordingId={id} playerKey={`${id}-detail`} />
+                 ) : (
+diff --git a/frontend/src/scenes/session-recordings/player/PlayerMeta.tsx b/frontend/src/scenes/session-recordings/player/PlayerMeta.tsx
+index c64333f8c3639..9272a434d49ac 100644
+--- a/frontend/src/scenes/session-recordings/player/PlayerMeta.tsx
++++ b/frontend/src/scenes/session-recordings/player/PlayerMeta.tsx
+@@ -1,7 +1,7 @@
+ import './PlayerMeta.scss'
+ import { dayjs } from 'lib/dayjs'
+ import { ProfilePicture } from 'lib/lemon-ui/ProfilePicture'
+-import { useActions, useValues } from 'kea'
++import { useValues } from 'kea'
+ import { asDisplay, PersonHeader } from 'scenes/persons/PersonHeader'
+ import { playerMetaLogic } from 'scenes/session-recordings/player/playerMetaLogic'
+ import { TZLabel } from 'lib/components/TZLabel'
+@@ -10,11 +10,8 @@ import { IconWindow } from 'scenes/session-recordings/player/icons'
+ import { CopyToClipboardInline } from 'lib/components/CopyToClipboard'
+ import clsx from 'clsx'
+ import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
+-import { LemonButton, Link } from '@posthog/lemon-ui'
++import { Link } from '@posthog/lemon-ui'
+ import { playerSettingsLogic } from './playerSettingsLogic'
+-import { IconUnfoldLess, IconUnfoldMore } from 'lib/lemon-ui/icons'
+-import { PropertiesTable } from 'lib/components/PropertiesTable'
+-import { CSSTransition } from 'react-transition-group'
+ import { Tooltip } from 'lib/lemon-ui/Tooltip'
+ import { PropertyIcon } from 'lib/components/PropertyIcon'
+ import { useResizeBreakpoints } from 'lib/hooks/useResizeObserver'
+@@ -83,13 +80,12 @@ export function PlayerMeta(): JSX.Element {
+         currentWindowIndex,
+         startTime,
+         sessionPlayerMetaDataLoading,
+-        windowIds,
+     } = useValues(playerMetaLogic(logicProps))
+ 
+-    const { isFullScreen, isMetadataExpanded } = useValues(playerSettingsLogic)
+-    const { setIsMetadataExpanded } = useActions(playerSettingsLogic)
+-
+-    const iconProperties = lastPageviewEvent?.properties || sessionPerson?.properties
++    const { isFullScreen } = useValues(playerSettingsLogic)
++    // NOTE: The optimised event listing broke this as we don't have all the properties we need
++    // const iconProperties = lastPageviewEvent?.properties || sessionPerson?.properties
++    const iconProperties = sessionPerson?.properties
+ 
+     const { ref, size } = useResizeBreakpoints({
+         0: 'compact',
+@@ -115,24 +111,26 @@ export function PlayerMeta(): JSX.Element {
+ 
+             <div
+                 className={clsx(
+-                    'PlayerMeta__top flex items-center gap-2 shrink-0',
+-                    isFullScreen ? 'px-3 p-1 text-xs' : 'p-3 border-b'
++                    'PlayerMeta__top flex items-center gap-2 shrink-0 p-2',
++                    isFullScreen ? ' text-xs' : 'border-b'
+                 )}
+             >
+                 <div className="ph-no-capture">
+                     {!sessionPerson ? (
+                         <LemonSkeleton.Circle className="w-10 h-10" />
+                     ) : (
+-                        <ProfilePicture name={asDisplay(sessionPerson)} size={!isFullScreen ? 'xl' : 'md'} />
++                        <ProfilePicture name={asDisplay(sessionPerson)} />
+                     )}
+                 </div>
+-                <div className="overflow-hidden ph-no-capture flex-1">
++                <div className="overflow-hidden ph-no-capture">
+                     <div className="font-bold">
+                         {!sessionPerson || !startTime ? (
+                             <LemonSkeleton className="w-1/3 my-1" />
+                         ) : (
+                             <div className="flex gap-1">
+-                                <PersonHeader person={sessionPerson} withIcon={false} noEllipsis={true} />
++                                <span className="whitespace-nowrap truncate">
++                                    <PersonHeader person={sessionPerson} withIcon={false} noEllipsis={true} />
++                                </span>
+                                 {'·'}
+                                 <TZLabel
+                                     time={dayjs(startTime)}
+@@ -156,44 +154,8 @@ export function PlayerMeta(): JSX.Element {
+                     </div>
+                 </div>
+ 
+-                {!logicProps.embedded && (
+-                    <>
+-                        <LemonButton
+-                            className={clsx('PlayerMeta__expander', isFullScreen ? 'rotate-90' : '')}
+-                            status="stealth"
+-                            active={isMetadataExpanded}
+-                            onClick={() => setIsMetadataExpanded(!isMetadataExpanded)}
+-                            tooltip={isMetadataExpanded ? 'Hide person properties' : 'Show person properties'}
+-                            tooltipPlacement={isFullScreen ? 'bottom' : 'left'}
+-                            size="small"
+-                        >
+-                            {isMetadataExpanded ? (
+-                                <IconUnfoldLess className="text-lg text-muted-alt" />
+-                            ) : (
+-                                <IconUnfoldMore className="text-lg text-muted-alt" />
+-                            )}
+-                        </LemonButton>
+-                        {sessionRecordingId ? <PlayerMetaLinks /> : null}
+-                    </>
+-                )}
++                {sessionRecordingId ? <PlayerMetaLinks /> : null}
+             </div>
+-            {sessionPerson && (
+-                <CSSTransition
+-                    in={isMetadataExpanded}
+-                    timeout={200}
+-                    classNames="PlayerMetaPersonProperties-"
+-                    mountOnEnter
+-                    unmountOnExit
+-                >
+-                    <div className="PlayerMetaPersonProperties">
+-                        {Object.keys(sessionPerson.properties).length ? (
+-                            <PropertiesTable properties={sessionPerson.properties} searchable filterable />
+-                        ) : (
+-                            <p className="text-center m-4">There are no properties.</p>
+-                        )}
+-                    </div>
+-                </CSSTransition>
+-            )}
+             <div
+                 className={clsx(
+                     'PlayerMeta__bottom flex items-center justify-between gap-2 whitespace-nowrap overflow-hidden',
+@@ -207,10 +169,17 @@ export function PlayerMeta(): JSX.Element {
+                     <LemonSkeleton className="w-1/3 my-1" />
+                 ) : (
+                     <>
+-                        <IconWindow value={currentWindowIndex + 1} className="text-muted-alt" />
+-                        {windowIds.length > 1 && !isSmallPlayer ? (
+-                            <div className="text-muted-alt">Window {currentWindowIndex + 1}</div>
+-                        ) : null}
++                        <Tooltip
++                            title={
++                                <>
++                                    Window {currentWindowIndex + 1}.
++                                    <br />
++                                    Each recording window translates to a distinct browser tab or window.
++                                </>
++                            }
++                        >
++                            <IconWindow value={currentWindowIndex + 1} className="text-muted-alt" />
++                        </Tooltip>
+ 
+                         {lastPageviewEvent?.properties?.['$current_url'] && (
+                             <span className="flex items-center gap-2 truncate">
+@@ -248,16 +217,30 @@ export function PlayerMeta(): JSX.Element {
+                 <div className={clsx('flex-1', isSmallPlayer ? 'min-w-4' : 'min-w-20')} />
+                 {sessionPlayerMetaDataLoading ? (
+                     <LemonSkeleton className="w-1/3" />
+-                ) : (
+-                    <span className="text-muted-alt">
+-                        {resolution && (
++                ) : resolution ? (
++                    <Tooltip
++                        placement="bottom"
++                        title={
+                             <>
+-                                Resolution: {resolution.width} x {resolution.height}{' '}
+-                                {!isSmallPlayer && `(${percentage(scale, 1, true)})`}
++                                The resolution of the page as it was captured was{' '}
++                                <b>
++                                    {resolution.width} x {resolution.height}
++                                </b>
++                                <br />
++                                You are viewing the replay at <b>{percentage(scale, 1, true)}</b> of the original size
+                             </>
+-                        )}
+-                    </span>
+-                )}
++                        }
++                    >
++                        <span className="text-muted-alt text-xs">
++                            {resolution && (
++                                <>
++                                    {resolution.width} x {resolution.height}{' '}
++                                    {!isSmallPlayer && `(${percentage(scale, 1, true)})`}
++                                </>
++                            )}
++                        </span>
++                    </Tooltip>
++                ) : null}
+             </div>
+         </div>
+     )
+diff --git a/frontend/src/scenes/session-recordings/player/PlayerMetaLinks.tsx b/frontend/src/scenes/session-recordings/player/PlayerMetaLinks.tsx
+index cceb6b61a2898..81ac38e91fcf0 100644
+--- a/frontend/src/scenes/session-recordings/player/PlayerMetaLinks.tsx
++++ b/frontend/src/scenes/session-recordings/player/PlayerMetaLinks.tsx
+@@ -1,9 +1,9 @@
+ import { sessionRecordingPlayerLogic } from 'scenes/session-recordings/player/sessionRecordingPlayerLogic'
+ import { useActions, useValues } from 'kea'
+-import { LemonButton } from 'lib/lemon-ui/LemonButton'
++import { LemonButton, LemonButtonProps } from 'lib/lemon-ui/LemonButton'
+ import { IconDelete, IconLink } from 'lib/lemon-ui/icons'
+ import { openPlayerShareDialog } from 'scenes/session-recordings/player/share/PlayerShare'
+-import { PlaylistPopover } from './playlist-popover/PlaylistPopover'
++import { PlaylistPopoverButton } from './playlist-popover/PlaylistPopover'
+ import { LemonDialog } from 'lib/lemon-ui/LemonDialog'
+ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+ import { FEATURE_FLAGS } from 'lib/constants'
+@@ -40,21 +40,67 @@ export function PlayerMetaLinks(): JSX.Element {
+         })
+     }
+ 
++    const commonProps: Partial<LemonButtonProps> = {
++        fullWidth: false,
++        size: 'small',
++    }
++
++    const showText = false
++
++    // return (
++    //     <More
++    //         overlay={
++    //             <>
++    //                 <LemonButton icon={<IconLink />} onClick={onShare} tooltip="Share recording" {...commonProps}>
++    //                     Share
++    //                 </LemonButton>
++
++    //                 <PlaylistPopoverButton {...commonProps} />
++
++    //                 {featureFlags[FEATURE_FLAGS.NOTEBOOKS] && (
++    //                     <AddToNotebook
++    //                         node={NotebookNodeType.Recording}
++    //                         properties={{ sessionRecordingId }}
++    //                         {...commonProps}
++    //                     >
++    //                         Add to Notebook
++    //                     </AddToNotebook>
++    //                 )}
++
++    //                 {logicProps.playerKey !== 'modal' && (
++    //                     <LemonButton status="danger" icon={<IconDelete />} onClick={onDelete} {...commonProps}>
++    //                         Delete
++    //                     </LemonButton>
++    //                 )}
++    //             </>
++    //         }
++    //     />
++    // )
++
+     return (
+-        <div className="flex flex-row gap-1 items-center">
+-            <LemonButton icon={<IconLink />} onClick={onShare} tooltip="Share recording" size="small">
+-                Share
++        <div className="flex flex-row gap-1 items-center flex-1 justify-end">
++            <LemonButton icon={<IconLink />} onClick={onShare} tooltip="Share recording" {...commonProps}>
++                {showText ? 'Share' : null}
+             </LemonButton>
+ 
+-            <PlaylistPopover />
++            <PlaylistPopoverButton tooltip="Pin to list" {...commonProps}>
++                {showText ? 'Pin to list' : null}
++            </PlaylistPopoverButton>
+ 
+             {featureFlags[FEATURE_FLAGS.NOTEBOOKS] && (
+-                <AddToNotebook node={NotebookNodeType.Recording} properties={{ sessionRecordingId }} />
++                <AddToNotebook
++                    tooltip="Add to Notebook"
++                    node={NotebookNodeType.Recording}
++                    properties={{ sessionRecordingId }}
++                    {...commonProps}
++                >
++                    {showText ? 'Add to Notebook' : null}
++                </AddToNotebook>
+             )}
+ 
+             {logicProps.playerKey !== 'modal' && (
+-                <LemonButton status="danger" onClick={onDelete} size="small">
+-                    <IconDelete className="text-lg" />
++                <LemonButton tooltip="Delete" status="danger" icon={<IconDelete />} onClick={onDelete} {...commonProps}>
++                    {showText ? 'Delete' : null}
+                 </LemonButton>
+             )}
+         </div>
+diff --git a/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.scss b/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.scss
+index 970afc60ff1ee..2b26579ff33f1 100644
+--- a/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.scss
++++ b/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.scss
+@@ -1,8 +1,13 @@
+ @import '../../../styles/mixins';
+ 
+ .SessionRecordingPlayer {
++    --inspector-width: 36rem;
++    --inspector-peek-width: 2.5rem;
++
++    position: relative;
+     display: flex;
+-    flex-direction: column;
++    flex-direction: row;
++    overflow: hidden;
+     height: 100%;
+     width: 100%;
+     border: 1px solid var(--border);
+@@ -19,10 +24,14 @@
+         z-index: 0;
+         background-color: var(--bg-light);
+         min-width: 1px;
+-        height: 500px;
+-        margin: 0.5rem;
++        height: 100%;
++        // margin: 0.5rem;
+         overflow: hidden;
+-        border-radius: var(--radius);
++        // border-radius: var(--radius);
++    }
++
++    .SessionRecordingPlayer__main {
++        flex: 1;
+     }
+ 
+     &--fullscreen {
+@@ -34,10 +43,8 @@
+         overflow-y: auto;
+         background-color: var(--white);
+         z-index: var(--z-modal);
+-
+-        .SessionRecordingPlayer__main {
+-            flex: 1;
+-        }
++        border: none;
++        border-radius: 0px;
+ 
+         .SessionRecordingPlayer__body {
+             height: 100%;
+@@ -51,46 +58,82 @@
+         display: flex;
+         flex-direction: column;
+         overflow: hidden;
+-        flex-shrink: 0;
+-    }
+-
+-    .SessionRecordingPlayer__inspector {
+-        border-top: 1px solid var(--border);
+-        min-height: 50rem;
+     }
+ 
+-    &--widescreen {
+-        flex-direction: row;
+-        overflow: hidden;
+-
+-        .SessionRecordingPlayer__main {
+-            flex: 2;
++    .LemonModal & {
++        .SessionRecordingPlayer__body {
++            height: calc(90vh - 15rem);
+         }
++    }
+ 
++    &--explorer-mode {
++        .SessionRecordingPlayer__main,
+         .SessionRecordingPlayer__inspector {
+-            min-width: 450px;
+-            flex: 1;
+-            border-left: 1px solid var(--border);
+-            border-top: none;
+-            min-height: auto;
++            display: none;
+         }
++    }
+ 
+-        .SessionRecordingPlayer__body {
+-            // Rough aproximation of the parent elements
+-            height: calc(100vh - 20rem);
++    .SessionRecordingPlayer__main {
++        padding-right: var(--inspector-peek-width);
++    }
++
++    .SessionRecordingPlayer__inspector {
++        flex-shrink: 0;
++        border-left: 1px solid var(--border);
++
++        position: absolute;
++        right: 0;
++        top: 0;
++        bottom: 0;
++        z-index: 10;
++        width: var(--inspector-width);
++        max-width: 95%;
++
++        transform: translateX(calc(100% - var(--inspector-peek-width)));
++        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
++        box-shadow: 0px 0px 5px rgba(0, 0, 0, 0.1);
++
++        .PlayerInspectorPreview {
++            position: absolute;
++            left: 0;
++            right: 0;
++            bottom: 0;
++            top: 0;
++            z-index: 1;
++            pointer-events: none;
++            transition: opacity 0.2s ease-in-out;
+         }
++    }
++
++    &--inspector-focus {
++        .SessionRecordingPlayer__inspector {
++            transform: translateX(0);
++            box-shadow: -10px 0px 20px rgba(0, 0, 0, 0.2);
+ 
+-        .LemonModal & {
+-            .SessionRecordingPlayer__body {
+-                height: calc(90vh - 15rem);
++            .PlayerInspectorPreview {
++                opacity: 0;
++                pointer-events: none;
+             }
+         }
+     }
+ 
+-    &--explorer-mode {
+-        .SessionRecordingPlayer__main,
++    &--widescreen {
++        .SessionRecordingPlayer__main {
++            padding-right: 0;
++        }
++        .SessionRecordingPlayer__inspector,
+         .SessionRecordingPlayer__inspector {
+-            display: none;
++            min-width: 30%;
++            width: 40%;
++            max-width: 400px;
++            position: relative;
++            transform: translateX(0);
++            box-shadow: none;
++            transition: none;
++
++            .PlayerInspectorPreview {
++                display: none;
++            }
+         }
+     }
+ }
+diff --git a/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.tsx b/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.tsx
+index 412b31bac2105..090447c5ae795 100644
+--- a/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.tsx
++++ b/frontend/src/scenes/session-recordings/player/SessionRecordingPlayer.tsx
+@@ -1,5 +1,5 @@
+ import './SessionRecordingPlayer.scss'
+-import { useMemo } from 'react'
++import { useMemo, useState } from 'react'
+ import { BindLogic, useActions, useValues } from 'kea'
+ import {
+     ONE_FRAME_MS,
+@@ -106,6 +106,8 @@ export function SessionRecordingPlayer(props: SessionRecordingPlayerProps): JSX.
+         1000: 'medium',
+     })
+ 
++    const [inspectorFocus, setInspectorFocus] = useState(false)
++
+     if (isNotFound) {
+         return (
+             <div className="text-center">
+@@ -123,6 +125,7 @@ export function SessionRecordingPlayer(props: SessionRecordingPlayerProps): JSX.
+                     'SessionRecordingPlayer--no-border': noBorder || embedded,
+                     'SessionRecordingPlayer--widescreen': !isFullScreen && size !== 'small',
+                     'SessionRecordingPlayer--explorer-mode': !!explorerMode,
++                    'SessionRecordingPlayer--inspector-focus': inspectorFocus,
+                 })}
+             >
+                 <div className="SessionRecordingPlayer__main">
+@@ -134,11 +137,7 @@ export function SessionRecordingPlayer(props: SessionRecordingPlayerProps): JSX.
+                     <LemonDivider className="my-0" />
+                     <PlayerController />
+                 </div>
+-                {!isFullScreen && (
+-                    <div className="SessionRecordingPlayer__inspector">
+-                        <PlayerInspector />
+-                    </div>
+-                )}
++                <PlayerInspector onFocusChange={setInspectorFocus} />
+ 
+                 {explorerMode && <SessionRecordingPlayerExplorer {...explorerMode} onClose={() => closeExplorer()} />}
+             </div>
+diff --git a/frontend/src/scenes/session-recordings/player/inspector/PlayerInspector.tsx b/frontend/src/scenes/session-recordings/player/inspector/PlayerInspector.tsx
+index dbabde8fd29bc..6c70b20ec0634 100644
+--- a/frontend/src/scenes/session-recordings/player/inspector/PlayerInspector.tsx
++++ b/frontend/src/scenes/session-recordings/player/inspector/PlayerInspector.tsx
+@@ -1,13 +1,63 @@
+ import { LemonDivider } from '@posthog/lemon-ui'
+ import { PlayerInspectorList } from './PlayerInspectorList'
+ import { PlayerInspectorControls } from './PlayerInspectorControls'
++import { useEffect, useRef, useState } from 'react'
++import { PlayerInspectorPreview } from './PlayerInspectorPreview'
++
++const MOUSE_LEAVE_DELAY = 500
++
++export function PlayerInspector({ onFocusChange }: { onFocusChange: (focus: boolean) => void }): JSX.Element {
++    const [inspectorFocus, setInspectorFocus] = useState(false)
++    const timeoutRef = useRef<any>(null)
++
++    const clear = (): void => {
++        clearTimeout(timeoutRef.current)
++        timeoutRef.current = null
++    }
++
++    const onInspectorEnter = (): void => {
++        clear()
++        setInspectorFocus(true)
++    }
++
++    const onInspectorLeave = (): void => {
++        clear()
++        timeoutRef.current = setTimeout(() => {
++            setInspectorFocus(false)
++        }, MOUSE_LEAVE_DELAY)
++    }
++
++    // Behaves like a delayed hover where we will only close if the mouse is outside of the inspector for a certain time
++    // but clicking outside will immediately close
++    useEffect(() => {
++        clear()
++        onFocusChange(inspectorFocus)
++
++        if (!inspectorFocus) {
++            return
++        }
++
++        const onClickHandler = (): void => {
++            if (timeoutRef.current) {
++                setInspectorFocus(false)
++            }
++        }
++
++        window.addEventListener('click', onClickHandler)
++
++        return () => window.removeEventListener('click', onClickHandler)
++    }, [inspectorFocus])
+ 
+-export function PlayerInspector(): JSX.Element {
+     return (
+-        <>
++        <div
++            className="SessionRecordingPlayer__inspector"
++            onMouseEnter={onInspectorEnter}
++            onMouseLeave={onInspectorLeave}
++        >
+             <PlayerInspectorControls />
+             <LemonDivider className="my-0" />
+             <PlayerInspectorList />
+-        </>
++            <PlayerInspectorPreview />
++        </div>
+     )
+ }
+diff --git a/frontend/src/scenes/session-recordings/player/inspector/PlayerInspectorPreview.tsx b/frontend/src/scenes/session-recordings/player/inspector/PlayerInspectorPreview.tsx
+new file mode 100644
+index 0000000000000..1ed7217a36aa7
+--- /dev/null
++++ b/frontend/src/scenes/session-recordings/player/inspector/PlayerInspectorPreview.tsx
+@@ -0,0 +1,46 @@
++import { useValues } from 'kea'
++import { IconGauge, IconTerminal, IconUnverifiedEvent, IconMagnifier } from 'lib/lemon-ui/icons'
++import { SessionRecordingPlayerTab } from '~/types'
++import { sessionRecordingPlayerLogic } from '../sessionRecordingPlayerLogic'
++import { playerInspectorLogic } from './playerInspectorLogic'
++import clsx from 'clsx'
++
++const TabToIcon = {
++    [SessionRecordingPlayerTab.ALL]: IconMagnifier,
++    [SessionRecordingPlayerTab.EVENTS]: IconUnverifiedEvent,
++    [SessionRecordingPlayerTab.CONSOLE]: IconTerminal,
++    [SessionRecordingPlayerTab.NETWORK]: IconGauge,
++}
++
++export function PlayerInspectorPreview(): JSX.Element {
++    const { logicProps } = useValues(sessionRecordingPlayerLogic)
++    const inspectorLogic = playerInspectorLogic(logicProps)
++
++    const { tab } = useValues(inspectorLogic)
++
++    const tabs = [
++        SessionRecordingPlayerTab.ALL,
++        SessionRecordingPlayerTab.EVENTS,
++        SessionRecordingPlayerTab.CONSOLE,
++        SessionRecordingPlayerTab.NETWORK,
++    ]
++
++    return (
++        <div className="PlayerInspectorPreview bg-side p-2 space-y-2 flex flex-col">
++            {tabs.map((tabId) => {
++                const TabIcon = TabToIcon[tabId]
++                return (
++                    <div
++                        key={tabId}
++                        className={clsx(
++                            'rounded p-1 w-6 h-6 flex items-center justify-center relative',
++                            tab === tabId && 'bg-primary-alt-highlight'
++                        )}
++                    >
++                        <TabIcon className="text-lg text-primary-alt" />
++                    </div>
++                )
++            })}
++        </div>
++    )
++}
+diff --git a/frontend/src/scenes/session-recordings/player/playerSettingsLogic.ts b/frontend/src/scenes/session-recordings/player/playerSettingsLogic.ts
+index 0587aebf24312..aef1f61a4eda6 100644
+--- a/frontend/src/scenes/session-recordings/player/playerSettingsLogic.ts
++++ b/frontend/src/scenes/session-recordings/player/playerSettingsLogic.ts
+@@ -168,7 +168,6 @@ export const playerSettingsLogic = kea<playerSettingsLogicType>([
+         setSpeed: (speed: number) => ({ speed }),
+         setShowOnlyMatching: (showOnlyMatching: boolean) => ({ showOnlyMatching }),
+         setIsFullScreen: (isFullScreen: boolean) => ({ isFullScreen }),
+-        setIsMetadataExpanded: (isMetadataExpanded: boolean) => ({ isMetadataExpanded }),
+         setAutoplayEnabled: (enabled: boolean) => ({ enabled }),
+         setTab: (tab: SessionRecordingPlayerTab) => ({ tab }),
+         setTimestampMode: (mode: 'absolute' | 'relative') => ({ mode }),
+@@ -203,12 +202,6 @@ export const playerSettingsLogic = kea<playerSettingsLogicType>([
+                 setIsFullScreen: (_, { isFullScreen }) => isFullScreen,
+             },
+         ],
+-        isMetadataExpanded: [
+-            false,
+-            {
+-                setIsMetadataExpanded: (_, { isMetadataExpanded }) => isMetadataExpanded,
+-            },
+-        ],
+         autoplayEnabled: [
+             true,
+             { persist: true },
+diff --git a/frontend/src/scenes/session-recordings/player/playlist-popover/PlaylistPopover.tsx b/frontend/src/scenes/session-recordings/player/playlist-popover/PlaylistPopover.tsx
+index 615a238e33259..f32f5472a45b2 100644
+--- a/frontend/src/scenes/session-recordings/player/playlist-popover/PlaylistPopover.tsx
++++ b/frontend/src/scenes/session-recordings/player/playlist-popover/PlaylistPopover.tsx
+@@ -2,7 +2,7 @@ import { LemonCheckbox, LemonDivider } from '@posthog/lemon-ui'
+ import { useActions, useValues } from 'kea'
+ import { Form } from 'kea-forms'
+ import { IconPlus, IconOpenInNew, IconWithCount } from 'lib/lemon-ui/icons'
+-import { LemonButton } from 'lib/lemon-ui/LemonButton'
++import { LemonButton, LemonButtonProps } from 'lib/lemon-ui/LemonButton'
+ import { LemonInput } from 'lib/lemon-ui/LemonInput/LemonInput'
+ import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
+ import { Popover } from 'lib/lemon-ui/Popover'
+@@ -12,7 +12,7 @@ import { urls } from 'scenes/urls'
+ import { sessionRecordingPlayerLogic } from '../sessionRecordingPlayerLogic'
+ import { playlistPopoverLogic } from './playlistPopoverLogic'
+ 
+-export function PlaylistPopover(): JSX.Element {
++export function PlaylistPopoverButton(props: LemonButtonProps): JSX.Element {
+     const { sessionRecordingId, logicProps, sessionPlayerData } = useValues(sessionRecordingPlayerLogic)
+     const logic = playlistPopoverLogic(logicProps)
+     const {
+@@ -123,10 +123,9 @@ export function PlaylistPopover(): JSX.Element {
+                     icon={<IconPlus />}
+                     active={showPlaylistPopover}
+                     onClick={() => setShowPlaylistPopover(!showPlaylistPopover)}
+-                    size={'small'}
+-                >
+-                    <span>Pin to list</span>
+-                </LemonButton>
++                    sideIcon={null}
++                    {...props}
++                />
+             </Popover>
+         </IconWithCount>
+     )
+diff --git a/frontend/src/scenes/session-recordings/player/view-explorer/SessionRecordingPlayerExplorer.tsx b/frontend/src/scenes/session-recordings/player/view-explorer/SessionRecordingPlayerExplorer.tsx
+index f78ee6e979c21..4b77d35ecfa2b 100644
+--- a/frontend/src/scenes/session-recordings/player/view-explorer/SessionRecordingPlayerExplorer.tsx
++++ b/frontend/src/scenes/session-recordings/player/view-explorer/SessionRecordingPlayerExplorer.tsx
+@@ -1,4 +1,4 @@
+-import { LemonButton, LemonTag } from '@posthog/lemon-ui'
++import { LemonButton } from '@posthog/lemon-ui'
+ import { useResizeObserver } from 'lib/hooks/useResizeObserver'
+ import { useState } from 'react'
+ import './SessionRecordingPlayerExplorer.scss'
+@@ -28,13 +28,11 @@ export function SessionRecordingPlayerExplorer({
+         <div className="SessionRecordingPlayerExplorer space-y-2">
+             <div className="shrink-0 space-y-2">
+                 <div className="flex items-center gap-2">
+-                    <span className="flex-1 font-semibold">
+-                        View Explorer <LemonTag>Experimental</LemonTag>
+-                    </span>
+-                    <LemonButton type="secondary" onClick={() => setIframeKey(iframeKey + 1)}>
++                    <span className="font-bold uppercase text-xs tracking-wide flex-1">View Explorer</span>
++                    <LemonButton type="secondary" onClick={() => setIframeKey(iframeKey + 1)} size="small">
+                         Reset
+                     </LemonButton>
+-                    <LemonButton type="primary" onClick={onClose}>
++                    <LemonButton type="primary" onClick={onClose} size="small">
+                         Close
+                     </LemonButton>
+                 </div>
+diff --git a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsList.tsx b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsList.tsx
+index 70e9a9c44282e..24436771cbb5d 100644
+--- a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsList.tsx
++++ b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsList.tsx
+@@ -81,7 +81,7 @@ export function SessionRecordingsList({
+                 'overflow-hidden': recordings?.length,
+             })}
+         >
+-            <div className="shrink-0 relative flex justify-between items-center p-1 gap-1">
++            <div className="shrink-0 relative flex justify-between items-center p-1 gap-1 whitespace-nowrap">
+                 {onCollapse ? (
+                     <LemonButton
+                         className="flex-1"
+diff --git a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.scss b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.scss
+index aa62faaca9c2d..9ceb63b96a25e 100644
+--- a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.scss
++++ b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.scss
+@@ -8,26 +8,17 @@
+     gap: 1rem;
+     overflow: hidden;
+ 
+-    @include screen($md) {
+-        flex-direction: row;
+-        justify-content: flex-start;
+-    }
+-
+     .SessionRecordingsPlaylist__left-column {
+         flex-shrink: 0;
+         width: 100%;
+-
+-        @include screen($md) {
+-            width: 350px;
+-            overflow: hidden;
+-        }
++        display: flex;
++        flex-direction: column;
+ 
+         .SessionRecordingsPlaylist__lists {
+             display: flex;
+             flex-direction: column;
+             flex: 1;
+             overflow: hidden;
+-            padding-bottom: 1rem;
+             gap: 0.5rem;
+         }
+ 
+@@ -47,9 +38,9 @@
+         }
+     }
+     .SessionRecordingsPlaylist__right-column {
+-        flex: 1;
+         overflow: hidden;
+         width: 100%;
++        height: 30rem;
+ 
+         .SessionRecordingsPlaylist__loading {
+             display: flex;
+@@ -58,4 +49,24 @@
+             margin-top: 10rem;
+         }
+     }
++
++    &--wide {
++        flex-direction: row;
++        justify-content: flex-start;
++        height: calc(100vh - 3.5rem);
++        padding-bottom: 1rem;
++
++        .SessionRecordingsPlaylist__left-column {
++            max-width: 350px;
++            min-width: 300px;
++            width: 25%;
++            overflow: hidden;
++            height: 100%;
++        }
++
++        .SessionRecordingsPlaylist__right-column {
++            flex: 1;
++            height: 100%;
++        }
++    }
+ }
+diff --git a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.tsx b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.tsx
+index 9a8fa9f95d7f2..39cdd09d1c844 100644
+--- a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.tsx
++++ b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylist.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useRef, useState } from 'react'
++import { useEffect, useState } from 'react'
+ import { useActions, useValues } from 'kea'
+ import { RecordingFilters, SessionRecordingType } from '~/types'
+ import {
+@@ -13,12 +13,10 @@ import { LemonButton } from '@posthog/lemon-ui'
+ import { IconChevronLeft, IconChevronRight } from 'lib/lemon-ui/icons'
+ import { SessionRecordingsFilters } from '../filters/SessionRecordingsFilters'
+ import { SessionRecordingsList } from './SessionRecordingsList'
+-import { StickyView } from 'lib/components/StickyView/StickyView'
+ import clsx from 'clsx'
+ import { SessionRecordingsPlaylistFilters } from 'scenes/session-recordings/playlist/SessionRecordingsPlaylistFilters'
+-import { PLAYLIST_PREVIEW_RECORDINGS_LIMIT } from 'scenes/notebooks/Nodes/RecordingPlaylistNode'
+-
+-const MARGIN_TOP = 16
++import { PLAYLIST_PREVIEW_RECORDINGS_LIMIT } from 'scenes/notebooks/Nodes/NotebookNodePlaylist'
++import { useResizeBreakpoints } from 'lib/hooks/useResizeObserver'
+ 
+ export function RecordingsLists({
+     playlistShortId,
+@@ -181,7 +179,11 @@ export function SessionRecordingsPlaylist(props: SessionRecordingsPlaylistProps)
+     const logic = sessionRecordingsListLogic(logicProps)
+     const { activeSessionRecording, nextSessionRecording, filters, showFilters } = useValues(logic)
+     const { setFilters } = useActions(logic)
+-    const playlistRef = useRef<HTMLDivElement>(null)
++
++    const { ref: playlistRef, size } = useResizeBreakpoints({
++        0: 'small',
++        750: 'medium',
++    })
+ 
+     useEffect(() => {
+         if (filters !== defaultFilters) {
+@@ -201,15 +203,15 @@ export function SessionRecordingsPlaylist(props: SessionRecordingsPlaylistProps)
+     return (
+         <>
+             {!embedded && <SessionRecordingsPlaylistFilters {...props} />}
+-            <div ref={playlistRef} className="SessionRecordingsPlaylist" data-attr="session-recordings-playlist">
++            <div
++                ref={playlistRef}
++                data-attr="session-recordings-playlist"
++                className={clsx('SessionRecordingsPlaylist', {
++                    'SessionRecordingsPlaylist--wide': size !== 'small',
++                })}
++            >
+                 <div className={clsx('SessionRecordingsPlaylist__left-column space-y-4', embedded && '-mr-4')}>
+-                    {embedded ? (
+-                        <div className="sticky top-0 border-r">{lists}</div>
+-                    ) : (
+-                        <StickyView top="3.5rem" marginTop={MARGIN_TOP}>
+-                            {lists}
+-                        </StickyView>
+-                    )}
++                    {lists}
+                 </div>
+                 <div className="SessionRecordingsPlaylist__right-column">
+                     {activeSessionRecording?.id ? (
+diff --git a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistFilters.tsx b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistFilters.tsx
+index d98579ae9b9cc..a39a4d6157974 100644
+--- a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistFilters.tsx
++++ b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistFilters.tsx
+@@ -145,6 +145,7 @@ export function SessionRecordingsPlaylistFilters({
+                             node={NotebookNodeType.RecordingPlaylist}
+                             properties={{ filters: {} }}
+                             data-attr="add-playlist-to-notebook-button"
++                            size="small"
+                         >
+                             Add to notebook
+                         </AddToNotebook>
+diff --git a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistScene.tsx b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistScene.tsx
+index 3f1d1c90c6b47..e107e12cd9139 100644
+--- a/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistScene.tsx
++++ b/frontend/src/scenes/session-recordings/playlist/SessionRecordingsPlaylistScene.tsx
+@@ -53,7 +53,8 @@ export function SessionRecordingsPlaylistScene(): JSX.Element {
+     }
+ 
+     return (
+-        <div>
++        // Margin bottom hacks the fact that our wrapping container has an annoyingly large padding
++        <div className="-mb-16">
+             <PageHeader
+                 title={
+                     <EditableField
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

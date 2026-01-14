@@ -1,0 +1,336 @@
+  Task-ID: python__mypy-3005@3587549
+  Please checkout to this commit first: 8c0001a4d9963316603e40f50d3db7d27340ab82
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Types should be promoted by issubclass
+I expected types to be promoted to sub-types within an `issubclass` block, the same as instances within an `isinstance` block, but type-checking the following code results in the error `Type[Vehicle] has no attribute "wheels"`:
+
+```python
+from typing import Type
+
+class Vehicle(object):
+    name = ''
+
+class Car(Vehicle):
+    wheels = 4
+
+def test_isinstance(x):
+    # type: (Vehicle) -> None
+    print(x.name)
+    if isinstance(x, Car):
+        print(x.wheels)
+
+def test_issubclass(x):
+    # type: (Type[Vehicle]) -> None
+    print(x.name)
+    if issubclass(x, Car):
+        print(x.wheels)
+```
+
+Is this be possible or am I missing something?  I'm testing against the master branch.
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 72fbc371ac4f..489f8bd4c41e 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -2616,6 +2616,20 @@ def or_conditional_maps(m1: TypeMap, m2: TypeMap) -> TypeMap:
+     return result
+ 
+ 
++def convert_to_typetype(type_map: TypeMap) -> TypeMap:
++    converted_type_map = {}  # type: TypeMap
++    for expr, typ in type_map.items():
++        if isinstance(typ, UnionType):
++            converted_type_map[expr] = UnionType([TypeType(t) for t in typ.items])
++        elif isinstance(typ, Instance):
++            converted_type_map[expr] = TypeType(typ)
++        else:
++            # TODO: verify this is ok
++            # unknown object, don't know how to convert
++            return {}
++    return converted_type_map
++
++
+ def find_isinstance_check(node: Expression,
+                           type_map: Dict[Expression, Type],
+                           ) -> Tuple[TypeMap, TypeMap]:
+@@ -2639,8 +2653,30 @@ def find_isinstance_check(node: Expression,
+             expr = node.args[0]
+             if expr.literal == LITERAL_TYPE:
+                 vartype = type_map[expr]
+-                types = get_isinstance_type(node.args[1], type_map)
+-                return conditional_type_map(expr, vartype, types)
++                type = get_isinstance_type(node.args[1], type_map)
++                return conditional_type_map(expr, vartype, type)
++        elif refers_to_fullname(node.callee, 'builtins.issubclass'):
++            expr = node.args[0]
++            if expr.literal == LITERAL_TYPE:
++                vartype = type_map[expr]
++                type = get_isinstance_type(node.args[1], type_map)
++                if isinstance(vartype, UnionType):
++                    union_list = []
++                    for t in vartype.items:
++                        if isinstance(t, TypeType):
++                            union_list.append(t.item)
++                        else:
++                            #  this an error; should be caught earlier, so we should never be here
++                            return {}, {}
++                    vartype = UnionType(union_list)
++                elif isinstance(vartype, TypeType):
++                    vartype = vartype.item
++                else:
++                    # TODO: verify this is ok
++                    return {}, {}  # unknown type
++                yes_map, no_map = conditional_type_map(expr, vartype, type)
++                yes_map, no_map = map(convert_to_typetype, (yes_map, no_map))
++                return yes_map, no_map
+         elif refers_to_fullname(node.callee, 'builtins.callable'):
+             expr = node.args[0]
+             if expr.literal == LITERAL_TYPE:
+diff --git a/mypy/semanal.py b/mypy/semanal.py
+index f3b1eaec8568..2b44f85c0157 100644
+--- a/mypy/semanal.py
++++ b/mypy/semanal.py
+@@ -2696,8 +2696,9 @@ def visit_member_expr(self, expr: MemberExpr) -> None:
+                 # one type checker run. If we reported errors here,
+                 # the build would terminate after semantic analysis
+                 # and we wouldn't be able to report any type errors.
+-                full_name = '%s.%s' % (file.fullname() if file is not None else None, expr.name)
+-                mod_name = " '%s'" % file.fullname() if file is not None else ''
++                full_name = '%s.%s' % (file.fullname() if file is not None  # type: ignore
++                                       else None, expr.name)
++                mod_name = " '%s'" % file.fullname() if file is not None else ''  # type: ignore
+                 if full_name in obsolete_name_mapping:
+                     self.fail("Module%s has no attribute %r (it's now called %r)" % (
+                         mod_name, expr.name, obsolete_name_mapping[full_name]), expr)
+diff --git a/test-data/unit/check-isinstance.test b/test-data/unit/check-isinstance.test
+index 973d463d6085..80fe0417d878 100644
+--- a/test-data/unit/check-isinstance.test
++++ b/test-data/unit/check-isinstance.test
+@@ -1412,3 +1412,171 @@ def f(x: Union[int, A], a: Type[A]) -> None:
+ 
+ [builtins fixtures/isinstancelist.pyi]
+ 
++
++[case testIssubclass]
++from typing import Type, ClassVar
++
++class Goblin:
++    aggressive: bool = True
++    level: int
++
++class GoblinAmbusher(Goblin):
++    job: ClassVar[str] = 'Ranger'
++
++
++def test_issubclass(cls: Type[Goblin]) -> None:
++    if issubclass(cls, GoblinAmbusher):
++        cls.aggressive
++        cls.level
++        cls.job
++        ga = cls()
++        ga.level = 15
++        ga.job
++        ga.job = "Warrior"  # E: Cannot assign to class variable "job" via instance
++    else:
++        cls.aggressive
++        cls.level
++        cls.job  # E: Type[Goblin] has no attribute "job"
++        g = cls()
++        g.level = 15
++        g.job  # E: "Goblin" has no attribute "job"
++
++
++[builtins fixtures/isinstancelist.pyi]
++
++
++[case testIssubclassDeepHierarchy]
++from typing import Type, ClassVar
++
++class Mob:
++    pass
++
++class Goblin(Mob):
++    aggressive: bool = True
++    level: int
++
++class GoblinAmbusher(Goblin):
++    job: ClassVar[str] = 'Ranger'
++
++def test_issubclass(cls: Type[Mob]) -> None:
++    if issubclass(cls, Goblin):
++        cls.aggressive
++        cls.level
++        cls.job  # E: Type[Goblin] has no attribute "job"
++        g = cls()
++        g.level = 15
++        g.job  # E: "Goblin" has no attribute "job"
++        if issubclass(cls, GoblinAmbusher):
++            cls.aggressive
++            cls.level
++            cls.job
++            g = cls()
++            g.level = 15
++            g.job
++            g.job = 'Warrior' # E: Cannot assign to class variable "job" via instance
++    else:
++        cls.aggressive  # E: Type[Mob] has no attribute "aggressive"
++        cls.job  # E: Type[Mob] has no attribute "job"
++        cls.level  # E: Type[Mob] has no attribute "level"
++        m = cls()
++        m.level = 15  # E: "Mob" has no attribute "level"
++        m.job  # E: "Mob" has no attribute "job"
++        if issubclass(cls, GoblinAmbusher):
++            cls.aggressive
++            cls.job
++            cls.level
++            ga = cls()
++            ga.level = 15
++            ga.job
++            ga.job = 'Warrior' # E: Cannot assign to class variable "job" via instance
++
++    if issubclass(cls, GoblinAmbusher):
++        cls.aggressive
++        cls.level
++        cls.job
++        ga = cls()
++        ga.level = 15
++        ga.job
++        ga.job = "Warrior"  # E: Cannot assign to class variable "job" via instance
++
++[builtins fixtures/isinstancelist.pyi]
++
++
++[case testIssubclassTuple]
++from typing import Type, ClassVar
++
++class Mob:
++    pass
++
++class Goblin(Mob):
++    aggressive: bool = True
++    level: int
++
++class GoblinAmbusher(Goblin):
++    job: ClassVar[str] = 'Ranger'
++
++class GoblinDigger(Goblin):
++    job: ClassVar[str] = 'Thief'
++
++
++def test_issubclass(cls: Type[Mob]) -> None:
++    if issubclass(cls, (Goblin, GoblinAmbusher)):
++        cls.aggressive
++        cls.level
++        cls.job  # E: Some element of union has no attribute "job"
++        g = cls()
++        g.level = 15
++        g.job  # E: "Goblin" has no attribute "job"
++        if issubclass(cls, GoblinAmbusher):
++            cls.aggressive
++            cls.level
++            reveal_type(cls)  # E: Revealed type is 'Type[__main__.GoblinAmbusher]'
++            cls.job
++            ga = cls()
++            ga.level = 15
++            ga.job
++            ga.job = "Warrior"  # E: Cannot assign to class variable "job" via instance
++    else:
++        cls.aggressive  # E: Type[Mob] has no attribute "aggressive"
++        cls.job  # E: Type[Mob] has no attribute "job"
++        cls.level  # E: Type[Mob] has no attribute "level"
++        m = cls()
++        m.level = 15  # E: "Mob" has no attribute "level"
++        m.job  # E: "Mob" has no attribute "job"
++        if issubclass(cls, GoblinAmbusher):
++            cls.aggressive
++            cls.job
++            cls.level
++            ga = cls()
++            ga.level = 15
++            ga.job
++            ga.job = "Warrior"  # E: Cannot assign to class variable "job" via instance
++
++    if issubclass(cls, (GoblinDigger, GoblinAmbusher)):
++        cls.aggressive
++        cls.level
++        cls.job
++        g = cls()
++        g.level = 15
++        g.job
++        g.job = "Warrior" # E: Cannot assign to class variable "job" via instance
++
++[builtins fixtures/isinstancelist.pyi]
++
++
++[case testIssubclassBuiltins]
++from typing import List, Type
++
++class MyList(List): pass
++class MyIntList(List[int]): pass
++
++def f(cls: Type):
++    if issubclass(cls, MyList):
++        cls()[0]
++    else:
++        cls()[0]  # E:
++
++    if issubclass(cls, MyIntList):
++        cls()[0] + 1
++
++[builtins fixtures/isinstancelist.pyi]
+diff --git a/test-data/unit/fixtures/isinstancelist.pyi b/test-data/unit/fixtures/isinstancelist.pyi
+index 9096961b06ab..7d0c8a02b1af 100644
+--- a/test-data/unit/fixtures/isinstancelist.pyi
++++ b/test-data/unit/fixtures/isinstancelist.pyi
+@@ -12,6 +12,7 @@ class tuple: pass
+ class function: pass
+ 
+ def isinstance(x: object, t: Union[type, Tuple]) -> bool: pass
++def issubclass(x: object, t: Union[type, Tuple]) -> bool: pass
+ 
+ @builtinclass
+ class int:
+diff --git a/typeshed b/typeshed
+index bd5b33f3b18f..48920fea7ee6 160000
+--- a/typeshed
++++ b/typeshed
+@@ -1 +1 @@
+-Subproject commit bd5b33f3b18fc8811ad2403d35f21ad6aae94b62
++Subproject commit 48920fea7ee6c1d413fba12fe709c652da065393
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

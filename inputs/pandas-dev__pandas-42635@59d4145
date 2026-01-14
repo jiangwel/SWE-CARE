@@ -1,0 +1,267 @@
+  Task-ID: pandas-dev__pandas-42635@59d4145
+  Please checkout to this commit first: 06b9e49bca8350ff177461d985f200d46b8c61c9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  pd.to_datetime() fails for KeyError when raising monotonic increasing index ValueError
+#### Code Sample, a copy-pastable example if possible
+
+```python
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+times = pd.date_range(datetime.now(), periods=1000, freq='h')
+times = times.to_frame(index=False, name='DT').sample(1000)
+times.index = times.index.to_series().astype(float)/1000
+
+pd.to_datetime(times.iloc[:, 0]) # <-- Fails
+
+pd.to_datetime(times.reset_index(drop=True).iloc[:, 0]) # <-- Reset index to sorted int works
+
+```
+#### Problem description
+Sometimes during data processing after pivoting or sampling data you may end up with a float index that is not sorted. When you try to convert a series which happens to have an unsorted float index to a DateTime, a ValueError followed by KeyError occurs. Also, this only happens for a series with 60 elements or more. There may be differences in code path for larger frames.
+
+```python
+---------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in get_slice_bound(self, label, side, kind)
+   5159             try:
+-> 5160                 return self._searchsorted_monotonic(label, side)
+   5161             except ValueError:
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in _searchsorted_monotonic(self, label, side)
+   5120 
+-> 5121         raise ValueError("index must be monotonic increasing or decreasing")
+   5122 
+
+ValueError: index must be monotonic increasing or decreasing
+
+During handling of the above exception, another exception occurred:
+
+KeyError                                  Traceback (most recent call last)
+<ipython-input-67-ffc7a0542f03> in <module>
+----> 1 pd.to_datetime(times.iloc[:, 0])
+
+D:\Python37\lib\site-packages\pandas\util\_decorators.py in wrapper(*args, **kwargs)
+    206                 else:
+    207                     kwargs[new_arg_name] = new_arg_value
+--> 208             return func(*args, **kwargs)
+    209 
+    210         return wrapper
+
+D:\Python37\lib\site-packages\pandas\core\tools\datetimes.py in to_datetime(arg, errors, dayfirst, yearfirst, utc, box, format, exact, unit, infer_datetime_format, origin, cache)
+    769                 result = result.tz_localize(tz)
+    770     elif isinstance(arg, ABCSeries):
+--> 771         cache_array = _maybe_cache(arg, format, cache, convert_listlike)
+    772         if not cache_array.empty:
+    773             result = arg.map(cache_array)
+
+D:\Python37\lib\site-packages\pandas\core\tools\datetimes.py in _maybe_cache(arg, format, cache, convert_listlike)
+    149     if cache:
+    150         # Perform a quicker unique check
+--> 151         if not should_cache(arg):
+    152             return cache_array
+    153 
+
+D:\Python37\lib\site-packages\pandas\core\tools\datetimes.py in should_cache(arg, unique_share, check_count)
+    119     assert 0 < unique_share < 1, "unique_share must be in next bounds: (0; 1)"
+    120 
+--> 121     unique_elements = unique(arg[:check_count])
+    122     if len(unique_elements) > check_count * unique_share:
+    123         do_caching = False
+
+D:\Python37\lib\site-packages\pandas\core\series.py in __getitem__(self, key)
+   1104             key = check_bool_indexer(self.index, key)
+   1105 
+-> 1106         return self._get_with(key)
+   1107 
+   1108     def _get_with(self, key):
+
+D:\Python37\lib\site-packages\pandas\core\series.py in _get_with(self, key)
+   1109         # other: fancy integer or otherwise
+   1110         if isinstance(key, slice):
+-> 1111             indexer = self.index._convert_slice_indexer(key, kind="getitem")
+   1112             return self._get_values(indexer)
+   1113         elif isinstance(key, ABCDataFrame):
+
+D:\Python37\lib\site-packages\pandas\core\indexes\numeric.py in _convert_slice_indexer(self, key, kind)
+    395 
+    396         # translate to locations
+--> 397         return self.slice_indexer(key.start, key.stop, key.step, kind=kind)
+    398 
+    399     def _format_native_types(
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in slice_indexer(self, start, end, step, kind)
+   5025         slice(1, 3)
+   5026         """
+-> 5027         start_slice, end_slice = self.slice_locs(start, end, step=step, kind=kind)
+   5028 
+   5029         # return a slice
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in slice_locs(self, start, end, step, kind)
+   5245         end_slice = None
+   5246         if end is not None:
+-> 5247             end_slice = self.get_slice_bound(end, "right", kind)
+   5248         if end_slice is None:
+   5249             end_slice = len(self)
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in get_slice_bound(self, label, side, kind)
+   5161             except ValueError:
+   5162                 # raise the original KeyError
+-> 5163                 raise err
+   5164 
+   5165         if isinstance(slc, np.ndarray):
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in get_slice_bound(self, label, side, kind)
+   5155         # we need to look up the label
+   5156         try:
+-> 5157             slc = self.get_loc(label)
+   5158         except KeyError as err:
+   5159             try:
+
+D:\Python37\lib\site-packages\pandas\core\indexes\numeric.py in get_loc(self, key, method, tolerance)
+    477         except (TypeError, NotImplementedError):
+    478             pass
+--> 479         return super().get_loc(key, method=method, tolerance=tolerance)
+    480 
+    481     @cache_readonly
+
+D:\Python37\lib\site-packages\pandas\core\indexes\base.py in get_loc(self, key, method, tolerance)
+   2890                 return self._engine.get_loc(key)
+   2891             except KeyError:
+-> 2892                 return self._engine.get_loc(self._maybe_cast_indexer(key))
+   2893         indexer = self.get_indexer([key], method=method, tolerance=tolerance)
+   2894         if indexer.ndim > 1 or indexer.size > 1:
+
+pandas\_libs\index.pyx in pandas._libs.index.IndexEngine.get_loc()
+
+pandas\_libs\index.pyx in pandas._libs.index.IndexEngine.get_loc()
+
+pandas\_libs\hashtable_class_helper.pxi in pandas._libs.hashtable.Float64HashTable.get_item()
+
+pandas\_libs\hashtable_class_helper.pxi in pandas._libs.hashtable.Float64HashTable.get_item()
+
+KeyError: 100.0
+```
+
+#### Expected Output
+Ideally it could create the DateTime series regardless of the state of the index. Perhaps users want to keep an unsorted float index and just want to cast to DateTime.
+
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+INSTALLED VERSIONS
+------------------
+commit           : None
+python           : 3.7.1.final.0
+python-bits      : 64
+OS               : Windows
+OS-release       : 2008ServerR2
+machine          : AMD64
+processor        : Intel64 Family 6 Model 45 Stepping 7, GenuineIntel
+byteorder        : little
+LC_ALL           : None
+LANG             : None
+LOCALE           : None.None
+
+pandas           : 0.25.0
+numpy            : 1.17.0
+pytz             : 2019.2
+dateutil         : 2.8.0
+pip              : 19.2.2
+setuptools       : 41.1.0
+Cython           : 0.29.13
+pytest           : 5.0.1
+hypothesis       : None
+sphinx           : 2.1.2
+blosc            : 1.8.1
+feather          : None
+xlsxwriter       : None
+lxml.etree       : 4.4.1
+html5lib         : 1.0.1
+pymysql          : None
+psycopg2         : None
+jinja2           : 2.10.1
+IPython          : 7.7.0
+pandas_datareader: None
+bs4              : 4.8.0
+bottleneck       : 1.2.1
+fastparquet      : 0.3.2
+gcsfs            : None
+lxml.etree       : 4.4.1
+matplotlib       : 3.1.1
+numexpr          : 2.7.0
+odfpy            : None
+openpyxl         : 2.6.2
+pandas_gbq       : None
+pyarrow          : 0.14.0
+pytables         : None
+s3fs             : None
+scipy            : 1.3.1
+sqlalchemy       : 1.3.6
+tables           : 3.5.2
+xarray           : 0.12.3
+xlrd             : 1.2.0
+xlwt             : 1.3.0
+xlsxwriter       : None
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/tests/tools/test_to_datetime.py b/pandas/tests/tools/test_to_datetime.py
+index 9da7951c199ca..a172ecd8e8f56 100644
+--- a/pandas/tests/tools/test_to_datetime.py
++++ b/pandas/tests/tools/test_to_datetime.py
+@@ -2530,3 +2530,14 @@ def test_empty_string_datetime_coerce__unit():
+     # verify that no exception is raised even when errors='raise' is set
+     result = to_datetime([1, ""], unit="s", errors="raise")
+     tm.assert_index_equal(expected, result)
++
++
++def test_to_datetime_monotonic_increasing_index():
++    # GH28238
++    times = date_range(datetime.now(), periods=1000, freq="h")
++    times = times.to_frame(index=False, name="DT").sample(1000)
++    times.index = times.index.to_series().astype(float) / 1000
++    converted = to_datetime(times.iloc[:, 0])
++    expected = np.ravel(times.values)
++    result = np.ravel(converted.values)
++    tm.assert_equal(result, expected)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

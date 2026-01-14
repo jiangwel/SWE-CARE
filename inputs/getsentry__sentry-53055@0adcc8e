@@ -1,0 +1,220 @@
+  Task-ID: getsentry__sentry-53055@0adcc8e
+  Please checkout to this commit first: 6faec71915477d06377dba2e7c14cdd67c7ae7e3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Fix duplicated metric data on query_hash collision
+Sentry should not send more than one query spec per project using the same `query_hash` tag value.
+
+## Details
+
+To collect unique metrics for every alert or dashboard widget, Sentry computes a query hash from the selected field and filters. This hash is supposed to be unique to the query. It is meant to be reused, so that if two alerts or widgets require the same metric, it can be extracted exactly once.
+
+The query hash is used as a tag in a metric with fixed MRI. Through that, Sentry queries the metric filtered by the tag value, to get the unique time series of the alert or widget.
+
+However, Sentry potentially sends the same query hash multiple times to Relay, which then extracts values for that metric multiple times. Particularly in counters, this leads to wrong values, as a single event is counted multiple times.
+
+## Potential Fix
+
+While Relay could de-duplicate these metrics, it does not have any semantic understanding of the `query_hash` tag. Therefore, the Sentry project config module should de-duplicate on-demand metrics based on their query_hash. 
+
+This de-duplication should occur at project boundary. If two project-specific metrics in an organization share the same `query_hash`, they are still sent to different projects, and the product can query them appropriately. If there is an organization-level metric (such as a dashboard widget), the deduplication can occur individually for every project.
+  </issue>
+  
+  <patch>
+  diff --git a/src/sentry/relay/config/metric_extraction.py b/src/sentry/relay/config/metric_extraction.py
+index 66bd3a4161dae2..9ad96bdce1917b 100644
+--- a/src/sentry/relay/config/metric_extraction.py
++++ b/src/sentry/relay/config/metric_extraction.py
+@@ -1,6 +1,6 @@
+ import logging
+ from dataclasses import dataclass
+-from typing import Any, List, Optional, Sequence, Tuple, TypedDict, Union, cast
++from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, Union, cast
+ 
+ from sentry import features
+ from sentry.api.endpoints.project_transaction_threshold import DEFAULT_THRESHOLD
+@@ -58,10 +58,7 @@ def get_metric_extraction_config(project: Project) -> Optional[MetricExtractionC
+         .select_related("snuba_query")
+     )
+ 
+-    metrics: List[MetricSpec] = []
+-    for alert in alerts:
+-        if metric := convert_query_to_metric(alert.snuba_query):
+-            metrics.append(metric)
++    metrics = get_metric_specs(alerts)
+ 
+     if not metrics:
+         return None
+@@ -76,7 +73,20 @@ def get_metric_extraction_config(project: Project) -> Optional[MetricExtractionC
+     }
+ 
+ 
+-def convert_query_to_metric(snuba_query: SnubaQuery) -> Optional[MetricSpec]:
++def get_metric_specs(alert_rules: Sequence[AlertRule]) -> List[MetricSpec]:
++    # We use a dict so that we can deduplicate metrics with the same query.
++    metrics: Dict[str, MetricSpec] = {}
++
++    for alert in alert_rules:
++        result = convert_query_to_metric(alert.snuba_query)
++        if result:
++            query_hash, spec = result
++            metrics[query_hash] = spec
++
++    return [spec for spec in metrics.values()]
++
++
++def convert_query_to_metric(snuba_query: SnubaQuery) -> Optional[Tuple[str, MetricSpec]]:
+     """
+     If the passed snuba_query is a valid query for on-demand metric extraction,
+     returns a MetricSpec for the query. Otherwise, returns None.
+@@ -86,13 +96,14 @@ def convert_query_to_metric(snuba_query: SnubaQuery) -> Optional[MetricSpec]:
+             return None
+ 
+         spec = OndemandMetricSpec(snuba_query.aggregate, snuba_query.query)
++        query_hash = spec.query_hash()
+ 
+-        return {
++        return query_hash, {
+             "category": DataCategory.TRANSACTION.api_name(),
+             "mri": spec.mri,
+             "field": spec.field,
+             "condition": spec.condition(),
+-            "tags": [{"key": QUERY_HASH_KEY, "value": spec.query_hash()}],
++            "tags": [{"key": QUERY_HASH_KEY, "value": query_hash}],
+         }
+     except Exception as e:
+         logger.error(e, exc_info=True)
+diff --git a/tests/sentry/relay/config/test_metric_extraction.py b/tests/sentry/relay/config/test_metric_extraction.py
+index 5624353b7f6214..2afc1d2848d424 100644
+--- a/tests/sentry/relay/config/test_metric_extraction.py
++++ b/tests/sentry/relay/config/test_metric_extraction.py
+@@ -1,32 +1,83 @@
+ from unittest.mock import ANY
+ 
+ from sentry.incidents.models import AlertRule
+-from sentry.relay.config.metric_extraction import convert_query_to_metric
++from sentry.relay.config.metric_extraction import convert_query_to_metric, get_metric_specs
+ from sentry.snuba.dataset import Dataset
+ from sentry.snuba.models import SnubaQuery
+ 
+ 
+-def test_empty_query():
++def create_alert(query: str) -> AlertRule:
+     snuba_query = SnubaQuery(
+-        aggregate="p75(measurements.fp)",
+-        query="",
++        aggregate="count()",
++        query=query,
+         dataset=Dataset.PerformanceMetrics.value,
+     )
+-    alert = AlertRule(snuba_query=snuba_query)
++    return AlertRule(snuba_query=snuba_query)
++
++
++def test_empty_query():
++    alert = create_alert("")
+ 
+     assert convert_query_to_metric(alert.snuba_query) is None
+ 
+ 
+ def test_simple_query_count():
+-    snuba_query = SnubaQuery(
+-        aggregate="count()",
+-        query="transaction.duration:>=1000",
+-        dataset=Dataset.PerformanceMetrics.value,
+-    )
+-    alert = AlertRule(snuba_query=snuba_query)
++    alert = create_alert("transaction.duration:>=1000")
+ 
+     metric = convert_query_to_metric(alert.snuba_query)
+-    assert metric == {
++
++    assert metric
++    assert metric[1] == {
++        "category": "transaction",
++        "condition": {"name": "event.duration", "op": "gte", "value": 1000.0},
++        "field": None,
++        "mri": "c:transactions/on_demand@none",
++        "tags": [{"key": "query_hash", "value": ANY}],
++    }
++
++
++def test_get_metric_specs_empty():
++    assert len(get_metric_specs([])) == 0
++
++
++def test_get_metric_specs_single():
++    alert = create_alert("transaction.duration:>=1000")
++
++    specs = get_metric_specs([alert])
++
++    assert len(specs) == 1
++    assert specs[0] == {
++        "category": "transaction",
++        "condition": {"name": "event.duration", "op": "gte", "value": 1000.0},
++        "field": None,
++        "mri": "c:transactions/on_demand@none",
++        "tags": [{"key": "query_hash", "value": ANY}],
++    }
++
++
++def test_get_metric_specs_multiple():
++    alert_1 = create_alert("transaction.duration:>=1")
++    alert_2 = create_alert("transaction.duration:>=2")
++
++    specs = get_metric_specs([alert_1, alert_2])
++
++    assert len(specs) == 2
++
++    first_hash = specs[0]["tags"][0]["value"]
++    second_hash = specs[1]["tags"][0]["value"]
++
++    assert first_hash != second_hash
++
++
++def test_get_metric_specs_multiple_duplicated():
++    alert_1 = create_alert("transaction.duration:>=1000")
++    alert_2 = create_alert("transaction.duration:>=1000")
++    alert_3 = create_alert("transaction.duration:>=1000")
++
++    specs = get_metric_specs([alert_1, alert_2, alert_3])
++
++    assert len(specs) == 1
++    assert specs[0] == {
+         "category": "transaction",
+         "condition": {"name": "event.duration", "op": "gte", "value": 1000.0},
+         "field": None,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

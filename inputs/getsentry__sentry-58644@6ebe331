@@ -1,0 +1,376 @@
+  Task-ID: getsentry__sentry-58644@6ebe331
+  Please checkout to this commit first: 7ed4c4caab87f0224df94ec89e93162e2f8bdb2f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support notifications for different channel types in Discord
+- Discord Forums need higher permissions and will say that message is sent when it does not send
+- When permissions fail, maybe link to docs of all the necessary permissions for different use cases
+```[tasklist]
+### Tasks
+- [ ] Update docs
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sentry/incidents/logic.py b/src/sentry/incidents/logic.py
+index bc5dcda3aae39c..7616d3eebd6411 100644
+--- a/src/sentry/incidents/logic.py
++++ b/src/sentry/incidents/logic.py
+@@ -1345,11 +1345,8 @@ def get_alert_rule_trigger_action_discord_channel_id(
+             integration_id=integration.id,
+             guild_name=integration.name,
+         )
+-    except ValidationError:
+-        raise InvalidTriggerActionError(
+-            "Could not find channel %s. Channel may not exist, may be formatted incorrectly, or Sentry may not "
+-            "have been granted permission to access it" % name
+-        )
++    except ValidationError as e:
++        raise InvalidTriggerActionError(e.message)
+     except IntegrationError:
+         raise InvalidTriggerActionError("Bad response from Discord channel lookup")
+     except ApiTimeoutError:
+diff --git a/src/sentry/integrations/discord/client.py b/src/sentry/integrations/discord/client.py
+index 9e8642b2408b4e..7ae4f47936b805 100644
+--- a/src/sentry/integrations/discord/client.py
++++ b/src/sentry/integrations/discord/client.py
+@@ -18,6 +18,12 @@ class DiscordClient(IntegrationProxyClient):
+     integration_name: str = "discord"
+     base_url: str = "https://discord.com/api/v10"
+ 
++    # https://discord.com/developers/docs/resources/channel#channel-object-channel-types
++    GUILD_TEXT = 0
++    DM = 1
++    PUBLIC_THREAD = 11
++    PRIVATE_THREAD = 12
++
+     # https://discord.com/developers/docs/resources/guild#get-guild
+     GUILD_URL = "/guilds/{guild_id}"
+ 
+@@ -33,6 +39,12 @@ class DiscordClient(IntegrationProxyClient):
+     # https://discord.com/developers/docs/resources/channel#create-message
+     MESSAGE_URL = "/channels/{channel_id}/messages"
+ 
++    SUPPORTED_CHANNEL_TYPES = {
++        GUILD_TEXT,
++        PUBLIC_THREAD,
++        PRIVATE_THREAD,
++    }
++
+     def __init__(
+         self,
+         integration_id: int | None = None,
+diff --git a/src/sentry/integrations/discord/integration.py b/src/sentry/integrations/discord/integration.py
+index 9f7c9d4710d710..870c9abbad49c3 100644
+--- a/src/sentry/integrations/discord/integration.py
++++ b/src/sentry/integrations/discord/integration.py
+@@ -105,8 +105,13 @@ class DiscordIntegrationProvider(IntegrationProvider):
+     oauth_scopes = frozenset(["applications.commands", "bot", "identify"])
+ 
+     # https://discord.com/developers/docs/topics/permissions#permissions
+-    # Permissions value that can Send Messages (0x800), View Channel (0x400), and Embed Links (0x4000):
+-    bot_permissions = 0x800 | 0x400 | 0x4000
++    # View Channel + read messages in text channels (1 << 10)
++    # Send Messages + create threads in forum (1 << 11)
++    # Embed Links (1 << 14)
++    # Create public threads (1 << 35)
++    # Create private threads (1 << 36)
++    # Send messages in threads (1 << 38)
++    bot_permissions = 1 << 10 | 1 << 11 | 1 << 14 | 1 << 35 | 1 << 36 | 1 << 38
+ 
+     setup_dialog_config = {"width": 600, "height": 900}
+ 
+diff --git a/src/sentry/integrations/discord/utils/channel.py b/src/sentry/integrations/discord/utils/channel.py
+index 72bc18cee4fe36..d0960fdec70582 100644
+--- a/src/sentry/integrations/discord/utils/channel.py
++++ b/src/sentry/integrations/discord/utils/channel.py
+@@ -80,6 +80,18 @@ def validate_channel_id(
+     if not isinstance(result, dict):
+         raise IntegrationError("Bad response from Discord channel lookup.")
+ 
++    if result["type"] not in DiscordClient.SUPPORTED_CHANNEL_TYPES:
++        # Forums are not supported
++        logger.info(
++            "rule.discord.wrong_channel_type",
++            extra={
++                "channel_id": channel_id,
++                "guild_name": guild_name,
++                "channel_type": result["type"],
++            },
++        )
++        raise ValidationError("Discord channel type is not supported")
++
+     if result["guild_id"] != guild_id:
+         # The channel exists and we have access to it, but it does not belong
+         # to the specified guild! We'll use the same message as generic 404,
+diff --git a/tests/sentry/api/serializers/test_alert_rule_trigger_action.py b/tests/sentry/api/serializers/test_alert_rule_trigger_action.py
+index 59453ce33c8d47..0eb49e08e35995 100644
+--- a/tests/sentry/api/serializers/test_alert_rule_trigger_action.py
++++ b/tests/sentry/api/serializers/test_alert_rule_trigger_action.py
+@@ -4,6 +4,7 @@
+ from sentry.incidents.logic import create_alert_rule_trigger, create_alert_rule_trigger_action
+ from sentry.incidents.models import AlertRuleTriggerAction
+ from sentry.incidents.serializers import ACTION_TARGET_TYPE_TO_STRING
++from sentry.integrations.discord.client import DiscordClient
+ from sentry.models.integrations.integration import Integration
+ from sentry.testutils.cases import TestCase
+ 
+@@ -45,10 +46,7 @@ def test_discord(self):
+         responses.add(
+             method=responses.GET,
+             url=f"{base_url}/channels/channel-id",
+-            json={
+-                "guild_id": "guild_id",
+-                "name": "guild_id",
+-            },
++            json={"guild_id": "guild_id", "name": "guild_id", "type": DiscordClient.GUILD_TEXT},
+         )
+ 
+         alert_rule = self.create_alert_rule()
+@@ -84,6 +82,7 @@ def test_discord_channel_id_none(self):
+             json={
+                 "guild_id": "guild_id",
+                 "name": "guild_id",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+diff --git a/tests/sentry/incidents/test_logic.py b/tests/sentry/incidents/test_logic.py
+index a9c4dcc43440cc..62ff7839212c9f 100644
+--- a/tests/sentry/incidents/test_logic.py
++++ b/tests/sentry/incidents/test_logic.py
+@@ -66,6 +66,7 @@
+     IncidentType,
+     TriggerStatus,
+ )
++from sentry.integrations.discord.client import DiscordClient
+ from sentry.models.actor import ActorTuple, get_actor_id_for_user
+ from sentry.models.integrations.integration import Integration
+ from sentry.models.integrations.organization_integration import OrganizationIntegration
+@@ -1431,10 +1432,7 @@ def test_pagerduty_not_existing(self):
+     @responses.activate
+     def test_discord(self):
+         guild_id = "example-discord-server"
+-        metadata = {
+-            "guild_id": guild_id,
+-            "name": "Server Name",
+-        }
++        metadata = {"guild_id": guild_id, "name": "Server Name", "type": DiscordClient.GUILD_TEXT}
+         integration = Integration.objects.create(
+             provider="discord",
+             name="Example Discord",
+@@ -1467,10 +1465,7 @@ def test_discord(self):
+ 
+     def test_discord_flag_off(self):
+         guild_id = "example-discord-server"
+-        metadata = {
+-            "guild_id": guild_id,
+-            "name": "Server Name",
+-        }
++        metadata = {"guild_id": guild_id, "name": "Server Name", "type": DiscordClient.GUILD_TEXT}
+         integration = Integration.objects.create(
+             provider="discord",
+             external_id=guild_id,
+@@ -1803,6 +1798,7 @@ def test_discord(self):
+             metadata={
+                 "guild_id": f"{guild_id}",
+                 "name": f"{guild_name}",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+@@ -1815,6 +1811,7 @@ def test_discord(self):
+             json={
+                 "guild_id": f"{guild_id}",
+                 "name": f"{guild_name}",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+@@ -1847,6 +1844,7 @@ def test_discord_invalid_channel_id(self):
+             metadata={
+                 "guild_id": f"{guild_id}",
+                 "name": f"{guild_name}",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+@@ -1879,6 +1877,7 @@ def test_discord_bad_response(self):
+             metadata={
+                 "guild_id": f"{guild_id}",
+                 "name": f"{guild_name}",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+@@ -1931,6 +1930,7 @@ def test_discord_timeout(self, mock_validate_channel_id):
+             metadata={
+                 "guild_id": f"{guild_id}",
+                 "name": f"{guild_name}",
++                "type": DiscordClient.GUILD_TEXT,
+             },
+         )
+ 
+@@ -1956,6 +1956,88 @@ def test_discord_timeout(self, mock_validate_channel_id):
+                     integration_id=integration.id,
+                 )
+ 
++    @responses.activate
++    def test_discord_channel_not_in_guild(self):
++        base_url: str = "https://discord.com/api/v10"
++        channel_id = "channel-id"
++        guild_id = "example-discord-server"
++        guild_name = "Server Name"
++
++        integration = Integration.objects.create(
++            provider="discord",
++            name="Example Discord",
++            external_id=f"{guild_id}",
++            metadata={
++                "guild_id": f"{guild_id}",
++                "name": f"{guild_name}",
++                "type": DiscordClient.DM,
++            },
++        )
++
++        integration.add_organization(self.organization, self.user)
++        type = AlertRuleTriggerAction.Type.DISCORD
++        target_type = AlertRuleTriggerAction.TargetType.SPECIFIC
++        responses.add(
++            method=responses.GET,
++            url=f"{base_url}/channels/{channel_id}",
++            json={
++                "guild_id": "other-guild",
++                "name": f"{guild_name}",
++                "type": DiscordClient.DM,
++            },
++        )
++
++        with self.feature("organizations:integrations-discord-metric-alerts"):
++            with pytest.raises(InvalidTriggerActionError):
++                update_alert_rule_trigger_action(
++                    self.action,
++                    type,
++                    target_type,
++                    target_identifier=channel_id,
++                    integration_id=integration.id,
++                )
++
++    @responses.activate
++    def test_discord_unsupported_type(self):
++        base_url: str = "https://discord.com/api/v10"
++        channel_id = "channel-id"
++        guild_id = "example-discord-server"
++        guild_name = "Server Name"
++
++        integration = Integration.objects.create(
++            provider="discord",
++            name="Example Discord",
++            external_id=f"{guild_id}",
++            metadata={
++                "guild_id": f"{guild_id}",
++                "name": f"{guild_name}",
++                "type": DiscordClient.DM,
++            },
++        )
++
++        integration.add_organization(self.organization, self.user)
++        type = AlertRuleTriggerAction.Type.DISCORD
++        target_type = AlertRuleTriggerAction.TargetType.SPECIFIC
++        responses.add(
++            method=responses.GET,
++            url=f"{base_url}/channels/{channel_id}",
++            json={
++                "guild_id": f"{guild_id}",
++                "name": f"{guild_name}",
++                "type": DiscordClient.DM,
++            },
++        )
++
++        with self.feature("organizations:integrations-discord-metric-alerts"):
++            with pytest.raises(InvalidTriggerActionError):
++                update_alert_rule_trigger_action(
++                    self.action,
++                    type,
++                    target_type,
++                    target_identifier=channel_id,
++                    integration_id=integration.id,
++                )
++
+ 
+ class DeleteAlertRuleTriggerAction(BaseAlertRuleTriggerActionTest, TestCase):
+     @cached_property
+diff --git a/tests/sentry/integrations/discord/test_utils.py b/tests/sentry/integrations/discord/test_utils.py
+index f26f90442a66f8..d0cc0628aee9ff 100644
+--- a/tests/sentry/integrations/discord/test_utils.py
++++ b/tests/sentry/integrations/discord/test_utils.py
+@@ -38,12 +38,13 @@ def test_verify_signature_invalid(self):
+ class ValidateChannelTest(TestCase):
+     guild_id = "guild-id"
+     channel_id = "channel-id"
++    channel_type = 0  # text
+     integration_id = 1234
+     guild_name = "server name"
+ 
+     @mock.patch("sentry.integrations.discord.utils.channel.DiscordClient.get_channel")
+     def test_happy_path(self, mock_get_channel):
+-        mock_get_channel.return_value = {"guild_id": self.guild_id}
++        mock_get_channel.return_value = {"guild_id": self.guild_id, "type": self.channel_type}
+         validate_channel_id(self.channel_id, self.guild_id, self.integration_id, self.guild_name)
+ 
+     @mock.patch("sentry.integrations.discord.utils.channel.DiscordClient.get_channel")
+@@ -88,7 +89,7 @@ def test_bad_response(self, mock_get_channel):
+ 
+     @mock.patch("sentry.integrations.discord.utils.channel.DiscordClient.get_channel")
+     def test_not_guild_member(self, mock_get_channel):
+-        mock_get_channel.return_value = {"guild_id": "not-my-guild"}
++        mock_get_channel.return_value = {"guild_id": "not-my-guild", "type": self.channel_type}
+         with raises(ValidationError):
+             validate_channel_id(
+                 self.channel_id, self.guild_id, self.integration_id, self.guild_name
+@@ -101,3 +102,11 @@ def test_timeout(self, mock_get_channel):
+             validate_channel_id(
+                 self.channel_id, self.guild_id, self.integration_id, self.guild_name
+             )
++
++    @mock.patch("sentry.integrations.discord.utils.channel.DiscordClient.get_channel")
++    def test_not_supported_type(self, mock_get_channel):
++        mock_get_channel.return_value = {"guild_id": self.guild_id, "type": 123}
++        with raises(ValidationError):
++            validate_channel_id(
++                self.channel_id, self.guild_id, self.integration_id, self.guild_name
++            )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

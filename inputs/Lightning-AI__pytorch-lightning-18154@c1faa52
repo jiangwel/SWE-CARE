@@ -1,0 +1,396 @@
+  Task-ID: Lightning-AI__pytorch-lightning-18154@c1faa52
+  Please checkout to this commit first: df4ad1932b0ad9a5ffe9b335726e4d12f6820f23
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Importing lightning causes large slowdown in dataloading with pickle files
+That issue is caused by `legacy_import_unpickler.py` that is setting `pickle.Unpickler = RedirectingUnpickler`.
+For datasets that unpickle files, switching from the C unpickler to the Python unpickler creates a slowdown of `~4x`.
+
+Here's minimal code to reproduce (minus of course the paths):
+```python
+import inspect
+import time
+
+# import lightning
+import torch
+import tqdm
+from torch.utils.data import Dataset
+
+
+class SlowDataset(Dataset):
+    def __init__(self):
+        super().__init__()
+
+    def __len__(self):
+        return 1000
+
+    def __getitem__(self, idx):
+        fname = f"/tmp/data/ckpt.pt"
+        file = torch.load(fname)
+        return file
+
+
+def main():
+    train_dataset = SlowDataset()
+
+    for i, data in enumerate(tqdm.tqdm(train_dataset)):
+        if i > 1000:
+            break
+
+
+if __name__ == "__main__":
+    main()
+```
+
+cc @tchaton @justusschock @awaelchli @borda
+  </issue>
+  
+  <patch>
+  diff --git a/src/lightning/pytorch/_graveyard/__init__.py b/src/lightning/pytorch/_graveyard/__init__.py
+index dffa45fdcb440..27f5992b2a309 100644
+--- a/src/lightning/pytorch/_graveyard/__init__.py
++++ b/src/lightning/pytorch/_graveyard/__init__.py
+@@ -13,5 +13,5 @@
+ # limitations under the License.
+ import lightning.pytorch._graveyard.hpu
+ import lightning.pytorch._graveyard.ipu
+-import lightning.pytorch._graveyard.legacy_import_unpickler
++import lightning.pytorch._graveyard.torchmetrics_
+ import lightning.pytorch._graveyard.tpu  # noqa: F401
+diff --git a/src/lightning/pytorch/_graveyard/legacy_import_unpickler.py b/src/lightning/pytorch/_graveyard/torchmetrics_.py
+similarity index 50%
+rename from src/lightning/pytorch/_graveyard/legacy_import_unpickler.py
+rename to src/lightning/pytorch/_graveyard/torchmetrics_.py
+index 35e9cd1d8ec86..c61eb3f8dccff 100644
+--- a/src/lightning/pytorch/_graveyard/legacy_import_unpickler.py
++++ b/src/lightning/pytorch/_graveyard/torchmetrics_.py
+@@ -1,28 +1,10 @@
+ import contextlib
+-import pickle
+-import warnings
+-from typing import Any, Callable
++from typing import Callable
+ 
+ import torchmetrics
+ from lightning_utilities.core.imports import compare_version as _compare_version
+ 
+-
+-def _patch_pl_to_mirror_if_necessary(module: str) -> str:
+-    pl = "pytorch_" + "lightning"  # avoids replacement during mirror package generation
+-    if module.startswith(pl):
+-        # for the standalone package this won't do anything,
+-        # for the unified mirror package it will redirect the imports
+-        return "lightning.pytorch" + module[len(pl) :]
+-    return module
+-
+-
+-class RedirectingUnpickler(pickle._Unpickler):
+-    def find_class(self, module: str, name: str) -> Any:
+-        new_module = _patch_pl_to_mirror_if_necessary(module)
+-        # this warning won't trigger for standalone as these imports are identical
+-        if module != new_module:
+-            warnings.warn(f"Redirecting import of {module}.{name} to {new_module}.{name}")
+-        return super().find_class(new_module, name)
++from lightning.pytorch.utilities.migration.utils import _patch_pl_to_mirror_if_necessary
+ 
+ 
+ def compare_version(package: str, op: Callable, version: str, use_base_version: bool = False) -> bool:
+@@ -40,5 +22,3 @@ def compare_version(package: str, op: Callable, version: str, use_base_version:
+ with contextlib.suppress(AttributeError):
+     if hasattr(torchmetrics.metric, "_compare_version"):
+         torchmetrics.metric._compare_version = compare_version
+-
+-pickle.Unpickler = RedirectingUnpickler  # type: ignore
+diff --git a/src/lightning/pytorch/utilities/migration/utils.py b/src/lightning/pytorch/utilities/migration/utils.py
+index aa94e10e63983..49ae9132630e9 100644
+--- a/src/lightning/pytorch/utilities/migration/utils.py
++++ b/src/lightning/pytorch/utilities/migration/utils.py
+@@ -13,8 +13,10 @@
+ # limitations under the License.
+ import logging
+ import os
++import pickle
+ import sys
+ import threading
++import warnings
+ from types import ModuleType, TracebackType
+ from typing import Any, Dict, List, Optional, Tuple, Type
+ 
+@@ -82,6 +84,8 @@ class pl_legacy_patch:
+            but still needs to be available for import for legacy checkpoints.
+         3. ``lightning.pytorch.utilities.enums._FaultTolerantMode``: This enum was removed in 2.0 but was pickled
+            into older checkpoints.
++        4. In legacy versions of Lightning, callback classes got pickled into the checkpoint. These classes have a
++           module import path under ``pytorch_lightning`` and must be redirected to the ``lightning.pytorch``.
+ 
+     Example:
+ 
+@@ -106,6 +110,10 @@ class _FaultTolerantMode(LightningEnum):
+             MANUAL = "manual"
+ 
+         pl.utilities.enums._FaultTolerantMode = _FaultTolerantMode
++
++        # Patch Unpickler to redirect `pytorch_lightning` imports
++        self._old_unpickler = pickle.Unpickler
++        pickle.Unpickler = _RedirectingUnpickler  # type: ignore
+         return self
+ 
+     def __exit__(
+@@ -119,6 +127,7 @@ def __exit__(
+         del sys.modules["lightning.pytorch.utilities.argparse_utils"]
+         if hasattr(pl.utilities.enums, "_FaultTolerantMode"):
+             delattr(pl.utilities.enums, "_FaultTolerantMode")
++        pickle.Unpickler = self._old_unpickler  # type: ignore
+         _lock.release()
+ 
+ 
+@@ -166,3 +175,27 @@ def _should_upgrade(checkpoint: _CHECKPOINT, target: str, max_version: Optional[
+     target_version = Version(target)
+     is_lte_max_version = max_version is None or target_version <= Version(max_version)
+     return is_lte_max_version and Version(_get_version(checkpoint)) < target_version
++
++
++class _RedirectingUnpickler(pickle._Unpickler):
++    """Redirects the unpickling of `pytorch_lightning` classes to `lightning.pytorch`.
++
++    In legacy versions of Lightning, callback classes got pickled into the checkpoint. These classes are defined in the
++    `pytorch_lightning` but need to be loaded from `lightning.pytorch`.
++    """
++
++    def find_class(self, module: str, name: str) -> Any:
++        new_module = _patch_pl_to_mirror_if_necessary(module)
++        # this warning won't trigger for standalone as these imports are identical
++        if module != new_module:
++            warnings.warn(f"Redirecting import of {module}.{name} to {new_module}.{name}")
++        return super().find_class(new_module, name)
++
++
++def _patch_pl_to_mirror_if_necessary(module: str) -> str:
++    _pl = "pytorch_" + "lightning"  # avoids replacement during mirror package generation
++    if module.startswith(_pl):
++        # for the standalone package this won't do anything,
++        # for the unified mirror package it will redirect the imports
++        return "lightning.pytorch" + module[len(_pl) :]
++    return module
+diff --git a/tests/tests_pytorch/graveyard/test_legacy_import_unpickler.py b/tests/tests_pytorch/graveyard/test_legacy_import_unpickler.py
+deleted file mode 100644
+index 9a3d149142478..0000000000000
+--- a/tests/tests_pytorch/graveyard/test_legacy_import_unpickler.py
++++ /dev/null
+@@ -1,75 +0,0 @@
+-import glob
+-import os
+-import sys
+-
+-import pytest
+-import torch
+-from lightning_utilities.core.imports import module_available
+-from lightning_utilities.test.warning import no_warning_call
+-from packaging.version import Version
+-
+-from tests_pytorch.checkpointing.test_legacy_checkpoints import (
+-    CHECKPOINT_EXTENSION,
+-    LEGACY_BACK_COMPATIBLE_PL_VERSIONS,
+-    LEGACY_CHECKPOINTS_PATH,
+-)
+-
+-
+-def _list_sys_modules(pattern: str) -> str:
+-    return repr({k: sys.modules[k] for k in sorted(sys.modules.keys()) if pattern in k})
+-
+-
+-@pytest.mark.parametrize("pl_version", LEGACY_BACK_COMPATIBLE_PL_VERSIONS)
+-@pytest.mark.skipif(module_available("lightning"), reason="This test is ONLY relevant for the STANDALONE package")
+-def test_imports_standalone(pl_version: str):
+-    assert any(
+-        key.startswith("pytorch_lightning") for key in sys.modules
+-    ), f"Imported PL, so it has to be in sys.modules: {_list_sys_modules('pytorch_lightning')}"
+-    path_legacy = os.path.join(LEGACY_CHECKPOINTS_PATH, pl_version)
+-    path_ckpts = sorted(glob.glob(os.path.join(path_legacy, f"*{CHECKPOINT_EXTENSION}")))
+-    assert path_ckpts, f'No checkpoints found in folder "{path_legacy}"'
+-    path_ckpt = path_ckpts[-1]
+-
+-    with no_warning_call(match="Redirecting import of*"):
+-        torch.load(path_ckpt)
+-
+-    assert any(
+-        key.startswith("pytorch_lightning") for key in sys.modules
+-    ), f"Imported PL, so it has to be in sys.modules: {_list_sys_modules('pytorch_lightning')}"
+-    assert not any(key.startswith("lightning." + "pytorch") for key in sys.modules), (
+-        "Did not import the unified package,"
+-        f" so it should not be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
+-    )
+-
+-
+-@pytest.mark.parametrize("pl_version", LEGACY_BACK_COMPATIBLE_PL_VERSIONS)
+-@pytest.mark.skipif(not module_available("lightning"), reason="This test is ONLY relevant for the UNIFIED package")
+-def test_imports_unified(pl_version: str):
+-    assert any(
+-        key.startswith("lightning." + "pytorch") for key in sys.modules
+-    ), f"Imported unified package, so it has to be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
+-    assert not any(key.startswith("pytorch_lightning") for key in sys.modules), (
+-        "Should not import standalone package, all imports should be redirected to the unified package;\n"
+-        f" environment: {_list_sys_modules('pytorch_lightning')}"
+-    )
+-
+-    path_legacy = os.path.join(LEGACY_CHECKPOINTS_PATH, pl_version)
+-    path_ckpts = sorted(glob.glob(os.path.join(path_legacy, f"*{CHECKPOINT_EXTENSION}")))
+-    assert path_ckpts, f'No checkpoints found in folder "{path_legacy}"'
+-    path_ckpt = path_ckpts[-1]
+-
+-    # only below version 1.5.0 we pickled stuff in checkpoints
+-    if pl_version != "local" and Version(pl_version) < Version("1.5.0"):
+-        context = pytest.warns(UserWarning, match="Redirecting import of")
+-    else:
+-        context = no_warning_call(match="Redirecting import of*")
+-    with context:
+-        torch.load(path_ckpt)
+-
+-    assert any(
+-        key.startswith("lightning." + "pytorch") for key in sys.modules
+-    ), f"Imported unified package, so it has to be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
+-    assert not any(key.startswith("pytorch_lightning") for key in sys.modules), (
+-        "Should not import standalone package, all imports should be redirected to the unified package;\n"
+-        f" environment: {_list_sys_modules('pytorch_lightning')}"
+-    )
+diff --git a/tests/tests_pytorch/utilities/migration/test_utils.py b/tests/tests_pytorch/utilities/migration/test_utils.py
+index 730c45f6e8e0e..f8f2be9786a79 100644
+--- a/tests/tests_pytorch/utilities/migration/test_utils.py
++++ b/tests/tests_pytorch/utilities/migration/test_utils.py
+@@ -11,16 +11,28 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import glob
+ import logging
++import os
++import pickle
+ import sys
+ from unittest.mock import ANY
+ 
+ import pytest
++import torch
++from lightning_utilities.core.imports import module_available
++from lightning_utilities.test.warning import no_warning_call
++from packaging.version import Version
+ 
+ import lightning.pytorch as pl
+ from lightning.fabric.utilities.warnings import PossibleUserWarning
+ from lightning.pytorch.utilities.migration import migrate_checkpoint, pl_legacy_patch
+-from lightning.pytorch.utilities.migration.utils import _pl_migrate_checkpoint
++from lightning.pytorch.utilities.migration.utils import _pl_migrate_checkpoint, _RedirectingUnpickler
++from tests_pytorch.checkpointing.test_legacy_checkpoints import (
++    CHECKPOINT_EXTENSION,
++    LEGACY_BACK_COMPATIBLE_PL_VERSIONS,
++    LEGACY_CHECKPOINTS_PATH,
++)
+ 
+ 
+ def test_patch_legacy_argparse_utils():
+@@ -50,6 +62,72 @@ def test_patch_legacy_fault_tolerant_mode():
+     assert not hasattr(pl.utilities.enums, "_FaultTolerantMode")
+ 
+ 
++def test_test_patch_legacy_unpickler():
++    with pl_legacy_patch():
++        assert pickle.Unpickler == _RedirectingUnpickler
++    assert pickle.Unpickler != _RedirectingUnpickler
++
++
++def _list_sys_modules(pattern: str) -> str:
++    return repr({k: sys.modules[k] for k in sorted(sys.modules.keys()) if pattern in k})
++
++
++@pytest.mark.parametrize("pl_version", LEGACY_BACK_COMPATIBLE_PL_VERSIONS)
++@pytest.mark.skipif(module_available("lightning"), reason="This test is ONLY relevant for the STANDALONE package")
++def test_test_patch_legacy_imports_standalone(pl_version):
++    assert any(
++        key.startswith("pytorch_lightning") for key in sys.modules
++    ), f"Imported PL, so it has to be in sys.modules: {_list_sys_modules('pytorch_lightning')}"
++    path_legacy = os.path.join(LEGACY_CHECKPOINTS_PATH, pl_version)
++    path_ckpts = sorted(glob.glob(os.path.join(path_legacy, f"*{CHECKPOINT_EXTENSION}")))
++    assert path_ckpts, f'No checkpoints found in folder "{path_legacy}"'
++    path_ckpt = path_ckpts[-1]
++
++    with no_warning_call(match="Redirecting import of*"), pl_legacy_patch():
++        torch.load(path_ckpt)
++
++    assert any(
++        key.startswith("pytorch_lightning") for key in sys.modules
++    ), f"Imported PL, so it has to be in sys.modules: {_list_sys_modules('pytorch_lightning')}"
++    assert not any(key.startswith("lightning." + "pytorch") for key in sys.modules), (
++        "Did not import the unified package,"
++        f" so it should not be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
++    )
++
++
++@pytest.mark.parametrize("pl_version", LEGACY_BACK_COMPATIBLE_PL_VERSIONS)
++@pytest.mark.skipif(not module_available("lightning"), reason="This test is ONLY relevant for the UNIFIED package")
++def test_patch_legacy_imports_unified(pl_version):
++    assert any(
++        key.startswith("lightning." + "pytorch") for key in sys.modules
++    ), f"Imported unified package, so it has to be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
++    assert not any(key.startswith("pytorch_lightning") for key in sys.modules), (
++        "Should not import standalone package, all imports should be redirected to the unified package;\n"
++        f" environment: {_list_sys_modules('pytorch_lightning')}"
++    )
++
++    path_legacy = os.path.join(LEGACY_CHECKPOINTS_PATH, pl_version)
++    path_ckpts = sorted(glob.glob(os.path.join(path_legacy, f"*{CHECKPOINT_EXTENSION}")))
++    assert path_ckpts, f'No checkpoints found in folder "{path_legacy}"'
++    path_ckpt = path_ckpts[-1]
++
++    # only below version 1.5.0 we pickled stuff in checkpoints
++    if pl_version != "local" and Version(pl_version) < Version("1.5.0"):
++        context = pytest.warns(UserWarning, match="Redirecting import of")
++    else:
++        context = no_warning_call(match="Redirecting import of*")
++    with context, pl_legacy_patch():
++        torch.load(path_ckpt)
++
++    assert any(
++        key.startswith("lightning." + "pytorch") for key in sys.modules
++    ), f"Imported unified package, so it has to be in sys.modules: {_list_sys_modules('lightning' + '.pytorch')}"
++    assert not any(key.startswith("pytorch_lightning") for key in sys.modules), (
++        "Should not import standalone package, all imports should be redirected to the unified package;\n"
++        f" environment: {_list_sys_modules('pytorch_lightning')}"
++    )
++
++
+ def test_migrate_checkpoint(monkeypatch):
+     """Test that the correct migration function gets executed given the current version of the checkpoint."""
+     # A checkpoint that is older than any migration point in the index
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,359 @@
+  Task-ID: python__mypy-4000@358ca96
+  Please checkout to this commit first: 8e506d28eac2639eab7d7d4db8421f341e029ed0
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Qualified alias names are mishandled
+```
+T = TypeVar('T')
+
+class X(Generic[T]):
+    A = X[T]
+    def f(self, x: int = 1) -> X[T]: ...
+    a: X[T]
+    b: A = a # ok
+    def g(self) -> None:
+        a: X[T]
+        b: X.A = a # ok
+
+
+def g(x: X[T]) -> None:
+    p: X[T] = x.f() # ok
+    q: X.A = x.f() # fail
+```
+
+I think it should pass, unless qualified aliases are not allowed (in which case it should fail in `X.g()`). In addition, the error is confusing: `Incompatible types in assignment (expression has type m.X[T], variable has type m.X[T])`.
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checkexpr.py b/mypy/checkexpr.py
+index 54d5f19d164e..aeb166a296e9 100644
+--- a/mypy/checkexpr.py
++++ b/mypy/checkexpr.py
+@@ -650,7 +650,7 @@ def analyze_type_type_callee(self, item: Type, context: Context) -> Type:
+             res = type_object_type(item.type, self.named_type)
+             if isinstance(res, CallableType):
+                 res = res.copy_modified(from_type_type=True)
+-            return res
++            return expand_type_by_instance(res, item)
+         if isinstance(item, UnionType):
+             return UnionType([self.analyze_type_type_callee(item, context)
+                               for item in item.relevant_items()], item.line)
+diff --git a/mypy/semanal.py b/mypy/semanal.py
+index 402bf9c9fabe..c6498b959b84 100644
+--- a/mypy/semanal.py
++++ b/mypy/semanal.py
+@@ -1732,11 +1732,10 @@ def alias_fallback(self, tp: Type) -> Instance:
+         return Instance(fb_info, [])
+ 
+     def analyze_alias(self, rvalue: Expression,
+-                      allow_unnormalized: bool) -> Tuple[Optional[Type], List[str]]:
++                      warn_bound_tvar: bool = False) -> Tuple[Optional[Type], List[str]]:
+         """Check if 'rvalue' represents a valid type allowed for aliasing
+         (e.g. not a type variable). If yes, return the corresponding type and a list of
+         qualified type variable names for generic aliases.
+-        If 'allow_unnormalized' is True, allow types like builtins.list[T].
+         """
+         dynamic = bool(self.function_stack and self.function_stack[-1].is_dynamic())
+         global_scope = not self.type and not self.function_stack
+@@ -1751,7 +1750,8 @@ def analyze_alias(self, rvalue: Expression,
+                                  self.is_typeshed_stub_file,
+                                  allow_unnormalized=True,
+                                  in_dynamic_func=dynamic,
+-                                 global_scope=global_scope)
++                                 global_scope=global_scope,
++                                 warn_bound_tvar=warn_bound_tvar)
+         if res:
+             alias_tvars = [name for (name, _) in
+                            res.accept(TypeVariableQuery(self.lookup_qualified, self.tvar_scope))]
+@@ -1770,11 +1770,12 @@ def check_and_set_up_type_alias(self, s: AssignmentStmt) -> None:
+         lvalue = s.lvalues[0]
+         if not isinstance(lvalue, NameExpr):
+             return
+-        if (len(s.lvalues) == 1 and not self.is_func_scope() and
+-                not (self.type and isinstance(s.rvalue, NameExpr) and lvalue.is_def)
++        if (len(s.lvalues) == 1 and
++                not ((self.type or self.is_func_scope()) and
++                     isinstance(s.rvalue, NameExpr) and lvalue.is_def)
+                 and not s.type):
+             rvalue = s.rvalue
+-            res, alias_tvars = self.analyze_alias(rvalue, allow_unnormalized=True)
++            res, alias_tvars = self.analyze_alias(rvalue, warn_bound_tvar=True)
+             if not res:
+                 return
+             node = self.lookup(lvalue.name, lvalue)
+@@ -3374,7 +3375,7 @@ def visit_index_expr(self, expr: IndexExpr) -> None:
+         elif isinstance(expr.base, RefExpr) and expr.base.kind == TYPE_ALIAS:
+             # Special form -- subscripting a generic type alias.
+             # Perform the type substitution and create a new alias.
+-            res, alias_tvars = self.analyze_alias(expr, allow_unnormalized=self.is_stub_file)
++            res, alias_tvars = self.analyze_alias(expr)
+             expr.analyzed = TypeAliasExpr(res, alias_tvars, fallback=self.alias_fallback(res),
+                                           in_runtime=True)
+             expr.analyzed.line = expr.line
+diff --git a/mypy/typeanal.py b/mypy/typeanal.py
+index 3119c19a05e3..f569d01731ab 100644
+--- a/mypy/typeanal.py
++++ b/mypy/typeanal.py
+@@ -63,7 +63,8 @@ def analyze_type_alias(node: Expression,
+                        is_typeshed_stub: bool,
+                        allow_unnormalized: bool = False,
+                        in_dynamic_func: bool = False,
+-                       global_scope: bool = True) -> Optional[Type]:
++                       global_scope: bool = True,
++                       warn_bound_tvar: bool = False) -> Optional[Type]:
+     """Return type if node is valid as a type alias rvalue.
+ 
+     Return None otherwise. 'node' must have been semantically analyzed.
+@@ -117,7 +118,7 @@ def analyze_type_alias(node: Expression,
+         return None
+     analyzer = TypeAnalyser(lookup_func, lookup_fqn_func, tvar_scope, fail_func, note_func,
+                             plugin, options, is_typeshed_stub, aliasing=True,
+-                            allow_unnormalized=allow_unnormalized)
++                            allow_unnormalized=allow_unnormalized, warn_bound_tvar=warn_bound_tvar)
+     analyzer.in_dynamic_func = in_dynamic_func
+     analyzer.global_scope = global_scope
+     return type.accept(analyzer)
+@@ -154,7 +155,8 @@ def __init__(self,
+                  aliasing: bool = False,
+                  allow_tuple_literal: bool = False,
+                  allow_unnormalized: bool = False,
+-                 third_pass: bool = False) -> None:
++                 third_pass: bool = False,
++                 warn_bound_tvar: bool = False) -> None:
+         self.lookup = lookup_func
+         self.lookup_fqn_func = lookup_fqn_func
+         self.fail_func = fail_func
+@@ -168,6 +170,7 @@ def __init__(self,
+         self.plugin = plugin
+         self.options = options
+         self.is_typeshed_stub = is_typeshed_stub
++        self.warn_bound_tvar = warn_bound_tvar
+         self.third_pass = third_pass
+ 
+     def visit_unbound_type(self, t: UnboundType) -> Type:
+@@ -194,7 +197,11 @@ def visit_unbound_type(self, t: UnboundType) -> Type:
+                 tvar_def = self.tvar_scope.get_binding(sym)
+             else:
+                 tvar_def = None
+-            if sym.kind == TVAR and tvar_def is not None:
++            if self.warn_bound_tvar and sym.kind == TVAR and tvar_def is not None:
++                self.fail('Can\'t use bound type variable "{}"'
++                          ' to define generic alias'.format(t.name), t)
++                return AnyType(TypeOfAny.from_error)
++            elif sym.kind == TVAR and tvar_def is not None:
+                 if len(t.args) > 0:
+                     self.fail('Type variable "{}" used with arguments'.format(
+                         t.name), t)
+diff --git a/test-data/unit/check-classes.test b/test-data/unit/check-classes.test
+index 7243de98420b..13545b3f0b92 100644
+--- a/test-data/unit/check-classes.test
++++ b/test-data/unit/check-classes.test
+@@ -2119,17 +2119,17 @@ reveal_type(C().aa) # E: Revealed type is '__main__.A'
+ [out]
+ 
+ [case testClassValuedAttributesGeneric]
+-from typing import Generic, TypeVar
++from typing import Generic, TypeVar, Type
+ T = TypeVar('T')
+ 
+ class A(Generic[T]):
+     def __init__(self, x: T) -> None:
+         self.x = x
+ class B(Generic[T]):
+-    a = A[T]
++    a: Type[A[T]] = A
+ 
+-reveal_type(B[int]().a) # E: Revealed type is 'def (x: builtins.int*) -> __main__.A[builtins.int*]'
+-B[int]().a('hi') # E: Argument 1 has incompatible type "str"; expected "int"
++reveal_type(B[int]().a) # E: Revealed type is 'Type[__main__.A[builtins.int*]]'
++B[int]().a('hi') # E: Argument 1 to "A" has incompatible type "str"; expected "int"
+ 
+ class C(Generic[T]):
+     a = A
+diff --git a/test-data/unit/check-isinstance.test b/test-data/unit/check-isinstance.test
+index 8279e1aeafd4..a92204ca5878 100644
+--- a/test-data/unit/check-isinstance.test
++++ b/test-data/unit/check-isinstance.test
+@@ -1447,16 +1447,16 @@ def f(x: Union[Type[int], Type[str], Type[List]]) -> None:
+         x()[1]  # E: Value of type "Union[int, str]" is not indexable
+     else:
+         reveal_type(x)  # E: Revealed type is 'Type[builtins.list[Any]]'
+-        reveal_type(x())  # E: Revealed type is 'builtins.list[<nothing>]'
++        reveal_type(x())  # E: Revealed type is 'builtins.list[Any]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+     if issubclass(x, (str, (list,))):
+         reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.str], Type[builtins.list[Any]]]'
+-        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[<nothing>]]'
++        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[Any]]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+ [builtins fixtures/isinstancelist.pyi]
+ 
+ [case testIssubclasDestructuringUnions2]
+@@ -1469,16 +1469,16 @@ def f(x: Type[Union[int, str, List]]) -> None:
+         x()[1]  # E: Value of type "Union[int, str]" is not indexable
+     else:
+         reveal_type(x)  # E: Revealed type is 'Type[builtins.list[Any]]'
+-        reveal_type(x())  # E: Revealed type is 'builtins.list[<nothing>]'
++        reveal_type(x())  # E: Revealed type is 'builtins.list[Any]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+     if issubclass(x, (str, (list,))):
+         reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.str], Type[builtins.list[Any]]]'
+-        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[<nothing>]]'
++        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[Any]]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+ [builtins fixtures/isinstancelist.pyi]
+ 
+ [case testIssubclasDestructuringUnions3]
+@@ -1486,23 +1486,23 @@ from typing import Union, List, Tuple, Dict, Type
+ 
+ def f(x: Type[Union[int, str, List]]) -> None:
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+     if issubclass(x, (str, (int,))):
+         reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str]]'
+         reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str]'
+         x()[1]  # E: Value of type "Union[int, str]" is not indexable
+     else:
+         reveal_type(x)  # E: Revealed type is 'Type[builtins.list[Any]]'
+-        reveal_type(x())  # E: Revealed type is 'builtins.list[<nothing>]'
++        reveal_type(x())  # E: Revealed type is 'builtins.list[Any]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+     if issubclass(x, (str, (list,))):
+         reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.str], Type[builtins.list[Any]]]'
+-        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[<nothing>]]'
++        reveal_type(x())  # E: Revealed type is 'Union[builtins.str, builtins.list[Any]]'
+         x()[1]
+     reveal_type(x)  # E: Revealed type is 'Union[Type[builtins.int], Type[builtins.str], Type[builtins.list[Any]]]'
+-    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[<nothing>]]'
++    reveal_type(x())  # E: Revealed type is 'Union[builtins.int, builtins.str, builtins.list[Any]]'
+ [builtins fixtures/isinstancelist.pyi]
+ 
+ [case testIssubclass]
+diff --git a/test-data/unit/check-type-aliases.test b/test-data/unit/check-type-aliases.test
+index 400326660b30..8c05b7429d8d 100644
+--- a/test-data/unit/check-type-aliases.test
++++ b/test-data/unit/check-type-aliases.test
+@@ -96,6 +96,48 @@ GenAlias = Sequence[T]
+ def fun(x: Alias) -> GenAlias[int]: pass
+ [out]
+ 
++[case testCorrectQualifiedAliasesAlsoInFunctions]
++from typing import TypeVar, Generic
++T = TypeVar('T')
++S = TypeVar('S')
++
++class X(Generic[T]):
++    A = X[S]
++    def f(self) -> X[T]:
++        pass
++
++    a: X[T]
++    b: A = a
++    c: A[T] = a
++    d: A[int] = a # E: Incompatible types in assignment (expression has type "X[T]", variable has type "X[int]")
++
++    def g(self) -> None:
++        a: X[T]
++        b: X.A = a
++        c: X.A[T] = a
++        d: X.A[int] = a  # E: Incompatible types in assignment (expression has type "X[T]", variable has type "X[int]")
++
++def g(arg: X[int]) -> None:
++    p: X[int] = arg.f()
++    q: X.A = arg.f()
++    r: X.A[str] = arg.f() # E: Incompatible types in assignment (expression has type "X[int]", variable has type "X[str]")
++[out]
++
++[case testProhibitBoundTypeVariableReuseForAliases]
++from typing import TypeVar, Generic, List
++T = TypeVar('T')
++class C(Generic[T]):
++    A = List[T] # E: Can't use bound type variable "T" to define generic alias
++
++x: C.A
++reveal_type(x) # E: Revealed type is 'builtins.list[Any]'
++
++def f(x: T) -> T:
++    A = List[T] # E: Can't use bound type variable "T" to define generic alias
++    return x
++[builtins fixtures/list.pyi]
++[out]
++
+ [case testTypeAliasInBuiltins]
+ def f(x: bytes): pass
+ bytes
+diff --git a/test-data/unit/check-typevar-values.test b/test-data/unit/check-typevar-values.test
+index 1dc5d143790e..eab5e3f094a0 100644
+--- a/test-data/unit/check-typevar-values.test
++++ b/test-data/unit/check-typevar-values.test
+@@ -556,16 +556,15 @@ def outer(x: T) -> T:
+ 
+ [case testClassMemberTypeVarInFunctionBody]
+ from typing import TypeVar, List
++S = TypeVar('S')
+ class C:
+     T = TypeVar('T', bound=int)
+     def f(self, x: T) -> T:
+-        L = List[C.T] # this creates a variable, not an alias
+-        reveal_type(L)  # E: Revealed type is 'Overload(def () -> builtins.list[T`-1], def (x: typing.Iterable[T`-1]) -> builtins.list[T`-1])'
+-        y: C.T = x
+-        L().append(x)
++        L = List[S]
++        y: L[C.T] = [x]
+         C.T  # E: Type variable "C.T" cannot be used as an expression
+         A = C.T  # E: Type variable "C.T" cannot be used as an expression
+-        return L()[0]
++        return y[0]
+ 
+ [builtins fixtures/list.pyi]
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

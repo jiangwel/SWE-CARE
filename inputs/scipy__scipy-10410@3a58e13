@@ -1,0 +1,120 @@
+  Task-ID: scipy__scipy-10410@3a58e13
+  Please checkout to this commit first: 975e3e421ca5758983ff734dcfb61c4f6e26cb61
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  scipy.stats.ncx2 fails for nc=0
+For `nc = 0` it should reduce to the chi-squared distribution, but `scipy.stats.ncx2.rvs(1, 0)` gives:
+
+``` python
+C:\Anaconda\lib\site-packages\scipy\stats\_distn_infrastructure.pyc in rvs(self, *args, **kwds)
+    882         cond = logical_and(self._argcheck(*args), (scale >= 0))
+    883         if not np.all(cond):
+--> 884             raise ValueError("Domain error in arguments.")
+    885 
+    886         # self._size is total size of all output values
+
+ValueError: Domain error in arguments.
+```
+
+Similarly the pdf, etc. also fail.
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/stats/_continuous_distns.py b/scipy/stats/_continuous_distns.py
+index 53ce63712ad8..d7af333d8a52 100644
+--- a/scipy/stats/_continuous_distns.py
++++ b/scipy/stats/_continuous_distns.py
+@@ -5204,19 +5204,25 @@ class ncx2_gen(rv_continuous):
+     %(example)s
+ 
+     """
++    def _argcheck(self, df, nc):
++        return (df > 0) & (nc >= 0)
++
+     def _rvs(self, df, nc):
+         return self._random_state.noncentral_chisquare(df, nc, self._size)
+ 
+     def _logpdf(self, x, df, nc):
+-        return _ncx2_log_pdf(x, df, nc)
++        cond = np.ones_like(x, dtype=bool) & (nc != 0)
++        return _lazywhere(cond, (x, df, nc), f=_ncx2_log_pdf, f2=chi2.logpdf)
+ 
+     def _pdf(self, x, df, nc):
+         # ncx2.pdf(x, df, nc) = exp(-(nc+x)/2) * 1/2 * (x/nc)**((df-2)/4)
+         #                       * I[(df-2)/2](sqrt(nc*x))
+-        return _ncx2_pdf(x, df, nc)
++        cond = np.ones_like(x, dtype=bool) & (nc != 0)
++        return _lazywhere(cond, (x, df, nc), f=_ncx2_pdf, f2=chi2.pdf)
+ 
+     def _cdf(self, x, df, nc):
+-        return _ncx2_cdf(x, df, nc)
++        cond = np.ones_like(x, dtype=bool) & (nc != 0)
++        return _lazywhere(cond, (x, df, nc), f=_ncx2_cdf, f2=chi2.cdf)
+ 
+     def _ppf(self, q, df, nc):
+         return sc.chndtrix(q, df, nc)
+diff --git a/scipy/stats/tests/test_distributions.py b/scipy/stats/tests/test_distributions.py
+index 25e32b3240e8..ec83feb8a478 100644
+--- a/scipy/stats/tests/test_distributions.py
++++ b/scipy/stats/tests/test_distributions.py
+@@ -3258,6 +3258,26 @@ def test_ncx2_tails_pdf():
+     assert_(np.isneginf(logval).all())
+ 
+ 
++@pytest.mark.parametrize('method, expected', [
++    ('cdf', np.array([1.72115630e-04, 2.74102033e-05])),
++    ('pdf', np.array([0.00078975, 0.00013013])),
++    ('logpdf', np.array([-7.14378973, -8.94700192]))
++])
++def test_ncx2_zero_nc(method, expected):
++    # gh-5441
++    # ncx2 with nc=0 is identical to chi2
++    result = getattr(stats.ncx2, method)(1, nc=[0, 4], df=10)
++    assert_allclose(result, expected, rtol=1e-3, atol=0)
++
++
++def test_ncx2_zero_nc_rvs():
++    # gh-5441
++    # ncx2 with nc=0 is identical to chi2
++    result = stats.ncx2.rvs(df=10, nc=[0,4], random_state=1)
++    expected = np.array([18.25726558,  8.24331569])
++    assert_allclose(result, expected, rtol=1e-3, atol=0)
++
++
+ def test_foldnorm_zero():
+     # Parameter value c=0 was not enabled, see gh-2399.
+     rv = stats.foldnorm(0, scale=1)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

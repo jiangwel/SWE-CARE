@@ -1,0 +1,250 @@
+  Task-ID: pyg-team__pytorch_geometric-4635@498dbbf
+  Please checkout to this commit first: 90fa81de6b6e63781ca305ebc35a18878179fc39
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `HeteroData.subgraph()`
+### 🚀 The feature, motivation and pitch
+
+Similar to `Data.subgraph()`, there should exist a `HeteroData.subgraph()` method to compute subgraphs in a heterogeneous graph setting, *e.g.*, for obtaining inductive node splits. Here, `mask`/`index` should be of type `dict`, holding masks/indices for each/a subset of node types:
+```python
+hetero_data.subgraph({'paper': mask})
+```
+
+### Alternatives
+
+_No response_
+
+### Additional context
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4ca2eda4295d..e8e63b4248ba 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,6 +5,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
+ 
+ ## [2.0.5] - 2022-MM-DD
+ ### Added
++- Added `HeteroData.subgraph()` support ([#4635](https://github.com/pyg-team/pytorch_geometric/pull/4635))
+ - Added support for returning embeddings in `MLP` models ([#4625](https://github.com/pyg-team/pytorch_geometric/pull/4625))
+ - Added faster initialization of `NeighborLoader` in case edge indices are already sorted (via `is_sorted=True`) ([#4620](https://github.com/pyg-team/pytorch_geometric/pull/4620))
+ - Added `AddPositionalEncoding` transform ([#4521](https://github.com/pyg-team/pytorch_geometric/pull/4521))
+diff --git a/test/data/test_hetero_data.py b/test/data/test_hetero_data.py
+index b8b5c5acdb7f..d7e5a72fcef5 100644
+--- a/test/data/test_hetero_data.py
++++ b/test/data/test_hetero_data.py
+@@ -6,15 +6,20 @@
+ 
+ x_paper = torch.randn(10, 16)
+ x_author = torch.randn(5, 32)
++x_conference = torch.randn(5, 8)
+ 
+ idx_paper = torch.randint(x_paper.size(0), (100, ), dtype=torch.long)
+ idx_author = torch.randint(x_author.size(0), (100, ), dtype=torch.long)
++idx_conference = torch.randint(x_conference.size(0), (100, ), dtype=torch.long)
+ 
+ edge_index_paper_paper = torch.stack([idx_paper[:50], idx_paper[:50]], dim=0)
+ edge_index_paper_author = torch.stack([idx_paper[:30], idx_author[:30]], dim=0)
+-edge_index_author_paper = torch.stack([idx_paper[:30], idx_author[:30]], dim=0)
++edge_index_author_paper = torch.stack([idx_author[:30], idx_paper[:30]], dim=0)
++edge_index_paper_conference = torch.stack(
++    [idx_paper[:25], idx_conference[:25]], dim=0)
+ 
+ edge_attr_paper_paper = torch.randn(edge_index_paper_paper.size(1), 8)
++edge_attr_author_paper = torch.randn(edge_index_author_paper.size(1), 8)
+ 
+ 
+ def get_edge_index(num_src_nodes, num_dst_nodes, num_edges):
+@@ -144,6 +149,62 @@ def test_hetero_data_rename():
+     assert edge_index.tolist() == edge_index_paper_paper.tolist()
+ 
+ 
++def test_hetero_data_subgraph():
++    data = HeteroData()
++    data.num_node_types = 3
++    data['paper'].x = x_paper
++    data['paper'].y = torch.randn(x_paper.size(0), 1)
++    data['paper'].train_idx = torch.tensor([0, 1, 5])
++    data['author'].x = x_author
++    data['conference'].x = x_conference
++    data['paper', 'cites', 'paper'].edge_index = edge_index_paper_paper
++    data['paper', 'cites', 'paper'].edge_attr = edge_attr_paper_paper
++    data['paper', 'cites', 'paper'].train_idx = [0, 10, 50]
++    data['author', 'paper'].edge_index = edge_index_author_paper
++    data['author', 'paper'].edge_attr = edge_attr_author_paper
++    data['paper', 'conference'].edge_index = edge_index_paper_conference
++
++    subset = {
++        'paper': torch.randperm(x_paper.size(0))[:4],
++        'author': torch.randperm(x_author.size(0))[:2]
++    }
++    edge_mask_paper_paper = (
++        torch.isin(data['paper', 'cites', 'paper'].edge_index[0, :],
++                   subset['paper'])
++        & torch.isin(data['paper', 'cites', 'paper'].edge_index[1, :],
++                     subset['paper']))
++    edge_mask_author_paper = (
++        torch.isin(data['author', 'paper'].edge_index[0, :], subset['author'])
++        & torch.isin(data['author', 'paper'].edge_index[1, :],
++                     subset['paper']))
++
++    data_subgraph = data.subgraph(subset)
++    assert data_subgraph.num_node_types == data.num_node_types
++    assert data_subgraph.node_types == ['paper', 'author']
++    assert torch.allclose(data_subgraph['paper'].x,
++                          data['paper'].x[subset['paper']])
++    assert torch.allclose(data_subgraph['paper'].y,
++                          data['paper'].y[subset['paper']])
++    assert torch.allclose(data_subgraph['paper'].train_idx,
++                          data['paper'].train_idx)
++    assert torch.allclose(data_subgraph['author'].x,
++                          data['author'].x[subset['author']])
++    assert data_subgraph.edge_types == [('paper', 'cites', 'paper'),
++                                        ('author', 'to', 'paper')]
++    assert torch.allclose(
++        data_subgraph['paper', 'cites', 'paper'].edge_attr,
++        data['paper', 'cites', 'paper'].edge_attr[edge_mask_paper_paper])
++    assert data_subgraph['paper', 'cites',
++                         'paper'].train_idx == data['paper', 'cites',
++                                                    'paper'].train_idx
++    assert torch.allclose(
++        data_subgraph['author', 'paper'].edge_attr,
++        data['author', 'paper'].edge_attr[edge_mask_author_paper])
++
++    del data.num_node_types
++    assert not hasattr(data.subgraph(subset), 'num_node_types')
++
++
+ def test_copy_hetero_data():
+     data = HeteroData()
+     data['paper'].x = x_paper
+diff --git a/torch_geometric/data/hetero_data.py b/torch_geometric/data/hetero_data.py
+index bf52ad2b2c1b..ebfb16c51fa3 100644
+--- a/torch_geometric/data/hetero_data.py
++++ b/torch_geometric/data/hetero_data.py
+@@ -12,7 +12,7 @@
+ from torch_geometric.data.data import BaseData, Data, size_repr
+ from torch_geometric.data.storage import BaseStorage, EdgeStorage, NodeStorage
+ from torch_geometric.typing import EdgeType, NodeType, QueryType
+-from torch_geometric.utils import is_undirected
++from torch_geometric.utils import bipartite_subgraph, is_undirected
+ 
+ NodeOrEdgeType = Union[NodeType, EdgeType]
+ NodeOrEdgeStorage = Union[NodeStorage, EdgeStorage]
+@@ -437,6 +437,79 @@ def rename(self, name: NodeType, new_name: NodeType) -> 'HeteroData':
+ 
+         return self
+ 
++    def subgraph(self, subset: Dict[NodeType, Tensor]) -> 'HeteroData':
++        r"""Returns the induced subgraph containing the node types and
++        corresponding nodes in :obj:`subset`.
++
++        .. code-block:: python
++
++            data = HeteroData()
++            data['paper'].x = (...)
++            data['author'].x = (...)
++            data['conference'].x = (...)
++            data['paper', 'cites', 'paper'].edge_index = (...)
++            data['author', 'paper'].edge_index = (...)
++            data['paper', 'conference'].edge_index = (...)
++            print(data)
++            >>> HeteroData(
++                paper={ x=[10, 16] },
++                author={ x=[5, 32] },
++                conference={ x=[5, 8] },
++                (paper, cites, paper)={ edge_index=[2, 50] },
++                (author, to, paper)={ edge_index=[2, 30] },
++                (paper, to, conference)={ edge_index=[2, 25] }
++                )
++
++            subset ={'paper': torch.tensor([3,4,5,6]),
++                     'author': torch.tensor([0,2])}
++
++            print(data.subgraph(subset))
++            >>> HeteroData(
++                paper={ x=[4, 16] },
++                author={ x=[2, 32] },
++                (paper, cites, paper)={ edge_index=[2, 24] },
++                (author, to, paper)={ edge_index=[2, 5] }
++                )
++
++        Args:
++            subset (Dict[str, Tensor or BoolTensor]): A dictonary holding the
++                nodes to keep for each node type.
++        """
++
++        data = HeteroData(self._global_store)
++
++        for node_type in self.node_types:
++            if node_type not in subset:
++                continue
++            cur_num_nodes = self[node_type].num_nodes
++            for key, value in self[node_type].items():
++                if isinstance(value,
++                              Tensor) and value.shape[0] == cur_num_nodes:
++                    data[node_type][key] = value[subset[node_type]]
++                else:
++                    data[node_type][key] = value
++
++        for edge_type in self.edge_types:
++            src_node_type, target_node_type = edge_type[0], edge_type[-1]
++            if src_node_type not in subset or target_node_type not in subset:
++                continue
++            cur_num_edges = self[edge_type].num_edges
++            edge_index, _, edge_mask = bipartite_subgraph(
++                (subset[src_node_type], subset[target_node_type]),
++                self[edge_type].edge_index, relabel_nodes=True,
++                size=(self[src_node_type].num_nodes,
++                      self[target_node_type].num_nodes), return_edge_mask=True)
++            for key, value in self[edge_type].items():
++                if key == 'edge_index':
++                    data[edge_type].edge_index = edge_index
++                elif isinstance(value,
++                                Tensor) and value.shape[0] == cur_num_edges:
++                    data[edge_type][key] = value[edge_mask]
++                else:
++                    data[edge_type][key] = value
++
++        return data
++
+     def to_homogeneous(self, node_attrs: Optional[List[str]] = None,
+                        edge_attrs: Optional[List[str]] = None,
+                        add_node_type: bool = True,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

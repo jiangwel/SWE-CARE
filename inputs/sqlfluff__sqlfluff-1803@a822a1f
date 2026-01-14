@@ -1,0 +1,182 @@
+  Task-ID: sqlfluff__sqlfluff-1803@a822a1f
+  Please checkout to this commit first: f3f808050fee5b43e0ee0c58cc7b3f540b227ae0
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  TSQL linting fix: L019+L034 breaks the code
+The following code breaks when fixed:
+
+```
+    SELECT
+      [ID]
+    , CASE
+        WHEN [ID] = 1 THEN NULL
+        ELSE 1
+        END AS [CaseOutput]
+    , [DataDate]
+    FROM #temp1
+```
+
+## Expected Behaviour
+
+Workable code.
+
+## Observed Behaviour
+
+```
+SELECT
+    [ID],
+    [DataDate]
+    CASE
+        WHEN [ID] = 1 THEN NULL
+        ELSE 1
+    END AS [CaseOutput],
+FROM #temp1
+```
+
+## Steps to Reproduce
+
+Run fix on the above
+
+## Dialect
+
+TSQL
+
+## Version
+Include the output of `sqlfluff --version` along with your Python version
+
+most recent main
+Python 3.9.7
+
+## Configuration
+```
+Include your SQLFluff configuration here
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/rules/L019.py b/src/sqlfluff/rules/L019.py
+index 7f439dc82dd..7580c4559ad 100644
+--- a/src/sqlfluff/rules/L019.py
++++ b/src/sqlfluff/rules/L019.py
+@@ -1,9 +1,8 @@
+ """Implementation of Rule L019."""
+ 
+-from typing import Dict, Any, Optional
+-
+-from sqlfluff.core.parser import WhitespaceSegment
++from typing import Any, Dict, Optional, Tuple
+ 
++from sqlfluff.core.parser import RawSegment, WhitespaceSegment
+ from sqlfluff.core.rules.base import BaseRule, LintFix, LintResult, RuleContext
+ from sqlfluff.core.rules.doc_decorators import (
+     document_fix_compatible,
+@@ -67,7 +66,7 @@ def _last_comment_seg(raw_stack):
+         return None
+ 
+     @staticmethod
+-    def _last_code_seg(raw_stack):
++    def _last_code_seg(raw_stack: Tuple[RawSegment, ...]) -> Optional[RawSegment]:
+         """Trace the raw stack back to the most recent code segment.
+ 
+         A return value of `None` indicates no code segments preceding the current position.
+@@ -77,6 +76,17 @@ def _last_code_seg(raw_stack):
+                 return segment
+         return None
+ 
++    @staticmethod
++    def _follows_seg(
++        raw_stack: Tuple[RawSegment, ...], segment: RawSegment
++    ) -> Optional[RawSegment]:
++        """Given a segment in raw_stack, return the segment following."""
++        idx = raw_stack.index(segment)
++        if idx < len(raw_stack):
++            return raw_stack[idx + 1]
++        else:
++            return None
++
+     def _eval(self, context: RuleContext) -> Optional[LintResult]:
+         """Enforce comma placement.
+ 
+@@ -176,11 +186,11 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                                 for d in memory["whitespace_deletions"]
+                             ],
+                             LintFix(
+-                                "edit",
+-                                last_code_seg,
+-                                # Reuse the previous leading comma violation to
+-                                # create a new trailing comma
+-                                [last_code_seg, last_leading_comma_seg],
++                                "create",
++                                anchor=self._follows_seg(
++                                    context.raw_stack, last_code_seg
++                                ),
++                                edit=last_leading_comma_seg,
+                             ),
+                         ],
+                     )
+diff --git a/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/after.sql b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/after.sql
+new file mode 100644
+index 00000000000..1b252c17ac3
+--- /dev/null
++++ b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/after.sql
+@@ -0,0 +1,5 @@
++SELECT
++  ID,
++DataDate,
++COALESCE(a, 1) AS CoalesceOutput
++FROM temp1
+diff --git a/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/before.sql b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/before.sql
+new file mode 100644
+index 00000000000..f36dd582050
+--- /dev/null
++++ b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/before.sql
+@@ -0,0 +1,5 @@
++SELECT
++  ID
++, COALESCE(a, 1) AS CoalesceOutput
++, DataDate
++FROM temp1
+diff --git a/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/test-config.yml b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/test-config.yml
+new file mode 100644
+index 00000000000..01ed778dc7e
+--- /dev/null
++++ b/test/fixtures/linter/autofix/ansi/022_l019_corrupts_parse_tree_and_causes_l034_to_corrupt_sql/test-config.yml
+@@ -0,0 +1,4 @@
++test-config:
++  rules:
++    - L019
++    - L034
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,606 @@
+  Task-ID: deepset-ai__haystack-5467@cc8b6d5
+  Please checkout to this commit first: 5f013918272402934a1d5ccd85c14370dc4f0f3d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `TextFileToDocument` (v2)
+Simple component that loads a text file into a document.
+
+Does not perform any pre-processing, chunking, cleaning: those tasks are delegated to the preprocessors components.
+
+However, let's make sure that metadata (any metadata the file carries, like its name, its mimetype, anything you could think of, plus any metadata provided by the user) is preserved in the resulting Documents
+
+Example API:
+
+```python
+@component
+class TextfileToDocument:
+
+    @component.input
+    def input(self):
+        class Input:
+            paths: List[Union[str, Path]]
+        return Input
+
+    @component.output
+    def output(self):
+        class Output:
+             documents: List[Document]
+        return Output
+
+    def __init__(self, encoding: str, ... params...):
+        ... 
+
+    def run(self, data):
+        documents = []
+        for path in data.paths:
+            with open(path) as textfile:
+                documents.append(Document(content=textfile.read()), metadata={'name': path})
+        return self.output(documents=documents)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/preview/components/__init__.py b/haystack/preview/components/__init__.py
+index 889df06ccf..c204f60171 100644
+--- a/haystack/preview/components/__init__.py
++++ b/haystack/preview/components/__init__.py
+@@ -1,2 +1,3 @@
+ from haystack.preview.components.audio.whisper_local import LocalWhisperTranscriber
+ from haystack.preview.components.audio.whisper_remote import RemoteWhisperTranscriber
++from haystack.preview.components.file_converters import TextfileToDocument
+diff --git a/haystack/preview/components/file_converters/__init__.py b/haystack/preview/components/file_converters/__init__.py
+new file mode 100644
+index 0000000000..03dc4782f0
+--- /dev/null
++++ b/haystack/preview/components/file_converters/__init__.py
+@@ -0,0 +1 @@
++from haystack.preview.components.file_converters.txt import TextfileToDocument
+diff --git a/haystack/preview/components/file_converters/txt.py b/haystack/preview/components/file_converters/txt.py
+new file mode 100644
+index 0000000000..238f394f35
+--- /dev/null
++++ b/haystack/preview/components/file_converters/txt.py
+@@ -0,0 +1,234 @@
++import logging
++from pathlib import Path
++from typing import Optional, List, Union, Dict
++
++from canals.errors import PipelineRuntimeError
++from tqdm import tqdm
++
++from haystack import Document
++from haystack.lazy_imports import LazyImport
++from haystack.preview import component
++
++with LazyImport("Run 'pip install farm-haystack[preprocessing]'") as langdetect_import:
++    import langdetect
++
++
++logger = logging.getLogger(__name__)
++
++
++@component
++class TextfileToDocument:
++    """
++    A component for converting a text file to a Document.
++    """
++
++    @component.input
++    def input(self):
++        class Input:
++            """
++            Input data for the TextfileToDocument component.
++
++            :param paths: A list of paths to text files.
++            :param meta: Optional metadata to attach to the Documents. If a list is provided, the length of the list
++                         must match the number of paths.
++                         Default: `None`
++            :param encoding: The encoding of the text files. Default: `"utf-8"`
++            :param remove_numeric_tables: This option uses heuristics to remove numeric rows from the tables.
++                                          The tabular structures in documents might be noise for reader models if they
++                                          don't have table parsing capability for finding answers. However, tables
++                                          may also have long strings that could be possible candidates for answers.
++                                          The rows containing strings are thus retained in this option.
++                                          Default: `False`
++            :param valid_languages: Validate languages from a list of languages specified in the [ISO 639-1 format]((https://en.wikipedia.org/wiki/ISO_639-1)).
++                                    This option can be used to add a test for encoding errors. If the extracted text is
++                                    not one of the valid languages, then there might be an encoding error resulting
++                                    in garbled text.
++                                    Default: `None`
++            :param id_hash_keys: Generate the Document ID from a custom list of strings that refer to the Document's
++                                 attributes. If you want to ensure you don't have duplicate Documents in your
++                                 DocumentStore but texts are not unique, you can modify the metadata and pass e.g.
++                                 `"meta"` to this field (for example `["content", "meta"]`).
++                                 In this case the ID will be generated by using the content and the defined metadata.
++                                 Default: `None`
++            :param progress_bar: Whether to show a progress bar for the conversion process.
++                                 Default: `True`
++            """
++
++            paths: List[Union[str, Path]]
++            meta: Optional[Union[Dict, List[Dict]]]
++            encoding: Optional[str]
++            remove_numeric_tables: Optional[bool]
++            valid_languages: Optional[List[str]]
++            id_hash_keys: Optional[List[str]]
++            progress_bar: Optional[bool]
++
++        return Input
++
++    @component.output
++    def output(self):
++        class Output:
++            """
++            Output data from the TextfileToDocument component.
++
++            :param documents: The converted documents.
++            """
++
++            documents: List[Document]
++
++        return Output
++
++    def __init__(
++        self,
++        encoding: str = "utf-8",
++        remove_numeric_tables: bool = False,
++        valid_languages: Optional[List[str]] = None,
++        id_hash_keys: Optional[List[str]] = None,
++        progress_bar: bool = True,
++    ):
++        """
++        Create a TextfileToDocument component.
++
++        :param encoding: The encoding of the text files. Default: `"utf-8"`
++        :param remove_numeric_tables: This option uses heuristics to remove numeric rows from the tables.
++                                      The tabular structures in documents might be noise for reader models if they
++                                      don't have table parsing capability for finding answers. However, tables
++                                      may also have long strings that could be possible candidates for answers.
++                                      The rows containing strings are thus retained in this option.
++                                      Default: `False`
++        :param valid_languages: Validate languages from a list of languages specified in the [ISO 639-1 format]((https://en.wikipedia.org/wiki/ISO_639-1)).
++                                This option can be used to add a test for encoding errors. If the extracted text is
++                                not one of the valid languages, then there might be an encoding error resulting
++                                in garbled text.
++                                Default: `None`
++        :param id_hash_keys: Generate the Document ID from a custom list of strings that refer to the Document's
++                             attributes. If you want to ensure you don't have duplicate Documents in your DocumentStore
++                             but texts are not unique, you can modify the metadata and pass e.g. `"meta"` to this field
++                             (for example `["content", "meta"]`). In this case the ID will be generated by using the
++                             content and the defined metadata. Default: `None`
++        :param progress_bar: Whether to show a progress bar for the conversion process.
++                             Default: `True`
++        """
++        langdetect_import.check()
++
++        self.defaults = {
++            "encoding": encoding,
++            "remove_numeric_tables": remove_numeric_tables,
++            "valid_languages": valid_languages,
++            "id_hash_keys": id_hash_keys,
++            "progress_bar": progress_bar,
++        }
++
++    def run(self, data):
++        """
++        Convert text files to Documents.
++
++        :param data: Input data for the TextfileToDocument component.
++        """
++        file_paths = data.paths
++        metas = TextfileToDocument._prepare_metadata(data.meta, file_paths)
++
++        documents = []
++        for path, meta in tqdm(
++            zip(file_paths, metas), total=len(file_paths), desc="Converting text files", disable=not data.progress_bar
++        ):
++            text = TextfileToDocument._read_and_clean_file(
++                path=path, encoding=data.encoding, remove_numeric_tables=data.remove_numeric_tables
++            )
++
++            if data.valid_languages is not None:
++                if not TextfileToDocument._validate_language(text, data.valid_languages):
++                    logger.warning(
++                        "Text from file %s is not in one of the valid languages: %s. "
++                        "The file may have been decoded incorrectly.",
++                        path,
++                        data.valid_languages,
++                    )
++
++            document = Document(content=text, meta=meta, id_hash_keys=data.id_hash_keys)
++            documents.append(document)
++
++        return self.output(documents=documents)
++
++    @staticmethod
++    def _prepare_metadata(meta: Optional[Union[Dict, List[Dict]]], file_paths: List[Union[str, Path]]) -> List[Dict]:
++        """
++        Prepare the metadata for the Documents.
++
++        :param meta: The metadata for the Documents.
++        :param file_paths: The paths to the text files.
++        """
++        if meta is None:
++            return [{"file_path": str(path)} for path in file_paths]
++
++        if isinstance(meta, dict):
++            meta = [meta] * len(file_paths)
++
++        if len(meta) != len(file_paths):
++            raise PipelineRuntimeError(
++                f"The number of meta entries must match the number of paths if meta is a list. "
++                f"Number of paths: {len(file_paths)}, number of meta entries: {len(meta)}"
++            )
++
++        return [{**m, "file_path": m.get("file_path", str(path))} for m, path in zip(meta, file_paths)]
++
++    @staticmethod
++    def _read_and_clean_file(path: Union[str, Path], encoding: str, remove_numeric_tables: bool) -> str:
++        """
++        Read and clean the text file.
++
++        :param path: The path to the text file.
++        :param encoding: The encoding of the text file.
++        :param remove_numeric_tables: Whether to remove numeric tables.
++        """
++        if not Path(path).exists():
++            raise PipelineRuntimeError(f"File at path {path} does not exist.")
++
++        with open(path, encoding=encoding) as file:
++            text = file.read()
++            pages = text.split("\f")
++            cleaned_pages = [TextfileToDocument._clean_page(page, remove_numeric_tables) for page in pages]
++            return "\f".join(cleaned_pages)
++
++    @staticmethod
++    def _clean_page(page: str, remove_numeric_tables: bool) -> str:
++        """
++        Clean a page of text from numeric tables if `remove_numeric_tables` is `True`.
++
++        :param page: The page of text.
++        :param remove_numeric_tables: Whether to remove numeric tables.
++        """
++        cleaned_lines = page.splitlines()
++        if remove_numeric_tables:
++            cleaned_lines = [line for line in cleaned_lines if not TextfileToDocument._is_numeric_row(line)]
++
++        return "\n".join(cleaned_lines)
++
++    @staticmethod
++    def _is_numeric_row(line: str) -> bool:
++        """
++        Check if a line is a numeric row. A line is considered a numeric row if it contains more than 40% digits and
++        does not end with a period.
++
++        :param line: The line to check.
++        """
++        words = line.split()
++        digits = [word for word in words if any(char.isdigit() for char in word)]
++        return len(digits) / len(words) > 0.4 and not line.strip().endswith(".")
++
++    @staticmethod
++    def _validate_language(text: str, valid_languages: List[str]) -> bool:
++        """
++        Validate if the detected language of the text is one of the valid languages.
++
++        :param text: The text to validate.
++        :param valid_languages: A list of valid languages.
++        """
++        if not valid_languages:
++            return True
++
++        try:
++            lang = langdetect.detect(text)
++        except langdetect.lang_detect_exception.LangDetectException:
++            lang = None
++
++        return lang in valid_languages
+diff --git a/releasenotes/notes/textfile-to-document-v2-341987623765ec95.yaml b/releasenotes/notes/textfile-to-document-v2-341987623765ec95.yaml
+new file mode 100644
+index 0000000000..783f486604
+--- /dev/null
++++ b/releasenotes/notes/textfile-to-document-v2-341987623765ec95.yaml
+@@ -0,0 +1,4 @@
++---
++features:
++  - |
++    Add new TextfileToDocument component to Haystack v2 preview so that text files can be converted to Haystack Documents.
+diff --git a/test/preview/components/file_converters/__init__.py b/test/preview/components/file_converters/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/preview/components/file_converters/test_textfile_to_document.py b/test/preview/components/file_converters/test_textfile_to_document.py
+new file mode 100644
+index 0000000000..958c79a93e
+--- /dev/null
++++ b/test/preview/components/file_converters/test_textfile_to_document.py
+@@ -0,0 +1,239 @@
++import logging
++from unittest.mock import patch
++
++import pytest
++from pathlib import Path
++
++from canals.errors import PipelineRuntimeError
++from langdetect import LangDetectException
++
++from haystack.preview.components.file_converters.txt import TextfileToDocument
++from test.preview.components.base import BaseTestComponent
++from test.conftest import preview_samples_path
++
++
++class TestTextfileToDocument(BaseTestComponent):
++    @pytest.mark.unit
++    def test_run(self, preview_samples_path):
++        """
++        Test if the component runs correctly.
++        """
++        file_paths = [preview_samples_path / "txt" / "doc_1.txt", preview_samples_path / "txt" / "doc_2.txt"]
++        converter = TextfileToDocument()
++        output = converter.run(data=converter.input(paths=file_paths))
++        docs = output.documents
++        assert len(docs) == 2
++        assert docs[0].content == "Some text for testing.\nTwo lines in here."
++        assert docs[1].content == "This is a test line.\n123 456 789\n987 654 321."
++        assert docs[0].meta["file_path"] == str(file_paths[0])
++        assert docs[1].meta["file_path"] == str(file_paths[1])
++
++    @pytest.mark.unit
++    def test_run_warning_for_unvalid_language(self, caplog, preview_samples_path):
++        file_path = preview_samples_path / "txt" / "doc_1.txt"
++        converter = TextfileToDocument()
++        with patch("haystack.preview.components.file_converters.txt.langdetect.detect", return_value="en"):
++            with caplog.at_level(logging.WARNING):
++                output = converter.run(data=converter.input(paths=[file_path], valid_languages=["de"]))
++                assert (
++                    f"Text from file {file_path} is not in one of the valid languages: ['de']. "
++                    f"The file may have been decoded incorrectly." in caplog.text
++                )
++
++        docs = output.documents
++        assert len(docs) == 1
++        assert docs[0].content == "Some text for testing.\nTwo lines in here."
++
++    @pytest.mark.unit
++    def test_prepare_metadata_no_metadata(self):
++        """
++        Test if the metadata is correctly prepared when no custom metadata is provided.
++        """
++        converter = TextfileToDocument()
++        meta = converter._prepare_metadata(
++            meta=None, file_paths=["data/sample_path_1.txt", Path("data/sample_path_2.txt")]
++        )
++        assert len(meta) == 2
++        assert meta[0]["file_path"] == "data/sample_path_1.txt"
++        assert meta[1]["file_path"] == str(Path("data/sample_path_2.txt"))
++
++    @pytest.mark.unit
++    def test_prepare_metadata_single_dict(self):
++        """
++        Test if the metadata is correctly prepared when a single dict is provided.
++        """
++        converter = TextfileToDocument()
++        meta = converter._prepare_metadata(
++            meta={"name": "test"}, file_paths=["data/sample_path_1.txt", Path("data/sample_path_2.txt")]
++        )
++        assert len(meta) == 2
++        assert meta[0]["file_path"] == "data/sample_path_1.txt"
++        assert meta[1]["file_path"] == str(Path("data/sample_path_2.txt"))
++        assert meta[0]["name"] == "test"
++        assert meta[1]["name"] == "test"
++
++    @pytest.mark.unit
++    def test_prepare_metadata_list_of_dicts(self):
++        """
++        Test if the metadata is correctly prepared when a list of dicts is provided.
++        """
++        converter = TextfileToDocument()
++        meta = converter._prepare_metadata(
++            meta=[{"name": "test1"}, {"name": "test2"}],
++            file_paths=["data/sample_path_1.txt", Path("data/sample_path_2.txt")],
++        )
++        assert len(meta) == 2
++        assert meta[0]["file_path"] == "data/sample_path_1.txt"
++        assert meta[1]["file_path"] == str(Path("data/sample_path_2.txt"))
++        assert meta[0]["name"] == "test1"
++        assert meta[1]["name"] == "test2"
++
++    @pytest.mark.unit
++    def test_prepare_metadata_unmatching_list_len(self):
++        """
++        Test if an error is raised when the number of metadata dicts is not equal to the number of
++        file paths.
++        """
++        converter = TextfileToDocument()
++        with pytest.raises(
++            PipelineRuntimeError, match="The number of meta entries must match the number of paths if meta is a list."
++        ):
++            converter._prepare_metadata(
++                meta=[{"name": "test1"}, {"name": "test2"}],
++                file_paths=["data/sample_path_1.txt", Path("data/sample_path_2.txt"), "data/sample_path_3.txt"],
++            )
++
++    @pytest.mark.unit
++    def test_read_and_clean_file(self, preview_samples_path):
++        """
++        Test if the file is correctly read.
++        """
++        file_path = preview_samples_path / "txt" / "doc_1.txt"
++        converter = TextfileToDocument()
++        text = converter._read_and_clean_file(path=file_path, encoding="utf-8", remove_numeric_tables=False)
++        assert text == "Some text for testing.\nTwo lines in here."
++
++    @pytest.mark.unit
++    def test_read_and_clean_file_non_existing_file(self):
++        """
++        Test if an error is raised when the file does not exist.
++        """
++        converter = TextfileToDocument()
++        file_path = "non_existing_file.txt"
++        with pytest.raises(PipelineRuntimeError, match=f"File at path {file_path} does not exist."):
++            converter._read_and_clean_file(path=file_path, encoding="utf-8", remove_numeric_tables=False)
++
++    @pytest.mark.unit
++    def test_read_and_clean_file_remove_numeric_tables(self, preview_samples_path):
++        """
++        Test if the file is correctly read and numeric tables are removed.
++        """
++        file_path = preview_samples_path / "txt" / "doc_2.txt"
++        converter = TextfileToDocument()
++        text = converter._read_and_clean_file(path=file_path, encoding="utf-8", remove_numeric_tables=True)
++        assert text == "This is a test line.\n987 654 321."
++
++    @pytest.mark.unit
++    def test_clean_page_without_remove_numeric_tables(self):
++        """
++        Test if the page is not changed when remove_numeric_tables is False.
++        """
++        converter = TextfileToDocument()
++        page = "This is a test line.\n123 456 789"
++        cleaned_page = converter._clean_page(page=page, remove_numeric_tables=False)
++        assert cleaned_page == page
++
++    @pytest.mark.unit
++    def test_clean_page_with_remove_numeric_tables(self):
++        """
++        Test if the page is correctly cleaned when remove_numeric_tables is True.
++        """
++        converter = TextfileToDocument()
++        page = "This is a test line.\n123 456 789"
++        cleaned_page = converter._clean_page(page=page, remove_numeric_tables=True)
++        assert cleaned_page == "This is a test line."
++
++    @pytest.mark.unit
++    def test_is_numeric_row_only_numbers(self):
++        """
++        Test if the line is correctly identified as a numeric row when it only contains numbers.
++        """
++        converter = TextfileToDocument()
++        line = "123 456 789"
++        assert converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_is_numeric_row_only_text(self):
++        """
++        Test if the line is correctly identified as a non-numeric row when it only contains text.
++        """
++        converter = TextfileToDocument()
++        line = "This is a test line."
++        assert not converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_is_numeric_row_only_numbers_with_period(self):
++        """
++        Test if the line is correctly identified as a non-numeric row when it only contains numbers and a period at
++        the end.
++        """
++        converter = TextfileToDocument()
++        line = "123 456 789."
++        assert not converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_is_numeric_row_more_numbers_than_text(self):
++        """
++        Test if the line is correctly identified as a numeric row when it consists of more than 40% of numbers than.
++        """
++        converter = TextfileToDocument()
++        line = "123 456 789 This is a test"
++        assert converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_is_numeric_row_less_numbers_than_text(self):
++        """
++        Test if the line is correctly identified as a non-numeric row when it consists of less than 40% of numbers than.
++        """
++        converter = TextfileToDocument()
++        line = "123 456 789 This is a test line"
++        assert not converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_is_numeric_row_words_consist_of_numbers_and_text(self):
++        """
++        Test if the line is correctly identified as a numeric row when the words consist of numbers and text.
++        """
++        converter = TextfileToDocument()
++        line = "123eur 456usd"
++        assert converter._is_numeric_row(line=line)
++
++    @pytest.mark.unit
++    def test_validate_language(self):
++        """
++        Test if the language is correctly validated.
++        """
++        converter = TextfileToDocument()
++        with patch("haystack.preview.components.file_converters.txt.langdetect.detect", return_value="en"):
++            assert converter._validate_language(text="This is an english text.", valid_languages=["en"])
++            assert not converter._validate_language(text="This is an english text.", valid_languages=["de"])
++
++    @pytest.mark.unit
++    def test_validate_language_no_languages_specified(self):
++        """
++        Test if _validate_languages returns True when no languages are specified.
++        """
++        converter = TextfileToDocument()
++        assert converter._validate_language(text="This is an english test.", valid_languages=[])
++
++    @pytest.mark.unit
++    def test_validate_language_lang_detect_exception(self):
++        """
++        Test if _validate_languages returns False when langdetect throws an exception.
++        """
++        converter = TextfileToDocument()
++        with patch(
++            "haystack.preview.components.file_converters.txt.langdetect.detect",
++            side_effect=LangDetectException(code=0, message="Test"),
++        ):
++            assert not converter._validate_language(text="This is an english text.", valid_languages=["en"])
+diff --git a/test/preview/test_files/txt/doc_1.txt b/test/preview/test_files/txt/doc_1.txt
+new file mode 100644
+index 0000000000..4121890801
+--- /dev/null
++++ b/test/preview/test_files/txt/doc_1.txt
+@@ -0,0 +1,2 @@
++Some text for testing.
++Two lines in here.
+diff --git a/test/preview/test_files/txt/doc_2.txt b/test/preview/test_files/txt/doc_2.txt
+new file mode 100644
+index 0000000000..6f950eedcf
+--- /dev/null
++++ b/test/preview/test_files/txt/doc_2.txt
+@@ -0,0 +1,3 @@
++This is a test line.
++123 456 789
++987 654 321.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

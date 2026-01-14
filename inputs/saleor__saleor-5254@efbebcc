@@ -1,0 +1,210 @@
+  Task-ID: saleor__saleor-5254@efbebcc
+  Please checkout to this commit first: 73f40eb405709b2748bbe7714a5b173226d70533
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  OpenTracing segments are orphans instead of children of the root span
+Saleor is using `start_span` instead of `start_active_span` which is resulting to having a trace for each span instead of a segment, making the tracing close to useless.
+
+On top, we should add a test(s) using MockTracer to ensure it does not break in the future.
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3c96b423944..33c0af0efbe 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -64,7 +64,8 @@ All notable, unreleased changes to this project will be documented in this file.
+ - Add slug to Warehouse, Product, ProductType and update slug in models which already using it - #5196 by @IKarbowiak
+ - Add mutation for assigning, unassigning shipping zones to warehouse - #5217 by @kswiatek92
+ - Fix passing addresses to `PaymentData` objects - #5223 by @maarcingebala
+-- Return `null` when querying `me` as an anonymous user - #5231 as @maarcingebala
++- Return `null` when querying `me` as an anonymous user - #5231 by @maarcingebala
++- Added `PLAYGROUND_ENABLED` environment variable/setting to allow to enable the GraphQL playground when `DEBUG` is disabled - #5254 by @NyanKiyoshi
+ 
+ ## 2.9.0
+ 
+diff --git a/saleor/graphql/middleware.py b/saleor/graphql/middleware.py
+index 67fcd277994..30cfd77eebb 100644
+--- a/saleor/graphql/middleware.py
++++ b/saleor/graphql/middleware.py
+@@ -1,6 +1,7 @@
+ from typing import Optional
+ 
+-import opentracing
++import opentracing as ot
++import opentracing.tags
+ from django.conf import settings
+ from django.contrib.auth.models import AnonymousUser
+ from django.utils.functional import SimpleLazyObject
+@@ -46,10 +47,11 @@ def should_trace(info):
+ class OpentracingGrapheneMiddleware:
+     @staticmethod
+     def resolve(next, root, info, **kwargs):
+-        with opentracing.global_tracer().start_span(
++        with ot.global_tracer().start_active_span(
+             operation_name=info.operation.operation
+-        ) as span:
+-            span.set_tag("component", "graphql")
++        ) as scope:
++            span = scope.span
++            span.set_tag(ot.tags.COMPONENT, "graphql")
+             span.set_tag("graphql.parent_type", info.parent_type.name)
+             span.set_tag("graphql.field_name", info.field_name)
+             return next(root, info, **kwargs)
+diff --git a/saleor/graphql/views.py b/saleor/graphql/views.py
+index 503e446916b..788c781c03b 100644
+--- a/saleor/graphql/views.py
++++ b/saleor/graphql/views.py
+@@ -3,7 +3,9 @@
+ import traceback
+ from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+-import opentracing
++import opentracing as ot
++import opentracing.logs
++import opentracing.tags
+ from django.conf import settings
+ from django.db import connection
+ from django.http import HttpRequest, HttpResponseNotAllowed, JsonResponse
+@@ -29,18 +31,11 @@
+ 
+ 
+ def tracing_wrapper(execute, sql, params, many, context):
+-    with opentracing.global_tracer().start_span(operation_name="query") as span:
+-        span.set_tag("component", "db")
+-        span.set_tag("db.statement", sql)
+-        try:
+-            result = execute(sql, params, many, context)
+-        except Exception as e:
+-            span.set_tag("error", True)
+-            span.set_tag("error.object", e)
+-            raise
+-        else:
+-            span.set_tag("error", False)
+-            return result
++    with ot.global_tracer().start_active_span(operation_name="query") as scope:
++        span = scope.span
++        span.set_tag(ot.tags.COMPONENT, "db")
++        span.set_tag(ot.tags.DATABASE_STATEMENT, sql)
++        return execute(sql, params, many, context)
+ 
+ 
+ class GraphQLView(View):
+@@ -80,7 +75,7 @@ def __init__(
+     def dispatch(self, request, *args, **kwargs):
+         # Handle options method the GraphQlView restricts it.
+         if request.method == "GET":
+-            if settings.DEBUG:
++            if settings.PLAYGROUND_ENABLED:
+                 return render_to_response("graphql/playground.html")
+             return HttpResponseNotAllowed(["OPTIONS", "POST"])
+ 
+@@ -120,10 +115,12 @@ def handle_query(self, request: HttpRequest):
+     def get_response(
+         self, request: HttpRequest, data: dict
+     ) -> Tuple[Optional[Dict[str, List[Any]]], int]:
+-        with opentracing.global_tracer().start_span(operation_name="request") as span:
+-            span.set_tag("component", "http")
+-            span.set_tag("http.method", request.method)
+-            span.set_tag("http.path", request.path)
++        with ot.global_tracer().start_active_span(operation_name="request") as scope:
++            span = scope.span
++            span.set_tag(ot.tags.COMPONENT, "http")
++            span.set_tag(ot.tags.HTTP_METHOD, request.method)
++            span.set_tag(ot.tags.HTTP_URL, request.get_full_path())
++
+             execution_result = self.execute_graphql_request(request, data)
+             status_code = 200
+             if execution_result:
+@@ -139,7 +136,8 @@ def get_response(
+                 result: Optional[Dict[str, List[Any]]] = response
+             else:
+                 result = None
+-            span.set_tag("http.status_code", status_code)
++
++            span.set_tag(ot.tags.HTTP_STATUS_CODE, status_code)
+             return result, status_code
+ 
+     def get_root_value(self):
+diff --git a/saleor/settings.py b/saleor/settings.py
+index 86bdfaf3a07..3f7e4ba7213 100644
+--- a/saleor/settings.py
++++ b/saleor/settings.py
+@@ -346,9 +346,7 @@ def get_bool_from_env(name, default_value):
+ # note: having multiple currencies is not supported yet
+ AVAILABLE_CURRENCIES = [DEFAULT_CURRENCY]
+ 
+-COUNTRIES_OVERRIDE = {
+-    "EU": "European Union",
+-}
++COUNTRIES_OVERRIDE = {"EU": "European Union"}
+ 
+ OPENEXCHANGERATES_API_KEY = os.environ.get("OPENEXCHANGERATES_API_KEY")
+ 
+@@ -391,6 +389,8 @@ def get_host():
+ 
+ TEST_RUNNER = "tests.runner.PytestTestRunner"
+ 
++PLAYGROUND_ENABLED = get_bool_from_env("PLAYGROUND_ENABLED", DEBUG)
++
+ ALLOWED_HOSTS = get_list(os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1"))
+ ALLOWED_GRAPHQL_ORIGINS = os.environ.get("ALLOWED_GRAPHQL_ORIGINS", "*")
+ 
+diff --git a/tests/api/test_view.py b/tests/api/test_view.py
+index ae7f0706539..7d80c329da5 100644
+--- a/tests/api/test_view.py
++++ b/tests/api/test_view.py
+@@ -52,16 +52,14 @@ def test_batch_queries(category, product, api_client):
+     assert data["category"]["name"] == category.name
+ 
+ 
+-def test_graphql_view_get_in_non_debug_mode(client):
++def test_graphql_view_get_enabled_or_disabled(client, settings):
++    settings.PLAYGROUND_ENABLED = False
+     response = client.get(API_PATH)
+     assert response.status_code == 405
+ 
+-
+-@override_settings(DEBUG=True)
+-def test_graphql_view_get_in_debug_mode(client):
++    settings.PLAYGROUND_ENABLED = True
+     response = client.get(API_PATH)
+     assert response.status_code == 200
+-    assert response.templates[0].name == "graphql/playground.html"
+ 
+ 
+ def test_graphql_view_options(client):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

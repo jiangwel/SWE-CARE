@@ -1,0 +1,251 @@
+  Task-ID: pandas-dev__pandas-35231@2f4902c
+  Please checkout to this commit first: 653f091f859c76948758b291d3546802dcb8cb96
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: Inconsistent behavior in Index.difference
+- [x] I have checked that this issue has not already been reported.
+
+- [x] I have confirmed this bug exists on the latest version of pandas.
+
+- [ ] (optional) I have confirmed this bug exists on the master branch of pandas.
+
+---
+
+`Index.difference` seems to be treating float vs object / int vs object differently.
+
+#### Code Sample, a copy-pastable example
+
+```python
+import pandas as pd
+float_index = pd.Index([1.0, 2, 3])
+string_index = pd.Index(['1','2','3'])
+integer_index = pd.Index([1, 2, 3])
+print(float_index.difference(string_index))
+print(string_index.difference(float_index))
+
+print(integer_index.difference(string_index))
+print(string_index.difference(integer_index))
+
+
+Float64Index([], dtype='float64')
+Index([], dtype='object')
+Int64Index([1, 2, 3], dtype='int64')
+Index(['1', '2', '3'], dtype='object')
+```
+
+#### Problem description
+Index.difference should probably not type-cast and compare the elements to honor consistent behavior with other types where they are not being type-casted.
+
+#### Expected Output
+
+```python
+Float64Index([1.0, 2.0, 3.0], dtype='float64')
+Index(['1', '2', '3'], dtype='object')
+Int64Index([1, 2, 3], dtype='int64')
+Index(['1', '2', '3'], dtype='object')
+```
+
+or 
+
+All empty Index objects like in case of int vs object.
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+INSTALLED VERSIONS
+------------------
+commit           : None
+
+pandas           : 1.0.5
+numpy            : 1.19.0
+pytz             : 2020.1
+dateutil         : 2.8.1
+pip              : 20.1.1
+setuptools       : 49.1.0
+Cython           : None
+pytest           : None
+hypothesis       : None
+sphinx           : None
+blosc            : None
+feather          : None
+xlsxwriter       : None
+lxml.etree       : None
+html5lib         : None
+pymysql          : None
+psycopg2         : None
+jinja2           : None
+IPython          : None
+pandas_datareader: None
+bs4              : None
+bottleneck       : None
+fastparquet      : None
+gcsfs            : None
+lxml.etree       : None
+matplotlib       : None
+numexpr          : None
+odfpy            : None
+openpyxl         : None
+pandas_gbq       : None
+pyarrow          : None
+pytables         : None
+pytest           : None
+pyxlsb           : None
+s3fs             : None
+scipy            : None
+sqlalchemy       : None
+tables           : None
+tabulate         : None
+xarray           : None
+xlrd             : None
+xlwt             : None
+xlsxwriter       : None
+numba            : None
+None
+
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v1.1.0.rst b/doc/source/whatsnew/v1.1.0.rst
+index 5f93e08d51baa..91fca53d9abeb 100644
+--- a/doc/source/whatsnew/v1.1.0.rst
++++ b/doc/source/whatsnew/v1.1.0.rst
+@@ -931,6 +931,7 @@ Numeric
+ - Bug in :meth:`DataFrame.diff` with ``axis=1`` returning incorrect results with mixed dtypes (:issue:`32995`)
+ - Bug in :meth:`DataFrame.corr` and :meth:`DataFrame.cov` raising when handling nullable integer columns with ``pandas.NA`` (:issue:`33803`)
+ - Bug in :class:`DataFrame` and :class:`Series` addition and subtraction between object-dtype objects and ``datetime64`` dtype objects (:issue:`33824`)
++- Bug in :meth:`Index.difference` incorrect results when comparing a :class:`Float64Index` and object :class:`Index` (:issue:`35217`)
+ 
+ Conversion
+ ^^^^^^^^^^
+diff --git a/pandas/core/indexes/numeric.py b/pandas/core/indexes/numeric.py
+index 5020a25c88ff4..731907993d08f 100644
+--- a/pandas/core/indexes/numeric.py
++++ b/pandas/core/indexes/numeric.py
+@@ -400,28 +400,6 @@ def _format_native_types(
+         )
+         return formatter.get_result_as_array()
+ 
+-    def equals(self, other) -> bool:
+-        """
+-        Determines if two Index objects contain the same elements.
+-        """
+-        if self is other:
+-            return True
+-
+-        if not isinstance(other, Index):
+-            return False
+-
+-        # need to compare nans locations and make sure that they are the same
+-        # since nans don't compare equal this is a bit tricky
+-        try:
+-            if not isinstance(other, Float64Index):
+-                other = self._constructor(other)
+-            if not is_dtype_equal(self.dtype, other.dtype) or self.shape != other.shape:
+-                return False
+-            left, right = self._values, other._values
+-            return ((left == right) | (self._isnan & other._isnan)).all()
+-        except (TypeError, ValueError):
+-            return False
+-
+     def __contains__(self, other: Any) -> bool:
+         hash(other)
+         if super().__contains__(other):
+diff --git a/pandas/tests/indexes/test_numeric.py b/pandas/tests/indexes/test_numeric.py
+index 33de0800658f2..83887ddbdb7ce 100644
+--- a/pandas/tests/indexes/test_numeric.py
++++ b/pandas/tests/indexes/test_numeric.py
+@@ -232,12 +232,24 @@ def test_equals_numeric(self):
+         i2 = Float64Index([1.0, 2.0])
+         assert i.equals(i2)
+ 
+-        i = Float64Index([1.0, np.nan])
+-        assert i.equals(i)
+-        assert i.identical(i)
++        i3 = Float64Index([1.0, np.nan])
++        assert i3.equals(i3)
++        assert i3.identical(i3)
+ 
+-        i2 = Float64Index([1.0, np.nan])
+-        assert i.equals(i2)
++        i4 = Float64Index([1.0, np.nan])
++        assert i3.equals(i4)
++
++        i5 = Int64Index([1, 2])
++        assert i.equals(i5)
++        assert i5.equals(i)
++
++        i6 = Index([1.0, 2.0], dtype=object)
++        assert i.equals(i6)
++        assert i6.equals(i)
++
++        i7 = Index([1, 2], dtype=object)
++        assert i.equals(i7)
++        assert i7.equals(i)
+ 
+     @pytest.mark.parametrize(
+         "vals",
+@@ -635,3 +647,27 @@ def test_uint_index_does_not_convert_to_float64():
+     tm.assert_index_equal(result.index, expected)
+ 
+     tm.assert_equal(result, series[:3])
++
++
++def test_float64_index_equals():
++    # https://github.com/pandas-dev/pandas/issues/35217
++    float_index = pd.Index([1.0, 2, 3])
++    string_index = pd.Index(["1", "2", "3"])
++
++    result = float_index.equals(string_index)
++    assert result is False
++
++    result = string_index.equals(float_index)
++    assert result is False
++
++
++def test_float64_index_difference():
++    # https://github.com/pandas-dev/pandas/issues/35217
++    float_index = pd.Index([1.0, 2, 3])
++    string_index = pd.Index(["1", "2", "3"])
++
++    result = float_index.difference(string_index)
++    tm.assert_index_equal(result, float_index)
++
++    result = string_index.difference(float_index)
++    tm.assert_index_equal(result, string_index)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

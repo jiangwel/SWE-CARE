@@ -1,0 +1,385 @@
+  Task-ID: tobymao__sqlglot-1123@23610af
+  Please checkout to this commit first: 295428f8133655505d8b463a1c8d8865fd22bcc7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: Escaped quotes at the beginning and end of quoted snowflake identifier cause ParseError
+This query works in snowflake:
+
+```sql
+SELECT """C Market # Segment""" FROM "Funky Customer With Nulls"
+```
+
+where the column name is `"C Market # Segment"` with quotes included. You escape quotes inside snowflake SQL identifiers by using two quotes.
+
+Transpiling the above statement in sqlglot gives `ParserError`:
+
+```python
+import sqlglot
+
+# works in snowflake, but raises KeyError
+print(sqlglot.transpile('SELECT """C Market # Segment""" FROM "Funky Customer With Nulls"', read='snowflake'))
+```
+
+<details>
+<summary>Stack trace</summary>
+
+```python-backtrace
+---------------------------------------------------------------------------
+ParseError                                Traceback (most recent call last)
+Cell In[14], line 4
+      1 import sqlglot
+      3 # works in snowflake, but raises KeyError
+----> 4 print(sqlglot.transpile('SELECT """C Market # Segment""" FROM "Funky Customer With Nulls"', read='snowflake'))
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/__init__.py:176, in transpile(sql, read, write, identity, error_level, **opts)
+    157 """
+    158 Parses the given SQL string in accordance with the source dialect and returns a list of SQL strings transformed
+    159 to conform to the target dialect. Each string in the returned list represents a single transformed SQL statement.
+   (...)
+    171     The list of transpiled SQL statements.
+    172 """
+    173 write = write or read if identity else write
+    174 return [
+    175     Dialect.get_or_raise(write)().generate(expression, **opts)
+--> 176     for expression in parse(sql, read, error_level=error_level)
+    177 ]
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/__init__.py:64, in parse(sql, read, **opts)
+     52 """
+     53 Parses the given SQL string into a collection of syntax trees, one per parsed SQL statement.
+     54
+   (...)
+     61     The resulting syntax tree collection.
+     62 """
+     63 dialect = Dialect.get_or_raise(read)()
+---> 64 return dialect.parse(sql, **opts)
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/dialects/dialect.py:157, in Dialect.parse(self, sql, **opts)
+    156 def parse(self, sql, **opts):
+--> 157     return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/parser.py:703, in Parser.parse(self, raw_tokens, sql)
+    689 def parse(
+    690     self, raw_tokens: t.List[Token], sql: t.Optional[str] = None
+    691 ) -> t.List[t.Optional[exp.Expression]]:
+    692     """
+    693     Parses a list of tokens and returns a list of syntax trees, one tree
+    694     per parsed SQL statement.
+   (...)
+    701         The list of syntax trees.
+    702     """
+--> 703     return self._parse(
+    704         parse_method=self.__class__._parse_statement, raw_tokens=raw_tokens, sql=sql
+    705     )
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/parser.py:769, in Parser._parse(self, parse_method, raw_tokens, sql)
+    766     expressions.append(parse_method(self))
+    768     if self._index < len(self._tokens):
+--> 769         self.raise_error("Invalid expression / Unexpected token")
+    771     self.check_errors()
+    773 return expressions
+
+File ~/opt/anaconda3/envs/ponder-product-testing/lib/python3.10/site-packages/sqlglot/parser.py:812, in Parser.raise_error(self, message, token)
+    800 error = ParseError.new(
+    801     f"{message}. Line {token.line}, Col: {token.col}.\n"
+    802     f"  {start_context}\033[4m{highlight}\033[0m{end_context}",
+   (...)
+    808     end_context=end_context,
+    809 )
+    811 if self.error_level == ErrorLevel.IMMEDIATE:
+--> 812     raise error
+    814 self.errors.append(error)
+
+ParseError: Invalid expression / Unexpected token. Line 1, Col: 32.
+  SELECT """C Market # Segment""" FROM "Funky Customer With Nulls"
+```
+
+</details>
+
+My system: sqlglot 10.6.3, python 3.10.4
+  </issue>
+  
+  <patch>
+  diff --git a/sqlglot/dialects/bigquery.py b/sqlglot/dialects/bigquery.py
+index 0ae3e04997..7236c48285 100644
+--- a/sqlglot/dialects/bigquery.py
++++ b/sqlglot/dialects/bigquery.py
+@@ -116,7 +116,7 @@ class Tokenizer(tokens.Tokenizer):
+         ]
+         COMMENTS = ["--", "#", ("/*", "*/")]
+         IDENTIFIERS = ["`"]
+-        ESCAPES = ["\\"]
++        STRING_ESCAPES = ["\\"]
+         HEX_STRINGS = [("0x", ""), ("0X", "")]
+ 
+         KEYWORDS = {
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index 7eed17e27a..89d9fd445c 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -197,7 +197,7 @@ def generator(self, **opts) -> Generator:
+                 "quote_end": self.quote_end,
+                 "identifier_start": self.identifier_start,
+                 "identifier_end": self.identifier_end,
+-                "escape": self.tokenizer_class.ESCAPES[0],
++                "escape": self.tokenizer_class.STRING_ESCAPES[0],
+                 "index_offset": self.index_offset,
+                 "time_mapping": self.inverse_time_mapping,
+                 "time_trie": self.inverse_time_trie,
+diff --git a/sqlglot/dialects/drill.py b/sqlglot/dialects/drill.py
+index 4002ac7892..c31117a47f 100644
+--- a/sqlglot/dialects/drill.py
++++ b/sqlglot/dialects/drill.py
+@@ -105,7 +105,7 @@ class Drill(Dialect):
+     class Tokenizer(tokens.Tokenizer):
+         QUOTES = ["'"]
+         IDENTIFIERS = ["`"]
+-        ESCAPES = ["\\"]
++        STRING_ESCAPES = ["\\"]
+         ENCODE = "utf-8"
+ 
+     class Parser(parser.Parser):
+diff --git a/sqlglot/dialects/hive.py b/sqlglot/dialects/hive.py
+index f2b6eaa3ba..c558b70b1d 100644
+--- a/sqlglot/dialects/hive.py
++++ b/sqlglot/dialects/hive.py
+@@ -172,7 +172,7 @@ class Hive(Dialect):
+     class Tokenizer(tokens.Tokenizer):
+         QUOTES = ["'", '"']
+         IDENTIFIERS = ["`"]
+-        ESCAPES = ["\\"]
++        STRING_ESCAPES = ["\\"]
+         ENCODE = "utf-8"
+ 
+         KEYWORDS = {
+diff --git a/sqlglot/dialects/mysql.py b/sqlglot/dialects/mysql.py
+index a5bd86bac2..554fad2cec 100644
+--- a/sqlglot/dialects/mysql.py
++++ b/sqlglot/dialects/mysql.py
+@@ -117,7 +117,7 @@ class Tokenizer(tokens.Tokenizer):
+         QUOTES = ["'", '"']
+         COMMENTS = ["--", "#", ("/*", "*/")]
+         IDENTIFIERS = ["`"]
+-        ESCAPES = ["'", "\\"]
++        STRING_ESCAPES = ["'", "\\"]
+         BIT_STRINGS = [("b'", "'"), ("B'", "'"), ("0b", "")]
+         HEX_STRINGS = [("x'", "'"), ("X'", "'"), ("0x", "")]
+ 
+diff --git a/sqlglot/dialects/redshift.py b/sqlglot/dialects/redshift.py
+index c3c99ebee5..0a6683f6d5 100644
+--- a/sqlglot/dialects/redshift.py
++++ b/sqlglot/dialects/redshift.py
+@@ -37,7 +37,7 @@ def _parse_types(self, check_func: bool = False) -> t.Optional[exp.Expression]:
+             return this
+ 
+     class Tokenizer(Postgres.Tokenizer):
+-        ESCAPES = ["\\"]
++        STRING_ESCAPES = ["\\"]
+ 
+         KEYWORDS = {
+             **Postgres.Tokenizer.KEYWORDS,  # type: ignore
+diff --git a/sqlglot/dialects/snowflake.py b/sqlglot/dialects/snowflake.py
+index 3b83b025e0..1754a86265 100644
+--- a/sqlglot/dialects/snowflake.py
++++ b/sqlglot/dialects/snowflake.py
+@@ -180,7 +180,8 @@ class Parser(parser.Parser):
+ 
+     class Tokenizer(tokens.Tokenizer):
+         QUOTES = ["'", "$$"]
+-        ESCAPES = ["\\", "'"]
++        STRING_ESCAPES = ["\\", "'"]
++        IDENTIFIER_ESCAPES = ['"']
+ 
+         SINGLE_TOKENS = {
+             **tokens.Tokenizer.SINGLE_TOKENS,
+diff --git a/sqlglot/executor/python.py b/sqlglot/executor/python.py
+index 29848c67cc..de570b043f 100644
+--- a/sqlglot/executor/python.py
++++ b/sqlglot/executor/python.py
+@@ -408,7 +408,7 @@ def _lambda_sql(self, e: exp.Lambda) -> str:
+ 
+ class Python(Dialect):
+     class Tokenizer(tokens.Tokenizer):
+-        ESCAPES = ["\\"]
++        STRING_ESCAPES = ["\\"]
+ 
+     class Generator(generator.Generator):
+         TRANSFORMS = {
+diff --git a/sqlglot/tokens.py b/sqlglot/tokens.py
+index e95057af54..ab10482a80 100644
+--- a/sqlglot/tokens.py
++++ b/sqlglot/tokens.py
+@@ -357,7 +357,8 @@ def __new__(cls, clsname, bases, attrs):  # type: ignore
+         klass._HEX_STRINGS = cls._delimeter_list_to_dict(klass.HEX_STRINGS)
+         klass._BYTE_STRINGS = cls._delimeter_list_to_dict(klass.BYTE_STRINGS)
+         klass._IDENTIFIERS = cls._delimeter_list_to_dict(klass.IDENTIFIERS)
+-        klass._ESCAPES = set(klass.ESCAPES)
++        klass._STRING_ESCAPES = set(klass.STRING_ESCAPES)
++        klass._IDENTIFIER_ESCAPES = set(klass.IDENTIFIER_ESCAPES)
+         klass._COMMENTS = dict(
+             (comment, None) if isinstance(comment, str) else (comment[0], comment[1])
+             for comment in klass.COMMENTS
+@@ -429,9 +430,13 @@ class Tokenizer(metaclass=_Tokenizer):
+ 
+     IDENTIFIERS: t.List[str | t.Tuple[str, str]] = ['"']
+ 
+-    ESCAPES = ["'"]
++    STRING_ESCAPES = ["'"]
+ 
+-    _ESCAPES: t.Set[str] = set()
++    _STRING_ESCAPES: t.Set[str] = set()
++
++    IDENTIFIER_ESCAPES: t.List[str] = []
++
++    _IDENTIFIER_ESCAPES: t.Set[str] = set()
+ 
+     KEYWORDS = {
+         **{
+@@ -744,7 +749,7 @@ class Tokenizer(metaclass=_Tokenizer):
+     )
+ 
+     def __init__(self) -> None:
+-        self._replace_backslash = "\\" in self._ESCAPES
++        self._replace_backslash = "\\" in self._STRING_ESCAPES
+         self.reset()
+ 
+     def reset(self) -> None:
+@@ -1046,12 +1051,25 @@ def _scan_formatted_string(self, string_start: str) -> bool:
+         return True
+ 
+     def _scan_identifier(self, identifier_end: str) -> None:
+-        while self._peek != identifier_end:
++        text = ""
++        identifier_end_is_escape = identifier_end in self._IDENTIFIER_ESCAPES
++
++        while True:
+             if self._end:
+                 raise RuntimeError(f"Missing {identifier_end} from {self._line}:{self._start}")
++
+             self._advance()
+-        self._advance()
+-        self._add(TokenType.IDENTIFIER, self._text[1:-1])
++            if self._char == identifier_end:
++                if identifier_end_is_escape and self._peek == identifier_end:
++                    text += 2 * identifier_end  # type: ignore
++                    self._advance()
++                    continue
++
++                break
++
++            text += self._char  # type: ignore
++
++        self._add(TokenType.IDENTIFIER, text)
+ 
+     def _scan_var(self) -> None:
+         while True:
+@@ -1072,9 +1090,9 @@ def _extract_string(self, delimiter: str) -> str:
+ 
+         while True:
+             if (
+-                self._char in self._ESCAPES
++                self._char in self._STRING_ESCAPES
+                 and self._peek
+-                and (self._peek == delimiter or self._peek in self._ESCAPES)
++                and (self._peek == delimiter or self._peek in self._STRING_ESCAPES)
+             ):
+                 text += self._peek
+                 self._advance(2)
+diff --git a/tests/dialects/test_snowflake.py b/tests/dialects/test_snowflake.py
+index f3e8e24e77..00dc1bfd01 100644
+--- a/tests/dialects/test_snowflake.py
++++ b/tests/dialects/test_snowflake.py
+@@ -6,6 +6,9 @@ class TestSnowflake(Validator):
+     dialect = "snowflake"
+ 
+     def test_snowflake(self):
++        self.validate_identity('SELECT """C Market # Segment""" FROM "Funky Customer With Nulls"')
++        self.validate_identity("SELECT REGEXP_LIKE(a, b, c)")
++
+         self.validate_all(
+             "SELECT * FROM xxx WHERE col ilike '%Don''t%'",
+             write={
+@@ -168,7 +171,6 @@ def test_snowflake(self):
+                 "snowflake": r"SELECT 'a \' \\ \\t \\x21 z $ '",
+             },
+         )
+-        self.validate_identity("SELECT REGEXP_LIKE(a, b, c)")
+         self.validate_all(
+             "SELECT RLIKE(a, b)",
+             write={
+@@ -253,6 +255,8 @@ def test_null_treatment(self):
+         )
+ 
+     def test_timestamps(self):
++        self.validate_identity("SELECT EXTRACT(month FROM a)")
++
+         self.validate_all(
+             "SELECT CAST(a AS TIMESTAMP)",
+             write={
+@@ -277,7 +281,6 @@ def test_timestamps(self):
+                 "snowflake": "SELECT CAST(a AS TIMESTAMPLTZ)",
+             },
+         )
+-        self.validate_identity("SELECT EXTRACT(month FROM a)")
+         self.validate_all(
+             "SELECT EXTRACT('month', a)",
+             write={
+@@ -313,6 +316,8 @@ def test_timestamps(self):
+ 
+     def test_semi_structured_types(self):
+         self.validate_identity("SELECT CAST(a AS VARIANT)")
++        self.validate_identity("SELECT CAST(a AS ARRAY)")
++
+         self.validate_all(
+             "SELECT a::VARIANT",
+             write={
+@@ -320,7 +325,6 @@ def test_semi_structured_types(self):
+                 "tsql": "SELECT CAST(a AS SQL_VARIANT)",
+             },
+         )
+-        self.validate_identity("SELECT CAST(a AS ARRAY)")
+         self.validate_all(
+             "ARRAY_CONSTRUCT(0, 1, 2)",
+             write={
+@@ -343,6 +347,7 @@ def test_ddl(self):
+             "CREATE TABLE a (x DATE, y BIGINT) WITH (PARTITION BY (x), integration='q', auto_refresh=TRUE, file_format=(type = parquet))"
+         )
+         self.validate_identity("CREATE MATERIALIZED VIEW a COMMENT='...' AS SELECT 1 FROM x")
++
+         self.validate_all(
+             "CREATE OR REPLACE TRANSIENT TABLE a (id INT)",
+             read={
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

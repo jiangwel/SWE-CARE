@@ -1,0 +1,151 @@
+  Task-ID: python__mypy-17309@b3c328e
+  Please checkout to this commit first: c3bbd1cdeca02e63e1102a3274415f056e8d1e43
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  AssertionError: unexpected type <class 'mypy.types.ParamSpecType'>
+Consider the following module:
+
+```python
+from typing import Callable, ParamSpec, TypeVar
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+def execute(
+    func: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs
+) -> _T:
+    return func(*args, **kwargs)
+```
+
+I can check it with mypy, but not compile it with mypyc:
+
+```shell-session
+$ mypy repro.py 
+Success: no issues found in 1 source file
+$ mypyc repro.py 
+Traceback (most recent call last):
+  File "mypyc/irbuild/builder.py", line 266, in accept
+  File "mypy/nodes.py", line 787, in accept
+  File "mypyc/irbuild/visitor.py", line 179, in visit_func_def
+  File "mypyc/irbuild/function.py", line 99, in transform_func_def
+  File "mypyc/irbuild/function.py", line 284, in gen_func_item
+  File "mypyc/irbuild/env_class.py", line 102, in load_env_registers
+  File "mypyc/irbuild/env_class.py", line 179, in add_args_to_env
+  File "mypyc/irbuild/env_class.py", line 165, in num_bitmap_args
+  File "mypyc/irbuild/builder.py", line 1233, in type_to_rtype
+  File "mypyc/irbuild/mapper.py", line 153, in type_to_rtype
+repro.py:6: AssertionError: unexpected type <class 'mypy.types.ParamSpecType'>
+```
+
+Versions:
+
+```
+Python 3.11.9
+mypy 1.9.0 (compiled: yes)
+mypyc 1.9.0 (compiled: yes)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/mypyc/irbuild/mapper.py b/mypyc/irbuild/mapper.py
+index a3abbb1f84fb..9b55fd2b8a89 100644
+--- a/mypyc/irbuild/mapper.py
++++ b/mypyc/irbuild/mapper.py
+@@ -10,6 +10,7 @@
+     LiteralType,
+     NoneTyp,
+     Overloaded,
++    ParamSpecType,
+     PartialType,
+     TupleType,
+     Type,
+@@ -123,6 +124,8 @@ def type_to_rtype(self, typ: Type | None) -> RType:
+                 return tuple_rprimitive
+         elif isinstance(typ, CallableType):
+             return object_rprimitive
++        elif isinstance(typ, ParamSpecType):
++            return object_rprimitive
+         elif isinstance(typ, NoneTyp):
+             return none_rprimitive
+         elif isinstance(typ, UnionType):
+diff --git a/mypyc/test-data/irbuild-generics.test b/mypyc/test-data/irbuild-generics.test
+index 4f9d0ab83a16..9d5c401ab46b 100644
+--- a/mypyc/test-data/irbuild-generics.test
++++ b/mypyc/test-data/irbuild-generics.test
+@@ -148,3 +148,42 @@ L2:
+     r4 = x
+ L3:
+     return r4
++
++
++[case testParamSpec]
++from typing import Callable, ParamSpec, TypeVar
++
++P = ParamSpec("P")
++
++def execute(func: Callable[P, int], *args: P.args, **kwargs: P.kwargs) -> int:
++    return func(*args, **kwargs)
++
++def f(x: int) -> int:
++    return x
++
++execute(f, 1)
++[out]
++def execute(func, args, kwargs):
++    func, args, kwargs :: object
++    r0 :: list
++    r1 :: object
++    r2 :: dict
++    r3 :: i32
++    r4 :: bit
++    r5 :: tuple
++    r6 :: object
++    r7 :: int
++L0:
++    r0 = PyList_New(0)
++    r1 = CPyList_Extend(r0, args)
++    r2 = PyDict_New()
++    r3 = CPyDict_UpdateInDisplay(r2, kwargs)
++    r4 = r3 >= 0 :: signed
++    r5 = PyList_AsTuple(r0)
++    r6 = PyObject_Call(func, r5, r2)
++    r7 = unbox(int, r6)
++    return r7
++def f(x):
++    x :: int
++L0:
++    return x
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

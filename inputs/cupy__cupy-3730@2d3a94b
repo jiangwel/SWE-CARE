@@ -1,0 +1,1359 @@
+  Task-ID: cupy__cupy-3730@2d3a94b
+  Please checkout to this commit first: 4c81aebbec5d481ddee8685d982b24372e5f272b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Reuse cufft plan objects
+Reusing a plan object have a significant impact in the complete fft performance. I measured a ~500us time drop.
+
+We should try to create a `PlanAllocator` or a pool of plans to reuse objects according to the requested size.
+
+(Plans allocate gpu memory so we have to be careful when reusing them).
+
+CC @leofang @asi1024 @grlee77
+  </issue>
+  
+  <patch>
+  diff --git a/cupy/cuda/cufft.pyx b/cupy/cuda/cufft.pyx
+index fe5f322b303..9d249c2a2b8 100644
+--- a/cupy/cuda/cufft.pyx
++++ b/cupy/cuda/cufft.pyx
+@@ -278,6 +278,17 @@ class Plan1d(object):
+             else:
+                 self._multi_gpu_get_plan(
+                     plan, nx, fft_type, batch, devices, out)
++        else:
++            if use_multi_gpus:
++                # multi-GPU FFT cannot transform 0-size arrays, and attempting
++                # to create such a plan will error out, but we still need this
++                # for bookkeeping
++                if isinstance(devices, (tuple, list)):
++                    self.gpus = list(devices)
++                elif isinstance(devices, int) and devices > 0:
++                    self.gpus = [i for i in range(int)]
++                else:
++                    raise ValueError
+ 
+         self.nx = nx
+         self.fft_type = fft_type
+@@ -327,7 +338,7 @@ class Plan1d(object):
+         if fft_type != CUFFT_C2C and fft_type != CUFFT_Z2Z:
+             raise ValueError('Currently for multiple GPUs only C2C and Z2Z are'
+                              ' supported.')
+-        if isinstance(devices, list):
++        if isinstance(devices, (tuple, list)):
+             nGPUs = len(devices)
+             for i in range(nGPUs):
+                 gpus.push_back(devices[i])
+@@ -336,7 +347,8 @@ class Plan1d(object):
+             for i in range(nGPUs):
+                 gpus.push_back(i)
+         else:
+-            raise ValueError('\"devices\" should be an int or a list of int.')
++            raise ValueError('\"devices\" should be an int or an iterable '
++                             'of int.')
+         if batch == 1:
+             if (nx & (nx - 1)) != 0:
+                 raise ValueError('For multi-GPU FFT with batch = 1, the array '
+@@ -724,6 +736,7 @@ class PlanNd(object):
+                 result = cufftSetAutoAllocation(plan, 0)
+         check_result(result)
+         self.plan = plan
++        self.gpus = None  # TODO(leofang): support multi-GPU PlanNd
+ 
+         if batch == 0:
+             work_size = 0
+diff --git a/cupy/fft/cache.pyx b/cupy/fft/cache.pyx
+new file mode 100644
+index 00000000000..d72a01fc99c
+--- /dev/null
++++ b/cupy/fft/cache.pyx
+@@ -0,0 +1,599 @@
++# distutils: language = c++
++
++from cupy_backends.cuda.api cimport runtime
++from cupy.cuda cimport device
++from cupy.cuda cimport memory
++
++import threading
++
++from cupy import util
++from cupy.cuda import cufft
++
++
++#####################################################################
++# Internal implementation                                           #
++#####################################################################
++
++cdef object _thread_local = threading.local()
++
++
++cdef class _ThreadLocal:
++
++    cdef list per_device_cufft_cache
++
++    def __init__(self):
++        cdef int i
++        self.per_device_cufft_cache = [
++            None for i in range(runtime.getDeviceCount())]
++
++    @staticmethod
++    cdef _ThreadLocal get():
++        cdef _ThreadLocal tls
++        tls = getattr(_thread_local, 'tls', None)
++        if tls is None:
++            tls = _ThreadLocal()
++            setattr(_thread_local, 'tls', tls)
++        return tls
++
++
++cdef inline Py_ssize_t _get_plan_memsize(plan) except -1:
++    cdef Py_ssize_t memsize = 0
++    cdef memory.MemoryPointer ptr
++    cdef int dev, curr_dev
++
++    # work_area could be None for "empty" plans...
++    if plan is not None and plan.work_area is not None:
++        if plan.gpus is not None:
++            # multi-GPU plan
++            curr_dev = runtime.getDevice()
++            for dev, ptr in zip(plan.gpus, plan.work_area):
++                if dev == curr_dev:
++                    memsize = <Py_ssize_t>(ptr.mem.size)
++                    break
++            else:
++                raise RuntimeError('invalid multi-GPU plan')
++        else:
++            # single-GPU plan
++            ptr = plan.work_area
++            memsize = <Py_ssize_t>(ptr.mem.size)
++
++    return memsize
++
++
++cdef class _Node:
++    # Unfortunately cython cdef class cannot be nested, so the node class
++    # has to live outside of the linked list...
++
++    # data
++    cdef readonly tuple key
++    cdef readonly object plan
++    cdef readonly Py_ssize_t memsize
++    cdef readonly list gpus
++
++    # link
++    cdef _Node prev
++    cdef _Node next
++
++    def __init__(self, tuple key, plan=None):
++        self.key = key
++        self.plan = plan
++        self.memsize = _get_plan_memsize(plan)
++        self.gpus = plan.gpus if plan is not None else None
++
++        self.prev = None
++        self.next = None
++
++    def __repr__(self):
++        cdef str output
++        cdef str plan_type
++        if isinstance(self.plan, cufft.Plan1d):
++            plan_type = 'Plan1d'
++        elif isinstance(self.plan, cufft.PlanNd):
++            plan_type = 'PlanNd'
++        else:
++            raise TypeError('unrecognized plan type: {}'.format(
++                type(self.plan)))
++        output = 'key: {0}, plan type: {1}, memory usage: {2}'.format(
++            self.key, plan_type, self.memsize)
++        return output
++
++
++cdef class _LinkedList:
++    # link
++    cdef _Node head
++    cdef _Node tail
++    cdef readonly size_t count
++
++    def __init__(self):
++        """ A doubly linked list to be used as an LRU cache. """
++        self.head = _Node(None, None)
++        self.tail = _Node(None, None)
++        self.count = 0
++        self.head.next = self.tail
++        self.tail.prev = self.head
++
++    cdef void remove_node(self, _Node node):
++        """ Remove the node from the linked list. """
++        cdef _Node p = node.prev
++        cdef _Node n = node.next
++        p.next = n
++        n.prev = p
++        self.count -= 1
++
++    cdef void append_node(self, _Node node):
++        """ Add a node to the tail of the linked list. """
++        cdef _Node t = self.tail
++        cdef _Node p = t.prev
++        p.next = node
++        t.prev = node
++        node.prev = p
++        node.next = t
++        self.count += 1
++
++
++#####################################################################
++# cuFFT plan cache                                                  #
++#####################################################################
++
++cdef class PlanCache:
++    """A per-thread, per-device, least recently used (LRU) cache for cuFFT
++    plans.
++
++    Args:
++        size (int): The number of plans that the cache can accommodate. The
++            default is 16. Setting this to ``-1`` will make this limit ignored.
++        memsize (int): The amount of GPU memory, in bytes, that the plans in
++            the cache will use for their work areas. Default is ``-1``, meaning
++            it is unlimited.
++        dev (int): The ID of the device for which the cache targets.
++
++    .. note::
++        1. By setting either ``size`` to ``0`` (by calling :meth:`set_size`) or
++           ``memsize`` to ``0`` (by calling :meth:`set_memsize`), the cache is
++           disabled, and any operation is no-op. To re-enable it, simply set
++           a nonzero ``size`` and/or ``memsize``.
++
++        2. This class can be instantiated by users, but it is discouraged.
++           Instead, we expect the following canonical usage pattern to
++           retrieve a handle to the cache through :func:`get_plan_cache`:
++
++           .. code-block:: python
++
++               from cupy.cuda import Device
++               from cupy.fft.config import get_plan_cache
++
++               # get the cache for Device n
++               with Device(n):
++                   cache = get_plan_cache()
++                   cache.set_size(0)  # disable the cache
++
++           In particular, the cache for Device n should be manaipulated under
++           the Device n's context.
++
++        3. This class is thread-safe since by default it is created on a
++           per-thread basis. When starting a new thread a new cache is not
++           initialized until :func:`~cupy.fft.config.get_plan_cache` is
++           called or when the constructor is manually invoked.
++
++        4. For multi-GPU plans, the plan will be added to all participating
++           GPUs' caches. Upon removal (by any of the caches), the plan will
++           be removed from all participating GPU's caches.
++
++        5. This cache supports the iterator protocol, and returns a 2-tuple:
++           ``(key, node)`` starting from the most recently used plan.
++
++    """
++    # total number of plans, regardless of plan type
++    # -1: unlimited/ignored, cache size is restricted by "memsize"
++    # 0: disable cache
++    cdef Py_ssize_t size
++
++    # current number of cached plans
++    cdef Py_ssize_t curr_size
++
++    # total amount of memory for all of the cached plans
++    # -1: unlimited/ignored, cache size is restricted by "size"
++    # 0: disable cache
++    cdef Py_ssize_t memsize
++
++    # current amount of memory used by cached plans
++    cdef Py_ssize_t curr_memsize
++
++    # whether the cache is enabled (True) or disabled (False)
++    cdef bint is_enabled
++
++    # the ID of the device on which the cached plans are allocated
++    cdef int dev
++
++    # key: all arguments used to construct Plan1d or PlanNd
++    # value: the node that holds the plan corresponding to the key
++    cdef dict cache
++
++    # for keeping track of least recently used plans
++    # lru.head: least recent used
++    # lru.tail: most recent used
++    cdef _LinkedList lru
++
++    # ---------------------- Python methods ---------------------- #
++
++    def __init__(self, Py_ssize_t size=16, Py_ssize_t memsize=-1, int dev=-1):
++        self._validate_size_memsize(size, memsize)
++        self._set_size_memsize(size, memsize)
++        self._reset()
++        self.dev = dev if dev != -1 else runtime.getDevice()
++
++    def __getitem__(self, tuple key):
++        # no-op if cache is disabled
++        if not self.is_enabled:
++            assert (self.size == 0 or self.memsize == 0)
++            return
++
++        cdef _Node node
++        cdef int dev
++        cdef PlanCache cache
++        cdef list gpus
++
++        node = self.cache.get(key)
++        if node is not None:
++            # hit, move the node to the end
++            gpus = node.gpus
++            if gpus is None:
++                self._move_plan_to_end(key=None, node=node)
++            else:
++                _remove_append_multi_gpu_plan(gpus, key)
++            return node.plan
++        else:
++            raise KeyError('plan not found for key: {}'.format(key))
++
++    def __setitem__(self, tuple key, plan):
++        # no-op if cache is disabled
++        if not self.is_enabled:
++            assert (self.size == 0 or self.memsize == 0)
++            return
++
++        # First, check for the worst case: the plan is too large to fit in
++        # the cache. In this case, we leave the cache intact and return early.
++        # If we have the budget, then try to squeeze in.
++        cdef list gpus = plan.gpus
++        if gpus is None:
++            self._check_plan_fit(plan)
++            self._add_plan(key, plan)
++        else:
++            # check all device's caches
++            _check_multi_gpu_plan_fit(gpus, plan)
++            # collectively add the plan to all devices' caches
++            _add_multi_gpu_plan(gpus, key, plan)
++
++    def __delitem__(self, tuple key):
++        cdef _Node node
++        cdef list gpus
++
++        # no-op if cache is disabled
++        if not self.is_enabled:
++            assert (self.size == 0 or self.memsize == 0)
++            return
++
++        node = self.cache.get(key)
++        if node is not None:
++            gpus = node.gpus
++            if gpus is None:
++                self._remove_plan(key=None, node=node)
++            else:
++                _remove_multi_gpu_plan(gpus, key)
++        else:
++            raise KeyError('plan not found for key: {}'.format(key))
++
++    def __repr__(self):
++        # we also validate data when the cache information is needed
++        assert len(self.cache) == int(self.lru.count) == self.curr_size
++        if self.size >= 0:
++            assert self.curr_size <= self.size
++        if self.memsize >= 0:
++            assert self.curr_memsize <= self.memsize
++
++        cdef str output = ''
++        output += '------------------- cuFFT plan cache '
++        output += '(device {}) -------------------\n'.format(self.dev)
++        output += 'cache enabled? {}\n'.format(self.is_enabled)
++        output += 'current / max size   : {0} / {1} (counts)\n'.format(
++            self.curr_size,
++            '(unlimited)' if self.size == -1 else self.size)
++        output += 'current / max memsize: {0} / {1} (bytes)\n'.format(
++            self.curr_memsize,
++            '(unlimited)' if self.memsize == -1 else self.memsize)
++        output += '\ncached plans (most recently used first):\n'
++
++        cdef tuple key
++        cdef _Node node
++        cdef size_t count = 0
++        for key, node in self:
++            output += str(node) + '\n'
++            count += 1
++        assert count == self.lru.count
++        return output
++
++    def __iter__(self):
++        # Traverse from the end (LRU). Unlike dict and other map-like
++        # containers, we also return the node (value) here for inspecting
++        # and testing the data structure without accidentally changing the
++        # cache order.
++        cdef _Node node = self.lru.tail
++
++        while node.prev is not self.lru.head:
++            node = node.prev
++            yield (node.key, node)
++
++    # --------------------- internal helpers --------------------- #
++
++    cdef void _reset(self):
++        self.curr_size = 0
++        self.curr_memsize = 0
++        self.cache = {}
++        self.lru = _LinkedList()
++
++    cdef void _validate_size_memsize(
++            self, Py_ssize_t size, Py_ssize_t memsize) except*:
++        if size < -1 or memsize < -1:
++            raise ValueError('invalid input')
++
++    cdef void _set_size_memsize(self, Py_ssize_t size, Py_ssize_t memsize):
++        self.size = size
++        self.memsize = memsize
++        self.is_enabled = (size != 0 and memsize != 0)
++
++    cdef void _check_plan_fit(self, plan) except*:
++        cdef Py_ssize_t memsize = _get_plan_memsize(plan)
++        if (memsize > self.memsize > 0):
++            raise RuntimeError('the plan memsize is too large')
++
++    # The four helpers below (_move_plan_to_end, _add_plan, _remove_plan, and
++    # _eject_until_fit) most of the time only change the internal state of the
++    # current device's cache (self); the only exception is when removing a
++    # multi-GPU plan from the caches (in _eject_until_fit).
++
++    cdef void _move_plan_to_end(self, tuple key=None, _Node node=None) except*:
++        # either key is None or node is None
++        assert (key is None) == (node is not None)
++        if node is None:
++            node = self.cache.get(key)
++
++        self.lru.remove_node(node)
++        self.lru.append_node(node)
++
++    cdef void _add_plan(self, tuple key, plan) except*:
++        cdef _Node node = _Node(key, plan)
++        cdef _Node unwanted_node
++
++        # Now we ensure we have room to insert, check if the key already exists
++        unwanted_node = self.cache.get(key)
++        if unwanted_node is not None:
++            self._remove_plan(key=None, node=unwanted_node)
++
++        # See if the plan can fit in, if not we remove least used ones
++        self._eject_until_fit(
++            self.size - 1 if self.size != -1 else -1,
++            self.memsize - node.memsize if self.memsize != -1 else -1)
++
++        # At this point we ensure we have room to insert
++        self.lru.append_node(node)
++        self.cache[node.key] = node
++        self.curr_size += 1
++        self.curr_memsize += node.memsize
++
++    cdef void _remove_plan(self, tuple key=None, _Node node=None) except*:
++        # either key is None or node is None
++        assert (key is None) == (node is not None)
++        if node is None:
++            node = self.cache.get(key)
++        elif key is None:
++            key = node.key
++
++        self.lru.remove_node(node)
++        del self.cache[key]
++        self.curr_size -= 1
++        self.curr_memsize -= node.memsize
++
++    cdef void _eject_until_fit(
++            self, Py_ssize_t size, Py_ssize_t memsize):
++        cdef _Node unwanted_node
++        cdef list gpus
++
++        while True:
++            if (self.curr_size == 0
++                or ((self.curr_size <= size or size == -1)
++                    and (self.curr_memsize <= memsize or memsize == -1))):
++                break
++            else:
++                # remove from the front to free up space
++                unwanted_node = self.lru.head.next
++                if unwanted_node is not self.lru.tail:
++                    gpus = unwanted_node.gpus
++                    if gpus is None:
++                        self._remove_plan(key=None, node=unwanted_node)
++                    else:
++                        _remove_multi_gpu_plan(gpus, unwanted_node.key)
++
++    # -------------- helpers also exposed to Python -------------- #
++
++    cpdef set_size(self, Py_ssize_t size):
++        self._validate_size_memsize(size, self.memsize)
++        self._eject_until_fit(size, self.memsize)
++        self._set_size_memsize(size, self.memsize)
++
++    cpdef Py_ssize_t get_size(self):
++        return self.size
++
++    cpdef Py_ssize_t get_curr_size(self):
++        return self.curr_size
++
++    cpdef set_memsize(self, Py_ssize_t memsize):
++        self._validate_size_memsize(self.size, memsize)
++        self._eject_until_fit(self.size, memsize)
++        self._set_size_memsize(self.size, memsize)
++
++    cpdef Py_ssize_t get_memsize(self):
++        return self.memsize
++
++    cpdef Py_ssize_t get_curr_memsize(self):
++        return self.curr_memsize
++
++    cpdef get(self, tuple key, default=None):
++        # behaves as if calling dict.get()
++        try:
++            plan = self[key]
++        except KeyError:
++            plan = default
++        else:
++            # if cache is disabled, plan can be None
++            if plan is None:
++                plan = default
++        return plan
++
++    cpdef clear(self):
++        self._reset()
++
++    cpdef show_info(self):
++        print(self)
++
++
++# The three functions below are used to collectively add, remove, or move a
++# a multi-GPU plan in all devices' caches (per thread). Therefore, they're
++# not PlanCache's methods, which focus on the current (device's) cache. This
++# module-level definition has an additional benefit that "cdef inline ..."
++# can work.
++
++cdef inline void _add_multi_gpu_plan(list gpus, tuple key, plan) except*:
++    cdef int dev
++    cdef PlanCache cache
++    cdef list insert_ok = []
++
++    try:
++        for dev in gpus:
++            with device.Device(dev):
++                cache = get_plan_cache()
++                cache._add_plan(key, plan)
++            insert_ok.append(dev)
++    except Exception as e:
++        # clean up and raise
++        _remove_multi_gpu_plan(insert_ok, key)
++        x = RuntimeError('Insert succeeded only on devices {0}:\n'
++                         '{1}'.format(insert_ok, e))
++        raise x.with_traceback(e.__traceback__)
++    assert len(insert_ok) == len(gpus)
++
++
++cdef inline void _remove_multi_gpu_plan(list gpus, tuple key) except*:
++    """ Removal of a multi-GPU plan is triggered when any of the participating
++    devices removes the plan from its cache.
++    """
++    cdef int dev
++    cdef PlanCache cache
++
++    for dev in gpus:
++        with device.Device(dev):
++            cache = get_plan_cache()
++            cache._remove_plan(key=key)
++
++
++cdef inline void _remove_append_multi_gpu_plan(list gpus, tuple key) except *:
++    cdef int dev
++    cdef PlanCache cache
++
++    for dev in gpus:
++        with device.Device(dev):
++            cache = get_plan_cache()
++            cache._move_plan_to_end(key=key)
++
++
++cdef inline void _check_multi_gpu_plan_fit(list gpus, plan) except*:
++    cdef int dev
++    cdef PlanCache cache
++
++    try:
++        for dev in gpus:
++            with device.Device(dev):
++                cache = get_plan_cache()
++                cache._check_plan_fit(plan)
++    except RuntimeError as e:
++        e.args = (e.args[0] + ' for device {}'.format(cache.dev),)
++        raise e
++
++
++#####################################################################
++# Public API                                                        #
++#####################################################################
++
++cpdef inline PlanCache get_plan_cache():
++    """Get the per-thread, per-device plan cache, or create one if not found.
++
++    .. seealso::
++        :class:`~cupy.fft.cache.PlanCache`
++
++    """
++    cdef _ThreadLocal tls = _ThreadLocal.get()
++    cdef int dev = runtime.getDevice()
++    cdef PlanCache cache = tls.per_device_cufft_cache[dev]
++    if cache is None:
++        # not found, do a default initialization
++        cache = PlanCache(dev=dev)
++        tls.per_device_cufft_cache[dev] = cache
++    return cache
++
++
++# TODO(leofang): remove experimental warning when scipy/scipy#12512 is merged
++cpdef Py_ssize_t get_plan_cache_size():
++    util.experimental('cupy.fft.cache.get_plan_cache_size')
++    cdef PlanCache cache = get_plan_cache()
++    return cache.get_size()
++
++
++# TODO(leofang): remove experimental warning when scipy/scipy#12512 is merged
++cpdef set_plan_cache_size(size):
++    util.experimental('cupy.fft.cache.set_plan_cache_size')
++    cdef PlanCache cache = get_plan_cache()
++    cache.set_size(size)
++
++
++# TODO(leofang): remove experimental warning when scipy/scipy#12512 is merged
++cpdef Py_ssize_t get_plan_cache_max_memsize():
++    util.experimental('cupy.fft.cache.get_plan_cache_max_memsize')
++    cdef PlanCache cache = get_plan_cache()
++    return cache.get_memsize()
++
++
++# TODO(leofang): remove experimental warning when scipy/scipy#12512 is merged
++cpdef set_plan_cache_max_memsize(size):
++    util.experimental('cupy.fft.cache.set_plan_cache_max_memsize')
++    cdef PlanCache cache = get_plan_cache()
++    cache.set_memsize(size)
++
++
++# TODO(leofang): remove experimental warning when scipy/scipy#12512 is merged
++cpdef clear_plan_cache():
++    util.experimental('cupy.fft.cache.clear_plan_cache')
++    cdef PlanCache cache = get_plan_cache()
++    cache.clear()
++
++
++cpdef show_plan_cache_info():
++    """Show all of the plan caches's info on this thread.
++
++    .. seealso::
++        :class:`~cupy.fft.cache.PlanCache`
++
++    """
++
++    cdef _ThreadLocal tls = _ThreadLocal.get()
++    cdef list caches = tls.per_device_cufft_cache
++    cdef int dev
++    cdef PlanCache cache
++
++    print('=============== cuFFT plan cache info (all devices) '
++          '===============')
++    for dev, cache in enumerate(caches):
++        if cache is None:
++            print('------------------- cuFFT plan cache '
++                  '(device {}) -------------------'.format(dev))
++            print('(uninitialized)\n')
++        else:
++            cache.show_info()
+diff --git a/cupy/fft/config.py b/cupy/fft/config.py
+index 10d8d655a89..eb07af8e09d 100644
+--- a/cupy/fft/config.py
++++ b/cupy/fft/config.py
+@@ -1,5 +1,14 @@
+ from cupy import util
+ 
++# expose cache handles to this module
++from cupy.fft.cache import get_plan_cache  # NOQA
++from cupy.fft.cache import clear_plan_cache  # NOQA
++from cupy.fft.cache import get_plan_cache_size  # NOQA
++from cupy.fft.cache import set_plan_cache_size  # NOQA
++from cupy.fft.cache import get_plan_cache_max_memsize  # NOQA
++from cupy.fft.cache import set_plan_cache_max_memsize  # NOQA
++from cupy.fft.cache import show_plan_cache_info  # NOQA
++
+ 
+ enable_nd_planning = True
+ use_multi_gpus = False
+@@ -35,4 +44,5 @@ def set_cufft_gpus(gpus):
+     if len(devs) <= 1:
+         raise ValueError("Must use at least 2 GPUs.")
+ 
+-    _devices = devs
++    # make it hashable
++    _devices = tuple(devs)
+diff --git a/cupy/fft/fft.py b/cupy/fft/fft.py
+index 7fc2352cbba..b19557fe9eb 100644
+--- a/cupy/fft/fft.py
++++ b/cupy/fft/fft.py
+@@ -7,6 +7,7 @@
+ import cupy
+ from cupy.cuda import cufft
+ from cupy.fft import config
++from cupy.fft.cache import get_plan_cache
+ 
+ 
+ _reduce = functools.reduce
+@@ -97,6 +98,11 @@ def _exec_fft(a, direction, value_type, norm, axis, overwrite_x,
+ 
+     batch = a.size // n
+ 
++    # plan search precedence:
++    # 1. plan passed in as an argument
++    # 2. plan as context manager
++    # 3. cached plan
++    # 4. create a new one
+     curr_plan = cufft.get_current_plan()
+     if curr_plan is not None:
+         if plan is None:
+@@ -104,9 +110,18 @@ def _exec_fft(a, direction, value_type, norm, axis, overwrite_x,
+         else:
+             raise RuntimeError('Use the cuFFT plan either as a context manager'
+                                ' or as an argument.')
++
+     if plan is None:
+         devices = None if not config.use_multi_gpus else config._devices
+-        plan = cufft.Plan1d(out_size, fft_type, batch, devices=devices)
++        # TODO(leofang): do we need to add the current stream to keys?
++        keys = (out_size, fft_type, batch, devices)
++        cache = get_plan_cache()
++        cached_plan = cache.get(keys)
++        if cached_plan is not None:
++            plan = cached_plan
++        else:
++            plan = cufft.Plan1d(out_size, fft_type, batch, devices=devices)
++            cache[keys] = plan
+     else:
+         # check plan validity
+         if not isinstance(plan, cufft.Plan1d):
+@@ -239,7 +254,8 @@ def _nd_plan_is_possible(axes_sorted, ndim):
+                 for n in range(len(axes_sorted) - 1)]))
+ 
+ 
+-def _get_cufft_plan_nd(shape, fft_type, axes=None, order='C', out_size=None):
++def _get_cufft_plan_nd(
++        shape, fft_type, axes=None, order='C', out_size=None, to_cache=True):
+     """Generate a CUDA FFT plan for transforming up to three axes.
+ 
+     Args:
+@@ -255,6 +271,8 @@ def _get_cufft_plan_nd(shape, fft_type, axes=None, order='C', out_size=None):
+             Fortran ordered data layout.
+         out_size (int): The output length along the last axis for R2C/C2R FFTs.
+             For C2C FFT, this is ignored (and set to `None`).
++        to_cache (bool): Whether to cache the generated plan. Default is
++            ``True``.
+ 
+     Returns:
+         plan (cufft.PlanNd): A cuFFT Plan for the chosen `fft_type`.
+@@ -373,18 +391,17 @@ def _get_cufft_plan_nd(shape, fft_type, axes=None, order='C', out_size=None):
+             raise ValueError(
+                 'Invalid number of FFT data points specified.')
+ 
+-    plan = cufft.PlanNd(shape=plan_dimensions,
+-                        inembed=inembed,
+-                        istride=istride,
+-                        idist=idist,
+-                        onembed=onembed,
+-                        ostride=ostride,
+-                        odist=odist,
+-                        fft_type=fft_type,
+-                        batch=nbatch,
+-                        order=order,
+-                        last_axis=fft_axes[-1],
+-                        last_size=out_size)
++    keys = (plan_dimensions, inembed, istride,
++            idist, onembed, ostride, odist,
++            fft_type, nbatch, order, fft_axes[-1], out_size)
++    cache = get_plan_cache()
++    cached_plan = cache.get(keys)
++    if cached_plan is not None:
++        plan = cached_plan
++    else:
++        plan = cufft.PlanNd(*keys)
++        if to_cache:
++            cache[keys] = plan
+     return plan
+ 
+ 
+@@ -413,12 +430,17 @@ def _exec_fftn(a, direction, value_type, norm, axes, overwrite_x,
+     else:
+         raise ValueError('a must be contiguous')
+ 
++    # plan search precedence:
++    # 1. plan passed in as an argument
++    # 2. plan as context manager
++    # 3. cached plan
++    # 4. create a new one
+     curr_plan = cufft.get_current_plan()
+     if curr_plan is not None:
+         plan = curr_plan
+         # don't check repeated usage; it's done in _default_fft_func()
+     if plan is None:
+-        # generate a plan
++        # search from cache, and generate a plan if not found
+         plan = _get_cufft_plan_nd(a.shape, fft_type, axes=axes, order=order,
+                                   out_size=out_size)
+     else:
+diff --git a/cupy_setup_build.py b/cupy_setup_build.py
+index 89fb70d3a66..492099fb303 100644
+--- a/cupy_setup_build.py
++++ b/cupy_setup_build.py
+@@ -83,6 +83,7 @@
+     'cupy.cuda.function',
+     'cupy.cuda.stream',
+     'cupy.cuda.texture',
++    'cupy.fft.cache',
+     'cupy.lib.polynomial',
+     'cupy.util'
+ ]
+diff --git a/cupyx/scipy/fftpack/fft.py b/cupyx/scipy/fftpack/fft.py
+index 8492637051b..caa9b68d122 100644
+--- a/cupyx/scipy/fftpack/fft.py
++++ b/cupyx/scipy/fftpack/fft.py
+@@ -6,6 +6,7 @@
+ from cupy.fft.fft import (_convert_fft_type, _default_fft_func, _fft,
+                           _get_cufft_plan_nd, _get_fftn_out_size,
+                           _output_dtype)
++from cupy.fft.cache import get_plan_cache
+ 
+ 
+ def get_fft_plan(a, shape=None, axes=None, value_type='C2C'):
+@@ -112,12 +113,16 @@ def get_fft_plan(a, shape=None, axes=None, value_type='C2C'):
+         raise ValueError('C2R/R2C PlanNd for F-order arrays is not supported')
+ 
+     # generate plan
++    # (load from cache if it exists, otherwise create one but not cache it)
+     if n > 1:  # ND transform
+         out_size = _get_fftn_out_size(
+             shape, transformed_shape, axes[-1], value_type)
++        # _get_cufft_plan_nd handles the interaction with plan cache
+         plan = _get_cufft_plan_nd(
+-            shape, fft_type, axes=axes, order=order, out_size=out_size)
++            shape, fft_type, axes=axes, order=order, out_size=out_size,
++            to_cache=False)
+     else:  # 1D transform
++        # prepare plan arguments
+         if value_type != 'C2R':
+             out_size = shape[axis1D]
+         else:
+@@ -125,7 +130,14 @@ def get_fft_plan(a, shape=None, axes=None, value_type='C2C'):
+                 shape, transformed_shape, axis1D, value_type)
+         batch = prod(shape) // shape[axis1D]
+         devices = None if not config.use_multi_gpus else config._devices
+-        plan = cufft.Plan1d(out_size, fft_type, batch, devices=devices)
++
++        keys = (out_size, fft_type, batch, devices)
++        cache = get_plan_cache()
++        cached_plan = cache.get(keys)
++        if cached_plan is not None:
++            plan = cached_plan
++        else:
++            plan = cufft.Plan1d(out_size, fft_type, batch, devices=devices)
+ 
+     return plan
+ 
+diff --git a/docs/source/reference/fft.rst b/docs/source/reference/fft.rst
+index 8e8381e2071..28838b85fd0 100644
+--- a/docs/source/reference/fft.rst
++++ b/docs/source/reference/fft.rst
+@@ -57,7 +57,10 @@ Helper routines
+    cupy.fft.rfftfreq
+    cupy.fft.fftshift
+    cupy.fft.ifftshift
++   cupy.fft.cache.PlanCache
+    cupy.fft.config.set_cufft_gpus
++   cupy.fft.config.get_plan_cache
++   cupy.fft.config.show_plan_cache_info
+ 
+ 
+ Normalization
+diff --git a/tests/cupy_tests/fft_tests/test_cache.py b/tests/cupy_tests/fft_tests/test_cache.py
+new file mode 100644
+index 00000000000..76b61b31adf
+--- /dev/null
++++ b/tests/cupy_tests/fft_tests/test_cache.py
+@@ -0,0 +1,439 @@
++import contextlib
++import io
++import queue
++import threading
++import unittest
++
++import pytest
++
++import cupy
++from cupy import testing
++from cupy.cuda import cufft
++from cupy.cuda import device
++from cupy.cuda import runtime
++from cupy.fft import config
++
++from .test_fft import multi_gpu_config
++
++
++def intercept_stdout(func):
++    with io.StringIO() as buf, contextlib.redirect_stdout(buf):
++        func()
++        stdout = buf.getvalue()
++    return stdout
++
++
++n_devices = runtime.getDeviceCount()
++
++
++class TestPlanCache(unittest.TestCase):
++    def setUp(self):
++        self.caches = []
++        self.old_sizes = []
++        for i in range(n_devices):
++            with device.Device(i):
++                cache = config.get_plan_cache()
++                self.old_sizes.append(cache.get_size())
++                cache.clear()
++                cache.set_memsize(-1)
++                cache.set_size(2)
++            self.caches.append(cache)
++
++    def tearDown(self):
++        for i in range(n_devices):
++            with device.Device(i):
++                cache = config.get_plan_cache()
++                cache.clear()
++                cache.set_size(self.old_sizes[i])
++                cache.set_memsize(-1)
++
++    def test_LRU_cache1(self):
++        # test if insertion and clean-up works
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++
++        cache.clear()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++    def test_LRU_cache2(self):
++        # test if plan is reused
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        # run once and fetch the cached plan
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        iterator = iter(cache)
++        plan0 = next(iterator)[1].plan
++
++        # repeat
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        iterator = iter(cache)
++        plan1 = next(iterator)[1].plan
++
++        # we should get the same plan
++        assert plan0 is plan1
++
++    def test_LRU_cache3(self):
++        # test if cache size is limited
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        # run once and fetch the cached plan
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        iterator = iter(cache)
++        plan = next(iterator)[1].plan
++
++        # run another two FFTs with different sizes so that the first
++        # plan is discarded from the cache
++        a = testing.shaped_random((20,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++        a = testing.shaped_random((30,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++
++        # check if the first plan is indeed not cached
++        for _, node in cache:
++            assert plan is not node.plan
++
++    def test_LRU_cache4(self):
++        # test if fetching the plan will reorder it to the top
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        # this creates a Plan1d
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++
++        # this creates a PlanNd
++        a = testing.shaped_random((10, 20), cupy, cupy.float32)
++        cupy.fft.fftn(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++
++        # The first in the cache is the most recently used one;
++        # using an iterator to access the linked list guarantees that
++        # we don't alter the cache order
++        iterator = iter(cache)
++        assert isinstance(next(iterator)[1].plan, cufft.PlanNd)
++        assert isinstance(next(iterator)[1].plan, cufft.Plan1d)
++        with pytest.raises(StopIteration):
++            next(iterator)
++
++        # this brings Plan1d to the top
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++        iterator = iter(cache)
++        assert isinstance(next(iterator)[1].plan, cufft.Plan1d)
++        assert isinstance(next(iterator)[1].plan, cufft.PlanNd)
++        with pytest.raises(StopIteration):
++            next(iterator)
++
++        # An LRU cache guarantees that such a silly operation never
++        # raises StopIteration
++        iterator = iter(cache)
++        for i in range(100):
++            cache[next(iterator)[0]]
++
++    @testing.multi_gpu(2)
++    def test_LRU_cache5(self):
++        # test if the LRU cache is thread-local
++
++        def init_caches(gpus):
++            for i in gpus:
++                with device.Device(i):
++                    config.get_plan_cache()
++
++        # Testing in the current thread: in setUp() we ensure all caches
++        # are initialized
++        stdout = intercept_stdout(config.show_plan_cache_info)
++        assert 'uninitialized' not in stdout
++
++        def thread_show_plan_cache_info(queue):
++            # allow output from another thread to be accessed by the
++            # main thread
++            stdout = intercept_stdout(config.show_plan_cache_info)
++            queue.put(stdout)
++
++        # When starting a new thread, the cache is uninitialized there
++        # (for both devices)
++        q = queue.Queue()
++        thread = threading.Thread(target=thread_show_plan_cache_info,
++                                  args=(q,))
++        thread.start()
++        thread.join()
++        stdout = q.get()
++        assert stdout.count('uninitialized') == n_devices
++
++        def thread_init_caches(gpus, queue):
++            init_caches(gpus)
++            thread_show_plan_cache_info(queue)
++
++        # Now let's try initializing device 0 on another thread
++        thread = threading.Thread(target=thread_init_caches,
++                                  args=([0], q,))
++        thread.start()
++        thread.join()
++        stdout = q.get()
++        assert stdout.count('uninitialized') == n_devices - 1
++
++        # ...and this time both devices
++        thread = threading.Thread(target=thread_init_caches,
++                                  args=([0, 1], q,))
++        thread.start()
++        thread.join()
++        stdout = q.get()
++        assert stdout.count('uninitialized') == n_devices - 2
++
++    @testing.multi_gpu(2)
++    def test_LRU_cache6(self):
++        # test if each device has a seperate cache
++        cache0 = self.caches[0]
++        cache1 = self.caches[1]
++
++        # ensure a fresh state
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # do some computation on GPU 0
++        with device.Device(0):
++            a = testing.shaped_random((10,), cupy, cupy.float32)
++            cupy.fft.fft(a)
++        assert cache0.get_curr_size() == 1 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # do some computation on GPU 1
++        with device.Device(1):
++            c = testing.shaped_random((16,), cupy, cupy.float64)
++            cupy.fft.fft(c)
++        assert cache0.get_curr_size() == 1 <= cache0.get_size()
++        assert cache1.get_curr_size() == 1 <= cache1.get_size()
++
++        # reset device 0
++        cache0.clear()
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 1 <= cache1.get_size()
++
++        # reset device 1
++        cache1.clear()
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++    @testing.multi_gpu(2)
++    def test_LRU_cache7(self):
++        # test accessing a multi-GPU plan
++        cache0 = self.caches[0]
++        cache1 = self.caches[1]
++
++        # ensure a fresh state
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # do some computation on GPU 0
++        with device.Device(0):
++            a = testing.shaped_random((10,), cupy, cupy.float32)
++            cupy.fft.fft(a)
++        assert cache0.get_curr_size() == 1 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # do a multi-GPU FFT
++        config.use_multi_gpus = True
++        config.set_cufft_gpus([0, 1])
++        c = testing.shaped_random((128,), cupy, cupy.complex64)
++        cupy.fft.fft(c)
++        assert cache0.get_curr_size() == 2 <= cache0.get_size()
++        assert cache1.get_curr_size() == 1 <= cache1.get_size()
++
++        # check both devices' caches see the same multi-GPU plan
++        plan0 = next(iter(cache0))[1].plan
++        plan1 = next(iter(cache1))[1].plan
++        assert plan0 is plan1
++
++        # reset
++        config.use_multi_gpus = False
++        config._device = None
++
++        # do some computation on GPU 1
++        with device.Device(1):
++            e = testing.shaped_random((20,), cupy, cupy.complex128)
++            cupy.fft.fft(e)
++        assert cache0.get_curr_size() == 2 <= cache0.get_size()
++        assert cache1.get_curr_size() == 2 <= cache1.get_size()
++
++        # by this time, the multi-GPU plan remains the most recently
++        # used one on GPU 0, but not on GPU 1
++        assert plan0 is next(iter(cache0))[1].plan
++        assert plan1 is not next(iter(cache1))[1].plan
++
++        # now use it again to make it the most recent
++        config.use_multi_gpus = True
++        config.set_cufft_gpus([0, 1])
++        c = testing.shaped_random((128,), cupy, cupy.complex64)
++        cupy.fft.fft(c)
++        assert cache0.get_curr_size() == 2 <= cache0.get_size()
++        assert cache1.get_curr_size() == 2 <= cache1.get_size()
++        assert plan0 is next(iter(cache0))[1].plan
++        assert plan1 is next(iter(cache1))[1].plan
++        # reset
++        config.use_multi_gpus = False
++        config._device = None
++
++        # Do 2 more different FFTs on one of the devices, and the
++        # multi-GPU plan would be discarded from both caches
++        with device.Device(1):
++            x = testing.shaped_random((30,), cupy, cupy.complex128)
++            cupy.fft.fft(x)
++            y = testing.shaped_random((40, 40), cupy, cupy.complex64)
++            cupy.fft.fftn(y)
++        for _, node in cache0:
++            assert plan0 is not node.plan
++        for _, node in cache1:
++            assert plan1 is not node.plan
++        assert cache0.get_curr_size() == 1 <= cache0.get_size()
++        assert cache1.get_curr_size() == 2 <= cache1.get_size()
++
++    def test_LRU_cache8(self):
++        # test if Plan1d and PlanNd can coexist in the same cache
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        # do a 1D FFT
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        assert isinstance(next(iter(cache))[1].plan, cufft.Plan1d)
++
++        # then a 3D FFT
++        a = testing.shaped_random((8, 8, 8), cupy, cupy.complex128)
++        cupy.fft.fftn(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++        iterator = iter(cache)
++
++        # the cached order is 1. PlanNd, 2. Plan1d
++        assert isinstance(next(iterator)[1].plan, cufft.PlanNd)
++        assert isinstance(next(iterator)[1].plan, cufft.Plan1d)
++
++    def test_LRU_cache9(self):
++        # test if memsizes in the cache adds up
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        memsize = 0
++        a = testing.shaped_random((10,), cupy, cupy.float32)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        memsize += next(iter(cache))[1].plan.work_area.mem.size
++
++        a = testing.shaped_random((48,), cupy, cupy.complex64)
++        cupy.fft.fft(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++        memsize += next(iter(cache))[1].plan.work_area.mem.size
++
++        assert memsize == cache.get_curr_memsize()
++
++    def test_LRU_cache10(self):
++        # test if deletion works and if show_info() is consistent with data
++        cache = config.get_plan_cache()
++        assert cache.get_curr_size() == 0 <= cache.get_size()
++
++        curr_size = 0
++        size = 2
++        curr_memsize = 0
++        memsize = '(unlimited)'  # default
++
++        a = testing.shaped_random((16, 16), cupy, cupy.float32)
++        cupy.fft.fft2(a)
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        node1 = next(iter(cache))[1]
++        curr_size += 1
++        curr_memsize += node1.plan.work_area.mem.size
++        stdout = intercept_stdout(cache.show_info)
++        assert '{0} / {1} (counts)'.format(curr_size, size) in stdout
++        assert '{0} / {1} (bytes)'.format(curr_memsize, memsize) in stdout
++        assert str(node1) in stdout
++
++        a = testing.shaped_random((1024,), cupy, cupy.complex64)
++        cupy.fft.ifft(a)
++        assert cache.get_curr_size() == 2 <= cache.get_size()
++        node2 = next(iter(cache))[1]
++        curr_size += 1
++        curr_memsize += node2.plan.work_area.mem.size
++        stdout = intercept_stdout(cache.show_info)
++        assert '{0} / {1} (counts)'.format(curr_size, size) in stdout
++        assert '{0} / {1} (bytes)'.format(curr_memsize, memsize) in stdout
++        assert str(node2) + '\n' + str(node1) in stdout
++
++        # test deletion
++        key = node2.key
++        del cache[key]
++        assert cache.get_curr_size() == 1 <= cache.get_size()
++        curr_size -= 1
++        curr_memsize -= node2.plan.work_area.mem.size
++        stdout = intercept_stdout(cache.show_info)
++        assert '{0} / {1} (counts)'.format(curr_size, size) in stdout
++        assert '{0} / {1} (bytes)'.format(curr_memsize, memsize) in stdout
++        assert str(node2) not in stdout
++
++    @multi_gpu_config(gpu_configs=[[0, 1], [1, 0]])
++    @testing.multi_gpu(2)
++    def test_LRU_cache11(self):
++        # test if collectively deleting a multi-GPU plan works
++        cache0 = self.caches[0]
++        cache1 = self.caches[1]
++
++        # ensure a fresh state
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # do a multi-GPU FFT
++        c = testing.shaped_random((128,), cupy, cupy.complex64)
++        cupy.fft.fft(c)
++        assert cache0.get_curr_size() == 1 <= cache0.get_size()
++        assert cache1.get_curr_size() == 1 <= cache1.get_size()
++
++        node0 = next(iter(cache0))[1]
++        node1 = next(iter(cache1))[1]
++        assert node0.key == node1.key
++        assert node0.plan is node1.plan
++        assert cache0.get_curr_memsize() == node0.memsize > 0
++        assert cache1.get_curr_memsize() == node1.memsize > 0
++
++        # delete
++        del cache0[node0.key]
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++        assert cache0.get_curr_memsize() == 0
++        assert cache1.get_curr_memsize() == 0
++
++    @multi_gpu_config(gpu_configs=[[0, 1], [1, 0]])
++    @testing.multi_gpu(2)
++    def test_LRU_cache12(self):
++        # test if an error is raise when one of the caches is unable
++        # to fit it a multi-GPU plan
++        cache0 = self.caches[0]
++        cache1 = self.caches[1]
++
++        # ensure a fresh state
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
++
++        # make it impossible to cache
++        cache1.set_memsize(1)
++
++        # do a multi-GPU FFT
++        with pytest.raises(RuntimeError) as e:
++            c = testing.shaped_random((128,), cupy, cupy.complex64)
++            cupy.fft.fft(c)
++        assert 'plan memsize is too large for device 1' in str(e.value)
++        assert cache0.get_curr_size() == 0 <= cache0.get_size()
++        assert cache1.get_curr_size() == 0 <= cache1.get_size()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

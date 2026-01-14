@@ -1,0 +1,1052 @@
+  Task-ID: saleor__saleor-3016@e00e759
+  Please checkout to this commit first: 0f29b4e2d7b3ec393b6afea9d88a6d9e067a1adc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  API tests don't test permissions
+### What I'm trying to achieve
+Tests suite should be precise. Now all non-user actions are tested using `admin_api_client` fixture which operates on superuser privileges level. This way, we don't test if staff API endpoints contain correct permissions checking.
+In the future, it may lead to a potential security issue.
+
+### What I expected to happen
+Staff API endpoints tests should use `staff_api_client` fixture and add correct permissions at the beginning of the test. Insufficient permissions test case should be covered as well.
+
+
+Refactor API client in tests
+Calling API in tests requires us to write some repetitive code:
+```
+admin_api_client.post(reverse('api'), {'query': query, 'variables': variables})
+```
+
+Both the URL and structure of the data dictionary are the same in every API, so we could adjust the `post` method of our `ApiClient` and have something like:
+```
+admin_api_client.post(query, variables)
+```
+
+We could also experiment with passing permissions to be used for a particular call, e.g.
+```
+admin_api_client.post(query, variables, permissions=[permission_manage_orders])
+```
+
+## TODO
+- [x] New method `post_grapqhl` for simplified query posting
+- [ ] All tests tested with `staff_api_client` instead of `admin_api_client`
+- [ ] `admin_api_client` is removed
+- [ ] API-related fixtures should be moved to `tests/api/conftest.py`
+  </issue>
+  
+  <patch>
+  diff --git a/tests/api/conftest.py b/tests/api/conftest.py
+new file mode 100644
+index 00000000000..381878e860f
+--- /dev/null
++++ b/tests/api/conftest.py
+@@ -0,0 +1,79 @@
++import json
++
++import pytest
++
++from django.shortcuts import reverse
++from django.test.client import MULTIPART_CONTENT, Client
++from graphql_jwt.shortcuts import get_token
++
++from .utils import assert_no_permission
++
++API_PATH = reverse('api')
++
++
++class ApiClient(Client):
++    """GraphQL API client."""
++
++    def __init__(self, *args, **kwargs):
++        user = kwargs.pop('user')
++        self.user = user
++        self.token = get_token(user)
++        super().__init__(*args, **kwargs)
++
++    def _base_environ(self, **request):
++        environ = super()._base_environ(**request)
++        environ.update({'HTTP_AUTHORIZATION': 'JWT %s' % self.token})
++        return environ
++
++    def post(self, data=None, **kwargs):
++        """Send a POST request.
++
++        This wrapper sets the `application/json` content type which is
++        more suitable for standard GraphQL requests and doesn't mismatch with
++        handling multipart requests in Graphene.
++        """
++        if data:
++            data = json.dumps(data)
++        kwargs['content_type'] = 'application/json'
++        return super().post(API_PATH, data, **kwargs)
++
++    def post_graphql(
++            self, query=None, variables=None, permissions=None, **kwargs):
++        """Dedicated helper for posting GraphQL queries.
++
++        Sets the `application/json` content type and json.dumps the variables
++        if present.
++        """
++        data = {}
++        if query is not None:
++            data['query'] = query
++        if variables is not None:
++            data['variables'] = json.dumps(variables)
++        if data:
++            data = json.dumps(data)
++        kwargs['content_type'] = 'application/json'
++
++        if permissions:
++            response = super().post(API_PATH, data, **kwargs)
++            assert_no_permission(response)
++            self.user.user_permissions.add(*permissions)
++        return super().post(API_PATH, data, **kwargs)
++
++    def post_multipart(self, *args, **kwargs):
++        """Send a multipart POST request.
++
++        This is used to send multipart requests to GraphQL API when e.g.
++        uploading files.
++        """
++        kwargs['content_type'] = MULTIPART_CONTENT
++        return super().post(API_PATH, *args, **kwargs)
++
++
++@pytest.fixture
++def staff_api_client(staff_user):
++    return ApiClient(user=staff_user)
++
++
++@pytest.fixture
++def user_api_client(customer_user):
++    return ApiClient(user=customer_user)
+diff --git a/tests/api/test_page.py b/tests/api/test_page.py
+index e3153cbb40a..76ce48b6be8 100644
+--- a/tests/api/test_page.py
++++ b/tests/api/test_page.py
+@@ -23,7 +23,7 @@ def test_page_query(user_api_client, page):
+     assert page_data['slug'] == page.slug
+ 
+ 
+-def test_page_create_mutation(admin_api_client):
++def test_page_create_mutation(staff_api_client, permission_manage_pages):
+     query = """
+         mutation CreatePage(
+                 $slug: String!, $title: String!, $content: String!,
+@@ -55,7 +55,8 @@ def test_page_create_mutation(admin_api_client):
+     variables = {
+         'title': page_title, 'content': page_content,
+         'isVisible': page_isVisible, 'slug': page_slug}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_pages])
+     content = get_graphql_content(response)
+     data = content['data']['pageCreate']
+     assert data['errors'] == []
+@@ -65,7 +66,7 @@ def test_page_create_mutation(admin_api_client):
+     assert data['page']['isVisible'] == page_isVisible
+ 
+ 
+-def test_page_delete_mutation(admin_api_client, page):
++def test_page_delete_mutation(staff_api_client, page, permission_manage_pages):
+     query = """
+         mutation DeletePage($id: ID!) {
+             pageDelete(id: $id) {
+@@ -81,7 +82,8 @@ def test_page_delete_mutation(admin_api_client, page):
+             }
+     """
+     variables = {'id': graphene.Node.to_global_id('Page', page.id)}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_pages])
+     content = get_graphql_content(response)
+     data = content['data']['pageDelete']
+     assert data['page']['title'] == page.title
+diff --git a/tests/api/test_shipping_method.py b/tests/api/test_shipping_method.py
+index a1ff344781f..d36bed740a9 100644
+--- a/tests/api/test_shipping_method.py
++++ b/tests/api/test_shipping_method.py
+@@ -5,66 +5,8 @@
+ from tests.api.utils import get_graphql_content
+ 
+ 
+-@pytest.fixture
+-def weight_based_shipping_query():
+-    """Dummy weight based createShippingPrice query for tests reusability."""
+-    return """
+-    mutation createShipipngPrice(
+-        $type: ShippingMethodTypeEnum, $name: String!, $price: Decimal,
+-        $shippingZone: ID!, $maximumOrderWeight: WeightScalar,
+-        $minimumOrderWeight: WeightScalar) {
+-        shippingPriceCreate(
+-            input: {
+-                name: $name, price: $price, shippingZone: $shippingZone,
+-                minimumOrderWeight:$minimumOrderWeight,
+-                maximumOrderWeight: $maximumOrderWeight, type: $type}) {
+-            errors {
+-                field
+-                message
+-            }
+-            shippingMethod {
+-                minimumOrderWeight {
+-                    value
+-                    unit
+-                }
+-                maximumOrderWeight {
+-                    value
+-                    unit}}}}
+-    """
+-
+-
+-@pytest.fixture
+-def price_based_shipping_query():
+-    """Dummy price based createShippingPrice query for tests reusability."""
+-    return """
+-        mutation createShipipngPrice(
+-            $type: ShippingMethodTypeEnum, $name: String!, $price: Decimal,
+-            $shippingZone: ID!, $minimumOrderPrice: Decimal,
+-            $maximumOrderPrice: Decimal) {
+-        shippingPriceCreate(input: {
+-                name: $name, price: $price, shippingZone: $shippingZone,
+-                minimumOrderPrice: $minimumOrderPrice,
+-                maximumOrderPrice: $maximumOrderPrice, type: $type}) {
+-            errors {
+-                field
+-                message
+-            }
+-            shippingMethod {
+-                name
+-                price {
+-                    amount
+-                }
+-                minimumOrderPrice {
+-                    amount
+-                }
+-                maximumOrderPrice {
+-                    amount
+-                }
+-                type}}}
+-    """
+-
+-
+-def test_shipping_zone_query(user_api_client, shipping_zone):
++def test_shipping_zone_query(
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     shipping = shipping_zone
+     query = """
+     query ShippingQuery($id: ID!) {
+@@ -88,7 +30,8 @@ def test_shipping_zone_query(user_api_client, shipping_zone):
+     """
+     ID = graphene.Node.to_global_id('ShippingZone', shipping.id)
+     variables = {'id': ID}
+-    response = user_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+ 
+     shipping_data = content['data']['shippingZone']
+@@ -101,7 +44,8 @@ def test_shipping_zone_query(user_api_client, shipping_zone):
+     assert data_price_range['stop']['amount'] == price_range.stop.amount
+ 
+ 
+-def test_shipping_zones_query(user_api_client, shipping_zone):
++def test_shipping_zones_query(
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     query = """
+     query MultipleShippings {
+         shippingZones {
+@@ -110,8 +54,8 @@ def test_shipping_zones_query(user_api_client, shipping_zone):
+     }
+     """
+     num_of_shippings = shipping_zone._meta.model.objects.count()
+-
+-    response = user_api_client.post_graphql(query)
++    response = staff_api_client.post_graphql(
++        query, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     assert content['data']['shippingZones']['totalCount'] == num_of_shippings
+ 
+@@ -138,10 +82,11 @@ def test_shipping_zones_query(user_api_client, shipping_zone):
+ """
+ 
+ 
+-def test_create_shipping_zone(admin_api_client):
++def test_create_shipping_zone(staff_api_client, permission_manage_shipping):
+     query = CREATE_SHIPPING_ZONE_QUERY
+     variables = {'name': 'test shipping', 'countries': ['PL']}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneCreate']
+     assert not data['errors']
+@@ -151,10 +96,12 @@ def test_create_shipping_zone(admin_api_client):
+     assert zone['default'] == False
+ 
+ 
+-def test_create_default_shipping_zone(admin_api_client):
++def test_create_default_shipping_zone(
++        staff_api_client, permission_manage_shipping):
+     query = CREATE_SHIPPING_ZONE_QUERY
+     variables = {'default': True, 'name': 'test shipping', 'countries': ['PL']}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneCreate']
+     assert not data['errors']
+@@ -165,13 +112,14 @@ def test_create_default_shipping_zone(admin_api_client):
+ 
+ 
+ def test_create_duplicated_default_shipping_zone(
+-        admin_api_client, shipping_zone):
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     shipping_zone.default = True
+     shipping_zone.save()
+ 
+     query = CREATE_SHIPPING_ZONE_QUERY
+     variables = {'default': True, 'name': 'test shipping', 'countries': ['PL']}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneCreate']
+     assert data['errors']
+@@ -199,12 +147,14 @@ def test_create_duplicated_default_shipping_zone(
+ """
+ 
+ 
+-def test_update_shipping_zone(admin_api_client, shipping_zone):
++def test_update_shipping_zone(
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     query = UPDATE_SHIPPING_ZONE_QUERY
+     name = 'Parabolic name'
+     shipping_id = graphene.Node.to_global_id('ShippingZone', shipping_zone.pk)
+     variables = {'id': shipping_id, 'name': name, 'countries': []}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneUpdate']
+     assert not data['errors']
+@@ -213,7 +163,7 @@ def test_update_shipping_zone(admin_api_client, shipping_zone):
+ 
+ 
+ def test_update_shipping_zone_default_exists(
+-        admin_api_client, shipping_zone):
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     query = UPDATE_SHIPPING_ZONE_QUERY
+     default_zone = shipping_zone
+     default_zone.default = True
+@@ -223,8 +173,12 @@ def test_update_shipping_zone_default_exists(
+ 
+     shipping_id = graphene.Node.to_global_id('ShippingZone', shipping_zone.pk)
+     variables = {
+-        'id': shipping_id, 'name': 'Name', 'countries': [], 'default': True}
+-    response = admin_api_client.post_graphql(query, variables)
++        'id': shipping_id,
++        'name': 'Name',
++        'countries': [],
++        'default': True}
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneUpdate']
+     assert data['errors']
+@@ -233,7 +187,8 @@ def test_update_shipping_zone_default_exists(
+         'Default shipping zone already exists.')
+ 
+ 
+-def test_delete_shipping_zone(admin_api_client, shipping_zone):
++def test_delete_shipping_zone(
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     query = """
+         mutation deleteShippingZone($id: ID!) {
+             shippingZoneDelete(id: $id) {
+@@ -246,7 +201,8 @@ def test_delete_shipping_zone(admin_api_client, shipping_zone):
+     shipping_zone_id = graphene.Node.to_global_id(
+         'ShippingZone', shipping_zone.pk)
+     variables = {'id': shipping_zone_id}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingZoneDelete']['shippingZone']
+     assert data['name'] == shipping_zone.name
+@@ -254,24 +210,60 @@ def test_delete_shipping_zone(admin_api_client, shipping_zone):
+         shipping_zone.refresh_from_db()
+ 
+ 
++PRICE_BASED_SHIPPING_QUERY = """
++    mutation createShipipngPrice(
++        $type: ShippingMethodTypeEnum, $name: String!, $price: Decimal,
++        $shippingZone: ID!, $minimumOrderPrice: Decimal,
++        $maximumOrderPrice: Decimal) {
++    shippingPriceCreate(input: {
++            name: $name, price: $price, shippingZone: $shippingZone,
++            minimumOrderPrice: $minimumOrderPrice,
++            maximumOrderPrice: $maximumOrderPrice, type: $type}) {
++        errors {
++            field
++            message
++        }
++        shippingMethod {
++            name
++            price {
++                amount
++            }
++            minimumOrderPrice {
++                amount
++            }
++            maximumOrderPrice {
++                amount
++            }
++            type
++            }
++        }
++    }
++"""
++
++
+ @pytest.mark.parametrize(
+     'min_price, max_price, expected_min_price, expected_max_price',
+-    (
+-        (10.32, 15.43, {'amount': 10.32}, {'amount': 15.43}),
+-        (10.33, None, {'amount': 10.33}, None)))
++    ((10.32, 15.43, {
++        'amount': 10.32}, {
++            'amount': 15.43}), (10.33, None, {
++                'amount': 10.33}, None)))
+ def test_create_shipping_method(
+-        admin_api_client, shipping_zone, min_price, max_price,
+-        expected_min_price, expected_max_price, price_based_shipping_query):
+-    query = price_based_shipping_query
++        staff_api_client, shipping_zone, min_price, max_price,
++        expected_min_price, expected_max_price, permission_manage_shipping):
++    query = PRICE_BASED_SHIPPING_QUERY
+     name = 'DHL'
+     price = 12.34
+     shipping_zone_id = graphene.Node.to_global_id(
+         'ShippingZone', shipping_zone.pk)
+     variables = {
+-        'shippingZone': shipping_zone_id, 'name': name, 'price': price,
+-        'minimumOrderPrice': min_price, 'maximumOrderPrice': max_price,
++        'shippingZone': shipping_zone_id,
++        'name': name,
++        'price': price,
++        'minimumOrderPrice': min_price,
++        'maximumOrderPrice': max_price,
+         'type': ShippingMethodTypeEnum.PRICE.name}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingPriceCreate']['shippingMethod']
+     assert 'errors' not in data
+@@ -282,23 +274,95 @@ def test_create_shipping_method(
+     assert data['type'] == ShippingMethodTypeEnum.PRICE.name
+ 
+ 
++@pytest.mark.parametrize(
++    'min_price, max_price, expected_error',
++    ((
++        None, 15.11, {
++            'field':
++            'minimumOrderPrice',
++            'message':
++            'Minimum order price is required'
++            ' for Price Based shipping.'}),
++     (
++         20.21, 15.11, {
++             'field': 'maximumOrderPrice',
++             'message':
++             'Maximum order price should be larger than the minimum.'})))
++def test_create_price_shipping_method_errors(
++        shipping_zone, staff_api_client, min_price, max_price, expected_error,
++        permission_manage_shipping):
++    query = PRICE_BASED_SHIPPING_QUERY
++    shipping_zone_id = graphene.Node.to_global_id(
++        'ShippingZone', shipping_zone.pk)
++    variables = {
++        'shippingZone': shipping_zone_id,
++        'name': 'DHL',
++        'price': 12.34,
++        'minimumOrderPrice': min_price,
++        'maximumOrderPrice': max_price,
++        'type': ShippingMethodTypeEnum.PRICE.name}
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
++    content = get_graphql_content(response)
++    data = content['data']['shippingPriceCreate']
++    assert data['errors'][0] == expected_error
++
++
++WEIGHT_BASED_SHIPPING_QUERY = """
++    mutation createShipipngPrice(
++        $type: ShippingMethodTypeEnum, $name: String!, $price: Decimal,
++        $shippingZone: ID!, $maximumOrderWeight: WeightScalar,
++        $minimumOrderWeight: WeightScalar) {
++        shippingPriceCreate(
++            input: {
++                name: $name, price: $price, shippingZone: $shippingZone,
++                minimumOrderWeight:$minimumOrderWeight,
++                maximumOrderWeight: $maximumOrderWeight, type: $type}) {
++            errors {
++                field
++                message
++            }
++            shippingMethod {
++                minimumOrderWeight {
++                    value
++                    unit
++                }
++                maximumOrderWeight {
++                    value
++                    unit
++                }
++            }
++        }
++    }
++"""
++
++
+ @pytest.mark.parametrize(
+     'min_weight, max_weight, expected_min_weight, expected_max_weight',
+-    (
+-        (10.32, 15.64, {'value': 10.32, 'unit': 'kg'},
+-         {'value': 15.64, 'unit': 'kg'}),
+-        (10.92, None, {'value': 10.92, 'unit': 'kg'}, None)))
++    ((
++        10.32, 15.64, {
++            'value': 10.32,
++            'unit': 'kg'}, {
++                'value': 15.64,
++                'unit': 'kg'}),
++     (10.92, None, {
++         'value': 10.92,
++         'unit': 'kg'}, None)))
+ def test_create_weight_based_shipping_method(
+-        shipping_zone, admin_api_client, min_weight, max_weight,
+-        expected_min_weight, expected_max_weight, weight_based_shipping_query):
+-    query = weight_based_shipping_query
++        shipping_zone, staff_api_client, min_weight, max_weight,
++        expected_min_weight, expected_max_weight, permission_manage_shipping):
++    query = WEIGHT_BASED_SHIPPING_QUERY
+     shipping_zone_id = graphene.Node.to_global_id(
+         'ShippingZone', shipping_zone.pk)
+     variables = {
+-        'shippingZone': shipping_zone_id, 'name': 'DHL', 'price': 12.34,
+-        'minimumOrderWeight': min_weight, 'maximumOrderWeight': max_weight,
++        'shippingZone': shipping_zone_id,
++        'name': 'DHL',
++        'price': 12.34,
++        'minimumOrderWeight': min_weight,
++        'maximumOrderWeight': max_weight,
+         'type': ShippingMethodTypeEnum.WEIGHT.name}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingPriceCreate']['shippingMethod']
+     assert data['minimumOrderWeight'] == expected_min_weight
+@@ -308,58 +372,44 @@ def test_create_weight_based_shipping_method(
+ @pytest.mark.parametrize(
+     'min_weight, max_weight, expected_error',
+     (
+-        (None, 15.11, {
+-            'field': 'minimumOrderWeight',
+-            'message': 'Minimum order weight is required for'
+-                       ' Weight Based shipping.'}),
+-        (20.21, 15.11, {
+-            'field': 'maximumOrderWeight',
+-            'message': 'Maximum order weight should be larger than the minimum.'  # noqa
+-        })))
++        (
++            None, 15.11, {
++                'field':
++                'minimumOrderWeight',
++                'message':
++                'Minimum order weight is required for'
++                ' Weight Based shipping.'}),
++        (
++            20.21,
++            15.11,
++            {
++                'field':
++                'maximumOrderWeight',
++                'message':
++                'Maximum order weight should be larger than the minimum.'  # noqa
++            })))
+ def test_create_weight_shipping_method_errors(
+-        shipping_zone, admin_api_client, min_weight, max_weight,
+-        expected_error, weight_based_shipping_query):
+-    query = weight_based_shipping_query
++        shipping_zone, staff_api_client, min_weight, max_weight,
++        expected_error, permission_manage_shipping):
++    query = WEIGHT_BASED_SHIPPING_QUERY
+     shipping_zone_id = graphene.Node.to_global_id(
+         'ShippingZone', shipping_zone.pk)
+     variables = {
+-        'shippingZone': shipping_zone_id, 'name': 'DHL', 'price': 12.34,
+-        'minimumOrderWeight': min_weight, 'maximumOrderWeight': max_weight,
++        'shippingZone': shipping_zone_id,
++        'name': 'DHL',
++        'price': 12.34,
++        'minimumOrderWeight': min_weight,
++        'maximumOrderWeight': max_weight,
+         'type': ShippingMethodTypeEnum.WEIGHT.name}
+-    response = admin_api_client.post_graphql(query, variables)
+-    content = get_graphql_content(response)
+-    data = content['data']['shippingPriceCreate']
+-    assert data['errors'][0] == expected_error
+-
+-
+-@pytest.mark.parametrize(
+-    'min_price, max_price, expected_error',
+-    (
+-        (None, 15.11, {
+-            'field': 'minimumOrderPrice',
+-            'message': 'Minimum order price is required'
+-                       ' for Price Based shipping.'}),
+-        (20.21, 15.11, {
+-            'field': 'maximumOrderPrice',
+-            'message': 'Maximum order price should be larger than the minimum.'
+-        })))
+-def test_create_price_shipping_method_errors(
+-        shipping_zone, admin_api_client, min_price, max_price,
+-        expected_error, price_based_shipping_query):
+-    query = price_based_shipping_query
+-    shipping_zone_id = graphene.Node.to_global_id(
+-        'ShippingZone', shipping_zone.pk)
+-    variables = {
+-        'shippingZone': shipping_zone_id, 'name': 'DHL', 'price': 12.34,
+-        'minimumOrderPrice': min_price, 'maximumOrderPrice': max_price,
+-        'type': ShippingMethodTypeEnum.PRICE.name}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingPriceCreate']
+     assert data['errors'][0] == expected_error
+ 
+ 
+-def test_update_shipping_method(admin_api_client, shipping_zone):
++def test_update_shipping_method(
++        staff_api_client, shipping_zone, permission_manage_shipping):
+     query = """
+     mutation updateShippingPrice(
+         $id: ID!, $price: Decimal, $shippingZone: ID!,
+@@ -397,13 +447,15 @@ def test_update_shipping_method(admin_api_client, shipping_zone):
+         'id': shipping_method_id,
+         'minimumOrderPrice': 12.00,
+         'type': ShippingMethodTypeEnum.PRICE.name}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingPriceUpdate']['shippingMethod']
+     assert data['price']['amount'] == float(price)
+ 
+ 
+-def test_delete_shipping_method(admin_api_client, shipping_method):
++def test_delete_shipping_method(
++        staff_api_client, shipping_method, permission_manage_shipping):
+     query = """
+         mutation deleteShippingPrice($id: ID!) {
+             shippingPriceDelete(id: $id) {
+@@ -418,7 +470,8 @@ def test_delete_shipping_method(admin_api_client, shipping_method):
+     shipping_method_id = graphene.Node.to_global_id(
+         'ShippingMethod', shipping_method.pk)
+     variables = {'id': shipping_method_id}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_shipping])
+     content = get_graphql_content(response)
+     data = content['data']['shippingPriceDelete']['shippingMethod']
+     assert data['price']['amount'] == float(shipping_method.price.amount)
+diff --git a/tests/api/test_shop.py b/tests/api/test_shop.py
+index 83e76604859..9101d879371 100644
+--- a/tests/api/test_shop.py
++++ b/tests/api/test_shop.py
+@@ -9,7 +9,7 @@
+ 
+ 
+ def test_query_authorization_keys(
+-        authorization_key, admin_api_client, user_api_client):
++        authorization_key, staff_api_client, permission_manage_settings):
+     query = """
+     query {
+         shop {
+@@ -20,15 +20,13 @@ def test_query_authorization_keys(
+         }
+     }
+     """
+-    response = admin_api_client.post_graphql(query)
++    response = staff_api_client.post_graphql(
++        query, permissions=[permission_manage_settings])
+     content = get_graphql_content(response)
+     data = content['data']['shop']
+     assert data['authorizationKeys'][0]['name'] == authorization_key.name
+     assert data['authorizationKeys'][0]['key'] == authorization_key.key
+ 
+-    response = user_api_client.post_graphql(query)
+-    assert_no_permission(response)
+-
+ 
+ def test_query_countries(user_api_client):
+     query = """
+@@ -116,7 +114,7 @@ def test_query_languages(settings, user_api_client):
+     assert len(data['languages']) == len(settings.LANGUAGES)
+ 
+ 
+-def test_query_permissions(admin_api_client, user_api_client):
++def test_query_permissions(staff_api_client, permission_manage_settings):
+     query = """
+     query {
+         shop {
+@@ -127,7 +125,8 @@ def test_query_permissions(admin_api_client, user_api_client):
+         }
+     }
+     """
+-    response = admin_api_client.post_graphql(query)
++    response = staff_api_client.post_graphql(
++        query, permissions=[permission_manage_settings])
+     content = get_graphql_content(response)
+     data = content['data']['shop']
+     permissions = data['permissions']
+@@ -136,9 +135,6 @@ def test_query_permissions(admin_api_client, user_api_client):
+     for code in permissions_codes:
+         assert code in MODELS_PERMISSIONS
+ 
+-    response = user_api_client.post_graphql(query)
+-    assert_no_permission(response)
+-
+ 
+ def test_query_navigation(user_api_client, site_settings):
+     query = """
+@@ -162,7 +158,8 @@ def test_query_navigation(user_api_client, site_settings):
+     assert navigation_data['secondary']['name'] == site_settings.bottom_menu.name
+ 
+ 
+-def test_shop_settings_mutation(admin_api_client, site_settings):
++def test_shop_settings_mutation(
++        staff_api_client, site_settings, permission_manage_settings):
+     query = """
+         mutation updateSettings($input: ShopSettingsInput!) {
+             shopSettingsUpdate(input: $input) {
+@@ -177,7 +174,8 @@ def test_shop_settings_mutation(admin_api_client, site_settings):
+         'input': {
+             'includeTaxesInPrices': False,
+             'headerText': 'Lorem ipsum'}}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_settings])
+     content = get_graphql_content(response)
+     data = content['data']['shopSettingsUpdate']['shop']
+     assert data['includeTaxesInPrices'] == False
+@@ -186,7 +184,7 @@ def test_shop_settings_mutation(admin_api_client, site_settings):
+     assert not site_settings.include_taxes_in_prices
+ 
+ 
+-def test_shop_domain_update(admin_api_client):
++def test_shop_domain_update(staff_api_client, permission_manage_settings):
+     query = """
+         mutation updateSettings($input: SiteDomainInput!) {
+             shopDomainUpdate(input: $input) {
+@@ -206,7 +204,8 @@ def test_shop_domain_update(admin_api_client):
+             'name': new_name}}
+     site = Site.objects.get_current()
+     assert site.domain != 'lorem-ipsum.com'
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_settings])
+     content = get_graphql_content(response)
+     data = content['data']['shopDomainUpdate']['shop']
+     assert data['domain']['host'] == 'lorem-ipsum.com'
+@@ -216,7 +215,8 @@ def test_shop_domain_update(admin_api_client):
+     assert site.name == new_name
+ 
+ 
+-def test_homepage_collection_update(admin_api_client, collection):
++def test_homepage_collection_update(
++        staff_api_client, collection, permission_manage_settings):
+     query = """
+         mutation homepageCollectionUpdate($collection: ID!) {
+             homepageCollectionUpdate(collection: $collection) {
+@@ -231,7 +231,8 @@ def test_homepage_collection_update(admin_api_client, collection):
+     """
+     collection_id = graphene.Node.to_global_id('Collection', collection.id)
+     variables = {'collection': collection_id}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_settings])
+     content = get_graphql_content(response)
+     data = content['data']['homepageCollectionUpdate']['shop']
+     assert data['homepageCollection']['id'] == collection_id
+diff --git a/tests/api/test_variant.py b/tests/api/test_variant.py
+index 1a63557b609..b0481f758e4 100644
+--- a/tests/api/test_variant.py
++++ b/tests/api/test_variant.py
+@@ -4,7 +4,7 @@
+ from tests.api.utils import get_graphql_content
+ 
+ 
+-def test_fetch_variant(admin_api_client, product):
++def test_fetch_variant(staff_api_client, product):
+     query = """
+     query ProductVariantDetails($id: ID!) {
+         productVariant(id: $id) {
+@@ -52,13 +52,14 @@ def test_fetch_variant(admin_api_client, product):
+     variant = product.variants.first()
+     variant_id = graphene.Node.to_global_id('ProductVariant', variant.pk)
+     variables = {'id': variant_id}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(query, variables)
+     content = get_graphql_content(response)
+     data = content['data']['productVariant']
+     assert data['name'] == variant.name
+ 
+ 
+-def test_create_variant(admin_api_client, product, product_type):
++def test_create_variant(
++        staff_api_client, product, product_type, permission_manage_products):
+     query = """
+         mutation createVariant (
+             $productId: ID!,
+@@ -130,7 +131,8 @@ def test_create_variant(admin_api_client, product, product_type):
+         'attributes': [
+             {'slug': variant_slug, 'value': variant_value}],
+         'trackInventory': True}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_products])
+     content = get_graphql_content(response)
+     data = content['data']['productVariantCreate']['productVariant']
+     assert data['name'] == variant_value
+@@ -145,7 +147,8 @@ def test_create_variant(admin_api_client, product, product_type):
+ 
+ 
+ def test_create_product_variant_not_all_attributes(
+-        admin_api_client, product, product_type, color_attribute):
++        staff_api_client, product, product_type, color_attribute,
++        permission_manage_products):
+     query = """
+             mutation createVariant (
+                 $productId: ID!,
+@@ -175,14 +178,17 @@ def test_create_product_variant_not_all_attributes(
+         'productId': product_id,
+         'sku': sku,
+         'attributes': [{'slug': variant_slug, 'value': variant_value}]}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_products])
+     content = get_graphql_content(response)
+     assert content['data']['productVariantCreate']['errors']
+-    assert content['data']['productVariantCreate']['errors'][0]['field'] == 'attributes:color'
++    assert content['data']['productVariantCreate']['errors'][0]['field'] == (
++        'attributes:color')
+     assert not product.variants.filter(sku=sku).exists()
+ 
+ 
+-def test_update_product_variant(admin_api_client, product):
++def test_update_product_variant(
++        staff_api_client, product, permission_manage_products):
+     query = """
+         mutation updateVariant (
+             $id: ID!,
+@@ -225,7 +231,8 @@ def test_update_product_variant(admin_api_client, product):
+         'costPrice': cost_price,
+         'trackInventory': True}
+ 
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_products])
+     variant.refresh_from_db()
+     content = get_graphql_content(response)
+     data = content['data']['productVariantUpdate']['productVariant']
+@@ -236,7 +243,8 @@ def test_update_product_variant(admin_api_client, product):
+ 
+ 
+ def test_update_product_variant_not_all_attributes(
+-        admin_api_client, product, product_type, color_attribute):
++        staff_api_client, product, product_type, color_attribute,
++        permission_manage_products):
+     query = """
+         mutation updateVariant (
+             $id: ID!,
+@@ -268,15 +276,17 @@ def test_update_product_variant_not_all_attributes(
+         'sku': sku,
+         'attributes': [{'slug': variant_slug, 'value': variant_value}]}
+ 
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_products])
+     variant.refresh_from_db()
+     content = get_graphql_content(response)
+     assert content['data']['productVariantUpdate']['errors']
+-    assert content['data']['productVariantUpdate']['errors'][0]['field'] == 'attributes:color'
++    assert content['data']['productVariantUpdate']['errors'][0]['field'] == (
++        'attributes:color')
+     assert not product.variants.filter(sku=sku).exists()
+ 
+ 
+-def test_delete_variant(admin_api_client, product):
++def test_delete_variant(staff_api_client, product, permission_manage_products):
+     query = """
+         mutation variantDelete($id: ID!) {
+             productVariantDelete(id: $id) {
+@@ -290,7 +300,8 @@ def test_delete_variant(admin_api_client, product):
+     variant = product.variants.first()
+     variant_id = graphene.Node.to_global_id('ProductVariant', variant.pk)
+     variables = {'id': variant_id}
+-    response = admin_api_client.post_graphql(query, variables)
++    response = staff_api_client.post_graphql(
++        query, variables, permissions=[permission_manage_products])
+     content = get_graphql_content(response)
+     data = content['data']['productVariantDelete']
+     assert data['productVariant']['sku'] == variant.sku
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 4c8b8f29892..dd53b7f9438 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,4 +1,3 @@
+-import json
+ from io import BytesIO
+ from unittest.mock import MagicMock, Mock
+ 
+@@ -9,13 +8,10 @@
+ from django.core.files import File
+ from django.core.files.uploadedfile import SimpleUploadedFile
+ from django.forms import ModelForm
+-from django.shortcuts import reverse
+-from django.test.client import MULTIPART_CONTENT, Client
+ from django.utils.encoding import smart_text
+ from django_countries import countries
+ from django_prices_vatlayer.models import VAT
+ from django_prices_vatlayer.utils import get_tax_for_rate
+-from graphql_jwt.shortcuts import get_token
+ from payments import FraudStatus, PaymentStatus
+ from PIL import Image
+ from prices import Money
+@@ -38,75 +34,6 @@
+     ShippingMethod, ShippingMethodType, ShippingZone)
+ from saleor.site.models import AuthorizationKey, SiteSettings
+ 
+-API_PATH = reverse('api')
+-
+-
+-class ApiClient(Client):
+-    """GraphQL API client."""
+-
+-    def __init__(self, *args, **kwargs):
+-        user = kwargs.pop('user')
+-        self.user = user
+-        self.token = get_token(user)
+-        super().__init__(*args, **kwargs)
+-
+-    def _base_environ(self, **request):
+-        environ = super()._base_environ(**request)
+-        environ.update({'HTTP_AUTHORIZATION': 'JWT %s' % self.token})
+-        return environ
+-
+-    def post(self, data=None, **kwargs):
+-        """Send a POST request.
+-
+-        This wrapper sets the `application/json` content type which is
+-        more suitable for standard GraphQL requests and doesn't mismatch with
+-        handling multipart requests in Graphene.
+-        """
+-        if data:
+-            data = json.dumps(data)
+-        kwargs['content_type'] = 'application/json'
+-        return super().post(API_PATH, data, **kwargs)
+-
+-    def post_graphql(self, query=None, variables=None, **kwargs):
+-        """Dedicated helper for posting GraphQL queries.
+-
+-        Sets the `application/json` content type and json.dumps the variables
+-        if present.
+-        """
+-        data = {}
+-        if query is not None:
+-            data['query'] = query
+-        if variables is not None:
+-            data['variables'] = json.dumps(variables)
+-        if data:
+-            data = json.dumps(data)
+-        kwargs['content_type'] = 'application/json'
+-        return super().post(API_PATH, data, **kwargs)
+-
+-    def post_multipart(self, *args, **kwargs):
+-        """Send a multipart POST request.
+-
+-        This is used to send multipart requests to GraphQL API when e.g.
+-        uploading files.
+-        """
+-        kwargs['content_type'] = MULTIPART_CONTENT
+-        return super().post(API_PATH, *args, **kwargs)
+-
+-
+-@pytest.fixture
+-def admin_api_client(admin_user):
+-    return ApiClient(user=admin_user)
+-
+-
+-@pytest.fixture
+-def user_api_client(customer_user):
+-    return ApiClient(user=customer_user)
+-
+-
+-@pytest.fixture
+-def staff_api_client(staff_user):
+-    return ApiClient(user=staff_user)
+-
+ 
+ @pytest.fixture(autouse=True)
+ def site_settings(db, settings):
+@@ -615,6 +542,11 @@ def permission_manage_menus():
+     return Permission.objects.get(codename='manage_menus')
+ 
+ 
++@pytest.fixture
++def permission_manage_pages():
++    return Permission.objects.get(codename='manage_pages')
++
++
+ @pytest.fixture
+ def collection(db):
+     collection = Collection.objects.create(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,137 @@
+  Task-ID: networkx__networkx-5371@b446ef1
+  Please checkout to this commit first: 2b01a30d6967cc94a0f8caca2252bce7817b2b1c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Error when importing networkx: "module 'importlib' has no attribute 'machinery'"
+When importing networkx, the error `AttributeError: module 'importlib' has no attribute 'machinery'` occurs.
+
+It seems like networkx is not importing `importlib.machinery`.
+
+### Steps to Reproduce
+```
+$ sudo docker run -it --rm fedora:35
+# dnf install -y python3 python3-pip
+# pip3 install networkx
+# python3 --version
+Python 3.10.0rc2
+# python3 -c "import importlib; print(dir(importlib))"
+['_RELOADING', '__all__', '__builtins__', '__cached__', '__doc__', '__file__', '__import__', '__loader__', '__name__', '__package__', '__path__', '__spec__', '_bootstrap', '_bootstrap_external', '_imp', '_pack_uint32', '_unpack_uint32', 'find_loader', 'import_module', 'invalidate_caches', 'reload', 'sys', 'warnings']
+# python3 -c "import networkx"
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/usr/local/lib/python3.10/site-packages/networkx/__init__.py", line 59, in <module>
+    from networkx import utils
+  File "/usr/local/lib/python3.10/site-packages/networkx/utils/__init__.py", line 1, in <module>
+    from networkx.utils.misc import *
+  File "/usr/local/lib/python3.10/site-packages/networkx/utils/misc.py", line 23, in <module>
+    np = nx.lazy_import("numpy")
+  File "/usr/local/lib/python3.10/site-packages/networkx/lazy_imports.py", line 138, in lazy_import
+    tmp_loader = importlib.machinery.SourceFileLoader(module, path=None)
+AttributeError: module 'importlib' has no attribute 'machinery'
+# python3 -c "import importlib; import importlib.machinery; import networkx"
+```
+
+### Environment
+Python version: Python 3.10.0rc2
+NetworkX version: networkx-2.7
+  </issue>
+  
+  <patch>
+  diff --git a/networkx/lazy_imports.py b/networkx/lazy_imports.py
+index 248f3b43c4e..9c4d8befe04 100644
+--- a/networkx/lazy_imports.py
++++ b/networkx/lazy_imports.py
+@@ -81,6 +81,18 @@ def __dir__():
+     return __getattr__, __dir__, list(__all__)
+ 
+ 
++class DelayedImportErrorModule(types.ModuleType):
++    def __init__(self, import_name, *args, **kwargs):
++        self.__import_name = import_name
++        super().__init__(*args, **kwargs)
++
++    def __getattr__(self, x):
++        if x.startswith("__"):
++            super().__getattr__(x)
++        else:
++            raise ModuleNotFoundError(f"No module named '{self.__import_name}'")
++
++
+ def lazy_import(fullname):
+     """Return a lazily imported proxy for a module or library.
+ 
+@@ -132,14 +144,7 @@ def myfunc():
+     spec = importlib.util.find_spec(fullname)
+ 
+     if spec is None:
+-        # module not found - construct a DelayedImportErrorModule
+-        spec = importlib.util.spec_from_loader(fullname, loader=None)
+-        module = importlib.util.module_from_spec(spec)
+-        tmp_loader = importlib.machinery.SourceFileLoader(module, path=None)
+-        loader = DelayedImportErrorLoader(tmp_loader)
+-        loader.exec_module(module)
+-        # dont add to sys.modules. The module wasn't found.
+-        return module
++        return DelayedImportErrorModule(fullname, "DelayedImportErrorModule")
+ 
+     module = importlib.util.module_from_spec(spec)
+     sys.modules[fullname] = module
+@@ -148,24 +153,3 @@ def myfunc():
+     loader.exec_module(module)
+ 
+     return module
+-
+-
+-class DelayedImportErrorLoader(importlib.util.LazyLoader):
+-    def exec_module(self, module):
+-        super().exec_module(module)
+-        module.__class__ = DelayedImportErrorModule
+-
+-
+-class DelayedImportErrorModule(types.ModuleType):
+-    def __getattribute__(self, attr):
+-        """Trigger a ModuleNotFoundError upon attribute access"""
+-        spec = super().__getattribute__("__spec__")
+-        # allows isinstance and type functions to work without raising error
+-        if attr in ["__class__"]:
+-            return super().__getattribute__("__class__")
+-
+-        raise ModuleNotFoundError(
+-            f"Delayed Report: module named '{spec.name}' not found.\n"
+-            "Reporting was Lazy -- delayed until module attributes accessed.\n"
+-            f"Most likely, {spec.name} is not installed"
+-        )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

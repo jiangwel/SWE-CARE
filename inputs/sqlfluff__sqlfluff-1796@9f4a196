@@ -1,0 +1,242 @@
+  Task-ID: sqlfluff__sqlfluff-1796@9f4a196
+  Please checkout to this commit first: 27d2f2f2263dc248d4add57792240f146fa9c9dc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Rule L028 flags false positive when using aliased columns
+```sql
+select
+    t.col0,
+    t.col1 + 1 as alias_col1
+from table1 as t
+where alias_col1 > 5
+```
+
+## Expected Behaviour
+Passes
+
+## Observed Behaviour
+```
+L:   5 | P:   7 | L028 | Unqualified reference 'alias_col1' found in single table select which is inconsistent with previous references.
+```
+
+## Steps to Reproduce
+`sqlfluff lint` on above code
+
+## Dialect
+postgres
+
+## Version
+sqlfluff:                0.7.0 python:                  3.7.6
+
+## Configuration
+```
+[sqlfluff]
+verbose = 0
+nocolor = False
+dialect = postgres
+templater = jinja
+rules = None
+exclude_rules = L009,L011,L019,L031,L034,L044
+recurse = 0
+output_line_length = 160
+runaway_limit = 10
+ignore_templated_areas = True
+encoding = autodetect
+# Comma separated list of file extensions to lint.
+
+# NB: This config will only apply in the root folder.
+sql_file_exts = .sql,.sql.j2,.dml,.ddl
+
+[sqlfluff:indentation]
+indented_joins = False
+indented_using_on = True
+template_blocks_indent = True
+
+[sqlfluff:templater]
+unwrap_wrapped_queries = True
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+
+[sqlfluff:templater:jinja:macros]
+# Macros provided as builtins for dbt projects
+dbt_ref = {% macro ref(model_ref) %}{{model_ref}}{% endmacro %}
+dbt_source = {% macro source(source_name, table) %}{{source_name}}_{{table}}{% endmacro %}
+dbt_config = {% macro config() %}{% for k in kwargs %}{% endfor %}{% endmacro %}
+dbt_var = {% macro var(variable) %}item{% endmacro %}
+dbt_is_incremental = {% macro is_incremental() %}True{% endmacro %}
+
+# Some rules can be configured directly from the config common to other rules.
+[sqlfluff:rules]
+tab_space_size = 4
+max_line_length = 160
+indent_unit = space
+comma_style = trailing
+allow_scalar = True
+single_table_references = consistent
+unquoted_identifiers_policy = all
+
+# Some rules have their own specific config.
+[sqlfluff:rules:L003]
+lint_templated_tokens = True
+
+[sqlfluff:rules:L007]  # Keywords
+operator_new_lines = after
+
+[sqlfluff:rules:L010]  # Keywords
+capitalisation_policy = consistent
+
+[sqlfluff:rules:L014]  # Unquoted identifiers
+extended_capitalisation_policy = consistent
+
+[sqlfluff:rules:L016]
+ignore_comment_lines = False
+
+[sqlfluff:rules:L029]  # Keyword identifiers
+unquoted_identifiers_policy = aliases
+
+[sqlfluff:rules:L030]  # Function names
+capitalisation_policy = consistent
+
+[sqlfluff:rules:L038]
+select_clause_trailing_comma = forbid
+
+[sqlfluff:rules:L040]  # Null & Boolean Literals
+capitalisation_policy = consistent
+
+[sqlfluff:rules:L042]
+# By default, allow subqueries in from clauses, but not join clauses.
+forbid_subquery_in = join
+
+[sqlfluff:rules:L047]  # Consistent syntax to count all rows
+prefer_count_1 = False
+prefer_count_0 = False
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/rules/L028.py b/src/sqlfluff/rules/L028.py
+index 5be833698bb..4ebb4dce447 100644
+--- a/src/sqlfluff/rules/L028.py
++++ b/src/sqlfluff/rules/L028.py
+@@ -43,6 +43,7 @@ class Rule_L028(Rule_L025):
+     """
+ 
+     config_keywords = ["single_table_references", "force_enable"]
++    _allow_select_alias = False
+ 
+     def _lint_references_and_aliases(
+         self,
+@@ -72,6 +73,10 @@ def _lint_references_and_aliases(
+             # entirely rather than trying to enforce anything.
+             if ref.raw in standalone_aliases:
+                 continue
++
++            # Certain dialects allow use of SELECT alias in WHERE clauses
++            if self._allow_select_alias and ref.raw in col_aliases:
++                continue
+             this_ref_type = ref.qualification()
+             if self.single_table_references == "consistent":
+                 if seen_ref_types and this_ref_type not in seen_ref_types:
+@@ -97,15 +102,17 @@ def _lint_references_and_aliases(
+         return violation_buff or None
+ 
+     def _eval(self, context: RuleContext) -> EvalResultType:
+-        """Override Rule L025 for dialects that use structs.
+-
+-        Some dialects use structs (e.g. column.field) which look like
+-        table references and so incorrectly trigger this rule.
+-        """
++        """Override Rule L025 for dialects that use structs."""
+         # Config type hints
+         self.force_enable: bool
+ 
++        # Some dialects use structs (e.g. column.field) which look like
++        # table references and so incorrectly trigger this rule.
+         if context.dialect.name in ["bigquery"] and not self.force_enable:
+             return LintResult()
+ 
++        # Certain dialects allow use of SELECT alias in WHERE clauses
++        if context.dialect.name in ["snowflake", "redshift"]:
++            self._allow_select_alias = True
++
+         return super()._eval(context=context)
+diff --git a/test/fixtures/rules/std_rule_cases/L028.yml b/test/fixtures/rules/std_rule_cases/L028.yml
+index 9d67bf72063..e427bc3b201 100644
+--- a/test/fixtures/rules/std_rule_cases/L028.yml
++++ b/test/fixtures/rules/std_rule_cases/L028.yml
+@@ -103,3 +103,39 @@ test_date_functions_are_excluded:
+       dialect: tsql
+ 
+ 
++test_select_alias_in_where_clause_1:
++  # This should pass for certain dialects
++  pass_str: |
++    select
++        t.col0,
++        t.col1 + 1 as alias_col1
++    from table1 as t
++    where alias_col1 > 5
++  configs:
++    core:
++      dialect: redshift
++
++
++test_select_alias_in_where_clause_2:
++  # This should pass for certain dialects
++  pass_str: |
++    select
++        t.col0,
++        t.col1 + 1 as alias_col1
++    from table1 as t
++    where alias_col1 > 5
++  configs:
++    core:
++      dialect: snowflake
++
++
++test_select_alias_in_where_clause_3:
++  # This should fail for ansi
++  fail_str: |
++    select
++        t.col0,
++        t.col1 + 1 as alias_col1
++    from table1 as t
++    where alias_col1 > 5
++
++
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

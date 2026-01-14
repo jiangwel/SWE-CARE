@@ -1,0 +1,101 @@
+  Task-ID: conan-io__conan-16883@09d3616
+  Please checkout to this commit first: 0191d7f04d6b1cb85d6bece766b72a2dae87ad5c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [bug] Specifying `tools.build.linker_scripts` in my profile results in an invalid command line when linking.
+### Describe the bug
+
+I'm using Fedora 40, with conan from the develop2 branch.
+
+While attempting to move my linker_script setup out of cmake and into my conan profile I encountered the error that the way in which the linker command was appended doesn't put a space between the previous linker arguments (if any).
+
+### How to reproduce it
+
+If you create a new cmake_lib and use a profile such as:
+
+```ini
+[settings]
+os=baremetal
+arch=tc162
+compiler=gcc
+compiler.version=11
+compiler.cppstd=20
+compiler.libcxx=libstdc++11
+
+[conf]
+tools.build:compiler_executables={"c":"tricore-elf-gcc","cpp":"tricore-elf-g++"}
+tools.build:linker_scripts=[ "${PROJECT_SOURCE_DIR}/Lcf_Gnuc_Tricore_Tc.ld" ]
+tools.cmake.cmake_layout:build_folder=build/tc162
+tools.cmake.cmaketoolchain:generator=Ninja Multi-Config
+
+# I have to do this, otherwise zlib tries to use fPIC which isn't supported by tricore.
+[options]
+*:shared=False
+*:fPIC=False
+```
+
+Then you'll get an error during the build similar to this:
+
+```
+tricore-elf-g++: error: unrecognized argument in option ‘-mtc162-T/home/chipc/.conan2/p/b/mypkg6fa17d873b59e/b/Lcf_Gnuc_Tricore_Tc.ld’
+    tricore-elf-g++: note: valid arguments to ‘-mtc’ are: 13 131 16 161 162 18
+```
+  </issue>
+  
+  <patch>
+  diff --git a/conan/tools/cmake/toolchain/blocks.py b/conan/tools/cmake/toolchain/blocks.py
+index fffa48aa273..2c7ee1ed0ae 100644
+--- a/conan/tools/cmake/toolchain/blocks.py
++++ b/conan/tools/cmake/toolchain/blocks.py
+@@ -254,7 +254,7 @@ class LinkerScriptsBlock(Block):
+         # Add linker flags from tools.build:linker_scripts conf
+ 
+         message(STATUS "Conan toolchain: Defining linker script flag: {{ linker_script_flags }}")
+-        string(APPEND CONAN_EXE_LINKER_FLAGS {{ linker_script_flags }})
++        string(APPEND CONAN_EXE_LINKER_FLAGS " {{ linker_script_flags }}")
+         """)
+ 
+     def context(self):
+@@ -265,7 +265,7 @@ def context(self):
+         linker_scripts = [linker_script.replace('\\', '/') for linker_script in linker_scripts]
+         linker_scripts = [relativize_path(p, self._conanfile, "${CMAKE_CURRENT_LIST_DIR}")
+                           for p in linker_scripts]
+-        linker_script_flags = ['-T"' + linker_script + '"' for linker_script in linker_scripts]
++        linker_script_flags = ['-T' + linker_script for linker_script in linker_scripts]
+         return {"linker_script_flags": " ".join(linker_script_flags)}
+ 
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

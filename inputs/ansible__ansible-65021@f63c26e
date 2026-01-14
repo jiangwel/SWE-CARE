@@ -1,0 +1,274 @@
+  Task-ID: ansible__ansible-65021@f63c26e
+  Please checkout to this commit first: 7d4800deb12c0b2894b0715065e1e0ab4caea99f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  AWS Application Load Balancer Fails with Multiple Host Headers
+##### SUMMARY
+When using the `host-header` condition for a load balancer rule if there are multiple values for the host header ansible fails to apply the changes with broken json output.
+
+##### ISSUE TYPE
+- Bug Report
+
+##### COMPONENT NAME
+elbv2
+
+##### ANSIBLE VERSION
+```
+ansible 2.10.0.dev0
+  config file = None
+  configured module search path = [u'/home/mjmayer/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /home/mjmayer/repos/ansible/lib/ansible
+  executable location = /home/mjmayer/repos/ansible/bin/ansible
+  python version = 2.7.15+ (default, Oct  7 2019, 17:39:04) [GCC 7.4.0]
+
+```
+
+##### CONFIGURATION
+```
+```
+
+##### OS / ENVIRONMENT
+Mint 19.2 / Ubuntu 18.04
+
+##### STEPS TO REPRODUCE
+
+```yaml
+  - name: add a rule that uses the host header condition to the listener
+    elb_application_lb:
+      name: "{{ alb_name }}"
+      subnets: "{{ alb_subnets }}"
+      security_groups: "{{ sec_group.group_id }}"
+      state: present
+      purge_rules: no
+      listeners:
+        - Protocol: HTTP
+          Port: 80
+          DefaultActions:
+            - Type: forward
+              TargetGroupName: "{{ tg_name }}"
+          Rules:
+            - Conditions:
+                - Field: host-header
+                  Values:
+                    - 'local.mydomain.com'
+              Priority: '3'
+              Actions:
+                - TargetGroupName: "{{ tg_name }}"
+                  Type: forward
+      <<: *aws_connection_info
+    register: alb
+
+  - assert:
+      that:
+        - alb.changed
+        - alb.listeners[0].rules|length == 4
+
+  - name: test replacing the rule that uses the host header condition with multiple host header conditions
+    elb_application_lb:
+      name: "{{ alb_name }}"
+      subnets: "{{ alb_subnets }}"
+      security_groups: "{{ sec_group.group_id }}"
+      purge_rules: no
+      state: present
+      listeners:
+        - Protocol: HTTP
+          Port: 80
+          DefaultActions:
+            - Type: forward
+              TargetGroupName: "{{ tg_name }}"
+          Rules:
+            - Conditions:
+                - Field: host-header
+                  Values:
+                    - 'local.mydomain.com'
+                    - 'alternate.mydomain.com'
+              Priority: '3'
+              Actions:
+                - TargetGroupName: "{{ tg_name }}"
+                  Type: forward
+      <<: *aws_connection_info
+    register: alb
+```
+##### EXPECTED RESULTS
+The second application of `elb_application_lb` should succeed and add the second host-header.
+
+
+##### ACTUAL RESULTS
+Ansible prints invalid json to the screen with the following error.
+```paste below
+Module invocation had junk after the JSON data
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/module_utils/aws/elbv2.py b/lib/ansible/module_utils/aws/elbv2.py
+index 1a197c8e0b3cbe..0e4a5cd7ec700e 100644
+--- a/lib/ansible/module_utils/aws/elbv2.py
++++ b/lib/ansible/module_utils/aws/elbv2.py
+@@ -720,7 +720,7 @@ def _compare_condition(self, current_conditions, condition):
+                         current_condition['SourceIpConfig']['Values'][0] == condition['SourceIpConfig']['Values'][0]):
+                     condition_found = True
+                     break
+-            elif current_condition['Field'] == condition['Field'] and current_condition['Values'][0] == condition['Values'][0]:
++            elif current_condition['Field'] == condition['Field'] and current_condition['Values'] == condition['Values']:
+                 condition_found = True
+                 break
+ 
+@@ -735,7 +735,7 @@ def _compare_rule(self, current_rule, new_rule):
+         modified_rule = {}
+ 
+         # Priority
+-        if int(current_rule['Priority']) != new_rule['Priority']:
++        if int(current_rule['Priority']) != int(new_rule['Priority']):
+             modified_rule['Priority'] = new_rule['Priority']
+ 
+         # Actions
+@@ -757,8 +757,6 @@ def _compare_rule(self, current_rule, new_rule):
+             if len(current_rule['Actions']) == 1 and len(new_rule['Actions']) == 1:
+                 if current_rule['Actions'] != new_rule['Actions']:
+                     modified_rule['Actions'] = new_rule['Actions']
+-                    print("modified_rule:")
+-                    print(new_rule['Actions'])
+             # if actions have multiple elements, we'll have to order them first before comparing.
+             # multiple actions will have an 'Order' key for this purpose
+             else:
+diff --git a/lib/ansible/modules/cloud/amazon/elb_application_lb.py b/lib/ansible/modules/cloud/amazon/elb_application_lb.py
+index 4ee26446a5ca41..d406ab3538a5a3 100644
+--- a/lib/ansible/modules/cloud/amazon/elb_application_lb.py
++++ b/lib/ansible/modules/cloud/amazon/elb_application_lb.py
+@@ -293,6 +293,15 @@
+                   ContentType: "text/plain"
+                   MessageBody: "This is the page you're looking for"
+                   StatusCode: "200"
++          - Conditions:
++              - Field: host-header
++                Values:
++                  - "hostname.domain.com"
++                  - "alternate.domain.com"
++            Priority: '4'
++            Actions:
++              - TargetGroupName: test-target-group
++                Type: forward
+     state: present
+ 
+ # Remove an ELB
+diff --git a/test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml b/test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
+index 31c1569168b9c4..a20ef97e43886a 100644
+--- a/test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
++++ b/test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
+@@ -117,6 +117,81 @@
+       that:
+         - alb.changed
+         - alb.listeners[0].rules|length == 3
++  - name:
++    debug:
++      msg: "{{ alb }}"
++
++  - name: add a rule that uses the host header condition to the listener
++    elb_application_lb:
++      name: "{{ alb_name }}"
++      subnets: "{{ alb_subnets }}"
++      security_groups: "{{ sec_group.group_id }}"
++      state: present
++      purge_rules: no
++      listeners:
++        - Protocol: HTTP
++          Port: 80
++          DefaultActions:
++            - Type: forward
++              TargetGroupName: "{{ tg_name }}"
++          Rules:
++            - Conditions:
++                - Field: host-header
++                  Values:
++                    - 'local.mydomain.com'
++              Priority: '3'
++              Actions:
++                - TargetGroupName: "{{ tg_name }}"
++                  Type: forward
++      <<: *aws_connection_info
++    register: alb
++
++  - name:
++    debug:
++      msg: "{{ alb }}"
++
++  - name:
++    debug:
++      msg: Number of alb rules "{{ alb.listeners[0].rules|length }}"
++
++  - assert:
++      that:
++        - alb.changed
++        - alb.listeners[0].rules|length == 4
++
++  - name: test replacing the rule that uses the host header condition with multiple host header conditions
++    elb_application_lb:
++      name: "{{ alb_name }}"
++      subnets: "{{ alb_subnets }}"
++      security_groups: "{{ sec_group.group_id }}"
++      purge_rules: no
++      state: present
++      listeners:
++        - Protocol: HTTP
++          Port: 80
++          DefaultActions:
++            - Type: forward
++              TargetGroupName: "{{ tg_name }}"
++          Rules:
++            - Conditions:
++                - Field: host-header
++                  Values:
++                    - 'local.mydomain.com'
++                    - 'alternate.mydomain.com'
++              Priority: '3'
++              Actions:
++                - TargetGroupName: "{{ tg_name }}"
++                  Type: forward
++      <<: *aws_connection_info
++    register: alb
++
++  - assert:
++      that:
++        - alb.changed
++        - alb.listeners[0].rules|length == 4
++  - name:
++    debug:
++      msg: "{{ alb }}"
+ 
+   - name: remove the rule
+     elb_application_lb:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

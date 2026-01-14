@@ -1,0 +1,982 @@
+  Task-ID: dbt-labs__dbt-core-3625@2a29dbd
+  Please checkout to this commit first: 280e9ad9c9bf914b5bbd1aa14629a6708c921546
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add command to auto-populate `profiles.yml`
+### Describe the feature
+This may have been suggested already but I couldn't find a duplicate issue from a quick search.
+
+Configuring the `profiles.yml` is non-beginner friendly, and creating instructions on how to do so is complicated especially due to the differences between Mac and Windows environments. Introducing a dbt command which would add a profile to `profiles.yml` (and create the file if needed) using the name from the `dbt_project.yml` would be extremely useful. In addition, it is typical that only the schema, username and password are unique between individual `profiles.yml`s, so a default set of values specified in e.g. `dbt_project.yml` could reduce the number of options required to be entered.
+
+### Describe alternatives you've considered
+Creating my own script to do this.
+
+### Who will this benefit?
+Anyone who introduces dbt to new users frequently and struggles to write a simple and comprehensive set of instructions for configuring a `profiles.yml`.
+
+### Are you interested in contributing this feature?
+With some guidance, sure.
+  </issue>
+  
+  <patch>
+  diff --git a/core/dbt/clients/yaml_helper.py b/core/dbt/clients/yaml_helper.py
+index df349c1bb38..9ed41d7c6ea 100644
+--- a/core/dbt/clients/yaml_helper.py
++++ b/core/dbt/clients/yaml_helper.py
+@@ -1,17 +1,16 @@
+ import dbt.exceptions
+ from typing import Any, Dict, Optional
+-import yaml
+-import yaml.scanner
++import oyaml as yaml
+ 
+ # the C version is faster, but it doesn't always exist
+ try:
+-    from yaml import (
++    from oyaml import (
+         CLoader as Loader,
+         CSafeLoader as SafeLoader,
+         CDumper as Dumper
+     )
+ except ImportError:
+-    from yaml import (  # type: ignore  # noqa: F401
++    from oyaml import (  # type: ignore  # noqa: F401
+         Loader, SafeLoader, Dumper
+     )
+ 
+diff --git a/core/dbt/main.py b/core/dbt/main.py
+index be620f2c383..437b7f3840b 100644
+--- a/core/dbt/main.py
++++ b/core/dbt/main.py
+@@ -256,7 +256,6 @@ def run_from_args(parsed):
+ 
+     with track_run(task):
+         results = task.run()
+-
+     return task, results
+ 
+ 
+@@ -360,20 +359,6 @@ def _build_init_subparser(subparsers, base_subparser):
+         Initialize a new DBT project.
+         '''
+     )
+-    sub.add_argument(
+-        'project_name',
+-        type=str,
+-        help='''
+-        Name of the new project
+-        ''',
+-    )
+-    sub.add_argument(
+-        '--adapter',
+-        type=str,
+-        help='''
+-        Write sample profiles.yml for which adapter
+-        ''',
+-    )
+     sub.set_defaults(cls=init_task.InitTask, which='init', rpc_method=None)
+     return sub
+ 
+diff --git a/core/dbt/task/init.py b/core/dbt/task/init.py
+index fadee6a760a..5bc17ced116 100644
+--- a/core/dbt/task/init.py
++++ b/core/dbt/task/init.py
+@@ -1,5 +1,11 @@
++import copy
+ import os
+ import shutil
++from typing import Tuple
++
++import oyaml as yaml
++import click
++from jinja2 import Template
+ 
+ import dbt.config
+ import dbt.clients.system
+@@ -10,7 +16,7 @@
+ 
+ from dbt.include.starter_project import PACKAGE_PATH as starter_project_directory
+ 
+-from dbt.task.base import BaseTask
++from dbt.task.base import BaseTask, move_to_nearest_project_dir
+ 
+ DOCS_URL = 'https://docs.getdbt.com/docs/configure-your-profile'
+ SLACK_URL = 'https://community.getdbt.com/'
+@@ -19,11 +25,7 @@
+ IGNORE_FILES = ["__init__.py", "__pycache__"]
+ 
+ ON_COMPLETE_MESSAGE = """
+-Your new dbt project "{project_name}" was created! If this is your first time
+-using dbt, you'll need to set up your profiles.yml file -- this file will tell dbt how
+-to connect to your database. You can find this file by running:
+-
+-  {open_cmd} {profiles_path}
++Your new dbt project "{project_name}" was created!
+ 
+ For more information on how to configure the profiles.yml file,
+ please consult the dbt documentation here:
+@@ -46,7 +48,8 @@ def copy_starter_repo(self, project_name):
+         shutil.copytree(starter_project_directory, project_name,
+                         ignore=shutil.ignore_patterns(*IGNORE_FILES))
+ 
+-    def create_profiles_dir(self, profiles_dir):
++    def create_profiles_dir(self, profiles_dir: str) -> bool:
++        """Create the user's profiles directory if it doesn't already exist."""
+         if not os.path.exists(profiles_dir):
+             msg = "Creating dbt configuration folder at {}"
+             logger.info(msg.format(profiles_dir))
+@@ -54,25 +57,27 @@ def create_profiles_dir(self, profiles_dir):
+             return True
+         return False
+ 
+-    def create_profiles_file(self, profiles_file, sample_adapter):
++    def create_profile_from_sample(self, adapter: str):
++        """Create a profile entry using the adapter's sample_profiles.yml"""
+         # Line below raises an exception if the specified adapter is not found
+-        load_plugin(sample_adapter)
+-        adapter_path = get_include_paths(sample_adapter)[0]
+-        sample_profiles_path = adapter_path / 'sample_profiles.yml'
++        load_plugin(adapter)
++        adapter_path = get_include_paths(adapter)[0]
++        sample_profiles_path = adapter_path / "sample_profiles.yml"
+ 
+         if not sample_profiles_path.exists():
+-            logger.debug(f"No sample profile found for {sample_adapter}, skipping")
+-            return False
+-
+-        if not os.path.exists(profiles_file):
+-            msg = "With sample profiles.yml for {}"
+-            logger.info(msg.format(sample_adapter))
+-            shutil.copyfile(sample_profiles_path, profiles_file)
+-            return True
+-
+-        return False
++            logger.debug(f"No sample profile found for {adapter}.")
++        else:
++            with open(sample_profiles_path, "r") as f:
++                # Ignore the name given in the sample_profiles.yml
++                profile = list(yaml.load(f).values())[0]
++                profiles_filepath, profile_name = self.write_profile(profile)
++                logger.info(
++                    f"Profile {profile_name} written to {profiles_filepath} "
++                    "using sample configuration. Once updated "
++                    "you'll be able to start developing with dbt."
++                )
+ 
+-    def get_addendum(self, project_name, profiles_path):
++    def get_addendum(self, project_name: str, profiles_path: str) -> str:
+         open_cmd = dbt.clients.system.open_dir_cmd()
+ 
+         return ON_COMPLETE_MESSAGE.format(
+@@ -83,29 +88,196 @@ def get_addendum(self, project_name, profiles_path):
+             slack_url=SLACK_URL
+         )
+ 
+-    def run(self):
+-        project_dir = self.args.project_name
+-        sample_adapter = self.args.adapter
+-        if not sample_adapter:
+-            try:
+-                # pick first one available, often postgres
+-                sample_adapter = next(_get_adapter_plugin_names())
+-            except StopIteration:
+-                logger.debug("No adapters installed, skipping")
++    def generate_target_from_input(
++        self,
++        target_options: dict,
++        target: dict = {}
++    ) -> dict:
++        """Generate a target configuration from target_options and user input.
++        """
++        target_options_local = copy.deepcopy(target_options)
++        for key, value in target_options_local.items():
++            if key.startswith("_choose"):
++                choice_type = key[8:].replace("_", " ")
++                option_list = list(value.keys())
++                options_msg = "\n".join([
++                    f"[{n+1}] {v}" for n, v in enumerate(option_list)
++                ])
++                click.echo(options_msg)
++                numeric_choice = click.prompt(
++                    f"Desired {choice_type} option (enter a number)", type=click.INT
++                )
++                choice = option_list[numeric_choice - 1]
++                # Complete the chosen option's values in a recursive call
++                target = self.generate_target_from_input(
++                    target_options_local[key][choice], target
++                )
++            else:
++                if key.startswith("_fixed"):
++                    # _fixed prefixed keys are not presented to the user
++                    target[key[7:]] = value
++                elif isinstance(value, str) and (value[0] + value[-1] == "[]"):
++                    # A square bracketed value is used as a hint
++                    hide_input = key == "password"
++                    target[key] = click.prompt(
++                        f"{key} ({value[1:-1]})", hide_input=hide_input
++                    )
++                elif isinstance(value, list):
++                    # A list can be used to provide both a hint and a default
++                    target[key] = click.prompt(
++                        f"{key} ({value[0]})", default=value[1]
++                    )
++                else:
++                    # All other values are used as defaults
++                    target[key] = click.prompt(
++                        key, default=target_options_local[key]
++                    )
++        return target
+ 
+-        profiles_dir = dbt.config.PROFILES_DIR
+-        profiles_file = os.path.join(profiles_dir, 'profiles.yml')
++    def get_profile_name_from_current_project(self) -> str:
++        """Reads dbt_project.yml in the current directory to retrieve the
++        profile name.
++        """
++        with open("dbt_project.yml") as f:
++            dbt_project = yaml.load(f)
++        return dbt_project["profile"]
++
++    def write_profile(
++        self, profile: dict, profile_name: str = None
++    ) -> Tuple[str, str]:
++        """Given a profile, write it to the current project's profiles.yml.
++        This will overwrite any profile with a matching name."""
++        profiles_file = os.path.join(dbt.config.PROFILES_DIR, "profiles.yml")
++        profile_name = (
++            profile_name or self.get_profile_name_from_current_project()
++        )
++        if os.path.exists(profiles_file):
++            with open(profiles_file, "r+") as f:
++                profiles = yaml.load(f) or {}
++                profiles[profile_name] = profile
++                f.seek(0)
++                yaml.dump(profiles, f)
++                f.truncate()
++        else:
++            profiles = {profile_name: profile}
++            with open(profiles_file, "w") as f:
++                yaml.dump(profiles, f)
++        return profiles_file, profile_name
++
++    def create_profile_from_target_options(self, target_options: dict):
++        """Create and write a profile using the supplied target_options."""
++        target = self.generate_target_from_input(target_options)
++        profile = {
++            "outputs": {
++                "dev": target
++            },
++            "target": "dev"
++        }
++        profiles_filepath, profile_name = self.write_profile(profile)
++        logger.info(
++            f"Profile {profile_name} written to {profiles_filepath} using "
++            "your supplied values."
++        )
+ 
++    def create_profile_from_scratch(self, adapter: str):
++        """Create a profile without defaults using target_options.yml if available, or
++        sample_profiles.yml as a fallback."""
++        # Line below raises an exception if the specified adapter is not found
++        load_plugin(adapter)
++        adapter_path = get_include_paths(adapter)[0]
++        target_options_path = adapter_path / "target_options.yml"
++
++        if target_options_path.exists():
++            with open(target_options_path) as f:
++                target_options = yaml.load(f)
++            self.create_profile_from_target_options(target_options)
++        else:
++            # For adapters without a target_options.yml defined, fallback on
++            # sample_profiles.yml
++            self.create_profile_from_sample(adapter)
++
++    def check_if_can_write_profile(self, profile_name: str = None) -> bool:
++        profiles_file = os.path.join(dbt.config.PROFILES_DIR, "profiles.yml")
++        if not os.path.exists(profiles_file):
++            return True
++        profile_name = (
++            profile_name or self.get_profile_name_from_current_project()
++        )
++        with open(profiles_file, "r") as f:
++            profiles = yaml.load(f) or {}
++        if profile_name in profiles.keys():
++            response = click.confirm(
++                f"The profile {profile_name} already exists in "
++                f"{profiles_file}. Continue and overwrite it?"
++            )
++            return response
++        else:
++            return True
++
++    def create_profile_using_profile_template(self):
++        """Create a profile using profile_template.yml"""
++        with open("profile_template.yml") as f:
++            profile_template = yaml.load(f)
++        profile_name = list(profile_template["profile"].keys())[0]
++        self.check_if_can_write_profile(profile_name)
++        render_vars = {}
++        for template_variable in profile_template["vars"]:
++            render_vars[template_variable] = click.prompt(template_variable)
++        profile = profile_template["profile"][profile_name]
++        profile_str = yaml.dump(profile)
++        profile_str = Template(profile_str).render(vars=render_vars)
++        profile = yaml.load(profile_str)
++        profiles_filepath, _ = self.write_profile(profile, profile_name)
++        logger.info(
++            f"Profile {profile_name} written to {profiles_filepath} using "
++            "profile_template.yml and your supplied values."
++        )
++
++    def ask_for_adapter_choice(self) -> str:
++        """Ask the user which adapter (database) they'd like to use."""
++        click.echo("Which database would you like to use?")
++        available_adapters = list(_get_adapter_plugin_names())
++        click.echo("\n".join([
++            f"[{n+1}] {v}" for n, v in enumerate(available_adapters)
++        ]))
++        numeric_choice = click.prompt("Enter a number", type=click.INT)
++        return available_adapters[numeric_choice - 1]
++
++    def run(self):
++        profiles_dir = dbt.config.PROFILES_DIR
+         self.create_profiles_dir(profiles_dir)
+-        if sample_adapter:
+-            self.create_profiles_file(profiles_file, sample_adapter)
+ 
+-        if os.path.exists(project_dir):
+-            raise RuntimeError("directory {} already exists!".format(
+-                project_dir
+-            ))
++        try:
++            move_to_nearest_project_dir(self.args)
++            in_project = True
++        except dbt.exceptions.RuntimeException:
++            in_project = False
+ 
+-        self.copy_starter_repo(project_dir)
++        if in_project:
++            logger.info("Setting up your profile.")
++            if os.path.exists("profile_template.yml"):
++                self.create_profile_using_profile_template()
++            else:
++                if not self.check_if_can_write_profile():
++                    return
++                adapter = self.ask_for_adapter_choice()
++                self.create_profile_from_scratch(
++                    adapter
++                )
++        else:
++            project_dir = click.prompt("What is the desired project name?")
++            if os.path.exists(project_dir):
++                logger.info(
++                    f"Existing project found at directory {project_dir}"
++                )
++                return
+ 
+-        addendum = self.get_addendum(project_dir, profiles_dir)
+-        logger.info(addendum)
++            self.copy_starter_repo(project_dir)
++            os.chdir(project_dir)
++            if not self.check_if_can_write_profile():
++                return
++            adapter = self.ask_for_adapter_choice()
++            self.create_profile_from_scratch(
++                adapter
++            )
++            logger.info(self.get_addendum(project_dir, profiles_dir))
+diff --git a/core/scripts/upgrade_dbt_schema_tests_v1_to_v2.py b/core/scripts/upgrade_dbt_schema_tests_v1_to_v2.py
+index 29a2eed1e7c..c803b5b7e7f 100644
+--- a/core/scripts/upgrade_dbt_schema_tests_v1_to_v2.py
++++ b/core/scripts/upgrade_dbt_schema_tests_v1_to_v2.py
+@@ -5,7 +5,7 @@
+ import os
+ import re
+ import sys
+-import yaml
++import oyaml as yaml
+ 
+ LOGGER = logging.getLogger('upgrade_dbt_schema')
+ LOGFILE = 'upgrade_dbt_schema_tests_v1_to_v2.txt'
+diff --git a/core/setup.py b/core/setup.py
+index 9f8b853bec9..6e2b3c5d7d3 100644
+--- a/core/setup.py
++++ b/core/setup.py
+@@ -50,8 +50,9 @@ def read(fname):
+     ],
+     install_requires=[
+         'Jinja2==2.11.3',
+-        'PyYAML>=3.11',
++        'oyaml>=1.0',
+         'agate>=1.6,<1.6.2',
++        'click>=8,<9',
+         'colorama>=0.3.9,<0.4.5',
+         'dataclasses>=0.6,<0.9;python_version<"3.7"',
+         'hologram==0.0.14',
+diff --git a/mypy.ini b/mypy.ini
+index 51fada1b1dc..e27ef73d8f0 100644
+--- a/mypy.ini
++++ b/mypy.ini
+@@ -1,3 +1,6 @@
+ [mypy]
+ mypy_path = ./third-party-stubs
+ namespace_packages = True
++
++[mypy-oyaml.*]
++ignore_missing_imports = True
+\ No newline at end of file
+diff --git a/plugins/bigquery/dbt/include/bigquery/target_options.yml b/plugins/bigquery/dbt/include/bigquery/target_options.yml
+new file mode 100644
+index 00000000000..cfd5113b621
+--- /dev/null
++++ b/plugins/bigquery/dbt/include/bigquery/target_options.yml
+@@ -0,0 +1,14 @@
++_fixed_type: bigquery
++_choose_authentication_method:
++  oauth:
++    _fixed_method: oauth
++  service_account:
++    _fixed_method: service-account
++    keyfile: '[/path/to/bigquery/keyfile.json]'
++project: '[GCP project id]'
++dataset: '[the name of your dbt dataset]'
++threads: '[1 or more]'
++timeout_seconds: 300
++location: '[one of US or EU]'
++_fixed_priority: interactive
++_fixed_retries: 1
+diff --git a/plugins/postgres/dbt/include/postgres/target_options.yml b/plugins/postgres/dbt/include/postgres/target_options.yml
+new file mode 100644
+index 00000000000..96698d7ccbf
+--- /dev/null
++++ b/plugins/postgres/dbt/include/postgres/target_options.yml
+@@ -0,0 +1,8 @@
++_fixed_type: postgres
++threads: '[1 or more]'
++host: '[host]'
++port: '[port]'
++user: '[dev_username]'
++pass: '[dev_password]'
++dbname: '[dbname]'
++schema: '[dev_schema]'
+\ No newline at end of file
+diff --git a/plugins/redshift/dbt/include/redshift/target_options.yml b/plugins/redshift/dbt/include/redshift/target_options.yml
+new file mode 100644
+index 00000000000..20fc722b66f
+--- /dev/null
++++ b/plugins/redshift/dbt/include/redshift/target_options.yml
+@@ -0,0 +1,13 @@
++_fixed_type: redshift
++_choose_authentication_method:
++  password:
++    password: '[password]'
++  iam:
++    method: iam
++host: '[hostname.region.redshift.amazonaws.com]'
++user: '[username]'
++port: 5439
++dbname: '[database name]'
++schema: '[dbt schema]'
++threads: '[1 or more]'
++keepalives_idle: 0 # default 0, indicating the system default
+\ No newline at end of file
+diff --git a/plugins/snowflake/dbt/adapters/snowflake/connections.py b/plugins/snowflake/dbt/adapters/snowflake/connections.py
+index e7f6b8d7403..dde108e3680 100644
+--- a/plugins/snowflake/dbt/adapters/snowflake/connections.py
++++ b/plugins/snowflake/dbt/adapters/snowflake/connections.py
+@@ -31,9 +31,9 @@
+ class SnowflakeCredentials(Credentials):
+     account: str
+     user: str
++    password: str
+     warehouse: Optional[str] = None
+     role: Optional[str] = None
+-    password: Optional[str] = None
+     authenticator: Optional[str] = None
+     private_key_path: Optional[str] = None
+     private_key_passphrase: Optional[str] = None
+diff --git a/plugins/snowflake/dbt/include/snowflake/target_options.yml b/plugins/snowflake/dbt/include/snowflake/target_options.yml
+new file mode 100644
+index 00000000000..d7cfbdf34cb
+--- /dev/null
++++ b/plugins/snowflake/dbt/include/snowflake/target_options.yml
+@@ -0,0 +1,15 @@
++_fixed_type: snowflake
++account: '[account id + region (if applicable)]'
++user: '[username]'
++_choose_authentication_type:
++  password:
++    password: '[password]'
++  keypair:
++    private_key_path: '[path/to/private.key]'
++    private_key_passphrase: '[passphrase for the private key, if key is encrypted]'
++role: '[user role]'
++database: '[database name]'
++warehouse: '[warehouse name]'
++schema: '[dbt schema]'
++threads: '[1 or more]'
++client_session_keep_alive: False
+\ No newline at end of file
+diff --git a/test/integration/006_simple_dependency_test/test_local_dependency.py b/test/integration/006_simple_dependency_test/test_local_dependency.py
+index 3691b19c5d7..f054f47c12f 100644
+--- a/test/integration/006_simple_dependency_test/test_local_dependency.py
++++ b/test/integration/006_simple_dependency_test/test_local_dependency.py
+@@ -2,7 +2,7 @@
+ import os
+ import json
+ import shutil
+-import yaml
++import oyaml as yaml
+ from unittest import mock
+ 
+ import dbt.semver
+diff --git a/test/integration/007_graph_selection_tests/test_graph_selection.py b/test/integration/007_graph_selection_tests/test_graph_selection.py
+index e7069ae1a38..b42ad4a3021 100644
+--- a/test/integration/007_graph_selection_tests/test_graph_selection.py
++++ b/test/integration/007_graph_selection_tests/test_graph_selection.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ import json
+ import os
+ 
+@@ -408,7 +408,7 @@ def test__postgres__exposure_parents(self):
+ 
+         results = self.run_dbt(['ls', '--select', '1+exposure:user_exposure'])
+         assert len(results) == 5
+-        assert sorted(results) == ['exposure:test.user_exposure', 'test.schema_test.unique_users_id', 
++        assert sorted(results) == ['exposure:test.user_exposure', 'test.schema_test.unique_users_id',
+             'test.schema_test.unique_users_rollup_gender', 'test.users', 'test.users_rollup']
+ 
+         results = self.run_dbt(['run', '-m', '+exposure:user_exposure'])
+diff --git a/test/integration/007_graph_selection_tests/test_intersection_syntax.py b/test/integration/007_graph_selection_tests/test_intersection_syntax.py
+index d725d03c39f..65f0ba3cfae 100644
+--- a/test/integration/007_graph_selection_tests/test_intersection_syntax.py
++++ b/test/integration/007_graph_selection_tests/test_intersection_syntax.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestGraphSelection(DBTIntegrationTest):
+diff --git a/test/integration/007_graph_selection_tests/test_tag_selection.py b/test/integration/007_graph_selection_tests/test_tag_selection.py
+index 3d3b0c3baf7..c5ea7434c9c 100644
+--- a/test/integration/007_graph_selection_tests/test_tag_selection.py
++++ b/test/integration/007_graph_selection_tests/test_tag_selection.py
+@@ -1,6 +1,6 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+ 
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestGraphSelection(DBTIntegrationTest):
+diff --git a/test/integration/015_cli_invocation_tests/test_cli_invocation.py b/test/integration/015_cli_invocation_tests/test_cli_invocation.py
+index ef898ae84fe..9c881d4da80 100644
+--- a/test/integration/015_cli_invocation_tests/test_cli_invocation.py
++++ b/test/integration/015_cli_invocation_tests/test_cli_invocation.py
+@@ -4,7 +4,7 @@
+ import shutil
+ import pytest
+ import tempfile
+-import yaml
++import oyaml as yaml
+ from typing import Dict
+ 
+ 
+diff --git a/test/integration/022_bigquery_test/test_bigquery_adapter_functions.py b/test/integration/022_bigquery_test/test_bigquery_adapter_functions.py
+index 480dca07d93..9df84d806f5 100644
+--- a/test/integration/022_bigquery_test/test_bigquery_adapter_functions.py
++++ b/test/integration/022_bigquery_test/test_bigquery_adapter_functions.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, FakeArgs, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBigqueryAdapterFunctions(DBTIntegrationTest):
+diff --git a/test/integration/022_bigquery_test/test_bigquery_adapter_specific.py b/test/integration/022_bigquery_test/test_bigquery_adapter_specific.py
+index 244d7ce56a0..76124fb24e9 100644
+--- a/test/integration/022_bigquery_test/test_bigquery_adapter_specific.py
++++ b/test/integration/022_bigquery_test/test_bigquery_adapter_specific.py
+@@ -3,7 +3,7 @@
+ 
+ from test.integration.base import DBTIntegrationTest, use_profile
+ import textwrap
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBigqueryAdapterSpecific(DBTIntegrationTest):
+@@ -28,7 +28,7 @@ def project_config(self):
+             test:
+                 materialized: table
+                 expiring_table:
+-                    hours_to_expiration: 4    
++                    hours_to_expiration: 4
+         '''))
+ 
+     @use_profile('bigquery')
+diff --git a/test/integration/022_bigquery_test/test_bigquery_copy_failing_models.py b/test/integration/022_bigquery_test/test_bigquery_copy_failing_models.py
+index da5316da8cc..de4e6e00b6e 100644
+--- a/test/integration/022_bigquery_test/test_bigquery_copy_failing_models.py
++++ b/test/integration/022_bigquery_test/test_bigquery_copy_failing_models.py
+@@ -1,6 +1,6 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+ import textwrap
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBigqueryCopyTableFails(DBTIntegrationTest):
+diff --git a/test/integration/022_bigquery_test/test_bigquery_copy_models.py b/test/integration/022_bigquery_test/test_bigquery_copy_models.py
+index 00028357faf..90e0449c276 100644
+--- a/test/integration/022_bigquery_test/test_bigquery_copy_models.py
++++ b/test/integration/022_bigquery_test/test_bigquery_copy_models.py
+@@ -1,6 +1,6 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+ import textwrap
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBigqueryCopyTable(DBTIntegrationTest):
+diff --git a/test/integration/022_bigquery_test/test_bigquery_date_partitioning.py b/test/integration/022_bigquery_test/test_bigquery_date_partitioning.py
+index c787d8d3f6f..94a31a5e279 100644
+--- a/test/integration/022_bigquery_test/test_bigquery_date_partitioning.py
++++ b/test/integration/022_bigquery_test/test_bigquery_date_partitioning.py
+@@ -1,6 +1,6 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+ import textwrap
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBigqueryDatePartitioning(DBTIntegrationTest):
+diff --git a/test/integration/028_cli_vars/test_cli_vars.py b/test/integration/028_cli_vars/test_cli_vars.py
+index d0873b6e107..bcf6c018a84 100644
+--- a/test/integration/028_cli_vars/test_cli_vars.py
++++ b/test/integration/028_cli_vars/test_cli_vars.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ import json
+ 
+ 
+diff --git a/test/integration/040_init_test/test_init.py b/test/integration/040_init_test/test_init.py
+index c7b5a85363d..bb2761df81c 100644
+--- a/test/integration/040_init_test/test_init.py
++++ b/test/integration/040_init_test/test_init.py
+@@ -2,7 +2,7 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+ import os
+ import shutil
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestInit(DBTIntegrationTest):
+diff --git a/test/integration/042_sources_test/test_sources.py b/test/integration/042_sources_test/test_sources.py
+index c9633e86e41..e948b7c9ab7 100644
+--- a/test/integration/042_sources_test/test_sources.py
++++ b/test/integration/042_sources_test/test_sources.py
+@@ -2,7 +2,7 @@
+ import os
+ from datetime import datetime, timedelta
+ 
+-import yaml
++import oyaml as yaml
+ 
+ from dbt.exceptions import CompilationException
+ import dbt.tracking
+@@ -371,7 +371,7 @@ def test_postgres_source_freshness_selection_select(self):
+ 
+     @use_profile('postgres')
+     def test_postgres_source_freshness_selection_exclude(self):
+-        """Tests node selection using the --select argument. It 'excludes' the 
++        """Tests node selection using the --select argument. It 'excludes' the
+         only source in the project so it should return no results."""
+         self._set_updated_at_to(timedelta(hours=-2))
+         self.freshness_start_time = datetime.utcnow()
+diff --git a/test/integration/044_run_operations_test/test_run_operations.py b/test/integration/044_run_operations_test/test_run_operations.py
+index 98715191e3e..10b1ec8ecd0 100644
+--- a/test/integration/044_run_operations_test/test_run_operations.py
++++ b/test/integration/044_run_operations_test/test_run_operations.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestOperations(DBTIntegrationTest):
+diff --git a/test/integration/049_dbt_debug_test/test_debug.py b/test/integration/049_dbt_debug_test/test_debug.py
+index 74fabfcbc7b..137935042fe 100644
+--- a/test/integration/049_dbt_debug_test/test_debug.py
++++ b/test/integration/049_dbt_debug_test/test_debug.py
+@@ -1,7 +1,7 @@
+ from test.integration.base import DBTIntegrationTest,  use_profile
+ import os
+ import re
+-import yaml
++import oyaml as yaml
+ 
+ import pytest
+ 
+diff --git a/test/integration/054_adapter_methods_test/test_adapter_methods.py b/test/integration/054_adapter_methods_test/test_adapter_methods.py
+index 1fcaf5b1a49..4fa0b9feff7 100644
+--- a/test/integration/054_adapter_methods_test/test_adapter_methods.py
++++ b/test/integration/054_adapter_methods_test/test_adapter_methods.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBaseCaching(DBTIntegrationTest):
+diff --git a/test/integration/056_column_type_tests/test_alter_column_types.py b/test/integration/056_column_type_tests/test_alter_column_types.py
+index 51970244b84..7e3048a4ddd 100644
+--- a/test/integration/056_column_type_tests/test_alter_column_types.py
++++ b/test/integration/056_column_type_tests/test_alter_column_types.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestAlterColumnTypes(DBTIntegrationTest):
+diff --git a/test/integration/069_build_test/test_build.py b/test/integration/069_build_test/test_build.py
+index 4b2c24024ce..999108c2aae 100644
+--- a/test/integration/069_build_test/test_build.py
++++ b/test/integration/069_build_test/test_build.py
+@@ -1,5 +1,5 @@
+ from test.integration.base import DBTIntegrationTest, use_profile
+-import yaml
++import oyaml as yaml
+ 
+ 
+ class TestBuild(DBTIntegrationTest):
+@@ -44,7 +44,7 @@ def schema(self):
+     @property
+     def models(self):
+         return "models-failing"
+-        
++
+     @use_profile("postgres")
+     def test__postgres_build_happy_path(self):
+         results = self.build(expect_pass=False)
+diff --git a/test/integration/base.py b/test/integration/base.py
+index 463948de4b8..dedeef420e3 100644
+--- a/test/integration/base.py
++++ b/test/integration/base.py
+@@ -13,7 +13,7 @@
+ from functools import wraps
+ 
+ import pytest
+-import yaml
++import oyaml as yaml
+ from unittest.mock import patch
+ 
+ import dbt.main as dbt
+diff --git a/test/rpc/conftest.py b/test/rpc/conftest.py
+index 561c009f92e..10db7d49206 100644
+--- a/test/rpc/conftest.py
++++ b/test/rpc/conftest.py
+@@ -5,7 +5,7 @@
+ import time
+ from typing import Dict, Any, Set
+ 
+-import yaml
++import oyaml as yaml
+ 
+ 
+ def pytest_addoption(parser):
+diff --git a/test/rpc/test_build.py b/test/rpc/test_build.py
+index 24183b947f2..8bbd4583313 100644
+--- a/test/rpc/test_build.py
++++ b/test/rpc/test_build.py
+@@ -1,6 +1,6 @@
+ import os
+ import pytest
+-import yaml
++import oyaml as yaml
+ from .util import (
+     assert_has_threads,
+     get_querier,
+@@ -128,7 +128,7 @@ def test_rpc_build_state(
+             querier.build(state='./state', models=['state:modified']),
+         )
+         assert len(results['results']) == 0
+-        
++
+         # a better test of defer would require multiple targets
+         results = querier.async_wait_for_result(
+             querier.build(state='./state', models=['state:modified'], defer=True)
+diff --git a/test/rpc/test_test.py b/test/rpc/test_test.py
+index 9f938c3c966..08aba9f4bbd 100644
+--- a/test/rpc/test_test.py
++++ b/test/rpc/test_test.py
+@@ -1,6 +1,6 @@
+ import os
+ import pytest
+-import yaml
++import oyaml as yaml
+ from .util import (
+     assert_has_threads,
+     get_querier,
+@@ -105,7 +105,7 @@ def test_rpc_test_state(
+             querier.test(state='./state', models=['state:modified']),
+         )
+         assert len(results['results']) == 0
+-        
++
+         # a better test of defer would require multiple targets
+         results = querier.async_wait_for_result(
+             querier.run(state='./state', models=['state:modified'], defer=True)
+diff --git a/test/rpc/util.py b/test/rpc/util.py
+index f6beb832af5..1bacc397116 100644
+--- a/test/rpc/util.py
++++ b/test/rpc/util.py
+@@ -10,7 +10,7 @@
+ from typing import Dict, Any, Optional, Union, List
+ 
+ import requests
+-import yaml
++import oyaml as yaml
+ 
+ import dbt.flags
+ from dbt.adapters.factory import get_adapter, register_adapter
+diff --git a/test/unit/test_config.py b/test/unit/test_config.py
+index 544bf473ce1..3a59484c6dc 100644
+--- a/test/unit/test_config.py
++++ b/test/unit/test_config.py
+@@ -8,7 +8,7 @@
+ import pytest
+ 
+ from unittest import mock
+-import yaml
++import oyaml as yaml
+ 
+ import dbt.config
+ import dbt.exceptions
+diff --git a/test/unit/test_graph_selector_parsing.py b/test/unit/test_graph_selector_parsing.py
+index 759930dd9dc..7a241d1ea1d 100644
+--- a/test/unit/test_graph_selector_parsing.py
++++ b/test/unit/test_graph_selector_parsing.py
+@@ -7,7 +7,7 @@
+ )
+ from dbt.graph.selector_methods import MethodName
+ import textwrap
+-import yaml
++import oyaml as yaml
+ 
+ from dbt.contracts.selection import SelectorFile
+ 
+diff --git a/test/unit/test_jinja.py b/test/unit/test_jinja.py
+index 19a25ee3f56..67503c4ab52 100644
+--- a/test/unit/test_jinja.py
++++ b/test/unit/test_jinja.py
+@@ -1,7 +1,7 @@
+ from contextlib import contextmanager
+ import pytest
+ import unittest
+-import yaml
++import oyaml as yaml
+ 
+ from dbt.clients.jinja import get_rendered
+ from dbt.clients.jinja import get_template
+diff --git a/test/unit/test_main.py b/test/unit/test_main.py
+index 09f65aa1d7b..6827b28ba49 100644
+--- a/test/unit/test_main.py
++++ b/test/unit/test_main.py
+@@ -4,7 +4,7 @@
+ import unittest
+ from unittest import mock
+ 
+-import yaml
++import oyaml as yaml
+ 
+ from dbt import main
+ 
+diff --git a/test/unit/test_manifest_selectors.py b/test/unit/test_manifest_selectors.py
+index d7e7c3d1fe8..cf3f31319df 100644
+--- a/test/unit/test_manifest_selectors.py
++++ b/test/unit/test_manifest_selectors.py
+@@ -1,6 +1,6 @@
+ import dbt.exceptions
+ import textwrap
+-import yaml
++import oyaml as yaml
+ import unittest
+ from dbt.config.selectors import SelectorDict
+ 
+@@ -71,7 +71,7 @@ def test_single_string_definition(self):
+         definition = sel_dict['nightly_selector']['definition']
+         self.assertEqual(expected, definition)
+ 
+- 
++
+     def test_single_key_value_definition(self):
+         dct = get_selector_dict('''\
+             selectors:
+diff --git a/test/unit/test_parser.py b/test/unit/test_parser.py
+index fc60b39a111..ca6f6c81802 100644
+--- a/test/unit/test_parser.py
++++ b/test/unit/test_parser.py
+@@ -3,7 +3,7 @@
+ from unittest import mock
+ 
+ import os
+-import yaml
++import oyaml as yaml
+ 
+ import dbt.flags
+ import dbt.parser
+diff --git a/test/unit/test_selector_errors.py b/test/unit/test_selector_errors.py
+index a5019c1211a..47ea553a084 100644
+--- a/test/unit/test_selector_errors.py
++++ b/test/unit/test_selector_errors.py
+@@ -1,6 +1,6 @@
+ import dbt.exceptions
+ import textwrap
+-import yaml
++import oyaml as yaml
+ import unittest
+ from dbt.config.selectors import (
+     selector_config_from_data
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,213 @@
+  Task-ID: scipy__scipy-10423@df1fef2
+  Please checkout to this commit first: 18219f5a1971be9a3fd6d590aeb496a419e8cd0e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: scipy.fft does not support multiprocessing
+`scipy.fft` interacts badly with `joblib`, specifically when using the "processes" method. @peterbell10 tested and reports that it also fails for `multiprocessing.Pool` directly. But here was my MWE with joblib:
+```Python
+>>> import numpy as np
+>>> from joblib import Parallel, delayed
+>>> from scipy.fft import rfft
+>>> [rfft(np.zeros(1)) for _ in range(2)]  # works
+>>> Parallel(n_jobs=2, prefer='threads')(delayed(rfft)(np.zeros(1)) for _ in range(2))  # works
+>>> Parallel(n_jobs=2, prefer='processes')(delayed(rfft)(np.zeros(1)) for _ in range(2))  # fails
+joblib.externals.loky.process_executor._RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/home/larsoner/python/joblib/joblib/externals/loky/process_executor.py", line 418, in _process_worker
+    r = call_item()
+  File "/home/larsoner/python/joblib/joblib/externals/loky/process_executor.py", line 272, in __call__
+    return self.fn(*self.args, **self.kwargs)
+  File "/home/larsoner/python/joblib/joblib/_parallel_backends.py", line 567, in __call__
+    return self.func(*args, **kwargs)
+  File "/home/larsoner/python/joblib/joblib/parallel.py", line 225, in __call__
+    for func, args, kwargs in self.items]
+  File "/home/larsoner/python/joblib/joblib/parallel.py", line 225, in <listcomp>
+    for func, args, kwargs in self.items]
+  File "/home/larsoner/python/scipy/scipy/fft/_basic.py", line 298, in rfft
+    return _pocketfft.rfft(x, n, axis, norm, overwrite_x)
+  File "/home/larsoner/python/scipy/scipy/fft/_pocketfft/basic.py", line 134, in rfft
+    return pfft.r2c(tmp, (axis,), True, norm, None, _default_workers)
+RuntimeError: unsupported data type
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/larsoner/python/joblib/joblib/parallel.py", line 934, in __call__
+    self.retrieve()
+  File "/home/larsoner/python/joblib/joblib/parallel.py", line 833, in retrieve
+    self._output.extend(job.get(timeout=self.timeout))
+  File "/home/larsoner/python/joblib/joblib/_parallel_backends.py", line 521, in wrap_future_result
+    return future.result(timeout=timeout)
+  File "/usr/lib/python3.7/concurrent/futures/_base.py", line 432, in result
+    return self.__get_result()
+  File "/usr/lib/python3.7/concurrent/futures/_base.py", line 384, in __get_result
+    raise self._exception
+RuntimeError: unsupported data type
+```
+Modifying the SciPy code to print the dtype and `__class__` of at least `tmp` shows `np.float64` and `np.ndarray` as expected, so I'm not sure what unsupported datatype we are getting.
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/fft/_pocketfft/pypocketfft.cxx b/scipy/fft/_pocketfft/pypocketfft.cxx
+index cf2a4246cdb4..ab7172fbca45 100644
+--- a/scipy/fft/_pocketfft/pypocketfft.cxx
++++ b/scipy/fft/_pocketfft/pypocketfft.cxx
+@@ -28,12 +28,12 @@ namespace py = pybind11;
+ using ldbl_t = typename std::conditional<
+   sizeof(long double)==sizeof(double), double, long double>::type;
+ 
+-auto c64 = py::dtype("complex64");
+-auto c128 = py::dtype("complex128");
+-auto clong = py::dtype("longcomplex");
+-auto f32 = py::dtype("float32");
+-auto f64 = py::dtype("float64");
+-auto flong = py::dtype("longfloat");
++using c64 = std::complex<float>;
++using c128 = std::complex<double>;
++using clong = std::complex<ldbl_t>;
++using f32 = float;
++using f64 = double;
++using flong = ldbl_t;
+ auto None = py::none();
+ 
+ shape_t copy_shape(const py::array &arr)
+@@ -77,10 +77,9 @@ shape_t makeaxes(const py::array &in, const py::object &axes)
+ 
+ #define DISPATCH(arr, T1, T2, T3, func, args) \
+   { \
+-  auto dtype = arr.dtype(); \
+-  if (dtype.is(T1)) return func<double> args; \
+-  if (dtype.is(T2)) return func<float> args; \
+-  if (dtype.is(T3)) return func<ldbl_t> args; \
++  if (py::isinstance<py::array_t<T1>>(arr)) return func<double> args; \
++  if (py::isinstance<py::array_t<T2>>(arr)) return func<float> args;  \
++  if (py::isinstance<py::array_t<T3>>(arr)) return func<ldbl_t> args; \
+   throw runtime_error("unsupported data type"); \
+   }
+ 
+diff --git a/scipy/fft/_pocketfft/scipychanges.patch b/scipy/fft/_pocketfft/scipychanges.patch
+new file mode 100644
+index 000000000000..4d268681a16f
+--- /dev/null
++++ b/scipy/fft/_pocketfft/scipychanges.patch
+@@ -0,0 +1,36 @@
++diff --git a/scipy/fft/_pocketfft/pypocketfft.cxx b/scipy/fft/_pocketfft/pypocketfft.cxx
++index cf2a4246c..ab7172fbc 100644
++--- a/scipy/fft/_pocketfft/pypocketfft.cxx
+++++ b/scipy/fft/_pocketfft/pypocketfft.cxx
++@@ -28,12 +28,12 @@ namespace py = pybind11;
++ using ldbl_t = typename std::conditional<
++   sizeof(long double)==sizeof(double), double, long double>::type;
++
++-auto c64 = py::dtype("complex64");
++-auto c128 = py::dtype("complex128");
++-auto clong = py::dtype("longcomplex");
++-auto f32 = py::dtype("float32");
++-auto f64 = py::dtype("float64");
++-auto flong = py::dtype("longfloat");
+++using c64 = std::complex<float>;
+++using c128 = std::complex<double>;
+++using clong = std::complex<ldbl_t>;
+++using f32 = float;
+++using f64 = double;
+++using flong = ldbl_t;
++ auto None = py::none();
++
++ shape_t copy_shape(const py::array &arr)
++@@ -77,10 +77,9 @@ shape_t makeaxes(const py::array &in, const py::object &axes)
++
++ #define DISPATCH(arr, T1, T2, T3, func, args) \
++   { \
++-  auto dtype = arr.dtype(); \
++-  if (dtype.is(T1)) return func<double> args; \
++-  if (dtype.is(T2)) return func<float> args; \
++-  if (dtype.is(T3)) return func<ldbl_t> args; \
+++  if (py::isinstance<py::array_t<T1>>(arr)) return func<double> args; \
+++  if (py::isinstance<py::array_t<T2>>(arr)) return func<float> args;  \
+++  if (py::isinstance<py::array_t<T3>>(arr)) return func<ldbl_t> args; \
++   throw runtime_error("unsupported data type"); \
++   }
+diff --git a/scipy/fft/_pocketfft/version.md b/scipy/fft/_pocketfft/version.md
+index 188fd5b9df94..d1c238ea36b6 100644
+--- a/scipy/fft/_pocketfft/version.md
++++ b/scipy/fft/_pocketfft/version.md
+@@ -13,4 +13,6 @@ SciPy currently vendors [pypocketfft][repo] at:
+ 
+         New interface
+ 
++With the changes in `scipychanges.patch`
++
+ repo: https://gitlab.mpcdf.mpg.de/mtr/pypocketfft
+diff --git a/scipy/fft/tests/test_numpy.py b/scipy/fft/tests/test_numpy.py
+index f2fbd2f1e585..434159448f8a 100644
+--- a/scipy/fft/tests/test_numpy.py
++++ b/scipy/fft/tests/test_numpy.py
+@@ -2,11 +2,12 @@
+ 
+ import queue
+ import threading
++import multiprocessing
+ import numpy as np
+ import pytest
+ from numpy.random import random
+ from numpy.testing import (
+-        assert_array_almost_equal, assert_array_equal
++        assert_array_almost_equal, assert_array_equal, assert_allclose
+         )
+ from pytest import raises as assert_raises
+ import scipy.fft as fft
+@@ -252,6 +253,17 @@ def test_irfft(self):
+         self._test_mtsame(fft.irfft, a)
+ 
+ 
++@pytest.mark.parametrize("func", [fft.fft, fft.ifft, fft.rfft, fft.irfft])
++def test_multiprocess(func):
++    # Test that fft still works after fork (gh-10422)
++    with multiprocessing.Pool(2) as p:
++        res = p.map(func, [np.ones(100) for _ in range(4)])
++
++    expect = func(np.ones(100))
++    for x in res:
++        assert_allclose(x, expect)
++
++
+ class TestIRFFTN(object):
+ 
+     def test_not_last_axis_success(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

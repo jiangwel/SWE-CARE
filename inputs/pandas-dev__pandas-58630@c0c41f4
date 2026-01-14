@@ -1,0 +1,168 @@
+  Task-ID: pandas-dev__pandas-58630@c0c41f4
+  Please checkout to this commit first: 882b228a495f11bbdace51c1072e6245299249ac
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Groupby on a column with tuples creates a multiindex, yielding unexpected behaviour.
+#### Code Sample, a copy-pastable example if possible
+
+```python
+import numpy as np
+import pandas as pd
+
+df = pd.DataFrame(np.random.randint(0, 11, (10, 3)), columns=['num1', 'num2', 'num3'])
+df['category_tuple'] = [(0, 1), (0, 1), (0, 1), (2, 3), (2, 3), (2, 3), (2, 3), (0, 4), (5,), (6,)]
+df['category_string'] = list('aaabbbbcde')
+df = df[['category_tuple', 'category_string', 'num1', 'num2', 'num3']]
+
+# df.groupby('category_string').apply(lambda x: x.sort_values(by='num1'))
+df.groupby('category_tuple').apply(lambda x: x.sort_values(by='num1'))
+```
+#### Problem description
+
+I get this error: `ValueError: Names should be list-like for a MultiIndex`
+
+This behaviour changed somewhere between 0.19.0 and 0.19.1. This can be sidestepped by casting the tuples to a string before doing the groupby, but the behaviour is definitely unexpected.
+
+`category_string` works, but `category_tuple` does not. Other operations also break in the same way (e.g., `describe()`). I'd expect them both to work in the same way, and not create a multiindex unless I request it.
+
+#### Expected Output
+```
+                  category_tuple category_string  num1  num2  num3
+category_tuple                                                   
+(0, 1)          0         (0, 1)               a     0     0    10
+                2         (0, 1)               a     0     7     1
+                1         (0, 1)               a     6     7     2
+(2, 3)          4         (2, 3)               b     1     3     0
+                6         (2, 3)               b     3     6     8
+                3         (2, 3)               b     6    10     3
+                5         (2, 3)               b     6     0     1
+(0, 4)          7         (0, 4)               c     7     7     5
+(5,)            8           (5,)               d     4     5     7
+(6,)            9           (6,)               e     9     1     5
+```
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+INSTALLED VERSIONS
+------------------
+commit: None
+
+pandas: 0.22.0
+pytest: None
+pip: 10.0.0
+setuptools: 28.8.0
+Cython: None
+numpy: 1.14.2
+scipy: 1.0.1
+pyarrow: None
+xarray: None
+IPython: 6.3.1
+sphinx: None
+patsy: 0.5.0
+dateutil: 2.6.1
+pytz: 2018.4
+blosc: None
+bottleneck: None
+tables: None
+numexpr: None
+feather: None
+matplotlib: 2.2.2
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: None
+lxml: None
+bs4: None
+html5lib: 1.0.1
+sqlalchemy: None
+pymysql: None
+psycopg2: None
+jinja2: 2.10
+s3fs: None
+fastparquet: None
+pandas_gbq: None
+pandas_datareader: None
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/tests/groupby/test_grouping.py b/pandas/tests/groupby/test_grouping.py
+index 063b0ce38387f..c72d8ebf628fe 100644
+--- a/pandas/tests/groupby/test_grouping.py
++++ b/pandas/tests/groupby/test_grouping.py
+@@ -822,6 +822,38 @@ def test_groupby_multiindex_level_empty(self):
+         )
+         tm.assert_frame_equal(result, expected)
+ 
++    def test_groupby_tuple_keys_handle_multiindex(self):
++        # https://github.com/pandas-dev/pandas/issues/21340
++        df = DataFrame(
++            {
++                "num1": [0, 8, 9, 4, 3, 3, 5, 9, 3, 6],
++                "num2": [3, 8, 6, 4, 9, 2, 1, 7, 0, 9],
++                "num3": [6, 5, 7, 8, 5, 1, 1, 10, 7, 8],
++                "category_tuple": [
++                    (0, 1),
++                    (0, 1),
++                    (0, 1),
++                    (0, 4),
++                    (2, 3),
++                    (2, 3),
++                    (2, 3),
++                    (2, 3),
++                    (5,),
++                    (6,),
++                ],
++                "category_string": list("aaabbbbcde"),
++            }
++        )
++        expected = df.sort_values(by=["category_tuple", "num1"])
++
++        msg = "DataFrameGroupBy.apply operated on the grouping columns"
++        with tm.assert_produces_warning(DeprecationWarning, match=msg):
++            result = df.groupby("category_tuple").apply(
++                lambda x: x.sort_values(by="num1")
++            )
++        expected = expected[result.columns]
++        tm.assert_frame_equal(result.reset_index(drop=True), expected)
++
+ 
+ # get_group
+ # --------------------------------
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

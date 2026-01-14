@@ -1,0 +1,2945 @@
+  Task-ID: deepset-ai__haystack-1861@36fe91e
+  Please checkout to this commit first: 7bdb7828714ba23668b3b696976ee06cc1807563
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Modify HTTP header for retriever request
+**Is your feature request related to a problem? Please describe.**
+Currently our ODFE has some plugins to handle authentication and the authorization of documents based on JWT tokens. With the Elasticsearch-, OpenSearch- and OpenDistroElasticsearchRetriever I can't add this token from a user to the retriever request. This would be awesome. There might be other use cases to modify the HTTP header.
+
+**Describe the solution you'd like**
+I would like to add a token, which can vary from request to request in the HTTP header.
+
+**Describe alternatives you've considered**
+No alternatives currently. All user are using the same user.
+
+**Additional context**
+  </issue>
+  
+  <patch>
+  diff --git a/docs/_src/api/api/document_store.md b/docs/_src/api/api/document_store.md
+index 0543fb65b8..0f783ea93a 100644
+--- a/docs/_src/api/api/document_store.md
++++ b/docs/_src/api/api/document_store.md
+@@ -24,7 +24,7 @@ Base class for implementing Document Stores.
+ 
+ ```python
+  | @abstractmethod
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None)
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, **kwargs)
+ ```
+ 
+ Indexes documents for later queries.
+@@ -55,7 +55,7 @@ None
+ 
+ ```python
+  | @abstractmethod
+- | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Get documents from the document store.
+@@ -67,12 +67,34 @@ Get documents from the document store.
+ - `filters`: Optional filters to narrow down the documents to return.
+                 Example: {"name": ["some", "more"], "category": ["only_one"]}
+ - `return_embedding`: Whether to return the document embeddings.
++- `batch_size`: Number of documents that are passed to bulk function at a time.
++
++<a name="base.BaseDocumentStore.get_all_documents_generator"></a>
++#### get\_all\_documents\_generator
++
++```python
++ | @abstractmethod
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
++```
++
++Get documents from the document store. Under-the-hood, documents are fetched in batches from the
++document store and yielded as individual documents. This method can be used to iteratively process
++a large number of documents without having to load all documents in memory.
++
++**Arguments**:
++
++- `index`: Name of the index to get the documents from. If None, the
++              DocumentStore's default index (self.index) will be used.
++- `filters`: Optional filters to narrow down the documents to return.
++                Example: {"name": ["some", "more"], "category": ["only_one"]}
++- `return_embedding`: Whether to return the document embeddings.
++- `batch_size`: When working with large number of documents, batching can help reduce memory footprint.
+ 
+ <a name="base.BaseDocumentStore.get_all_labels_aggregated"></a>
+ #### get\_all\_labels\_aggregated
+ 
+ ```python
+- | get_all_labels_aggregated(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, open_domain: bool = True, drop_negative_labels: bool = False, drop_no_answers: bool = False, aggregate_by_meta: Optional[Union[str, list]] = None) -> List[MultiLabel]
++ | get_all_labels_aggregated(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, open_domain: bool = True, drop_negative_labels: bool = False, drop_no_answers: bool = False, aggregate_by_meta: Optional[Union[str, list]] = None, **kwargs) -> List[MultiLabel]
+ ```
+ 
+ Return all labels in the DocumentStore, aggregated into MultiLabel objects.
+@@ -114,7 +136,7 @@ Performs L2 normalization of embeddings vector inplace. Input can be a single ve
+ #### add\_eval\_data
+ 
+ ```python
+- | add_eval_data(filename: str, doc_index: str = "eval_document", label_index: str = "label", batch_size: Optional[int] = None, preprocessor: Optional[PreProcessor] = None, max_docs: Union[int, bool] = None, open_domain: bool = False)
++ | add_eval_data(filename: str, doc_index: str = "eval_document", label_index: str = "label", batch_size: Optional[int] = None, preprocessor: Optional[PreProcessor] = None, max_docs: Union[int, bool] = None, open_domain: bool = False, **kwargs)
+ ```
+ 
+ Adds a SQuAD-formatted file to the DocumentStore in order to be able to perform evaluation on it.
+@@ -231,7 +253,7 @@ A DocumentStore using Elasticsearch to store and query the documents for our sea
+ #### get\_document\_by\_id
+ 
+ ```python
+- | get_document_by_id(id: str, index: Optional[str] = None) -> Optional[Document]
++ | get_document_by_id(id: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> Optional[Document]
+ ```
+ 
+ Fetch a document by specifying its text id string
+@@ -240,7 +262,7 @@ Fetch a document by specifying its text id string
+ #### get\_documents\_by\_id
+ 
+ ```python
+- | get_documents_by_id(ids: List[str], index: Optional[str] = None) -> List[Document]
++ | get_documents_by_id(ids: List[str], index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Fetch documents by specifying a list of text id strings
+@@ -249,7 +271,7 @@ Fetch documents by specifying a list of text id strings
+ #### get\_metadata\_values\_by\_key
+ 
+ ```python
+- | get_metadata_values_by_key(key: str, query: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> List[dict]
++ | get_metadata_values_by_key(key: str, query: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, headers: MutableMapping[str, str] = None) -> List[dict]
+ ```
+ 
+ Get values associated with a metadata key. The output is in the format:
+@@ -262,12 +284,13 @@ Get values associated with a metadata key. The output is in the format:
+ - `filters`: narrow down the scope to documents that match the given filters.
+ - `index`: Elasticsearch index where the meta values should be searched. If not supplied,
+               self.index will be used.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="elasticsearch.ElasticsearchDocumentStore.write_documents"></a>
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None)
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs)
+ ```
+ 
+ Indexes documents for later queries in Elasticsearch.
+@@ -296,6 +319,7 @@ they will automatically get UUIDs assigned. See the `Document` class for details
+                             overwrite: Update any existing documents with the same ID when adding documents.
+                             fail: an error is raised if the document ID of the document being added already
+                             exists.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Raises**:
+ 
+@@ -309,7 +333,7 @@ None
+ #### write\_labels
+ 
+ ```python
+- | write_labels(labels: Union[List[Label], List[dict]], index: Optional[str] = None, batch_size: int = 10_000)
++ | write_labels(labels: Union[List[Label], List[dict]], index: Optional[str] = None, headers: MutableMapping[str, str] = None, batch_size: int = 10_000, **kwargs)
+ ```
+ 
+ Write annotation labels into document store.
+@@ -319,12 +343,13 @@ Write annotation labels into document store.
+ - `labels`: A list of Python dictionaries or a list of Haystack Label objects.
+ - `index`: Elasticsearch index where the labels should be stored. If not supplied, self.label_index will be used.
+ - `batch_size`: Number of labels that are passed to Elasticsearch's bulk function at a time.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="elasticsearch.ElasticsearchDocumentStore.update_document_meta"></a>
+ #### update\_document\_meta
+ 
+ ```python
+- | update_document_meta(id: str, meta: Dict[str, str])
++ | update_document_meta(id: str, meta: Dict[str, str], headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Update the metadata dictionary of a document by specifying its string id
+@@ -333,7 +358,7 @@ Update the metadata dictionary of a document by specifying its string id
+ #### get\_document\_count
+ 
+ ```python
+- | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, only_documents_without_embedding: bool = False) -> int
++ | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, only_documents_without_embedding: bool = False, headers: MutableMapping[str, str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of documents in the document store.
+@@ -342,7 +367,7 @@ Return the number of documents in the document store.
+ #### get\_label\_count
+ 
+ ```python
+- | get_label_count(index: Optional[str] = None) -> int
++ | get_label_count(index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of labels in the document store
+@@ -351,7 +376,7 @@ Return the number of labels in the document store
+ #### get\_embedding\_count
+ 
+ ```python
+- | get_embedding_count(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None) -> int
++ | get_embedding_count(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None) -> int
+ ```
+ 
+ Return the count of embeddings in the document store.
+@@ -360,7 +385,7 @@ Return the count of embeddings in the document store.
+ #### get\_all\_documents
+ 
+ ```python
+- | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> List[Document]
++ | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, headers: MutableMapping[str, str] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Get documents from the document store.
+@@ -373,12 +398,13 @@ Get documents from the document store.
+                 Example: {"name": ["some", "more"], "category": ["only_one"]}
+ - `return_embedding`: Whether to return the document embeddings.
+ - `batch_size`: When working with large number of documents, batching can help reduce memory footprint.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="elasticsearch.ElasticsearchDocumentStore.get_all_documents_generator"></a>
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, headers: MutableMapping[str, str] = None, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -393,12 +419,13 @@ a large number of documents without having to load all documents in memory.
+                 Example: {"name": ["some", "more"], "category": ["only_one"]}
+ - `return_embedding`: Whether to return the document embeddings.
+ - `batch_size`: When working with large number of documents, batching can help reduce memory footprint.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="elasticsearch.ElasticsearchDocumentStore.get_all_labels"></a>
+ #### get\_all\_labels
+ 
+ ```python
+- | get_all_labels(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, batch_size: int = 10_000) -> List[Label]
++ | get_all_labels(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, batch_size: int = 10_000, **kwargs) -> List[Label]
+ ```
+ 
+ Return all labels in the document store
+@@ -407,7 +434,7 @@ Return all labels in the document store
+ #### query
+ 
+ ```python
+- | query(query: Optional[str], filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, custom_query: Optional[str] = None, index: Optional[str] = None) -> List[Document]
++ | query(query: Optional[str], filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, custom_query: Optional[str] = None, index: Optional[str] = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -419,12 +446,13 @@ that are most relevant to the query as defined by the BM25 algorithm.
+ - `filters`: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+ - `top_k`: How many documents to return per query.
+ - `index`: The name of the index in the DocumentStore from which to retrieve documents
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="elasticsearch.ElasticsearchDocumentStore.query_by_embedding"></a>
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, headers: MutableMapping[str, str] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -437,6 +465,7 @@ Find the document that is most similar to the provided `query_emb` by using a ve
+ - `top_k`: How many documents to return
+ - `index`: Index name for storing the docs and metadata
+ - `return_embedding`: To return document embedding
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -455,7 +484,7 @@ Return a summary of the documents in the document store
+ #### update\_embeddings
+ 
+ ```python
+- | update_embeddings(retriever, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, update_existing_embeddings: bool = True, batch_size: int = 10_000)
++ | update_embeddings(retriever, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, update_existing_embeddings: bool = True, batch_size: int = 10_000, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Updates the embeddings in the the document store using the encoding model specified in the retriever.
+@@ -472,6 +501,7 @@ This can be useful if want to add or change the embeddings for your documents (e
+ - `filters`: Optional filters to narrow down the documents for which embeddings are to be updated.
+                 Example: {"name": ["some", "more"], "category": ["only_one"]}
+ - `batch_size`: When working with large number of documents, batching can help reduce memory footprint.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -481,7 +511,7 @@ None
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -490,6 +520,7 @@ Delete documents in an index. All documents are deleted if no filters are passed
+ 
+ - `index`: Index name to delete the document from.
+ - `filters`: Optional filters to narrow down the documents to be deleted.
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -499,7 +530,7 @@ None
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -514,6 +545,7 @@ Delete documents in an index. All documents are deleted if no filters are passed
+     If filters are provided along with a list of IDs, this method deletes the
+     intersection of the two query results (documents that match the filters and
+     have their ID in the list).
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -523,7 +555,7 @@ None
+ #### delete\_labels
+ 
+ ```python
+- | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs)
+ ```
+ 
+ Delete labels in an index. All labels are deleted if no filters are passed.
+@@ -535,6 +567,7 @@ Delete labels in an index. All labels are deleted if no filters are passed.
+ - `ids`: Optional list of IDs to narrow down the labels to be deleted.
+ - `filters`: Optional filters to narrow down the labels to be deleted.
+     Example filters: {"id": ["9a196e41-f7b5-45b4-bd19-5feb7501c159", "9a196e41-f7b5-45b4-bd19-5feb7501c159"]} or {"query": ["question2"]}
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -556,7 +589,7 @@ the KNN plugin that can scale to a large number of documents.
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, headers: MutableMapping[str, str] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -569,6 +602,7 @@ Find the document that is most similar to the provided `query_emb` by using a ve
+ - `top_k`: How many documents to return
+ - `index`: Index name for storing the docs and metadata
+ - `return_embedding`: To return document embedding
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -625,7 +659,7 @@ In-memory document store
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, duplicate_documents: Optional[str] = None)
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, duplicate_documents: Optional[str] = None, **kwargs)
+ ```
+ 
+ Indexes documents for later queries.
+@@ -659,7 +693,7 @@ None
+ #### write\_labels
+ 
+ ```python
+- | write_labels(labels: Union[List[dict], List[Label]], index: Optional[str] = None)
++ | write_labels(labels: Union[List[dict], List[Label]], index: Optional[str] = None, **kwargs)
+ ```
+ 
+ Write annotation labels into document store.
+@@ -668,7 +702,7 @@ Write annotation labels into document store.
+ #### get\_document\_by\_id
+ 
+ ```python
+- | get_document_by_id(id: str, index: Optional[str] = None) -> Optional[Document]
++ | get_document_by_id(id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]
+ ```
+ 
+ Fetch a document by specifying its text id string.
+@@ -686,7 +720,7 @@ Fetch documents by specifying a list of text id strings.
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -734,7 +768,7 @@ None
+ #### get\_document\_count
+ 
+ ```python
+- | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int
++ | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of documents in the document store.
+@@ -752,7 +786,7 @@ Return the count of embeddings in the document store.
+ #### get\_label\_count
+ 
+ ```python
+- | get_label_count(index: Optional[str] = None) -> int
++ | get_label_count(index: Optional[str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of labels in the document store.
+@@ -761,7 +795,7 @@ Return the number of labels in the document store.
+ #### get\_all\_documents
+ 
+ ```python
+- | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> List[Document]
++ | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Get all documents from the document store as a list.
+@@ -778,7 +812,7 @@ Get all documents from the document store as a list.
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get all documents from the document store. The methods returns a Python Generator that yields individual
+@@ -796,7 +830,7 @@ documents.
+ #### get\_all\_labels
+ 
+ ```python
+- | get_all_labels(index: str = None, filters: Optional[Dict[str, List[str]]] = None) -> List[Label]
++ | get_all_labels(index: str = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs) -> List[Label]
+ ```
+ 
+ Return all labels in the document store.
+@@ -805,7 +839,7 @@ Return all labels in the document store.
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -823,7 +857,7 @@ None
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -847,7 +881,7 @@ None
+ #### delete\_labels
+ 
+ ```python
+- | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete labels in an index. All labels are deleted if no filters are passed.
+@@ -901,7 +935,7 @@ An SQL backed DocumentStore. Currently supports SQLite, PostgreSQL and MySQL bac
+ #### get\_document\_by\_id
+ 
+ ```python
+- | get_document_by_id(id: str, index: Optional[str] = None) -> Optional[Document]
++ | get_document_by_id(id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]
+ ```
+ 
+ Fetch a document by specifying its text id string
+@@ -910,7 +944,7 @@ Fetch a document by specifying its text id string
+ #### get\_documents\_by\_id
+ 
+ ```python
+- | get_documents_by_id(ids: List[str], index: Optional[str] = None, batch_size: int = 10_000) -> List[Document]
++ | get_documents_by_id(ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Fetch documents by specifying a list of text id strings
+@@ -928,7 +962,7 @@ Fetch documents by specifying a list of text vector id strings
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -948,7 +982,7 @@ a large number of documents without having to load all documents in memory.
+ #### get\_all\_labels
+ 
+ ```python
+- | get_all_labels(index=None, filters: Optional[dict] = None)
++ | get_all_labels(index=None, filters: Optional[dict] = None, **kwargs)
+ ```
+ 
+ Return all labels in the document store
+@@ -957,7 +991,7 @@ Return all labels in the document store
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None) -> None
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, **kwargs) -> None
+ ```
+ 
+ Indexes documents for later queries.
+@@ -987,7 +1021,7 @@ None
+ #### write\_labels
+ 
+ ```python
+- | write_labels(labels, index=None)
++ | write_labels(labels, index=None, **kwargs)
+ ```
+ 
+ Write annotation labels into document store.
+@@ -1029,7 +1063,7 @@ Update the metadata dictionary of a document by specifying its string id
+ #### get\_document\_count
+ 
+ ```python
+- | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int
++ | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of documents in the document store.
+@@ -1038,7 +1072,7 @@ Return the number of documents in the document store.
+ #### get\_label\_count
+ 
+ ```python
+- | get_label_count(index: Optional[str] = None) -> int
++ | get_label_count(index: Optional[str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of labels in the document store
+@@ -1047,7 +1081,7 @@ Return the number of labels in the document store
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -1065,7 +1099,7 @@ None
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -1089,7 +1123,7 @@ None
+ #### delete\_labels
+ 
+ ```python
+- | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_labels(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete labels from the document store. All labels are deleted if no filters are passed.
+@@ -1178,7 +1212,7 @@ the vector embeddings are indexed in a FAISS Index.
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None) -> None
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, **kwargs) -> None
+ ```
+ 
+ Add new documents to the DocumentStore.
+@@ -1234,7 +1268,7 @@ None
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get all documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -1284,7 +1318,7 @@ None
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete all documents from the document store.
+@@ -1293,7 +1327,7 @@ Delete all documents from the document store.
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents from the document store. All documents are deleted if no filters are passed.
+@@ -1317,7 +1351,7 @@ None
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[Dict[str, List[str]]] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -1454,7 +1488,7 @@ Note that an overly large index_file_size value may cause failure to load a segm
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None)
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None, **kwargs)
+ ```
+ 
+ Add new documents to the DocumentStore.
+@@ -1510,7 +1544,7 @@ None
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[dict] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[dict] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -1532,7 +1566,7 @@ list of Documents that are the most similar to `query_emb`
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete all documents (from SQL AND Milvus).
+@@ -1551,7 +1585,7 @@ None
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -1575,7 +1609,7 @@ None
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get all documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -1595,7 +1629,7 @@ a large number of documents without having to load all documents in memory.
+ #### get\_all\_documents
+ 
+ ```python
+- | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> List[Document]
++ | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Get documents from the document store (optionally using filter criteria).
+@@ -1613,7 +1647,7 @@ Get documents from the document store (optionally using filter criteria).
+ #### get\_document\_by\_id
+ 
+ ```python
+- | get_document_by_id(id: str, index: Optional[str] = None) -> Optional[Document]
++ | get_document_by_id(id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]
+ ```
+ 
+ Fetch a document by specifying its text id string
+@@ -1628,7 +1662,7 @@ Fetch a document by specifying its text id string
+ #### get\_documents\_by\_id
+ 
+ ```python
+- | get_documents_by_id(ids: List[str], index: Optional[str] = None, batch_size: int = 10_000) -> List[Document]
++ | get_documents_by_id(ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Fetch multiple documents by specifying their IDs (strings)
+@@ -1638,7 +1672,7 @@ Fetch multiple documents by specifying their IDs (strings)
+ - `ids`: List of IDs of the documents
+ - `index`: Name of the index to get the documents from. If None, the
+               DocumentStore's default index (self.index) will be used.
+-- `batch_size`: When working with large number of documents, batching can help reduce memory footprint.
++- `batch_size`: is currently not used
+ 
+ <a name="milvus.MilvusDocumentStore.get_all_vectors"></a>
+ #### get\_all\_vectors
+@@ -1739,7 +1773,7 @@ The current implementation is not supporting the storage of labels, so you canno
+ #### get\_document\_by\_id
+ 
+ ```python
+- | get_document_by_id(id: str, index: Optional[str] = None) -> Optional[Document]
++ | get_document_by_id(id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]
+ ```
+ 
+ Fetch a document by specifying its uuid string
+@@ -1748,7 +1782,7 @@ Fetch a document by specifying its uuid string
+ #### get\_documents\_by\_id
+ 
+ ```python
+- | get_documents_by_id(ids: List[str], index: Optional[str] = None, batch_size: int = 10_000) -> List[Document]
++ | get_documents_by_id(ids: List[str], index: Optional[str] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Fetch documents by specifying a list of uuid strings.
+@@ -1757,7 +1791,7 @@ Fetch documents by specifying a list of uuid strings.
+ #### write\_documents
+ 
+ ```python
+- | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None)
++ | write_documents(documents: Union[List[dict], List[Document]], index: Optional[str] = None, batch_size: int = 10_000, duplicate_documents: Optional[str] = None, **kwargs)
+ ```
+ 
+ Add new documents to the DocumentStore.
+@@ -1804,7 +1838,7 @@ Return the number of embeddings in the document store, which is the same as the
+ #### get\_document\_count
+ 
+ ```python
+- | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int
++ | get_document_count(filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int
+ ```
+ 
+ Return the number of documents in the document store.
+@@ -1813,7 +1847,7 @@ Return the number of documents in the document store.
+ #### get\_all\_documents
+ 
+ ```python
+- | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> List[Document]
++ | get_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> List[Document]
+ ```
+ 
+ Get documents from the document store.
+@@ -1831,7 +1865,7 @@ Get documents from the document store.
+ #### get\_all\_documents\_generator
+ 
+ ```python
+- | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000) -> Generator[Document, None, None]
++ | get_all_documents_generator(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, return_embedding: Optional[bool] = None, batch_size: int = 10_000, **kwargs) -> Generator[Document, None, None]
+ ```
+ 
+ Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -1870,7 +1904,7 @@ that are most relevant to the query as defined by Weaviate semantic search.
+ #### query\_by\_embedding
+ 
+ ```python
+- | query_by_embedding(query_emb: np.ndarray, filters: Optional[dict] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None) -> List[Document]
++ | query_by_embedding(query_emb: np.ndarray, filters: Optional[dict] = None, top_k: int = 10, index: Optional[str] = None, return_embedding: Optional[bool] = None, **kwargs) -> List[Document]
+ ```
+ 
+ Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+@@ -1916,7 +1950,7 @@ None
+ #### delete\_all\_documents
+ 
+ ```python
+- | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_all_documents(index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -1934,7 +1968,7 @@ None
+ #### delete\_documents
+ 
+ ```python
+- | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None)
++ | delete_documents(index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs)
+ ```
+ 
+ Delete documents in an index. All documents are deleted if no filters are passed.
+@@ -1988,7 +2022,7 @@ Init the knowledge graph by defining the settings to connect with a GraphDB inst
+ #### create\_index
+ 
+ ```python
+- | create_index(config_path: Path)
++ | create_index(config_path: Path, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Create a new index (also called repository) stored in the GraphDB instance
+@@ -1996,22 +2030,27 @@ Create a new index (also called repository) stored in the GraphDB instance
+ **Arguments**:
+ 
+ - `config_path`: path to a .ttl file with configuration settings, details:
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ https://graphdb.ontotext.com/documentation/free/configuring-a-repository.html#configure-a-repository-programmatically
+ 
+ <a name="graphdb.GraphDBKnowledgeGraph.delete_index"></a>
+ #### delete\_index
+ 
+ ```python
+- | delete_index()
++ | delete_index(headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Delete the index that GraphDBKnowledgeGraph is connected to. This method deletes all data stored in the index.
+ 
++**Arguments**:
++
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
++
+ <a name="graphdb.GraphDBKnowledgeGraph.import_from_ttl_file"></a>
+ #### import\_from\_ttl\_file
+ 
+ ```python
+- | import_from_ttl_file(index: str, path: Path)
++ | import_from_ttl_file(index: str, path: Path, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Load an existing knowledge graph represented in the form of triples of subject, predicate, and object from a .ttl file into an index of GraphDB
+@@ -2020,12 +2059,13 @@ Load an existing knowledge graph represented in the form of triples of subject,
+ 
+ - `index`: name of the index (also called repository) in the GraphDB instance where the imported triples shall be stored
+ - `path`: path to a .ttl containing a knowledge graph
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ <a name="graphdb.GraphDBKnowledgeGraph.get_all_triples"></a>
+ #### get\_all\_triples
+ 
+ ```python
+- | get_all_triples(index: Optional[str] = None)
++ | get_all_triples(index: Optional[str] = None, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Query the given index in the GraphDB instance for all its stored triples. Duplicates are not filtered.
+@@ -2033,6 +2073,7 @@ Query the given index in the GraphDB instance for all its stored triples. Duplic
+ **Arguments**:
+ 
+ - `index`: name of the index (also called repository) in the GraphDB instance
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -2042,7 +2083,7 @@ all triples stored in the index
+ #### get\_all\_subjects
+ 
+ ```python
+- | get_all_subjects(index: Optional[str] = None)
++ | get_all_subjects(index: Optional[str] = None, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Query the given index in the GraphDB instance for all its stored subjects. Duplicates are not filtered.
+@@ -2050,6 +2091,7 @@ Query the given index in the GraphDB instance for all its stored subjects. Dupli
+ **Arguments**:
+ 
+ - `index`: name of the index (also called repository) in the GraphDB instance
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -2059,7 +2101,7 @@ all subjects stored in the index
+ #### get\_all\_predicates
+ 
+ ```python
+- | get_all_predicates(index: Optional[str] = None)
++ | get_all_predicates(index: Optional[str] = None, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Query the given index in the GraphDB instance for all its stored predicates. Duplicates are not filtered.
+@@ -2067,6 +2109,7 @@ Query the given index in the GraphDB instance for all its stored predicates. Dup
+ **Arguments**:
+ 
+ - `index`: name of the index (also called repository) in the GraphDB instance
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -2076,7 +2119,7 @@ all predicates stored in the index
+ #### get\_all\_objects
+ 
+ ```python
+- | get_all_objects(index: Optional[str] = None)
++ | get_all_objects(index: Optional[str] = None, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Query the given index in the GraphDB instance for all its stored objects. Duplicates are not filtered.
+@@ -2084,6 +2127,7 @@ Query the given index in the GraphDB instance for all its stored objects. Duplic
+ **Arguments**:
+ 
+ - `index`: name of the index (also called repository) in the GraphDB instance
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+@@ -2093,7 +2137,7 @@ all objects stored in the index
+ #### query
+ 
+ ```python
+- | query(sparql_query: str, index: Optional[str] = None)
++ | query(sparql_query: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None)
+ ```
+ 
+ Execute a SPARQL query on the given index in the GraphDB instance
+@@ -2102,6 +2146,7 @@ Execute a SPARQL query on the given index in the GraphDB instance
+ 
+ - `sparql_query`: SPARQL query that shall be executed
+ - `index`: name of the index (also called repository) in the GraphDB instance
++- `headers`: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+ 
+ **Returns**:
+ 
+diff --git a/docs/_src/api/api/retriever.md b/docs/_src/api/api/retriever.md
+index d5bce1b78d..282ec2fafc 100644
+--- a/docs/_src/api/api/retriever.md
++++ b/docs/_src/api/api/retriever.md
+@@ -24,7 +24,7 @@ Base class for regular retrievers.
+ 
+ ```python
+  | @abstractmethod
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -36,6 +36,7 @@ that are most relevant to the query.
+ - `filters`: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+ - `top_k`: How many documents to return per query.
+ - `index`: The name of the index in the DocumentStore from which to retrieve documents
++- `headers`: custom HTTP headers to pass to document store client if available (e.g. user token with 'Authorization' header)
+ 
+ <a name="base.BaseRetriever.timing"></a>
+ #### timing
+@@ -50,7 +51,7 @@ Wrapper method used to time functions.
+ #### eval
+ 
+ ```python
+- | eval(label_index: str = "label", doc_index: str = "eval_document", label_origin: str = "gold-label", top_k: int = 10, open_domain: bool = False, return_preds: bool = False) -> dict
++ | eval(label_index: str = "label", doc_index: str = "eval_document", label_origin: str = "gold-label", top_k: int = 10, open_domain: bool = False, return_preds: bool = False, headers: MutableMapping[str, str] = None) -> dict
+ ```
+ 
+ Performs evaluation on the Retriever.
+@@ -79,6 +80,7 @@ position in the ranking of documents the correct document is.
+                     are within ids explicitly stated in the labels.
+ - `return_preds`: Whether to add predictions in the returned dictionary. If True, the returned dictionary
+                      contains the keys "predictions" and "metrics".
++- `headers`: custom HTTP headers to pass to document store client if available (e.g. user token with 'Authorization' header)
+ 
+ <a name="sparse"></a>
+ # Module sparse
+@@ -138,7 +140,7 @@ class ElasticsearchRetriever(BaseRetriever)
+ #### retrieve
+ 
+ ```python
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -150,6 +152,7 @@ that are most relevant to the query.
+ - `filters`: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+ - `top_k`: How many documents to return per query.
+ - `index`: The name of the index in the DocumentStore from which to retrieve documents
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="sparse.ElasticsearchFilterOnlyRetriever"></a>
+ ## ElasticsearchFilterOnlyRetriever
+@@ -165,7 +168,7 @@ Helpful for benchmarking, testing and if you want to do QA on small documents wi
+ #### retrieve
+ 
+ ```python
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -177,6 +180,7 @@ that are most relevant to the query.
+ - `filters`: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+ - `top_k`: How many documents to return per query.
+ - `index`: The name of the index in the DocumentStore from which to retrieve documents
++- `headers`: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+ 
+ <a name="sparse.TfidfRetriever"></a>
+ ## TfidfRetriever
+@@ -209,7 +213,7 @@ It uses sklearn's TfidfVectorizer to compute a tf-idf matrix.
+ #### retrieve
+ 
+ ```python
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -309,7 +313,7 @@ The checkpoint format matches huggingface transformers' model format
+ #### retrieve
+ 
+ ```python
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+@@ -648,7 +652,7 @@ class EmbeddingRetriever(BaseRetriever)
+ #### retrieve
+ 
+ ```python
+- | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]
++ | retrieve(query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]
+ ```
+ 
+ Scan through documents in DocumentStore and return a small number documents
+diff --git a/haystack/document_stores/base.py b/haystack/document_stores/base.py
+index 541e7655bd..0e717f8b79 100644
+--- a/haystack/document_stores/base.py
++++ b/haystack/document_stores/base.py
+@@ -1,4 +1,4 @@
+-from typing import Optional, Dict, List, Union
++from typing import Generator, MutableMapping, Optional, Dict, List, Union
+ 
+ import logging
+ import collections
+@@ -34,12 +34,12 @@ class BaseKnowledgeGraph(BaseComponent):
+     """
+     outgoing_edges = 1
+ 
+-    def run(self, sparql_query: str, index: Optional[str] = None, **kwargs):  # type: ignore
+-        result = self.query(sparql_query=sparql_query, index=index)
++    def run(self, sparql_query: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None):  # type: ignore
++        result = self.query(sparql_query=sparql_query, index=index, headers=headers)
+         output = {"sparql_result": result}
+         return output, "output_1"
+ 
+-    def query(self, sparql_query: str, index: Optional[str] = None):
++    def query(self, sparql_query: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         raise NotImplementedError
+ 
+ 
+@@ -55,7 +55,7 @@ class BaseDocumentStore(BaseComponent):
+ 
+     @abstractmethod
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None):
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, **kwargs):
+         """
+         Indexes documents for later queries.
+ 
+@@ -83,7 +83,9 @@ def get_all_documents(
+             self,
+             index: Optional[str] = None,
+             filters: Optional[Dict[str, List[str]]] = None,
+-            return_embedding: Optional[bool] = None
++            return_embedding: Optional[bool] = None, 
++            batch_size: int = 10_000, 
++            **kwargs
+     ) -> List[Document]:
+         """
+         Get documents from the document store.
+@@ -93,6 +95,30 @@ def get_all_documents(
+         :param filters: Optional filters to narrow down the documents to return.
+                         Example: {"name": ["some", "more"], "category": ["only_one"]}
+         :param return_embedding: Whether to return the document embeddings.
++        :param batch_size: Number of documents that are passed to bulk function at a time.
++        """
++        pass
++
++    @abstractmethod
++    def get_all_documents_generator(
++        self,
++        index: Optional[str] = None,
++        filters: Optional[Dict[str, List[str]]] = None,
++        return_embedding: Optional[bool] = None,
++        batch_size: int = 10_000, 
++        **kwargs
++    ) -> Generator[Document, None, None]:
++        """
++        Get documents from the document store. Under-the-hood, documents are fetched in batches from the
++        document store and yielded as individual documents. This method can be used to iteratively process
++        a large number of documents without having to load all documents in memory.
++
++        :param index: Name of the index to get the documents from. If None, the
++                      DocumentStore's default index (self.index) will be used.
++        :param filters: Optional filters to narrow down the documents to return.
++                        Example: {"name": ["some", "more"], "category": ["only_one"]}
++        :param return_embedding: Whether to return the document embeddings.
++        :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
+         """
+         pass
+ 
+@@ -111,7 +137,7 @@ def __next__(self):
+             return ret
+ 
+     @abstractmethod
+-    def get_all_labels(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None) -> List[Label]:
++    def get_all_labels(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs) -> List[Label]:
+         pass
+ 
+     def get_all_labels_aggregated(self,
+@@ -120,7 +146,8 @@ def get_all_labels_aggregated(self,
+                                   open_domain: bool=True,
+                                   drop_negative_labels: bool=False,
+                                   drop_no_answers: bool=False,
+-                                  aggregate_by_meta: Optional[Union[str, list]]=None) -> List[MultiLabel]:
++                                  aggregate_by_meta: Optional[Union[str, list]]=None,
++                                  **kwargs) -> List[MultiLabel]:
+         """
+         Return all labels in the DocumentStore, aggregated into MultiLabel objects. 
+         This aggregation step helps, for example, if you collected multiple possible answers for one question and you
+@@ -147,7 +174,7 @@ def get_all_labels_aggregated(self,
+ 
+         """
+         aggregated_labels = []
+-        all_labels = self.get_all_labels(index=index, filters=filters)
++        all_labels = self.get_all_labels(index=index, filters=filters, **kwargs)
+ 
+         # Collect all answers to a question in a dict
+         question_ans_dict: dict = {}
+@@ -184,11 +211,11 @@ def get_all_labels_aggregated(self,
+         return aggregated_labels
+ 
+     @abstractmethod
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         pass
+ 
+     @abstractmethod
+-    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int:
++    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int:
+         pass
+ 
+     @njit#(fastmath=True)
+@@ -220,20 +247,22 @@ def query_by_embedding(self,
+                            filters: Optional[Optional[Dict[str, List[str]]]] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+         pass
+ 
+     @abstractmethod
+-    def get_label_count(self, index: Optional[str] = None) -> int:
++    def get_label_count(self, index: Optional[str] = None, **kwargs) -> int:
+         pass
+ 
+     @abstractmethod
+-    def write_labels(self, labels: Union[List[Label], List[dict]], index: Optional[str] = None):
++    def write_labels(self, labels: Union[List[Label], List[dict]], index: Optional[str] = None, **kwargs):
+         pass
+ 
+     def add_eval_data(self, filename: str, doc_index: str = "eval_document", label_index: str = "label",
+                       batch_size: Optional[int] = None, preprocessor: Optional[PreProcessor] = None,
+-                      max_docs: Union[int, bool] = None, open_domain: bool = False):
++                      max_docs: Union[int, bool] = None, open_domain: bool = False, 
++                      **kwargs):
+         """
+         Adds a SQuAD-formatted file to the DocumentStore in order to be able to perform evaluation on it.
+         If a jsonl file and a batch_size is passed to the function, documents are loaded batchwise
+@@ -274,43 +303,43 @@ def add_eval_data(self, filename: str, doc_index: str = "eval_document", label_i
+         if file_path.suffix == ".json":
+             if batch_size is None:
+                 docs, labels = eval_data_from_json(filename, max_docs=max_docs, preprocessor=preprocessor, open_domain=open_domain)
+-                self.write_documents(docs, index=doc_index)
+-                self.write_labels(labels, index=label_index)
++                self.write_documents(docs, index=doc_index, **kwargs)
++                self.write_labels(labels, index=label_index, **kwargs)
+             else:
+                 jsonl_filename = (file_path.parent / (file_path.stem + '.jsonl')).as_posix()
+                 logger.info(f"Adding evaluation data batch-wise is not compatible with json-formatted SQuAD files. "
+                             f"Converting json to jsonl to: {jsonl_filename}")
+                 squad_json_to_jsonl(filename, jsonl_filename)
+-                self.add_eval_data(jsonl_filename, doc_index, label_index, batch_size, open_domain=open_domain)
++                self.add_eval_data(jsonl_filename, doc_index, label_index, batch_size, open_domain=open_domain, **kwargs)
+ 
+         elif file_path.suffix == ".jsonl":
+             for docs, labels in eval_data_from_jsonl(filename, batch_size, max_docs=max_docs, preprocessor=preprocessor, open_domain=open_domain):
+                 if docs:
+-                    self.write_documents(docs, index=doc_index)
++                    self.write_documents(docs, index=doc_index, **kwargs)
+                 if labels:
+-                    self.write_labels(labels, index=label_index)
++                    self.write_labels(labels, index=label_index, **kwargs)
+ 
+         else:
+             logger.error("File needs to be in json or jsonl format.")
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         pass
+ 
+     @abstractmethod
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         pass
+ 
+     @abstractmethod
+-    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         pass
+ 
+-    def run(self, documents: List[dict], index: Optional[str] = None):  # type: ignore
+-        self.write_documents(documents=documents, index=index)
++    def run(self, documents: List[dict], index: Optional[str] = None, **kwargs):  # type: ignore
++        self.write_documents(documents=documents, index=index, **kwargs)
+         return {}, "output_1"
+ 
+     @abstractmethod
+     def get_documents_by_id(self, ids: List[str], index: Optional[str] = None,
+-                            batch_size: int = 10_000) -> List[Document]:
++                            **kwargs) -> List[Document]:
+         pass
+ 
+     def _drop_duplicate_documents(self, documents: List[Document]) -> List[Document]:
+@@ -336,7 +365,8 @@ def _drop_duplicate_documents(self, documents: List[Document]) -> List[Document]
+     def _handle_duplicate_documents(self,
+                                     documents: List[Document],
+                                     index: Optional[str] = None,
+-                                    duplicate_documents: Optional[str] = None):
++                                    duplicate_documents: Optional[str] = None,
++                                    **kwargs):
+         """
+         Checks whether any of the passed documents is already existing in the chosen index and returns a list of
+         documents that are not in the index yet.
+@@ -354,7 +384,7 @@ def _handle_duplicate_documents(self,
+         index = index or self.index
+         if duplicate_documents in ('skip', 'fail'):
+             documents = self._drop_duplicate_documents(documents)
+-            documents_found = self.get_documents_by_id(ids=[doc.id for doc in documents], index=index)
++            documents_found = self.get_documents_by_id(ids=[doc.id for doc in documents], index=index, **kwargs)
+             ids_exist_in_db: List[str] = [doc.id for doc in documents_found]
+ 
+             if len(ids_exist_in_db) > 0 and duplicate_documents == 'fail':
+@@ -365,7 +395,7 @@ def _handle_duplicate_documents(self,
+ 
+         return documents
+ 
+-    def _get_duplicate_labels(self, labels: list, index: str = None) -> List[Label]:
++    def _get_duplicate_labels(self, labels: list, index: str = None, **kwargs) -> List[Label]:
+         """
+         Return all duplicate labels
+         :param labels: List of Label objects
+@@ -380,7 +410,7 @@ def _get_duplicate_labels(self, labels: list, index: str = None) -> List[Label]:
+             if count > 1:
+                 duplicate_ids.append(label_id)
+ 
+-        for label in self.get_all_labels(index=index):
++        for label in self.get_all_labels(index=index, **kwargs):
+             if label.id in new_ids:
+                 duplicate_ids.append(label.id)
+ 
+diff --git a/haystack/document_stores/elasticsearch.py b/haystack/document_stores/elasticsearch.py
+index b32495047d..8b7ef24f5d 100644
+--- a/haystack/document_stores/elasticsearch.py
++++ b/haystack/document_stores/elasticsearch.py
+@@ -1,4 +1,4 @@
+-from typing import List, Optional, Union, Dict, Any, Generator
++from typing import List, MutableMapping, Optional, Union, Dict, Any, Generator
+ 
+ import json
+ import logging
+@@ -243,7 +243,7 @@ def _prepare_hosts(self, host, port):
+             hosts = [{"host": host, "port": port}]
+         return hosts
+ 
+-    def _create_document_index(self, index_name: str):
++    def _create_document_index(self, index_name: str, headers: MutableMapping[str, str] = None):
+         """
+         Create a new index for storing documents. In case if an index with the name already exists, it ensures that
+         the embedding_field is present.
+@@ -251,13 +251,13 @@ def _create_document_index(self, index_name: str):
+         # check if the existing index has the embedding field; if not create it
+         if self.client.indices.exists(index=index_name):
+             if self.embedding_field:
+-                mapping = self.client.indices.get(index_name)[index_name]["mappings"]
++                mapping = self.client.indices.get(index_name, headers=headers)[index_name]["mappings"]
+                 if self.embedding_field in mapping["properties"] and mapping["properties"][self.embedding_field]["type"] != "dense_vector":
+                     raise Exception(f"The '{index_name}' index in Elasticsearch already has a field called '{self.embedding_field}'"
+                                     f" with the type '{mapping['properties'][self.embedding_field]['type']}'. Please update the "
+                                     f"document_store to use a different name for the embedding_field parameter.")
+                 mapping["properties"][self.embedding_field] = {"type": "dense_vector", "dims": self.embedding_dim}
+-                self.client.indices.put_mapping(index=index_name, body=mapping)
++                self.client.indices.put_mapping(index=index_name, body=mapping, headers=headers)
+             return
+ 
+         if self.custom_mapping:
+@@ -298,17 +298,17 @@ def _create_document_index(self, index_name: str):
+                 mapping["mappings"]["properties"][self.embedding_field] = {"type": "dense_vector", "dims": self.embedding_dim}
+ 
+         try:
+-            self.client.indices.create(index=index_name, body=mapping)
++            self.client.indices.create(index=index_name, body=mapping, headers=headers)
+         except RequestError as e:
+             # With multiple workers we need to avoid race conditions, where:
+             # - there's no index in the beginning
+             # - both want to create one
+             # - one fails as the other one already created it
+-            if not self.client.indices.exists(index=index_name):
++            if not self.client.indices.exists(index=index_name, headers=headers):
+                 raise e
+ 
+-    def _create_label_index(self, index_name: str):
+-        if self.client.indices.exists(index=index_name):
++    def _create_label_index(self, index_name: str, headers: MutableMapping[str, str] = None):
++        if self.client.indices.exists(index=index_name, headers=headers):
+             return
+         mapping = {
+             "mappings": {
+@@ -329,13 +329,13 @@ def _create_label_index(self, index_name: str):
+             }
+         }
+         try:
+-            self.client.indices.create(index=index_name, body=mapping)
++            self.client.indices.create(index=index_name, body=mapping, headers=headers)
+         except RequestError as e:
+             # With multiple workers we need to avoid race conditions, where:
+             # - there's no index in the beginning
+             # - both want to create one
+             # - one fails as the other one already created it
+-            if not self.client.indices.exists(index=index_name):
++            if not self.client.indices.exists(index=index_name, headers=headers):
+                 raise e
+ 
+     # TODO: Add flexibility to define other non-meta and meta fields expected by the Document class
+@@ -345,20 +345,20 @@ def _create_document_field_map(self) -> Dict:
+             self.embedding_field: "embedding"
+         }
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> Optional[Document]:
+         """Fetch a document by specifying its text id string"""
+         index = index or self.index
+-        documents = self.get_documents_by_id([id], index=index)
++        documents = self.get_documents_by_id([id], index=index, headers=headers)
+         if documents:
+             return documents[0]
+         else:
+             return None
+ 
+-    def get_documents_by_id(self, ids: List[str], index: Optional[str] = None) -> List[Document]:  # type: ignore
++    def get_documents_by_id(self, ids: List[str], index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> List[Document]:
+         """Fetch documents by specifying a list of text id strings"""
+         index = index or self.index
+         query = {"query": {"ids": {"values": ids}}}
+-        result = self.client.search(index=index, body=query)["hits"]["hits"]
++        result = self.client.search(index=index, body=query, headers=headers)["hits"]["hits"]
+         documents = [self._convert_es_hit_to_document(hit, return_embedding=self.return_embedding) for hit in result]
+         return documents
+ 
+@@ -367,7 +367,8 @@ def get_metadata_values_by_key(
+         key: str,
+         query: Optional[str] = None,
+         filters: Optional[Dict[str, List[str]]] = None,
+-        index: Optional[str] = None,
++        index: Optional[str] = None, 
++        headers: MutableMapping[str, str] = None
+     ) -> List[dict]:
+         """
+         Get values associated with a metadata key. The output is in the format:
+@@ -378,6 +379,7 @@ def get_metadata_values_by_key(
+         :param filters: narrow down the scope to documents that match the given filters.
+         :param index: Elasticsearch index where the meta values should be searched. If not supplied,
+                       self.index will be used.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+         body: dict = {"size": 0, "aggs": {"metadata_agg": {"terms": {"field": key}}}}
+         if query:
+@@ -393,7 +395,7 @@ def get_metadata_values_by_key(
+             if not body.get("query"):
+                 body["query"] = {"bool": {}}
+             body["query"]["bool"].update({"filter": filter_clause})
+-        result = self.client.search(body=body, index=index)
++        result = self.client.search(body=body, index=index, headers=headers)
+         buckets = result["aggregations"]["metadata_agg"]["buckets"]
+         for bucket in buckets:
+             bucket["count"] = bucket.pop("doc_count")
+@@ -401,7 +403,8 @@ def get_metadata_values_by_key(
+         return buckets
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None):
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None,
++                        headers: MutableMapping[str, str] = None, **kwargs):
+         """
+         Indexes documents for later queries in Elasticsearch.
+ 
+@@ -427,12 +430,13 @@ def write_documents(self, documents: Union[List[dict], List[Document]], index: O
+                                     overwrite: Update any existing documents with the same ID when adding documents.
+                                     fail: an error is raised if the document ID of the document being added already
+                                     exists.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :raises DuplicateDocumentError: Exception trigger on duplicate document
+         :return: None
+         """
+ 
+-        if index and not self.client.indices.exists(index=index):
+-            self._create_document_index(index)
++        if index and not self.client.indices.exists(index=index, headers=headers):
++            self._create_document_index(index, headers=headers)
+ 
+         if index is None:
+             index = self.index
+@@ -444,7 +448,8 @@ def write_documents(self, documents: Union[List[dict], List[Document]], index: O
+         document_objects = [Document.from_dict(d, field_map=field_map) if isinstance(d, dict) else d for d in documents]
+         document_objects = self._handle_duplicate_documents(documents=document_objects,
+                                                             index=index,
+-                                                            duplicate_documents=duplicate_documents)
++                                                            duplicate_documents=duplicate_documents,
++                                                            headers=headers)
+         documents_to_index = []
+         for doc in document_objects:
+             _doc = {
+@@ -475,24 +480,30 @@ def write_documents(self, documents: Union[List[dict], List[Document]], index: O
+ 
+             # Pass batch_size number of documents to bulk
+             if len(documents_to_index) % batch_size == 0:
+-                bulk(self.client, documents_to_index, request_timeout=300, refresh=self.refresh_type)
++                bulk(self.client, documents_to_index, request_timeout=300, refresh=self.refresh_type, headers=headers)
+                 documents_to_index = []
+ 
+         if documents_to_index:
+-            bulk(self.client, documents_to_index, request_timeout=300, refresh=self.refresh_type)
++            bulk(self.client, documents_to_index, request_timeout=300, refresh=self.refresh_type, headers=headers)
+ 
+     def write_labels(
+-        self, labels: Union[List[Label], List[dict]], index: Optional[str] = None, batch_size: int = 10_000
++        self, 
++        labels: Union[List[Label], List[dict]], 
++        index: Optional[str] = None, 
++        headers: MutableMapping[str, str] = None,
++        batch_size: int = 10_000,
++        **kwargs
+     ):
+         """Write annotation labels into document store.
+ 
+         :param labels: A list of Python dictionaries or a list of Haystack Label objects.
+         :param index: Elasticsearch index where the labels should be stored. If not supplied, self.label_index will be used.
+         :param batch_size: Number of labels that are passed to Elasticsearch's bulk function at a time.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+         index = index or self.label_index
+-        if index and not self.client.indices.exists(index=index):
+-            self._create_label_index(index)
++        if index and not self.client.indices.exists(index=index, headers=headers):
++            self._create_label_index(index, headers=headers)
+ 
+         labels = [Label.from_dict(label) if isinstance(label, dict) else label for label in labels]
+         duplicate_ids: list = [label.id for label in self._get_duplicate_labels(labels, index=index)]
+@@ -524,21 +535,21 @@ def write_labels(
+ 
+             # Pass batch_size number of labels to bulk
+             if len(labels_to_index) % batch_size == 0:
+-                bulk(self.client, labels_to_index, request_timeout=300, refresh=self.refresh_type)
++                bulk(self.client, labels_to_index, request_timeout=300, refresh=self.refresh_type, headers=headers)
+                 labels_to_index = []
+ 
+         if labels_to_index:
+-            bulk(self.client, labels_to_index, request_timeout=300, refresh=self.refresh_type)
++            bulk(self.client, labels_to_index, request_timeout=300, refresh=self.refresh_type, headers=headers)
+ 
+-    def update_document_meta(self, id: str, meta: Dict[str, str]):
++    def update_document_meta(self, id: str, meta: Dict[str, str], headers: MutableMapping[str, str] = None):
+         """
+         Update the metadata dictionary of a document by specifying its string id
+         """
+         body = {"doc": meta}
+-        self.client.update(index=self.index, id=id, body=body, refresh=self.refresh_type)
++        self.client.update(index=self.index, id=id, body=body, refresh=self.refresh_type, headers=headers)
+ 
+     def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None,
+-                           only_documents_without_embedding: bool = False) -> int:
++                           only_documents_without_embedding: bool = False, headers: MutableMapping[str, str] = None, **kwargs) -> int:
+         """
+         Return the number of documents in the document store.
+         """
+@@ -562,18 +573,18 @@ def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, ind
+                 )
+             body["query"]["bool"]["filter"] = filter_clause
+ 
+-        result = self.client.count(index=index, body=body)
++        result = self.client.count(index=index, body=body, headers=headers)
+         count = result["count"]
+         return count
+ 
+-    def get_label_count(self, index: Optional[str] = None) -> int:
++    def get_label_count(self, index: Optional[str] = None, headers: MutableMapping[str, str] = None, **kwargs) -> int:
+         """
+         Return the number of labels in the document store
+         """
+         index = index or self.label_index
+-        return self.get_document_count(index=index)
++        return self.get_document_count(index=index, headers=headers)
+ 
+-    def get_embedding_count(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None) -> int:
++    def get_embedding_count(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None) -> int:
+         """
+         Return the count of embeddings in the document store.
+         """
+@@ -595,7 +606,7 @@ def get_embedding_count(self, index: Optional[str] = None, filters: Optional[Dic
+                 )
+             body["query"]["bool"]["filter"] = filter_clause
+ 
+-        result = self.client.count(index=index, body=body)
++        result = self.client.count(index=index, body=body, headers=headers)
+         count = result["count"]
+         return count
+ 
+@@ -605,6 +616,8 @@ def get_all_documents(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        headers: MutableMapping[str, str] = None,
++        **kwargs
+     ) -> List[Document]:
+         """
+         Get documents from the document store.
+@@ -615,9 +628,10 @@ def get_all_documents(
+                         Example: {"name": ["some", "more"], "category": ["only_one"]}
+         :param return_embedding: Whether to return the document embeddings.
+         :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+         result = self.get_all_documents_generator(
+-            index=index, filters=filters, return_embedding=return_embedding, batch_size=batch_size
++            index=index, filters=filters, return_embedding=return_embedding, batch_size=batch_size, headers=headers
+         )
+         documents = list(result)
+         return documents
+@@ -628,6 +642,8 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        headers: MutableMapping[str, str] = None,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -640,6 +656,7 @@ def get_all_documents_generator(
+                         Example: {"name": ["some", "more"], "category": ["only_one"]}
+         :param return_embedding: Whether to return the document embeddings.
+         :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+ 
+         if index is None:
+@@ -648,19 +665,24 @@ def get_all_documents_generator(
+         if return_embedding is None:
+             return_embedding = self.return_embedding
+ 
+-        result = self._get_all_documents_in_index(index=index, filters=filters, batch_size=batch_size)
++        result = self._get_all_documents_in_index(index=index, filters=filters, batch_size=batch_size, headers=headers)
+         for hit in result:
+             document = self._convert_es_hit_to_document(hit, return_embedding=return_embedding)
+             yield document
+ 
+     def get_all_labels(
+-        self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, batch_size: int = 10_000
++        self, 
++        index: Optional[str] = None, 
++        filters: Optional[Dict[str, List[str]]] = None, 
++        headers: MutableMapping[str, str] = None,
++        batch_size: int = 10_000, 
++        **kwargs
+     ) -> List[Label]:
+         """
+         Return all labels in the document store
+         """
+         index = index or self.label_index
+-        result = list(self._get_all_documents_in_index(index=index, filters=filters, batch_size=batch_size))
++        result = list(self._get_all_documents_in_index(index=index, filters=filters, batch_size=batch_size, headers=headers))
+         labels = [Label.from_dict({**hit["_source"], "id": hit["_id"]}) for hit in result]
+         return labels
+ 
+@@ -670,6 +692,7 @@ def _get_all_documents_in_index(
+         filters: Optional[Dict[str, List[str]]] = None,
+         batch_size: int = 10_000,
+         only_documents_without_embedding: bool = False,
++        headers: MutableMapping[str, str] = None
+     ) -> Generator[dict, None, None]:
+         """
+         Return all documents in a specific index in the document store
+@@ -689,7 +712,7 @@ def _get_all_documents_in_index(
+         if only_documents_without_embedding:
+             body['query']['bool']['must_not'] = [{"exists": {"field": self.embedding_field}}]
+ 
+-        result = scan(self.client, query=body, index=index, size=batch_size, scroll=self.scroll)
++        result = scan(self.client, query=body, index=index, size=batch_size, scroll=self.scroll, headers=headers)
+         yield from result
+ 
+     def query(
+@@ -699,6 +722,7 @@ def query(
+         top_k: int = 10,
+         custom_query: Optional[str] = None,
+         index: Optional[str] = None,
++        headers: MutableMapping[str, str] = None
+     ) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+@@ -708,6 +732,7 @@ def query(
+         :param filters: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+         :param top_k: How many documents to return per query.
+         :param index: The name of the index in the DocumentStore from which to retrieve documents
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+ 
+         if index is None:
+@@ -775,7 +800,7 @@ def query(
+             body["_source"] = {"excludes": self.excluded_meta_data}
+ 
+         logger.debug(f"Retriever query: {body}")
+-        result = self.client.search(index=index, body=body)["hits"]["hits"]
++        result = self.client.search(index=index, body=body, headers=headers)["hits"]["hits"]
+ 
+         documents = [self._convert_es_hit_to_document(hit, return_embedding=self.return_embedding) for hit in result]
+         return documents
+@@ -785,7 +810,9 @@ def query_by_embedding(self,
+                            filters: Optional[Dict[str, List[str]]] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           headers: MutableMapping[str, str] = None,
++                           **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -795,6 +822,7 @@ def query_by_embedding(self,
+         :param top_k: How many documents to return
+         :param index: Index name for storing the docs and metadata
+         :param return_embedding: To return document embedding
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return:
+         """
+         if index is None:
+@@ -841,9 +869,9 @@ def query_by_embedding(self,
+ 
+             logger.debug(f"Retriever query: {body}")
+             try:
+-                result = self.client.search(index=index, body=body, request_timeout=300)["hits"]["hits"]
++                result = self.client.search(index=index, body=body, request_timeout=300, headers=headers)["hits"]["hits"]
+                 if len(result) == 0:
+-                    count_embeddings = self.get_embedding_count(index=index)
++                    count_embeddings = self.get_embedding_count(index=index, headers=headers)
+                     if count_embeddings == 0:
+                         raise RequestError(400, "search_phase_execution_exception",
+                                            {"error": "No documents with embeddings."})
+@@ -974,7 +1002,8 @@ def update_embeddings(
+         index: Optional[str] = None,
+         filters: Optional[Dict[str, List[str]]] = None,
+         update_existing_embeddings: bool = True,
+-        batch_size: int = 10_000
++        batch_size: int = 10_000,
++        headers: MutableMapping[str, str] = None
+     ):
+         """
+         Updates the embeddings in the the document store using the encoding model specified in the retriever.
+@@ -989,30 +1018,32 @@ def update_embeddings(
+         :param filters: Optional filters to narrow down the documents for which embeddings are to be updated.
+                         Example: {"name": ["some", "more"], "category": ["only_one"]}
+         :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return: None
+         """
+         if index is None:
+             index = self.index
+ 
+         if self.refresh_type == 'false':
+-            self.client.indices.refresh(index=index)
++            self.client.indices.refresh(index=index, headers=headers)
+ 
+         if not self.embedding_field:
+             raise RuntimeError("Specify the arg `embedding_field` when initializing ElasticsearchDocumentStore()")
+ 
+         if update_existing_embeddings:
+-            document_count = self.get_document_count(index=index)
++            document_count = self.get_document_count(index=index, headers=headers)
+             logger.info(f"Updating embeddings for all {document_count} docs ...")
+         else:
+             document_count = self.get_document_count(index=index, filters=filters,
+-                                                     only_documents_without_embedding=True)
++                                                     only_documents_without_embedding=True, headers=headers)
+             logger.info(f"Updating embeddings for {document_count} docs without embeddings ...")
+ 
+         result = self._get_all_documents_in_index(
+             index=index,
+             filters=filters,
+             batch_size=batch_size,
+-            only_documents_without_embedding=not update_existing_embeddings
++            only_documents_without_embedding=not update_existing_embeddings,
++            headers=headers
+         )
+ 
+         logging.getLogger("elasticsearch").setLevel(logging.CRITICAL)
+@@ -1036,15 +1067,16 @@ def update_embeddings(
+                               }
+                     doc_updates.append(update)
+ 
+-                bulk(self.client, doc_updates, request_timeout=300, refresh=self.refresh_type)
++                bulk(self.client, doc_updates, request_timeout=300, refresh=self.refresh_type, headers=headers)
+                 progress_bar.update(batch_size)
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+         :param index: Index name to delete the document from.
+         :param filters: Optional filters to narrow down the documents to be deleted.
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return: None
+         """
+         logger.warning(
+@@ -1053,9 +1085,9 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+                 For more details, please refer to the issue: https://github.com/deepset-ai/haystack/issues/1045
+                 """
+         )
+-        self.delete_documents(index, None, filters)
++        self.delete_documents(index, None, filters, headers=headers)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -1067,6 +1099,7 @@ def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]]
+             If filters are provided along with a list of IDs, this method deletes the
+             intersection of the two query results (documents that match the filters and
+             have their ID in the list).
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return: None
+         """
+         index = index or self.index
+@@ -1088,12 +1121,12 @@ def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]]
+             query["query"]["ids"] = {"values": ids}
+         else:
+             query["query"] = {"match_all": {}}
+-        self.client.delete_by_query(index=index, body=query, ignore=[404])
++        self.client.delete_by_query(index=index, body=query, ignore=[404], headers=headers)
+         # We want to be sure that all docs are deleted before continuing (delete_by_query doesn't support wait_for)
+         if self.refresh_type == "wait_for":
+             time.sleep(2)
+ 
+-    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, headers: MutableMapping[str, str] = None, **kwargs):
+         """
+         Delete labels in an index. All labels are deleted if no filters are passed.
+ 
+@@ -1102,10 +1135,11 @@ def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] =
+         :param ids: Optional list of IDs to narrow down the labels to be deleted.
+         :param filters: Optional filters to narrow down the labels to be deleted.
+             Example filters: {"id": ["9a196e41-f7b5-45b4-bd19-5feb7501c159", "9a196e41-f7b5-45b4-bd19-5feb7501c159"]} or {"query": ["question2"]}
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return: None
+         """
+         index = index or self.label_index
+-        self.delete_documents(index=index, ids=ids, filters=filters)
++        self.delete_documents(index=index, ids=ids, filters=filters, headers=headers)
+ 
+ 
+ class OpenSearchDocumentStore(ElasticsearchDocumentStore):
+@@ -1140,7 +1174,9 @@ def query_by_embedding(self,
+                         filters: Optional[Dict[str, List[str]]] = None,
+                         top_k: int = 10,
+                         index: Optional[str] = None,
+-                        return_embedding: Optional[bool] = None) -> List[Document]:
++                        return_embedding: Optional[bool] = None,
++                        headers: MutableMapping[str, str] = None,
++                        **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -1150,6 +1186,7 @@ def query_by_embedding(self,
+         :param top_k: How many documents to return
+         :param index: Index name for storing the docs and metadata
+         :param return_embedding: To return document embedding
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         :return:
+         """
+         if index is None:
+@@ -1202,7 +1239,7 @@ def query_by_embedding(self,
+                 body["_source"] = {"excludes": excluded_meta_data}
+ 
+             logger.debug(f"Retriever query: {body}")
+-            result = self.client.search(index=index, body=body, request_timeout=300)["hits"]["hits"]
++            result = self.client.search(index=index, body=body, request_timeout=300, headers=headers)["hits"]["hits"]
+ 
+             documents = [
+                 self._convert_es_hit_to_document(hit, adapt_score_for_embedding=True, return_embedding=return_embedding)
+@@ -1210,7 +1247,7 @@ def query_by_embedding(self,
+             ]
+             return documents
+ 
+-    def _create_document_index(self, index_name: str):
++    def _create_document_index(self, index_name: str, headers: MutableMapping[str, str] = None):
+         """
+         Create a new index for storing documents.
+         """
+@@ -1278,17 +1315,17 @@ def _create_document_index(self, index_name: str):
+                     logger.error("Please set index_type to either 'flat' or 'hnsw'")
+ 
+         try:
+-            self.client.indices.create(index=index_name, body=mapping)
++            self.client.indices.create(index=index_name, body=mapping, headers=headers)
+         except RequestError as e:
+             # With multiple workers we need to avoid race conditions, where:
+             # - there's no index in the beginning
+             # - both want to create one
+             # - one fails as the other one already created it
+-            if not self.client.indices.exists(index=index_name):
++            if not self.client.indices.exists(index=index_name, headers=headers):
+                 raise e
+ 
+-    def _create_label_index(self, index_name: str):
+-        if self.client.indices.exists(index=index_name):
++    def _create_label_index(self, index_name: str, headers: MutableMapping[str, str] = None):
++        if self.client.indices.exists(index=index_name, headers=headers):
+             return
+         mapping = {
+             "mappings": {
+@@ -1309,13 +1346,13 @@ def _create_label_index(self, index_name: str):
+             }
+         }
+         try:
+-            self.client.indices.create(index=index_name, body=mapping)
++            self.client.indices.create(index=index_name, body=mapping, headers=headers)
+         except RequestError as e:
+             # With multiple workers we need to avoid race conditions, where:
+             # - there's no index in the beginning
+             # - both want to create one
+             # - one fails as the other one already created it
+-            if not self.client.indices.exists(index=index_name):
++            if not self.client.indices.exists(index=index_name, headers=headers):
+                 raise e
+ 
+     def _get_vector_similarity_query(self, query_emb: np.ndarray, top_k: int):
+diff --git a/haystack/document_stores/faiss.py b/haystack/document_stores/faiss.py
+index 7d77f7614b..0f5abcc11f 100644
+--- a/haystack/document_stores/faiss.py
++++ b/haystack/document_stores/faiss.py
+@@ -190,7 +190,8 @@ def _create_new_index(self, vector_dim: int, metric_type, index_factory: str = "
+         return index
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None) -> None:
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None,
++                        **kwargs) -> None:
+         """
+         Add new documents to the DocumentStore.
+ 
+@@ -338,6 +339,7 @@ def get_all_documents(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> List[Document]:
+         result = self.get_all_documents_generator(
+             index=index, filters=filters, return_embedding=return_embedding, batch_size=batch_size
+@@ -351,6 +353,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs 
+     ) -> Generator[Document, None, None]:
+         """
+         Get all documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -366,7 +369,7 @@ def get_all_documents_generator(
+         """
+         index = index or self.index
+         documents = super(FAISSDocumentStore, self).get_all_documents_generator(
+-            index=index, filters=filters, batch_size=batch_size, return_embedding=False,
++            index=index, filters=filters, batch_size=batch_size, return_embedding=False
+         )
+         if return_embedding is None:
+             return_embedding = self.return_embedding
+@@ -378,10 +381,10 @@ def get_all_documents_generator(
+             yield doc
+ 
+     def get_documents_by_id(
+-        self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000
++        self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs
+     ) -> List[Document]:
+         index = index or self.index
+-        documents = super(FAISSDocumentStore, self).get_documents_by_id(ids=ids, index=index)
++        documents = super(FAISSDocumentStore, self).get_documents_by_id(ids=ids, index=index, batch_size=batch_size)
+         if self.return_embedding:
+             for doc in documents:
+                 if doc.meta and doc.meta.get("vector_id") is not None:
+@@ -424,7 +427,7 @@ def train_index(
+         if embeddings:
+             self.faiss_indexes[index].train(embeddings)
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete all documents from the document store.
+         """
+@@ -436,7 +439,7 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+         )
+         self.delete_documents(index, None, filters)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents from the document store. All documents are deleted if no filters are passed.
+ 
+@@ -469,7 +472,8 @@ def query_by_embedding(
+         filters: Optional[Dict[str, List[str]]] = None,
+         top_k: int = 10,
+         index: Optional[str] = None,
+-        return_embedding: Optional[bool] = None
++        return_embedding: Optional[bool] = None,
++        **kwargs
+     ) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+diff --git a/haystack/document_stores/graphdb.py b/haystack/document_stores/graphdb.py
+index f6c9d6402a..5b35fe38a7 100644
+--- a/haystack/document_stores/graphdb.py
++++ b/haystack/document_stores/graphdb.py
+@@ -1,4 +1,4 @@
+-from typing import Optional
++from typing import MutableMapping, Optional
+ 
+ import requests
+ from pathlib import Path
+@@ -42,11 +42,12 @@ def __init__(
+         self.password = password
+         self.prefixes = prefixes
+ 
+-    def create_index(self, config_path: Path):
++    def create_index(self, config_path: Path, headers: MutableMapping[str, str] = None):
+         """
+         Create a new index (also called repository) stored in the GraphDB instance
+         
+         :param config_path: path to a .ttl file with configuration settings, details: 
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         https://graphdb.ontotext.com/documentation/free/configuring-a-repository.html#configure-a-repository-programmatically
+         """
+         url = f"{self.url}/rest/repositories"
+@@ -54,28 +55,31 @@ def create_index(self, config_path: Path):
+         response = requests.post(
+             url,
+             files=files,
++            headers=headers
+         )
+         if response.status_code > 299:
+             raise Exception(response.text)
+ 
+-    def delete_index(self):
++    def delete_index(self, headers: MutableMapping[str, str] = None):
+         """
+         Delete the index that GraphDBKnowledgeGraph is connected to. This method deletes all data stored in the index.
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         """
+         url = f"{self.url}/rest/repositories/{self.index}"
+-        response = requests.delete(url)
++        response = requests.delete(url, headers=headers)
+         if response.status_code > 299:
+             raise Exception(response.text)
+ 
+-    def import_from_ttl_file(self, index: str, path: Path):
++    def import_from_ttl_file(self, index: str, path: Path, headers: MutableMapping[str, str] = None):
+         """
+         Load an existing knowledge graph represented in the form of triples of subject, predicate, and object from a .ttl file into an index of GraphDB
+         
+         :param index: name of the index (also called repository) in the GraphDB instance where the imported triples shall be stored
+         :param path: path to a .ttl containing a knowledge graph
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         """
+         url = f"{self.url}/repositories/{index}/statements"
+-        headers = {"Content-type": "application/x-turtle"}
++        headers = {"Content-type": "application/x-turtle"} if headers is None else {**{"Content-type": "application/x-turtle"}, **headers}
+         response = requests.post(
+             url,
+             headers=headers,
+@@ -85,56 +89,61 @@ def import_from_ttl_file(self, index: str, path: Path):
+         if response.status_code > 299:
+             raise Exception(response.text)
+ 
+-    def get_all_triples(self, index: Optional[str] = None):
++    def get_all_triples(self, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         """
+         Query the given index in the GraphDB instance for all its stored triples. Duplicates are not filtered.
+         
+         :param index: name of the index (also called repository) in the GraphDB instance
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         :return: all triples stored in the index
+         """
+         sparql_query = "SELECT * WHERE { ?s ?p ?o. }"
+-        results = self.query(sparql_query=sparql_query, index=index)
++        results = self.query(sparql_query=sparql_query, index=index, headers=headers)
+         return results
+ 
+-    def get_all_subjects(self, index: Optional[str] = None):
++    def get_all_subjects(self, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         """
+         Query the given index in the GraphDB instance for all its stored subjects. Duplicates are not filtered.
+         
+         :param index: name of the index (also called repository) in the GraphDB instance
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         :return: all subjects stored in the index
+         """ 
+         sparql_query = "SELECT ?s WHERE { ?s ?p ?o. }"
+-        results = self.query(sparql_query=sparql_query, index=index)
++        results = self.query(sparql_query=sparql_query, index=index, headers=headers)
+         return results
+ 
+-    def get_all_predicates(self, index: Optional[str] = None):
++    def get_all_predicates(self, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         """
+         Query the given index in the GraphDB instance for all its stored predicates. Duplicates are not filtered.
+         
+         :param index: name of the index (also called repository) in the GraphDB instance
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         :return: all predicates stored in the index
+         """
+         sparql_query = "SELECT ?p WHERE { ?s ?p ?o. }"
+-        results = self.query(sparql_query=sparql_query, index=index)
++        results = self.query(sparql_query=sparql_query, index=index, headers=headers)
+         return results
+ 
+-    def get_all_objects(self, index: Optional[str] = None):
++    def get_all_objects(self, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         """
+         Query the given index in the GraphDB instance for all its stored objects. Duplicates are not filtered.
+         
+         :param index: name of the index (also called repository) in the GraphDB instance
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         :return: all objects stored in the index
+         """
+         sparql_query = "SELECT ?o WHERE { ?s ?p ?o. }"
+-        results = self.query(sparql_query=sparql_query, index=index)
++        results = self.query(sparql_query=sparql_query, index=index, headers=headers)
+         return results
+ 
+-    def query(self, sparql_query: str, index: Optional[str] = None):
++    def query(self, sparql_query: str, index: Optional[str] = None, headers: MutableMapping[str, str] = None):
+         """
+         Execute a SPARQL query on the given index in the GraphDB instance
+         
+         :param sparql_query: SPARQL query that shall be executed
+         :param index: name of the index (also called repository) in the GraphDB instance
++        :param headers: custom HTTP headers to pass to http client if available (e.g. user token with 'Authorization' header)
+         :return: query result
+         """
+         if self.index is None and index is None:
+@@ -144,6 +153,8 @@ def query(self, sparql_query: str, index: Optional[str] = None):
+         sparql.setCredentials(self.username, self.password)
+         sparql.setQuery(self.prefixes + sparql_query)
+         sparql.setReturnFormat(JSON)
++        if headers is not None:
++            sparql.customHttpHeaders = headers
+         results = sparql.query().convert()
+         # if query is a boolean query, return boolean instead of text result
+         return results["results"]["bindings"] if "results" in results else results["boolean"]
+diff --git a/haystack/document_stores/memory.py b/haystack/document_stores/memory.py
+index e22475a793..d6724922b4 100644
+--- a/haystack/document_stores/memory.py
++++ b/haystack/document_stores/memory.py
+@@ -71,7 +71,7 @@ def __init__(
+         self.duplicate_documents = duplicate_documents
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,  # type: ignore
+-                        duplicate_documents: Optional[str] = None):
++                        duplicate_documents: Optional[str] = None, **kwargs):
+         """
+         Indexes documents for later queries.
+ 
+@@ -118,7 +118,7 @@ def _create_document_field_map(self):
+             self.embedding_field: "embedding",
+         }
+ 
+-    def write_labels(self, labels: Union[List[dict], List[Label]], index: Optional[str] = None):
++    def write_labels(self, labels: Union[List[dict], List[Label]], index: Optional[str] = None, **kwargs):
+         """
+         Write annotation labels into document store.
+         """
+@@ -140,7 +140,7 @@ def write_labels(self, labels: Union[List[dict], List[Label]], index: Optional[s
+                 label.updated_at = label.created_at
+             self.indexes[index][label.id] = label
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         """
+         Fetch a document by specifying its text id string.
+         """
+@@ -164,7 +164,8 @@ def query_by_embedding(self,
+                            filters: Optional[Dict[str, List[str]]] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -259,7 +260,7 @@ def update_embeddings(
+                 progress_bar.set_description_str("Documents Processed")
+                 progress_bar.update(batch_size)
+ 
+-    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int:
++    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int:
+         """
+         Return the number of documents in the document store.
+         """
+@@ -274,7 +275,7 @@ def get_embedding_count(self, filters: Optional[Dict[str, List[str]]] = None, in
+         embedding_count = sum(doc.embedding is not None for doc in documents)
+         return embedding_count
+ 
+-    def get_label_count(self, index: Optional[str] = None) -> int:
++    def get_label_count(self, index: Optional[str] = None, **kwargs) -> int:
+         """
+         Return the number of labels in the document store.
+         """
+@@ -288,6 +289,7 @@ def _query(
+         return_embedding: Optional[bool] = None,
+         only_documents_without_embedding: bool = False,
+         batch_size: int = 10_000,
++        **kwargs
+     ):
+         index = index or self.index
+         documents = deepcopy(list(self.indexes[index].values()))
+@@ -325,6 +327,7 @@ def get_all_documents(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> List[Document]:
+         """
+         Get all documents from the document store as a list.
+@@ -335,7 +338,7 @@ def get_all_documents(
+                         Example: {"name": ["some", "more"], "category": ["only_one"]}
+         :param return_embedding: Whether to return the document embeddings.
+         """
+-        result = self.get_all_documents_generator(index=index, filters=filters, return_embedding=return_embedding)
++        result = self.get_all_documents_generator(index=index, filters=filters, return_embedding=return_embedding, batch_size=batch_size)
+         documents = list(result)
+         return documents
+ 
+@@ -345,6 +348,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get all documents from the document store. The methods returns a Python Generator that yields individual
+@@ -364,7 +368,7 @@ def get_all_documents_generator(
+         )
+         yield from result
+ 
+-    def get_all_labels(self, index: str = None, filters: Optional[Dict[str, List[str]]] = None) -> List[Label]:
++    def get_all_labels(self, index: str = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs) -> List[Label]:
+         """
+         Return all labels in the document store.
+         """
+@@ -386,7 +390,7 @@ def get_all_labels(self, index: str = None, filters: Optional[Dict[str, List[str
+ 
+         return result
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -402,7 +406,7 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+         )
+         self.delete_documents(index, None, filters)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -427,7 +431,7 @@ def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]]
+         for doc in docs_to_delete:
+             del self.indexes[index][doc.id]
+ 
+-    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete labels in an index. All labels are deleted if no filters are passed.
+ 
+diff --git a/haystack/document_stores/milvus.py b/haystack/document_stores/milvus.py
+index 5105eb861a..e8b2196dd1 100644
+--- a/haystack/document_stores/milvus.py
++++ b/haystack/document_stores/milvus.py
+@@ -166,7 +166,7 @@ def _create_document_field_map(self) -> Dict:
+         }
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None):
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None, **kwargs):
+         """
+         Add new documents to the DocumentStore.
+ 
+@@ -227,7 +227,7 @@ def write_documents(self, documents: Union[List[dict], List[Document]], index: O
+                                                  f'supported. Please use list or numpy.ndarray')
+ 
+                     if duplicate_documents == 'overwrite':
+-                        existing_docs = super().get_documents_by_id(ids=doc_ids, index=index)
++                        existing_docs = super().get_documents_by_id(ids=doc_ids, index=index, batch_size=batch_size)
+                         self._delete_vector_ids_from_milvus(documents=existing_docs, index=index)
+ 
+                     status, vector_ids = self.milvus_server.insert(collection_name=index, records=embeddings)
+@@ -330,7 +330,8 @@ def query_by_embedding(self,
+                            filters: Optional[dict] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -387,7 +388,7 @@ def query_by_embedding(self,
+ 
+         return documents
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete all documents (from SQL AND Milvus).
+         :param index: (SQL) index name for storing the docs and metadata
+@@ -403,7 +404,7 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+         )
+         self.delete_documents(index, None, filters)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -444,6 +445,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get all documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -475,6 +477,7 @@ def get_all_documents(
+             filters: Optional[Dict[str, List[str]]] = None,
+             return_embedding: Optional[bool] = None,
+             batch_size: int = 10_000,
++            **kwargs
+     ) -> List[Document]:
+         """
+         Get documents from the document store (optionally using filter criteria).
+@@ -493,7 +496,7 @@ def get_all_documents(
+         documents = list(result)
+         return documents
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         """
+         Fetch a document by specifying its text id string
+ 
+@@ -506,7 +509,7 @@ def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[D
+         return document
+ 
+     def get_documents_by_id(
+-            self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000
++            self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs
+     ) -> List[Document]:
+         """
+         Fetch multiple documents by specifying their IDs (strings)
+@@ -514,10 +517,10 @@ def get_documents_by_id(
+         :param ids: List of IDs of the documents
+         :param index: Name of the index to get the documents from. If None, the
+                       DocumentStore's default index (self.index) will be used.
+-        :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
++        :param batch_size: is currently not used
+         """
+         index = index or self.index
+-        documents = super().get_documents_by_id(ids=ids, index=index)
++        documents = super().get_documents_by_id(ids=ids, index=index, batch_size=batch_size)
+         if self.return_embedding:
+             self._populate_embeddings_to_docs(index=index, docs=documents)
+ 
+diff --git a/haystack/document_stores/milvus2x.py b/haystack/document_stores/milvus2x.py
+index b207c3caae..377e03aebc 100644
+--- a/haystack/document_stores/milvus2x.py
++++ b/haystack/document_stores/milvus2x.py
+@@ -222,7 +222,7 @@ def _create_document_field_map(self) -> Dict:
+         }
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None):
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, index_param: Optional[Dict[str, Any]] = None, **kwargs):
+         """
+         Add new documents to the DocumentStore.
+ 
+@@ -436,7 +436,8 @@ def query_by_embedding(self,
+                            filters: Optional[dict] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -518,7 +519,7 @@ def query_by_embedding(self,
+         return documents
+ 
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete all documents (from SQL AND Milvus).
+         :param index: (SQL) index name for storing the docs and metadata
+@@ -553,6 +554,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get all documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -584,6 +586,7 @@ def get_all_documents(
+             filters: Optional[Dict[str, List[str]]] = None,
+             return_embedding: Optional[bool] = None,
+             batch_size: int = 10_000,
++            **kwargs
+     ) -> List[Document]:
+         """
+         Get documents from the document store (optionally using filter criteria).
+@@ -603,7 +606,7 @@ def get_all_documents(
+         documents = list(result)
+         return documents
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         """
+         Fetch a document by specifying its text id string
+ 
+@@ -616,7 +619,7 @@ def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[D
+         return document
+ 
+     def get_documents_by_id(
+-            self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000
++            self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs
+     ) -> List[Document]:
+         """
+         Fetch multiple documents by specifying their IDs (strings)
+@@ -627,7 +630,7 @@ def get_documents_by_id(
+         :param batch_size: When working with large number of documents, batching can help reduce memory footprint.
+         """
+         index = index or self.index
+-        documents = super().get_documents_by_id(ids=ids, index=index)
++        documents = super().get_documents_by_id(ids=ids, index=index, batch_size=batch_size)
+         if self.return_embedding:
+             self._populate_embeddings_to_docs(index=index, docs=documents)
+ 
+diff --git a/haystack/document_stores/sql.py b/haystack/document_stores/sql.py
+index 014c31d13d..f6dd58e3eb 100644
+--- a/haystack/document_stores/sql.py
++++ b/haystack/document_stores/sql.py
+@@ -137,13 +137,13 @@ def __init__(
+             if sqlite3.sqlite_version < "3.25":
+                 self.use_windowed_query = False
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         """Fetch a document by specifying its text id string"""
+         documents = self.get_documents_by_id([id], index)
+         document = documents[0] if documents else None
+         return document
+ 
+-    def get_documents_by_id(self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000) -> List[Document]:
++    def get_documents_by_id(self, ids: List[str], index: Optional[str] = None, batch_size: int = 10_000, **kwargs) -> List[Document]:
+         """Fetch documents by specifying a list of text id strings"""
+         index = index or self.index
+ 
+@@ -179,8 +179,10 @@ def get_all_documents(
+         index: Optional[str] = None,
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
++        batch_size: int = 10_000,
++        **kwargs
+     ) -> List[Document]:
+-        documents = list(self.get_all_documents_generator(index=index, filters=filters, return_embedding=return_embedding))
++        documents = list(self.get_all_documents_generator(index=index, filters=filters, return_embedding=return_embedding, batch_size=batch_size))
+         return documents
+ 
+     def get_all_documents_generator(
+@@ -189,6 +191,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -285,7 +288,7 @@ def _get_documents_meta(self, documents_map):
+             documents_map[row.document_id].meta[row.name] = row.value
+         return documents_map
+ 
+-    def get_all_labels(self, index=None, filters: Optional[dict] = None):
++    def get_all_labels(self, index=None, filters: Optional[dict] = None, **kwargs):
+         """
+         Return all labels in the document store
+         """
+@@ -297,7 +300,8 @@ def get_all_labels(self, index=None, filters: Optional[dict] = None):
+         return labels
+ 
+     def write_documents(self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None) -> None:
++                        batch_size: int = 10_000, duplicate_documents: Optional[str] = None, 
++                        **kwargs) -> None:
+         """
+         Indexes documents for later queries.
+ 
+@@ -353,7 +357,7 @@ def write_documents(self, documents: Union[List[dict], List[Document]], index: O
+                 self.session.rollback()
+                 raise ex
+ 
+-    def write_labels(self, labels, index=None):
++    def write_labels(self, labels, index=None, **kwargs):
+         """Write annotation labels into document store."""
+ 
+         labels = [Label.from_dict(l) if isinstance(l, dict) else l for l in labels]
+@@ -442,7 +446,7 @@ def update_document_meta(self, id: str, meta: Dict[str, str]):
+             self.session.add(m)
+         self.session.commit()
+ 
+-    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int:
++    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int:
+         """
+         Return the number of documents in the document store.
+         """
+@@ -461,7 +465,7 @@ def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, ind
+         count = query.count()
+         return count
+ 
+-    def get_label_count(self, index: Optional[str] = None) -> int:
++    def get_label_count(self, index: Optional[str] = None, **kwargs) -> int:
+         """
+         Return the number of labels in the document store
+         """
+@@ -505,13 +509,14 @@ def query_by_embedding(self,
+                            filters: Optional[dict] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+ 
+         raise NotImplementedError("SQLDocumentStore is currently not supporting embedding queries. "
+                                   "Change the query type (e.g. by choosing a different retriever) "
+                                   "or change the DocumentStore (e.g. to ElasticsearchDocumentStore)")
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -527,7 +532,7 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+         )
+         self.delete_documents(index, None, filters)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+@@ -562,7 +567,7 @@ def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]]
+ 
+         self.session.commit()
+ 
+-    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_labels(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete labels from the document store. All labels are deleted if no filters are passed.
+ 
+diff --git a/haystack/document_stores/weaviate.py b/haystack/document_stores/weaviate.py
+index 4d23a4b708..a922c37b5c 100644
+--- a/haystack/document_stores/weaviate.py
++++ b/haystack/document_stores/weaviate.py
+@@ -255,7 +255,7 @@ def _create_document_field_map(self) -> Dict:
+             self.embedding_field: "embedding"
+         }
+ 
+-    def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[Document]:
++    def get_document_by_id(self, id: str, index: Optional[str] = None, **kwargs) -> Optional[Document]:
+         """Fetch a document by specifying its uuid string"""
+         # Sample result dict from a get method
+         '''{'class': 'Document',
+@@ -275,8 +275,9 @@ def get_document_by_id(self, id: str, index: Optional[str] = None) -> Optional[D
+             document = self._convert_weaviate_result_to_document(result, return_embedding=True)
+         return document
+ 
+-    def get_documents_by_id(self, ids: List[str], index: Optional[str] = None,
+-                            batch_size: int = 10_000) -> List[Document]:
++    def get_documents_by_id(self, ids: List[str], 
++                            index: Optional[str] = None, 
++                            **kwargs) -> List[Document]:
+         """
+         Fetch documents by specifying a list of uuid strings.
+         """
+@@ -364,7 +365,8 @@ def _check_document(self, cur_props: List[str], doc: dict) -> List[str]:
+ 
+     def write_documents(
+             self, documents: Union[List[dict], List[Document]], index: Optional[str] = None,
+-            batch_size: int = 10_000, duplicate_documents: Optional[str] = None):
++            batch_size: int = 10_000, duplicate_documents: Optional[str] = None, 
++            **kwargs):
+         """
+         Add new documents to the DocumentStore.
+ 
+@@ -483,7 +485,7 @@ def get_embedding_count(self, filters: Optional[Dict[str, List[str]]] = None, in
+         """
+         return self.get_document_count(filters=filters, index=index)
+ 
+-    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None) -> int:
++    def get_document_count(self, filters: Optional[Dict[str, List[str]]] = None, index: Optional[str] = None, **kwargs) -> int:
+         """
+         Return the number of documents in the document store.
+         """
+@@ -512,6 +514,7 @@ def get_all_documents(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> List[Document]:
+         """
+         Get documents from the document store.
+@@ -568,6 +571,7 @@ def get_all_documents_generator(
+         filters: Optional[Dict[str, List[str]]] = None,
+         return_embedding: Optional[bool] = None,
+         batch_size: int = 10_000,
++        **kwargs
+     ) -> Generator[Document, None, None]:
+         """
+         Get documents from the document store. Under-the-hood, documents are fetched in batches from the
+@@ -648,7 +652,8 @@ def query_by_embedding(self,
+                            filters: Optional[dict] = None,
+                            top_k: int = 10,
+                            index: Optional[str] = None,
+-                           return_embedding: Optional[bool] = None) -> List[Document]:
++                           return_embedding: Optional[bool] = None,
++                           **kwargs) -> List[Document]:
+         """
+         Find the document that is most similar to the provided `query_emb` by using a vector similarity metric.
+ 
+@@ -753,7 +758,7 @@ def update_embeddings(
+                 if self.similarity=="cosine": self.normalize_embedding(emb)
+                 self.weaviate_client.data_object.update({}, class_name=index, uuid=doc.id, vector=emb)
+ 
+-    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+         :param index: Index name to delete the document from.
+@@ -768,7 +773,7 @@ def delete_all_documents(self, index: Optional[str] = None, filters: Optional[Di
+         )
+         self.delete_documents(index, None, filters)
+ 
+-    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None):
++    def delete_documents(self, index: Optional[str] = None, ids: Optional[List[str]] = None, filters: Optional[Dict[str, List[str]]] = None, **kwargs):
+         """
+         Delete documents in an index. All documents are deleted if no filters are passed.
+ 
+diff --git a/haystack/nodes/retriever/base.py b/haystack/nodes/retriever/base.py
+index bbc45227f3..70a1561cd3 100644
+--- a/haystack/nodes/retriever/base.py
++++ b/haystack/nodes/retriever/base.py
+@@ -1,4 +1,4 @@
+-from typing import List, Optional
++from typing import List, MutableMapping, Optional
+ 
+ import logging
+ from abc import abstractmethod
+@@ -48,7 +48,13 @@ class BaseRetriever(BaseComponent):
+     retrieve_time = 0.0
+ 
+     @abstractmethod
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(
++        self, 
++        query: str, 
++        filters: dict = None, 
++        top_k: Optional[int] = None, 
++        index: str = None,
++        headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -57,6 +63,7 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+         :param filters: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+         :param top_k: How many documents to return per query.
+         :param index: The name of the index in the DocumentStore from which to retrieve documents
++        :param headers: custom HTTP headers to pass to document store client if available (e.g. user token with 'Authorization' header)
+         """
+         pass
+ 
+@@ -81,6 +88,7 @@ def eval(
+         top_k: int = 10,
+         open_domain: bool = False,
+         return_preds: bool = False,
++        headers: MutableMapping[str, str] = None
+     ) -> dict:
+         """
+         Performs evaluation on the Retriever.
+@@ -107,6 +115,7 @@ def eval(
+                             are within ids explicitly stated in the labels.
+         :param return_preds: Whether to add predictions in the returned dictionary. If True, the returned dictionary
+                              contains the keys "predictions" and "metrics".
++        :param headers: custom HTTP headers to pass to document store client if available (e.g. user token with 'Authorization' header)
+         """
+ 
+         # Extract all questions for evaluation
+@@ -117,7 +126,8 @@ def eval(
+         labels: List[MultiLabel] = self.document_store.get_all_labels_aggregated(index=label_index, filters=filters,
+                                                                                  open_domain=open_domain,
+                                                                                  drop_negative_labels=True,
+-                                                                                 drop_no_answers=False)
++                                                                                 drop_no_answers=False,
++                                                                                 headers=headers)
+ 
+         correct_retrievals = 0
+         summed_avg_precision = 0.0
+@@ -142,7 +152,7 @@ def eval(
+         logger.info("Performing eval queries...")
+         if open_domain:
+             for (_, question), gold_answers in tqdm(question_label_dict.items()):
+-                retrieved_docs = timed_retrieve(question, top_k=top_k, index=doc_index)
++                retrieved_docs = timed_retrieve(question, top_k=top_k, index=doc_index, headers=headers)
+                 if return_preds:
+                     predictions.append({"question": question, "retrieved_docs": retrieved_docs})
+                 # check if correct doc in retrieved docs
+@@ -164,7 +174,7 @@ def eval(
+         # Option 2: Strict evaluation by document ids that are listed in the labels
+         else:
+             for (_, question), gold_ids in tqdm(question_label_dict.items()):
+-                retrieved_docs = timed_retrieve(question, top_k=top_k, index=doc_index)
++                retrieved_docs = timed_retrieve(question, top_k=top_k, index=doc_index, headers=headers)
+                 if return_preds:
+                     predictions.append({"question": question, "retrieved_docs": retrieved_docs})
+                 # check if correct doc in retrieved docs
+@@ -215,15 +225,16 @@ def run(  # type: ignore
+         top_k: Optional[int] = None,
+         documents: Optional[List[dict]] = None,
+         index: Optional[str] = None,
++        headers: MutableMapping[str, str] = None
+     ):
+         if root_node == "Query":
+             self.query_count += 1
+             run_query_timed = self.timing(self.run_query, "query_time")
+-            output, stream = run_query_timed(query=query, filters=filters, top_k=top_k, index=index)
++            output, stream = run_query_timed(query=query, filters=filters, top_k=top_k, index=index, headers=headers)
+         elif root_node == "File":
+             self.index_count += len(documents)  # type: ignore
+             run_indexing = self.timing(self.run_indexing, "index_time")
+-            output, stream = run_indexing(documents=documents)
++            output, stream = run_indexing(documents=documents, headers=headers)
+         else:
+             raise Exception(f"Invalid root_node '{root_node}'.")
+         return output, stream
+@@ -234,15 +245,16 @@ def run_query(
+         filters: Optional[dict] = None,
+         top_k: Optional[int] = None,
+         index: Optional[str] = None,
++        headers: MutableMapping[str, str] = None
+     ):
+-        documents = self.retrieve(query=query, filters=filters, top_k=top_k, index=index)
++        documents = self.retrieve(query=query, filters=filters, top_k=top_k, index=index, headers=headers)
+         document_ids = [doc.id for doc in documents]
+         logger.debug(f"Retrieved documents with IDs: {document_ids}")
+         output = {"documents": documents}
+ 
+         return output, "output_1"
+ 
+-    def run_indexing(self, documents: List[dict]):
++    def run_indexing(self, documents: List[dict], headers: MutableMapping[str, str] = None):
+         if self.__class__.__name__ in ["DensePassageRetriever", "EmbeddingRetriever"]:
+             documents = deepcopy(documents)
+             document_objects = [Document.from_dict(doc) for doc in documents]
+diff --git a/haystack/nodes/retriever/dense.py b/haystack/nodes/retriever/dense.py
+index 9f058cf7ee..9890b31ad9 100644
+--- a/haystack/nodes/retriever/dense.py
++++ b/haystack/nodes/retriever/dense.py
+@@ -1,4 +1,4 @@
+-from typing import List, Dict, Union, Optional
++from typing import List, Dict, MutableMapping, Union, Optional
+ 
+ import logging
+ import numpy as np
+@@ -194,7 +194,7 @@ def __init__(self,
+         if len(self.devices) > 1:
+             self.model = DataParallel(self.model, device_ids=self.devices)
+ 
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -212,7 +212,7 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+         if index is None:
+             index = self.document_store.index
+         query_emb = self.embed_queries(texts=[query])
+-        documents = self.document_store.query_by_embedding(query_emb=query_emb[0], top_k=top_k, filters=filters, index=index)
++        documents = self.document_store.query_by_embedding(query_emb=query_emb[0], top_k=top_k, filters=filters, index=index, headers=headers)
+         return documents
+ 
+     def _get_predictions(self, dicts):
+@@ -643,7 +643,7 @@ def __init__(self,
+         if len(self.devices) > 1:
+             self.model = DataParallel(self.model, device_ids=self.devices)
+ 
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]:
+         if top_k is None:
+             top_k = self.top_k
+         if not self.document_store:
+@@ -653,7 +653,7 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+             index = self.document_store.index
+         query_emb = self.embed_queries(texts=[query])
+         documents = self.document_store.query_by_embedding(query_emb=query_emb[0], top_k=top_k, filters=filters,
+-                                                           index=index)
++                                                           index=index, headers=headers)
+         return documents
+ 
+     def _get_predictions(self, dicts: List[Dict]) -> Dict[str, List[np.ndarray]]:
+@@ -1029,7 +1029,7 @@ def __init__(
+             raise ValueError(f"Unknown retriever embedding model format {model_format}")
+         self.embedding_encoder = _EMBEDDING_ENCODERS[model_format](self)
+ 
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -1045,7 +1045,7 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+             index = self.document_store.index
+         query_emb = self.embed_queries(texts=[query])
+         documents = self.document_store.query_by_embedding(query_emb=query_emb[0], filters=filters,
+-                                                           top_k=top_k, index=index)
++                                                           top_k=top_k, index=index, headers=headers)
+         return documents
+ 
+     def embed_queries(self, texts: List[str]) -> List[np.ndarray]:
+diff --git a/haystack/nodes/retriever/sparse.py b/haystack/nodes/retriever/sparse.py
+index 47ece639da..4cb4ea7c66 100644
+--- a/haystack/nodes/retriever/sparse.py
++++ b/haystack/nodes/retriever/sparse.py
+@@ -1,4 +1,4 @@
+-from typing import List, Optional
++from typing import List, MutableMapping, Optional
+ 
+ import logging
+ import pandas as pd
+@@ -58,7 +58,13 @@ def __init__(self, document_store: ElasticsearchDocumentStore, top_k: int = 10,
+         self.top_k = top_k
+         self.custom_query = custom_query
+ 
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(
++        self, 
++        query: str, 
++        filters: dict = None, 
++        top_k: Optional[int] = None, 
++        index: str = None,
++        headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -67,13 +73,14 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+         :param filters: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+         :param top_k: How many documents to return per query.
+         :param index: The name of the index in the DocumentStore from which to retrieve documents
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+         if top_k is None:
+             top_k = self.top_k
+         if index is None:
+             index = self.document_store.index
+ 
+-        documents = self.document_store.query(query, filters, top_k, self.custom_query, index)
++        documents = self.document_store.query(query, filters, top_k, self.custom_query, index, headers=headers)
+         return documents
+ 
+ 
+@@ -82,7 +89,13 @@ class ElasticsearchFilterOnlyRetriever(ElasticsearchRetriever):
+     Naive "Retriever" that returns all documents that match the given filters. No impact of query at all.
+     Helpful for benchmarking, testing and if you want to do QA on small documents without an "active" retriever.
+     """
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(
++        self, 
++        query: str, 
++        filters: dict = None, 
++        top_k: Optional[int] = None, 
++        index: str = None, 
++        headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -91,13 +104,15 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+         :param filters: A dictionary where the keys specify a metadata field and the value is a list of accepted values for that field
+         :param top_k: How many documents to return per query.
+         :param index: The name of the index in the DocumentStore from which to retrieve documents
++        :param headers: custom HTTP headers to pass to es client (e.g. user token with 'Authorization' header)
+         """
+         if top_k is None:
+             top_k = self.top_k
+         if index is None:
+             index = self.document_store.index
+         documents = self.document_store.query(query=None, filters=filters, top_k=top_k,
+-                                              custom_query=self.custom_query, index=index)
++                                              custom_query=self.custom_query, index=index,
++                                              headers=headers)
+         return documents
+ 
+ # TODO make Paragraph generic for configurable units of text eg, pages, paragraphs, or split by a char_limit
+@@ -166,7 +181,7 @@ def _calc_scores(self, query: str) -> dict:
+         )
+         return indices_and_scores
+ 
+-    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None) -> List[Document]:
++    def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None, index: str = None, headers: MutableMapping[str, str] = None) -> List[Document]:
+         """
+         Scan through documents in DocumentStore and return a small number documents
+         that are most relevant to the query.
+@@ -177,7 +192,7 @@ def retrieve(self, query: str, filters: dict = None, top_k: Optional[int] = None
+         :param index: The name of the index in the DocumentStore from which to retrieve documents
+         """
+         if self.auto_fit:
+-            if self.document_store.get_document_count() != self.document_count:
++            if self.document_store.get_document_count(headers=headers) != self.document_count:
+                 # run fit() to update self.df, self.tfidf_matrix and self.document_count
+                 logger.warning("Indexed documents have been updated and fit() method needs to be run before retrieval. Running it now.")
+                 self.fit()
+diff --git a/test/test_document_store.py b/test/test_document_store.py
+index 5aa5c6c34c..19de17a860 100644
+--- a/test/test_document_store.py
++++ b/test/test_document_store.py
+@@ -1,12 +1,15 @@
++from unittest import mock
+ import numpy as np
+ import pandas as pd
+ import pytest
++from unittest.mock import Mock
+ from elasticsearch import Elasticsearch
+ from elasticsearch.exceptions import RequestError
+ 
+ 
+ from conftest import get_document_store
+ from haystack.document_stores import WeaviateDocumentStore
++from haystack.document_stores.base import BaseDocumentStore
+ from haystack.errors import DuplicateDocumentError
+ from haystack.schema import Document, Label, Answer, Span
+ from haystack.document_stores.elasticsearch import ElasticsearchDocumentStore
+@@ -940,4 +943,20 @@ def test_elasticsearch_synonyms():
+     indexed_settings = client.indices.get_settings(index="haystack_synonym_arg")
+ 
+     assert synonym_type == indexed_settings['haystack_synonym_arg']['settings']['index']['analysis']['filter']['synonym']['type']
+-    assert synonyms == indexed_settings['haystack_synonym_arg']['settings']['index']['analysis']['filter']['synonym']['synonyms']
+\ No newline at end of file
++    assert synonyms == indexed_settings['haystack_synonym_arg']['settings']['index']['analysis']['filter']['synonym']['synonyms']
++
++
++def test_custom_headers(document_store_with_docs: BaseDocumentStore):
++    mock_client = None
++    if isinstance(document_store_with_docs, ElasticsearchDocumentStore):
++        es_document_store: ElasticsearchDocumentStore = document_store_with_docs
++        mock_client = Mock(wraps=es_document_store.client)
++        es_document_store.client = mock_client
++    custom_headers = {'X-My-Custom-Header': 'header-value'}
++    documents = document_store_with_docs.get_all_documents(headers=custom_headers)
++    if mock_client:
++        mock_client.search.assert_called_once()
++        args, kwargs = mock_client.search.call_args
++        assert "headers" in kwargs
++        assert kwargs["headers"] == custom_headers
++    assert len(documents) > 0
+\ No newline at end of file
+diff --git a/test/test_pipeline_extractive_qa.py b/test/test_pipeline_extractive_qa.py
+index 48910f70fe..3fd202558b 100644
+--- a/test/test_pipeline_extractive_qa.py
++++ b/test/test_pipeline_extractive_qa.py
+@@ -1,4 +1,7 @@
++from unittest.mock import Mock
+ import pytest
++from haystack.document_stores.elasticsearch import ElasticsearchDocumentStore
++from haystack.nodes.retriever.dense import DensePassageRetriever, EmbeddingRetriever
+ 
+ from haystack.pipeline import (
+     TranslationWrapperPipeline,
+@@ -98,3 +101,48 @@ def test_extractive_qa_answers_with_translator(
+     assert (
+         prediction["answers"][0].context == "My name is Carla and I live in Berlin"
+     )
++
++
++@pytest.mark.slow
++@pytest.mark.parametrize("retriever_with_docs", ["elasticsearch", "dpr", "embedding"], indirect=True)
++@pytest.mark.parametrize("document_store_with_docs", ["elasticsearch"], indirect=True)
++@pytest.mark.parametrize("reader", ["farm"], indirect=True)
++def test_extractive_qa_es_authentication(reader, retriever_with_docs, document_store_with_docs: ElasticsearchDocumentStore):
++    if isinstance(retriever_with_docs, (DensePassageRetriever, EmbeddingRetriever)):
++        document_store_with_docs.update_embeddings(retriever=retriever_with_docs)
++    mock_client = Mock(wraps=document_store_with_docs.client)
++    document_store_with_docs.client = mock_client
++    auth_headers = {'Authorization': 'Basic YWRtaW46cm9vdA=='}
++    pipeline = ExtractiveQAPipeline(reader=reader, retriever=retriever_with_docs)
++    prediction = pipeline.run(
++        query="Who lives in Berlin?", params={"Retriever": {"top_k": 10, "headers": auth_headers}, "Reader": {"top_k": 3}},
++    )
++    assert prediction is not None
++    assert len(prediction["answers"]) == 3
++    mock_client.search.assert_called_once()
++    args, kwargs = mock_client.search.call_args
++    assert "headers" in kwargs
++    assert kwargs["headers"] == auth_headers
++
++
++@pytest.mark.slow
++@pytest.mark.parametrize("retriever_with_docs", ["tfidf"], indirect=True)
++@pytest.mark.parametrize("reader", ["farm"], indirect=True)
++def test_extractive_qa_document_store_authentication(reader, retriever_with_docs, document_store_with_docs):
++    mock_client = None
++    if isinstance(document_store_with_docs, ElasticsearchDocumentStore):
++        es_document_store: ElasticsearchDocumentStore = document_store_with_docs
++        mock_client = Mock(wraps=es_document_store.client)
++        es_document_store.client = mock_client
++    auth_headers = {'Authorization': 'Basic YWRtaW46cm9vdA=='}
++    pipeline = ExtractiveQAPipeline(reader=reader, retriever=retriever_with_docs)
++    prediction = pipeline.run(
++        query="Who lives in Berlin?", params={"Retriever": {"top_k": 10, "headers": auth_headers}, "Reader": {"top_k": 3}},
++    )
++    assert prediction is not None
++    assert len(prediction["answers"]) == 3
++    if mock_client:
++        mock_client.count.assert_called_once()
++        args, kwargs = mock_client.count.call_args
++        assert "headers" in kwargs
++        assert kwargs["headers"] == auth_headers
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,426 @@
+  Task-ID: pandas-dev__pandas-16247@fa4e036
+  Please checkout to this commit first: e832ddfc8bb6362a465de18ccdd25a42585ba2bd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: pandas rolling_quantile does not use interpolation
+i recently bumped an unexpected issue with pandas rolling funcs. rolling_quantile for example:
+
+```
+>> row = 10
+>> col = 5
+>> idx = pd.date_range(20100101,periods=row,freq='B')
+>> a = pd.DataFrame(np.random.rand(row*col).reshape((row,-1)),index=idx)
+>> a
+                   0           1           2           3           4
+2010-01-01  0.341434    0.497274    0.596341    0.259909    0.872207
+2010-01-04  0.222653    0.056723    0.064019    0.936307    0.785647
+2010-01-05  0.179067    0.647165    0.931266    0.557698    0.713282
+2010-01-06  0.049766    0.259756    0.945736    0.380948    0.282667
+2010-01-07  0.385036    0.517609    0.575958    0.050758    0.850735
+2010-01-08  0.628169    0.510453    0.325973    0.263361    0.444959
+2010-01-11  0.099133    0.976571    0.602235    0.181185    0.506316
+2010-01-12  0.987344    0.902289    0.080000    0.254695    0.753325
+2010-01-13  0.759198    0.014548    0.139858    0.822900    0.251972
+2010-01-14  0.404149    0.349788    0.038714    0.280568    0.197865
+
+>> a.quantile([0.25,0.5,0.75],axis=0)
+               0           1           2           3           4
+0.25    0.189963    0.282264    0.094964    0.255999    0.323240
+0.50    0.363235    0.503864    0.450966    0.271964    0.609799
+0.75    0.572164    0.614776    0.600761    0.513510    0.777567
+
+>> np.percentile(a,[25,50,75],axis=0)
+[array([ 0.18996316,  0.28226404,  0.09496441,  0.25599853,  0.32323997]),
+ array([ 0.36323529,  0.50386356,  0.45096554,  0.27196429,  0.60979881]),
+ array([ 0.57216415,  0.61477607,  0.6007611 ,  0.51351021,  0.7775667 ])]
+
+>> pd.rolling_quantile(a,row,0.25).tail(1)
+                   0           1       2           3           4
+2010-01-14  0.179067    0.259756    0.08    0.254695    0.282667
+```
+
+looks like pandas.DataFrame.quantile member func is consistent with the numpy.percentile func. however the pandas.rolling_quantile func returns diff results. reduce the row number to 5, the problem will be gone (all three methods return the same results). any thoughts?
+
+ps: i also tested rolling_std func which will "randomly" generate errors with 10^-7 ~ 10^-8 scales (compared to pandas.DataFrame std member func or numpy/scipy std funcs which could limit the error close to np.spacing(1) level) for long (row-wise) pandas.DataFrames
+
+python environment:
+
+python 3.4.2
+cython 0.21.1
+numpy 1.8.2
+scipy 0.14.0
+pandas 0.15.1
+statsmodels 0.6.0
+  </issue>
+  
+  <patch>
+  diff --git a/asv_bench/benchmarks/rolling.py b/asv_bench/benchmarks/rolling.py
+new file mode 100644
+index 0000000000000..9da9d0b855323
+--- /dev/null
++++ b/asv_bench/benchmarks/rolling.py
+@@ -0,0 +1,185 @@
++from .pandas_vb_common import *
++import pandas as pd
++import numpy as np
++
++
++class DataframeRolling(object):
++    goal_time = 0.2
++
++    def setup(self):
++        self.N = 100000
++        self.Ns = 10000
++        self.df = pd.DataFrame({'a': np.random.random(self.N)})
++        self.dfs = pd.DataFrame({'a': np.random.random(self.Ns)})
++        self.wins = 10
++        self.winl = 1000
++
++    def time_rolling_quantile_0(self):
++        (self.df.rolling(self.wins).quantile(0.0))
++
++    def time_rolling_quantile_1(self):
++        (self.df.rolling(self.wins).quantile(1.0))
++
++    def time_rolling_quantile_median(self):
++        (self.df.rolling(self.wins).quantile(0.5))
++
++    def time_rolling_median(self):
++        (self.df.rolling(self.wins).median())
++
++    def time_rolling_median(self):
++        (self.df.rolling(self.wins).mean())
++
++    def time_rolling_max(self):
++        (self.df.rolling(self.wins).max())
++
++    def time_rolling_min(self):
++        (self.df.rolling(self.wins).min())
++
++    def time_rolling_std(self):
++        (self.df.rolling(self.wins).std())
++
++    def time_rolling_count(self):
++        (self.df.rolling(self.wins).count())
++
++    def time_rolling_skew(self):
++        (self.df.rolling(self.wins).skew())
++
++    def time_rolling_kurt(self):
++        (self.df.rolling(self.wins).kurt())
++
++    def time_rolling_sum(self):
++        (self.df.rolling(self.wins).sum())
++
++    def time_rolling_corr(self):
++        (self.dfs.rolling(self.wins).corr())
++
++    def time_rolling_cov(self):
++        (self.dfs.rolling(self.wins).cov())
++        
++    def time_rolling_quantile_0_l(self):
++        (self.df.rolling(self.winl).quantile(0.0))
++
++    def time_rolling_quantile_1_l(self):
++        (self.df.rolling(self.winl).quantile(1.0))
++
++    def time_rolling_quantile_median_l(self):
++        (self.df.rolling(self.winl).quantile(0.5))
++
++    def time_rolling_median_l(self):
++        (self.df.rolling(self.winl).median())
++
++    def time_rolling_median_l(self):
++        (self.df.rolling(self.winl).mean())
++
++    def time_rolling_max_l(self):
++        (self.df.rolling(self.winl).max())
++
++    def time_rolling_min_l(self):
++        (self.df.rolling(self.winl).min())
++
++    def time_rolling_std_l(self):
++        (self.df.rolling(self.wins).std())
++
++    def time_rolling_count_l(self):
++        (self.df.rolling(self.wins).count())
++
++    def time_rolling_skew_l(self):
++        (self.df.rolling(self.wins).skew())
++
++    def time_rolling_kurt_l(self):
++        (self.df.rolling(self.wins).kurt())
++
++    def time_rolling_sum_l(self):
++        (self.df.rolling(self.wins).sum())
++
++
++class SeriesRolling(object):
++    goal_time = 0.2
++
++    def setup(self):
++        self.N = 100000
++        self.Ns = 10000
++        self.df = pd.DataFrame({'a': np.random.random(self.N)})
++        self.dfs = pd.DataFrame({'a': np.random.random(self.Ns)})
++        self.sr = self.df.a
++        self.srs = self.dfs.a
++        self.wins = 10
++        self.winl = 1000
++
++    def time_rolling_quantile_0(self):
++        (self.sr.rolling(self.wins).quantile(0.0))
++
++    def time_rolling_quantile_1(self):
++        (self.sr.rolling(self.wins).quantile(1.0))
++
++    def time_rolling_quantile_median(self):
++        (self.sr.rolling(self.wins).quantile(0.5))
++
++    def time_rolling_median(self):
++        (self.sr.rolling(self.wins).median())
++
++    def time_rolling_median(self):
++        (self.sr.rolling(self.wins).mean())
++
++    def time_rolling_max(self):
++        (self.sr.rolling(self.wins).max())
++
++    def time_rolling_min(self):
++        (self.sr.rolling(self.wins).min())
++
++    def time_rolling_std(self):
++        (self.sr.rolling(self.wins).std())
++
++    def time_rolling_count(self):
++        (self.sr.rolling(self.wins).count())
++
++    def time_rolling_skew(self):
++        (self.sr.rolling(self.wins).skew())
++
++    def time_rolling_kurt(self):
++        (self.sr.rolling(self.wins).kurt())
++
++    def time_rolling_sum(self):
++        (self.sr.rolling(self.wins).sum())
++
++    def time_rolling_corr(self):
++        (self.srs.rolling(self.wins).corr())
++
++    def time_rolling_cov(self):
++        (self.srs.rolling(self.wins).cov())
++        
++    def time_rolling_quantile_0_l(self):
++        (self.sr.rolling(self.winl).quantile(0.0))
++
++    def time_rolling_quantile_1_l(self):
++        (self.sr.rolling(self.winl).quantile(1.0))
++
++    def time_rolling_quantile_median_l(self):
++        (self.sr.rolling(self.winl).quantile(0.5))
++
++    def time_rolling_median_l(self):
++        (self.sr.rolling(self.winl).median())
++
++    def time_rolling_median_l(self):
++        (self.sr.rolling(self.winl).mean())
++
++    def time_rolling_max_l(self):
++        (self.sr.rolling(self.winl).max())
++
++    def time_rolling_min_l(self):
++        (self.sr.rolling(self.winl).min())
++
++    def time_rolling_std_l(self):
++        (self.sr.rolling(self.wins).std())
++
++    def time_rolling_count_l(self):
++        (self.sr.rolling(self.wins).count())
++
++    def time_rolling_skew_l(self):
++        (self.sr.rolling(self.wins).skew())
++
++    def time_rolling_kurt_l(self):
++        (self.sr.rolling(self.wins).kurt())
++
++    def time_rolling_sum_l(self):
++        (self.sr.rolling(self.wins).sum())
+diff --git a/doc/source/whatsnew/v0.21.0.txt b/doc/source/whatsnew/v0.21.0.txt
+index d5cc3d6ddca8e..93363b2944f72 100644
+--- a/doc/source/whatsnew/v0.21.0.txt
++++ b/doc/source/whatsnew/v0.21.0.txt
+@@ -167,9 +167,11 @@ Plotting
+ 
+ Groupby/Resample/Rolling
+ ^^^^^^^^^^^^^^^^^^^^^^^^
+-- Bug in ``DataFrame.resample().size()`` where an empty ``DataFrame`` did not return a ``Series`` (:issue:`14962`)
+ 
++- Bug in ``DataFrame.resample().size()`` where an empty ``DataFrame`` did not return a ``Series`` (:issue:`14962`)
+ - Bug in ``infer_freq`` causing indices with 2-day gaps during the working week to be wrongly inferred as business daily (:issue:`16624`)
++- Bug in ``.rolling.quantile()`` which incorrectly used different defaults than Series.quantile() and DataFrame.quantile()
++
+ 
+ Sparse
+ ^^^^^^
+@@ -190,6 +192,7 @@ Categorical
+ ^^^^^^^^^^^
+ 
+ 
++
+ Other
+ ^^^^^
+ - Bug in :func:`eval` where the ``inplace`` parameter was being incorrectly handled (:issue:`16732`)
+diff --git a/pandas/_libs/window.pyx b/pandas/_libs/window.pyx
+index 3bb8abe26c781..2450eea5500cd 100644
+--- a/pandas/_libs/window.pyx
++++ b/pandas/_libs/window.pyx
+@@ -1348,8 +1348,9 @@ def roll_quantile(ndarray[float64_t, cast=True] input, int64_t win,
+         bint is_variable
+         ndarray[int64_t] start, end
+         ndarray[double_t] output
++        double vlow, vhigh
+ 
+-    if quantile < 0.0 or quantile > 1.0:
++    if quantile <= 0.0 or quantile >= 1.0:
+         raise ValueError("quantile value {0} not in [0, 1]".format(quantile))
+ 
+     # we use the Fixed/Variable Indexer here as the
+@@ -1391,7 +1392,17 @@ def roll_quantile(ndarray[float64_t, cast=True] input, int64_t win,
+ 
+         if nobs >= minp:
+             idx = int(quantile * <double>(nobs - 1))
+-            output[i] = skiplist.get(idx)
++
++            # Single value in skip list
++            if nobs == 1:
++                output[i] = skiplist.get(0)
++
++            # Interpolated quantile
++            else:
++                vlow = skiplist.get(idx)
++                vhigh = skiplist.get(idx + 1)
++                output[i] = (vlow + (vhigh - vlow) *
++                                 (quantile * (nobs - 1) - idx))
+         else:
+             output[i] = NaN
+ 
+diff --git a/pandas/core/window.py b/pandas/core/window.py
+index 02b508bb94e4c..57611794c375f 100644
+--- a/pandas/core/window.py
++++ b/pandas/core/window.py
+@@ -975,8 +975,15 @@ def quantile(self, quantile, **kwargs):
+ 
+         def f(arg, *args, **kwargs):
+             minp = _use_window(self.min_periods, window)
+-            return _window.roll_quantile(arg, window, minp, indexi,
+-                                         self.closed, quantile)
++            if quantile == 1.0:
++                return _window.roll_max(arg, window, minp, indexi,
++                                        self.closed)
++            elif quantile == 0.0:
++                return _window.roll_min(arg, window, minp, indexi,
++                                        self.closed)
++            else:
++                return _window.roll_quantile(arg, window, minp, indexi,
++                                             self.closed, quantile)
+ 
+         return self._apply(f, 'quantile', quantile=quantile,
+                            **kwargs)
+diff --git a/pandas/tests/test_window.py b/pandas/tests/test_window.py
+index 9c3765ffdb716..1d6070a15369f 100644
+--- a/pandas/tests/test_window.py
++++ b/pandas/tests/test_window.py
+@@ -1122,8 +1122,19 @@ def test_rolling_quantile(self):
+         def scoreatpercentile(a, per):
+             values = np.sort(a, axis=0)
+ 
+-            idx = per / 1. * (values.shape[0] - 1)
+-            return values[int(idx)]
++            idx = int(per / 1. * (values.shape[0] - 1))
++
++            if idx == values.shape[0] - 1:
++                retval = values[-1]
++
++            else:
++                qlow = float(idx) / float(values.shape[0] - 1)
++                qhig = float(idx + 1) / float(values.shape[0] - 1)
++                vlow = values[idx]
++                vhig = values[idx + 1]
++                retval = vlow + (vhig - vlow) * (per - qlow) / (qhig - qlow)
++
++            return retval
+ 
+         for q in qs:
+ 
+@@ -1138,6 +1149,28 @@ def alt(x):
+ 
+             self._check_moment_func(f, alt, name='quantile', quantile=q)
+ 
++    def test_rolling_quantile_np_percentile(self):
++        # #9413
++        row = 10
++        col = 5
++        idx = pd.date_range(20100101, periods=row, freq='B')
++        df = pd.DataFrame(np.random.rand(row * col).reshape((row, -1)),
++                          index=idx)
++
++        df_quantile = df.quantile([0.25, 0.5, 0.75], axis=0)
++        np_percentile = np.percentile(df, [25, 50, 75], axis=0)
++
++        tm.assert_almost_equal(df_quantile.values, np.array(np_percentile))
++
++    def test_rolling_quantile_series(self):
++        # #16211
++        arr = np.arange(100)
++        s = pd.Series(arr)
++        q1 = s.quantile(0.1)
++        q2 = s.rolling(100).quantile(0.1).iloc[-1]
++
++        tm.assert_almost_equal(q1, q2)
++
+     def test_rolling_quantile_param(self):
+         ser = Series([0.0, .1, .5, .9, 1.0])
+ 
+@@ -3558,7 +3591,7 @@ def test_ragged_quantile(self):
+ 
+         result = df.rolling(window='2s', min_periods=1).quantile(0.5)
+         expected = df.copy()
+-        expected['B'] = [0.0, 1, 1.0, 3.0, 3.0]
++        expected['B'] = [0.0, 1, 1.5, 3.0, 3.5]
+         tm.assert_frame_equal(result, expected)
+ 
+     def test_ragged_std(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

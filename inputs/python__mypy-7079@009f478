@@ -1,0 +1,291 @@
+  Task-ID: python__mypy-7079@009f478
+  Please checkout to this commit first: 262fe3dc4d5d14492c6fd4009d91c555c406ac04
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Avoid redundant extra errors after "Need type annotation for variable"
+Consider this (oversimplified) example:
+```python
+from typing import TypeVar, Optional
+
+T = TypeVar('T')
+
+def f(x: Optional[T] = None) -> T: ...
+
+x = f()  # Need type annotation for 'x'
+y = x  # Cannot determine type of 'x'
+
+def g() -> None:
+    x = f()  # Need type annotation for 'x'
+    y = x  # Cannot determine type of 'x'
+```
+The subsequent errors look redundant (and maybe even annoying). This is more important with the new semantic analyzer because the old one doesn't show the error if the problematic variable was defined at the function scope.
+
+Potentially, we can replace `<nothing>` with `Any` after we show the error. Also the code that detects failed inference can be improved. For example, `is_valid_inferred_type()` should be replaced with a proper type visitor.
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 8720b4995f36..471da0476ed7 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -34,7 +34,7 @@
+     Instance, NoneType, strip_type, TypeType, TypeOfAny,
+     UnionType, TypeVarId, TypeVarType, PartialType, DeletedType, UninhabitedType, TypeVarDef,
+     true_only, false_only, function_type, is_named_instance, union_items, TypeQuery, LiteralType,
+-    is_optional, remove_optional
++    is_optional, remove_optional, TypeTranslator
+ )
+ from mypy.sametypes import is_same_type
+ from mypy.messages import MessageBuilder, make_inferred_type_note, append_invariance_notes
+@@ -2520,7 +2520,7 @@ def infer_variable_type(self, name: Var, lvalue: Lvalue,
+             # gets generated in assignment like 'x = []' where item type is not known.
+             if not self.infer_partial_type(name, lvalue, init_type):
+                 self.msg.need_annotation_for_var(name, context, self.options.python_version)
+-                self.set_inference_error_fallback_type(name, lvalue, init_type, context)
++                self.set_inference_error_fallback_type(name, lvalue, init_type)
+         elif (isinstance(lvalue, MemberExpr) and self.inferred_attribute_types is not None
+               and lvalue.def_var and lvalue.def_var in self.inferred_attribute_types
+               and not is_same_type(self.inferred_attribute_types[lvalue.def_var], init_type)):
+@@ -2569,9 +2569,8 @@ def set_inferred_type(self, var: Var, lvalue: Lvalue, type: Type) -> None:
+                     self.inferred_attribute_types[lvalue.def_var] = type
+             self.store_type(lvalue, type)
+ 
+-    def set_inference_error_fallback_type(self, var: Var, lvalue: Lvalue, type: Type,
+-                                          context: Context) -> None:
+-        """If errors on context line are ignored, store dummy type for variable.
++    def set_inference_error_fallback_type(self, var: Var, lvalue: Lvalue, type: Type) -> None:
++        """Store best known type for variable if type inference failed.
+ 
+         If a program ignores error on type inference error, the variable should get some
+         inferred type so that if can used later on in the program. Example:
+@@ -2579,10 +2578,9 @@ def set_inference_error_fallback_type(self, var: Var, lvalue: Lvalue, type: Type
+           x = []  # type: ignore
+           x.append(1)   # Should be ok!
+ 
+-        We implement this here by giving x a valid type (Any).
++        We implement this here by giving x a valid type (replacing inferred <nothing> with Any).
+         """
+-        if context.get_line() in self.errors.ignored_lines[self.errors.file]:
+-            self.set_inferred_type(var, lvalue, AnyType(TypeOfAny.from_error))
++        self.set_inferred_type(var, lvalue, type.accept(SetNothingToAny()))
+ 
+     def check_simple_assignment(self, lvalue_type: Optional[Type], rvalue: Expression,
+                                 context: Context,
+@@ -4300,26 +4298,24 @@ def is_valid_inferred_type(typ: Type) -> bool:
+         # specific Optional type.  This resolution happens in
+         # leave_partial_types when we pop a partial types scope.
+         return False
+-    return is_valid_inferred_type_component(typ)
++    return not typ.accept(NothingSeeker())
+ 
+ 
+-def is_valid_inferred_type_component(typ: Type) -> bool:
+-    """Is this part of a type a valid inferred type?
++class NothingSeeker(TypeQuery[bool]):
++    """Find any <nothing> types resulting from failed (ambiguous) type inference."""
++    def __init__(self) -> None:
++        super().__init__(any)
+ 
+-    In strict Optional mode this excludes bare None types, as otherwise every
+-    type containing None would be invalid.
+-    """
+-    if is_same_type(typ, UninhabitedType()):
+-        return False
+-    elif isinstance(typ, Instance):
+-        for arg in typ.args:
+-            if not is_valid_inferred_type_component(arg):
+-                return False
+-    elif isinstance(typ, TupleType):
+-        for item in typ.items:
+-            if not is_valid_inferred_type_component(item):
+-                return False
+-    return True
++    def visit_uninhabited_type(self, t: UninhabitedType) -> bool:
++        return t.ambiguous
++
++
++class SetNothingToAny(TypeTranslator):
++    """Replace all ambiguous <nothing> types with Any (to avoid spurious extra errors)."""
++    def visit_uninhabited_type(self, t: UninhabitedType) -> Type:
++        if t.ambiguous:
++            return AnyType(TypeOfAny.from_error)
++        return t
+ 
+ 
+ def is_node_static(node: Optional[Node]) -> Optional[bool]:
+diff --git a/test-data/unit/check-generics.test b/test-data/unit/check-generics.test
+index 6a3f15da476e..3cb4564c42b7 100644
+--- a/test-data/unit/check-generics.test
++++ b/test-data/unit/check-generics.test
+@@ -996,7 +996,7 @@ IntNode[int](1, 1)
+ IntNode[int](1, 'a')  # E: Argument 2 to "Node" has incompatible type "str"; expected "int"
+ 
+ SameNode = Node[T, T]
+-ff = SameNode[T](1, 1)  # E: Need type annotation for 'ff'
++ff = SameNode[T](1, 1)
+ a = SameNode(1, 'x')
+ reveal_type(a) # N: Revealed type is '__main__.Node[Any, Any]'
+ b = SameNode[int](1, 1)
+diff --git a/test-data/unit/check-inference.test b/test-data/unit/check-inference.test
+index cdd23f3e6cca..f80134b74930 100644
+--- a/test-data/unit/check-inference.test
++++ b/test-data/unit/check-inference.test
+@@ -440,8 +440,7 @@ a = None # type: A
+ 
+ def ff() -> None:
+     x = f() # E: Need type annotation for 'x'
+-    reveal_type(x) # N: Revealed type is 'Any' \
+-                   # E: Cannot determine type of 'x'
++    reveal_type(x) # N: Revealed type is 'Any'
+ 
+ g(None) # Ok
+ f()     # Ok because not used to infer local variable type
+@@ -969,9 +968,8 @@ for x in [A()]:
+     a = x
+ 
+ for y in []: # E: Need type annotation for 'y'
+-    a = y # E: Cannot determine type of 'y'
+-    reveal_type(y)  # N: Revealed type is 'Any' \
+-                    # E: Cannot determine type of 'y'
++    a = y
++    reveal_type(y)  # N: Revealed type is 'Any'
+ 
+ class A: pass
+ class B: pass
+@@ -1017,10 +1015,8 @@ for x, y in [[A()]]:
+ 
+ for e, f in [[]]:  # E: Need type annotation for 'e' \
+                    # E: Need type annotation for 'f'
+-    reveal_type(e)  # N: Revealed type is 'Any' \
+-                    # E: Cannot determine type of 'e'
+-    reveal_type(f)  # N: Revealed type is 'Any' \
+-                    # E: Cannot determine type of 'f'
++    reveal_type(e)  # N: Revealed type is 'Any'
++    reveal_type(f)  # N: Revealed type is 'Any'
+ 
+ class A: pass
+ class B: pass
+@@ -2724,3 +2720,23 @@ class A:
+ class B(A):
+     x = None  # E: Incompatible types in assignment (expression has type "None", base class "A" defined the type as "str")
+     x = ''
++
++[case testNeedAnnotationForCallable]
++from typing import TypeVar, Optional, Callable
++
++T = TypeVar('T')
++
++def f(x: Optional[T] = None) -> Callable[..., T]: ...
++
++x = f()  # E: Need type annotation for 'x'
++y = x
++
++[case testDontNeedAnnotationForCallable]
++from typing import TypeVar, Optional, Callable, NoReturn
++
++T = TypeVar('T')
++
++def f() -> Callable[..., NoReturn]: ...
++
++x = f()
++reveal_type(x)  # N: Revealed type is 'def (*Any, **Any) -> <nothing>'
+diff --git a/test-data/unit/check-literal.test b/test-data/unit/check-literal.test
+index 54891124582d..1dd61f2d3d86 100644
+--- a/test-data/unit/check-literal.test
++++ b/test-data/unit/check-literal.test
+@@ -700,7 +700,7 @@ def f() -> NotAType['also' + 'not' + 'a' + 'type']: ... # E: Invalid type "__mai
+ 
+ # Note: this makes us re-inspect the type (e.g. via '_patch_indirect_dependencies'
+ # in build.py) so we can confirm the RawExpressionType did not leak out.
+-indirect = f()                                          # E: Need type annotation for 'indirect'
++indirect = f()
+ [out]
+ 
+ --
+diff --git a/test-data/unit/check-newsemanal.test b/test-data/unit/check-newsemanal.test
+index 6c7af2498c8d..f354ab231583 100644
+--- a/test-data/unit/check-newsemanal.test
++++ b/test-data/unit/check-newsemanal.test
+@@ -2716,3 +2716,34 @@ class N(NamedTuple):
+         )
+         b
+ [builtins fixtures/tuple.pyi]
++
++[case testNewAnalyzerLessErrorsNeedAnnotation]
++from typing import TypeVar, Optional
++
++T = TypeVar('T')
++
++def f(x: Optional[T] = None) -> T: ...
++
++x = f()  # E: Need type annotation for 'x'
++y = x
++
++def g() -> None:
++    x = f()  # E: Need type annotation for 'x'
++    y = x
++
++[case testNewAnalyzerLessErrorsNeedAnnotationNested]
++from typing import TypeVar, Optional, Generic
++
++T = TypeVar('T')
++class G(Generic[T]): ...
++
++def f(x: Optional[T] = None) -> G[T]: ...
++
++x = f()  # E: Need type annotation for 'x'
++y = x
++reveal_type(y)  # N: Revealed type is '__main__.G[Any]'
++
++def g() -> None:
++    x = f()  # E: Need type annotation for 'x'
++    y = x
++    reveal_type(y)  # N: Revealed type is '__main__.G[Any]'
+diff --git a/test-data/unit/fine-grained-cycles.test b/test-data/unit/fine-grained-cycles.test
+index 9995963b1d64..e4206496b589 100644
+--- a/test-data/unit/fine-grained-cycles.test
++++ b/test-data/unit/fine-grained-cycles.test
+@@ -205,8 +205,7 @@ def h() -> None:
+ [out]
+ ==
+ a.py:3: error: Invalid type "b.C"
+-b.py:6: error: Need type annotation for 'c'
+-b.py:7: error: Cannot determine type of 'c'
++b.py:7: error: C? has no attribute "g"
+ 
+ -- TODO: More import cycle:
+ --
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

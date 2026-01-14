@@ -1,0 +1,191 @@
+  Task-ID: dbt-labs__dbt-core-7180@0829ff7
+  Please checkout to this commit first: 4186f99b742b47e0e95aca4f604cc09e5c67a449
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [CT-2049] Fire an event at the end of every command
+On the `feature/click-cli` branch, each command explicitly returns a tuple of `success: bool, results: Any`. (The structure of `results` differs based on the command.)
+
+We should additionally fire an event that can be used programmatically to determine:
+- when the command completed
+- if the command succeeded
+
+Ideally, this event would be fired _always_, even in cases where the command was interrupted (`^C`) or cancelled itself (e.g. `--fail-fast`).
+  </issue>
+  
+  <patch>
+  diff --git a/core/dbt/cli/requires.py b/core/dbt/cli/requires.py
+index 57f0df82795..0867e17fe92 100644
+--- a/core/dbt/cli/requires.py
++++ b/core/dbt/cli/requires.py
+@@ -5,7 +5,12 @@
+ from dbt.config import RuntimeConfig
+ from dbt.config.runtime import load_project, load_profile, UnsetProfile
+ from dbt.events.functions import setup_event_logger, fire_event, LOG_VERSION
+-from dbt.events.types import MainReportVersion, MainReportArgs, MainTrackingUserState
++from dbt.events.types import (
++    CommandCompleted,
++    MainReportVersion,
++    MainReportArgs,
++    MainTrackingUserState,
++)
+ from dbt.exceptions import DbtProjectError
+ from dbt.parser.manifest import ManifestLoader, write_manifest
+ from dbt.profiler import profiler
+@@ -13,7 +18,9 @@
+ from dbt.utils import cast_dict_to_dict_of_strings
+ 
+ from click import Context
++import datetime
+ from functools import update_wrapper
++import time
+ 
+ 
+ def preflight(func):
+@@ -53,7 +60,20 @@ def wrapper(*args, **kwargs):
+         # Adapter management
+         ctx.with_resource(adapter_management())
+ 
+-        return func(*args, **kwargs)
++        start_func = time.perf_counter()
++
++        (results, success) = func(*args, **kwargs)
++
++        fire_event(
++            CommandCompleted(
++                command=ctx.command_path,
++                success=success,
++                completed_at=datetime.datetime.utcnow(),
++                elapsed=time.perf_counter() - start_func,
++            )
++        )
++
++        return (results, success)
+ 
+     return update_wrapper(wrapper, func)
+ 
+diff --git a/core/dbt/events/proto_types.py b/core/dbt/events/proto_types.py
+index 24d70ec9947..6ffb7a852cf 100644
+--- a/core/dbt/events/proto_types.py
++++ b/core/dbt/events/proto_types.py
+@@ -2184,6 +2184,22 @@ class NoNodesSelectedMsg(betterproto.Message):
+     data: "NoNodesSelected" = betterproto.message_field(2)
+ 
+ 
++@dataclass
++class CommandCompleted(betterproto.Message):
++    """Q039"""
++
++    command: str = betterproto.string_field(1)
++    success: bool = betterproto.bool_field(2)
++    completed_at: datetime = betterproto.message_field(3)
++    elapsed: float = betterproto.float_field(4)
++
++
++@dataclass
++class CommandCompletedMsg(betterproto.Message):
++    info: "EventInfo" = betterproto.message_field(1)
++    data: "CommandCompleted" = betterproto.message_field(2)
++
++
+ @dataclass
+ class CatchableExceptionOnRun(betterproto.Message):
+     """W002"""
+diff --git a/core/dbt/events/types.proto b/core/dbt/events/types.proto
+index 39a53257e69..33bc6ef751b 100644
+--- a/core/dbt/events/types.proto
++++ b/core/dbt/events/types.proto
+@@ -1747,6 +1747,19 @@ message NoNodesSelectedMsg {
+     NoNodesSelected data = 2;
+ }
+ 
++// Q039
++message CommandCompleted {
++    string command = 1;
++    bool success = 2;
++    google.protobuf.Timestamp completed_at = 3;
++    float elapsed = 4;
++}
++
++message CommandCompletedMsg {
++    EventInfo info = 1;
++    CommandCompleted data = 2;
++}
++
+ // W - Node testing
+ 
+ // Skipped W001
+diff --git a/core/dbt/events/types.py b/core/dbt/events/types.py
+index 9ff34f84b52..1b3aa199642 100644
+--- a/core/dbt/events/types.py
++++ b/core/dbt/events/types.py
+@@ -1827,6 +1827,16 @@ def message(self) -> str:
+         return "No nodes selected!"
+ 
+ 
++@dataclass
++class CommandCompleted(InfoLevel, pt.CommandCompleted):
++    def code(self):
++        return "Q039"
++
++    def message(self) -> str:
++        status = "succeeded" if self.success else "failed"
++        return f"Command `{self.command}` {status} at {self.completed_at} after {self.elapsed:0.2f} seconds"
++
++
+ # =======================================================
+ # W - Node testing
+ # =======================================================
+diff --git a/tests/unit/test_events.py b/tests/unit/test_events.py
+index 01e9e576cd2..88441372a4c 100644
+--- a/tests/unit/test_events.py
++++ b/tests/unit/test_events.py
+@@ -1,6 +1,7 @@
+ import re
+ from typing import TypeVar
+ 
++from datetime import datetime
+ from dbt.contracts.results import TimingInfo
+ from dbt.events import AdapterLogger, test_types, types
+ from dbt.events.base_types import (
+@@ -326,6 +327,7 @@ def test_event_codes(self):
+     types.NoNodesSelected(),
+     types.DepsUnpinned(revision="", git=""),
+     types.NoNodesForSelectionCriteria(spec_raw=""),
++    types.CommandCompleted(command="", success=True, elapsed=0.1, completed_at=datetime.utcnow()),
+     # W - Node testing ======================
+     types.CatchableExceptionOnRun(exc=""),
+     types.InternalErrorOnRun(build_path="", exc=""),
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

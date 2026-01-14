@@ -1,0 +1,314 @@
+  Task-ID: skypilot-org__skypilot-1144@36893af
+  Please checkout to this commit first: 3c8b5e28487d8857d58c8d4fe6e3368f543c3fa4
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Fail to launch spot job due to wheels not found
+Hi Sky team,
+
+I try to launch a spot job on a new controller with the latest sky from `git pull` The job keeps failing, and the log error is
+
+```
+(warmup pid=534) I 09-01 01:04:42 recovery_strategy.py:144] Failed to launch the spot cluster with error: Could not find built SkyPilot wheels 'skypilot-1.0.0.dev0-*.whl' under PosixPath('/home/.../.sky/sky_wheels')
+(warmup pid=534) I 09-01 01:04:42 recovery_strategy.py:175] Retrying to launch the spot cluster in 95.6 seconds.
+(warmup pid=534) I 09-01 01:06:17 cloud_vm_ray_backend.py:2666] Creating a new cluster: "warmup-1" [1x GCP(n2d-standard-4[Spot])].
+(warmup pid=534) I 09-01 01:06:17 cloud_vm_ray_backend.py:2666] Tip: to reuse an existing cluster, specify --cluster (-c). Run `sky status` to see existing clusters.
+(warmup pid=534) No existing clusters.
+(warmup pid=534)
+(warmup pid=534) I 09-01 01:06:19 recovery_strategy.py:144] Failed to launch the spot cluster with error: Could not find built SkyPilot wheels 'skypilot-1.0.0.dev0-*.whl' under PosixPath('/home/.../.sky/sky_wheels')
+(warmup pid=534) E 09-01 01:06:19 controller.py:131] Resources unavailable: Failed to launch the spot cluster after 3 retries.
+(warmup pid=534) I 09-01 01:06:19 spot_state.py:186] Job failed due to failing to find available resources after retries.
+``` 
+
+And I go to `~/.sky/sky_wheels/`, the whl file exists, but located in a sub-dir named by its hash.
+```
+~$ tree ~/.sky/sky_wheels/
+/home/qzeng_salk_edu/.sky/sky_wheels/
+├── 6567324f0436356cf90d23feaebc2e10
+│   └── skypilot-1.0.0.dev0-py3-none-any.whl
+├── current_sky_wheel_hash
+```
+
+If I copy the `skypilot-1.0.0.dev0-py3-none-any.whl` file to `~/.sky/sky_wheels/`, the spot job succeed.
+
+In my older controllers, the whl file do exist in `~/.sky/sky_wheels/` without the sub-dir.
+  </issue>
+  
+  <patch>
+  diff --git a/sky/backends/wheel_utils.py b/sky/backends/wheel_utils.py
+index 3eee3fb9d05..752bdf3ad92 100644
+--- a/sky/backends/wheel_utils.py
++++ b/sky/backends/wheel_utils.py
+@@ -5,82 +5,104 @@
+ import shutil
+ import subprocess
+ import tempfile
+-from typing import Optional, Tuple
++from typing import Tuple
+ 
+ import filelock
+ from packaging import version
+ 
+ import sky
++from sky import sky_logging
+ from sky.backends import backend_utils
+ 
++logger = sky_logging.init_logger(__name__)
++
+ # Local wheel path is same as the remote path.
+ WHEEL_DIR = pathlib.Path(os.path.expanduser(backend_utils.SKY_REMOTE_PATH))
++_WHEEL_LOCK_PATH = WHEEL_DIR.parent / '.wheels_lock'
+ SKY_PACKAGE_PATH = pathlib.Path(sky.__file__).parent.parent / 'sky'
+ 
+ # NOTE: keep the same as setup.py's setuptools.setup(name=..., ...).
+ _PACKAGE_WHEEL_NAME = 'skypilot'
+ 
+ 
+-def cleanup_wheels_dir(wheel_dir: pathlib.Path,
+-                       latest_wheel: Optional[pathlib.Path] = None) -> None:
+-    if latest_wheel is None:
+-        # Remove the entire dir.
+-        shutil.rmtree(wheel_dir, ignore_errors=True)
+-        return
++def _get_latest_wheel_and_cleanup() -> pathlib.Path:
++    wheel_name = (f'**/{_PACKAGE_WHEEL_NAME}-'
++                  f'{version.parse(sky.__version__)}-*.whl')
++    try:
++        latest_wheel = max(WHEEL_DIR.glob(wheel_name), key=os.path.getctime)
++    except ValueError:
++        raise FileNotFoundError(f'Could not find built SkyPilot wheels '
++                                f'under {WHEEL_DIR!r}') from None
++
++    latest_wheel_dir_name = latest_wheel.parent
+     # Cleanup older wheels.
+-    for f in wheel_dir.iterdir():
+-        if f != latest_wheel:
++    for f in WHEEL_DIR.iterdir():
++        if f != latest_wheel_dir_name:
+             if f.is_dir() and not f.is_symlink():
+                 shutil.rmtree(f, ignore_errors=True)
+             else:
+                 f.unlink()
++    return latest_wheel
+ 
+ 
+-def _get_latest_built_wheel() -> pathlib.Path:
+-    wheel_name = (f'{_PACKAGE_WHEEL_NAME}-'
+-                  f'{version.parse(sky.__version__)}-*.whl')
++def clean_up_wheel_dir():
++    """Clean up the wheel directory.
++
++    This function will be called during `ray up` to clean up the wheel, it
++    acquires the wheel lock to prevent concurrent wheel operations, by other
++    `ray up` or `sky launch`.
++    """
+     try:
+-        latest_wheel = max(WHEEL_DIR.glob(wheel_name), key=os.path.getctime)
+-    except ValueError:
+-        raise FileNotFoundError(
+-            f'Could not find built SkyPilot wheels {wheel_name!r} '
+-            f'under {WHEEL_DIR!r}') from None
+-    return latest_wheel
++        with filelock.FileLock(_WHEEL_LOCK_PATH, timeout=5):  # pylint: disable=E0110
++            _get_latest_wheel_and_cleanup()
++    except FileNotFoundError as e:
++        logger.error(str(e))
++    except filelock.Timeout:
++        logger.warning('Failed to clean up wheel directory')
+ 
+ 
+-def _build_sky_wheel() -> pathlib.Path:
++def _build_sky_wheel():
+     """Build a wheel for Sky."""
+-    # prepare files
+-    if (WHEEL_DIR / 'sky').exists():
+-        # This may because the last wheel build was interrupted,
+-        # so the symlink file doesn't get cleaned.
+-        (WHEEL_DIR / 'sky').unlink()
+-    (WHEEL_DIR / 'sky').symlink_to(SKY_PACKAGE_PATH, target_is_directory=True)
+-    setup_files_dir = SKY_PACKAGE_PATH / 'setup_files'
+-    for f in setup_files_dir.iterdir():
+-        if f.is_file():
+-            shutil.copy(str(f), str(WHEEL_DIR))
+-
+-    # It is important to normalize the path, otherwise 'pip wheel' would
+-    # treat the directory as a file and generate an empty wheel.
+-    norm_path = str(WHEEL_DIR) + os.sep
+-    try:
+-        # TODO(suquark): For python>=3.7, 'subprocess.run' supports capture
+-        # of the output.
+-        subprocess.run([
+-            'pip3', 'wheel', '--no-deps', norm_path, '--wheel-dir',
+-            str(WHEEL_DIR)
+-        ],
+-                       stdout=subprocess.DEVNULL,
+-                       stderr=subprocess.PIPE,
+-                       check=True)
+-    except subprocess.CalledProcessError as e:
+-        raise RuntimeError('Fail to build pip wheel for Sky. '
+-                           f'Error message: {e.stderr.decode()}') from e
+-
+-    latest_wheel = _get_latest_built_wheel()
+-    cleanup_wheels_dir(WHEEL_DIR, latest_wheel)
+-    return WHEEL_DIR.absolute()
++    with tempfile.TemporaryDirectory() as tmp_dir:
++        # prepare files
++        tmp_dir = pathlib.Path(tmp_dir)
++        (tmp_dir / 'sky').symlink_to(SKY_PACKAGE_PATH, target_is_directory=True)
++        setup_files_dir = SKY_PACKAGE_PATH / 'setup_files'
++        for f in setup_files_dir.iterdir():
++            if f.is_file():
++                shutil.copy(str(f), str(tmp_dir))
++
++        # It is important to normalize the path, otherwise 'pip wheel' would
++        # treat the directory as a file and generate an empty wheel.
++        norm_path = str(tmp_dir) + os.sep
++        try:
++            # TODO(suquark): For python>=3.7, 'subprocess.run' supports capture
++            # of the output.
++            subprocess.run([
++                'pip3', 'wheel', '--no-deps', norm_path, '--wheel-dir',
++                str(tmp_dir)
++            ],
++                           stdout=subprocess.DEVNULL,
++                           stderr=subprocess.PIPE,
++                           check=True)
++        except subprocess.CalledProcessError as e:
++            raise RuntimeError('Fail to build pip wheel for Sky. '
++                               f'Error message: {e.stderr.decode()}') from e
++
++        wheel_name = (f'{_PACKAGE_WHEEL_NAME}-'
++                      f'{version.parse(sky.__version__)}-*.whl')
++        wheel_path = next(tmp_dir.glob(wheel_name))
++
++        # Use a unique temporary dir per wheel hash, because there may be many
++        # concurrent 'sky launch' happening.  The path should be stable if the
++        # wheel content hash doesn't change.
++        with open(wheel_path, 'rb') as f:
++            contents = f.read()
++        hash_of_latest_wheel = hashlib.md5(contents).hexdigest()
++
++        wheel_dir = WHEEL_DIR / hash_of_latest_wheel
++        wheel_dir.mkdir(parents=True, exist_ok=True)
++        shutil.copy(wheel_path, wheel_dir)
+ 
+ 
+ def build_sky_wheel() -> Tuple[pathlib.Path, str]:
+@@ -106,7 +128,7 @@ def _get_latest_modification_time(path: pathlib.Path) -> float:
+     # This lock prevents that the wheel is updated while being copied.
+     # Although the current caller already uses a lock, we still lock it here
+     # to guarantee inherent consistency.
+-    with filelock.FileLock(WHEEL_DIR.parent / '.wheels_lock'):  # pylint: disable=E0110
++    with filelock.FileLock(_WHEEL_LOCK_PATH):  # pylint: disable=E0110
+         # This implements a classic "compare, update and clone" consistency
+         # protocol. "compare, update and clone" has to be atomic to avoid
+         # race conditions.
+@@ -119,17 +141,15 @@ def _get_latest_modification_time(path: pathlib.Path) -> float:
+                 WHEEL_DIR.mkdir(parents=True, exist_ok=True)
+             _build_sky_wheel()
+ 
+-        latest_wheel_path = _get_latest_built_wheel()
++        latest_wheel = _get_latest_wheel_and_cleanup()
++
++        wheel_hash = latest_wheel.parent.name
+ 
+         # Use a unique temporary dir per wheel hash, because there may be many
+         # concurrent 'sky launch' happening.  The path should be stable if the
+         # wheel content hash doesn't change.
+-        with open(latest_wheel_path, 'rb') as f:
+-            contents = f.read()
+-        hash_of_latest_wheel = hashlib.md5(contents).hexdigest()
+-        temp_wheel_dir = pathlib.Path(
+-            tempfile.gettempdir()) / hash_of_latest_wheel
++        temp_wheel_dir = pathlib.Path(tempfile.gettempdir()) / wheel_hash
+         temp_wheel_dir.mkdir(parents=True, exist_ok=True)
+-        shutil.copy(latest_wheel_path, temp_wheel_dir)
++        shutil.copy(latest_wheel, temp_wheel_dir)
+ 
+-    return temp_wheel_dir.absolute(), hash_of_latest_wheel
++    return temp_wheel_dir.absolute(), wheel_hash
+diff --git a/sky/setup_files/setup.py b/sky/setup_files/setup.py
+index 620cdf438fe..09fdac6bfee 100644
+--- a/sky/setup_files/setup.py
++++ b/sky/setup_files/setup.py
+@@ -94,7 +94,7 @@ def parse_footnote(readme: str) -> str:
+     ],
+     # TODO(zongheng): azure-cli is huge and takes a long time to install.
+     # Tracked in: https://github.com/Azure/azure-cli/issues/7387
+-    'azure': ['azure-cli==2.30.0'],
++    'azure': ['azure-cli==2.31.0', 'azure-core'],
+     'gcp': ['google-api-python-client', 'google-cloud-storage'],
+     'docker': ['docker'],
+ }
+diff --git a/sky/templates/aws-ray.yml.j2 b/sky/templates/aws-ray.yml.j2
+index 5fe50079989..48af240371c 100644
+--- a/sky/templates/aws-ray.yml.j2
++++ b/sky/templates/aws-ray.yml.j2
+@@ -96,7 +96,7 @@ setup_commands:
+     (which conda > /dev/null 2>&1 && conda init > /dev/null && conda config --set auto_activate_base false) || (wget -nc https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && bash Miniconda3-latest-Linux-x86_64.sh -b && eval "$(~/miniconda3/bin/conda shell.bash hook)" && conda init && conda config --set auto_activate_base true);
+     source ~/.bashrc;
+     (pip3 list | grep ray | grep {{ray_version}} 2>&1 > /dev/null || pip3 install -U ray[default]=={{ray_version}}) && mkdir -p ~/sky_workdir && mkdir -p ~/.sky/sky_app;
+-    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[aws]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash);
++    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[aws]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash; python3 -u -c "import sky; sky.backends.wheel_utils.clean_up_wheel_dir()");
+     sudo systemctl stop unattended-upgrades;
+     sudo kill -9 `sudo lsof /var/lib/dpkg/lock-frontend | awk '{print $2}' | tail -n 1` || true;
+     sudo pkill -9 apt-get;
+diff --git a/sky/templates/azure-ray.yml.j2 b/sky/templates/azure-ray.yml.j2
+index 094dc59f6f4..5a74c223bfb 100644
+--- a/sky/templates/azure-ray.yml.j2
++++ b/sky/templates/azure-ray.yml.j2
+@@ -102,7 +102,7 @@ setup_commands:
+     which conda > /dev/null 2>&1 || (wget -nc https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && bash Miniconda3-latest-Linux-x86_64.sh -b && eval "$(/home/azureuser/miniconda3/bin/conda shell.bash hook)" && conda init && conda config --set auto_activate_base true);
+     source ~/.bashrc;
+     (pip3 list | grep ray | grep {{ray_version}} 2>&1 > /dev/null || pip3 install -U ray[default]=={{ray_version}}) && mkdir -p ~/sky_workdir && mkdir -p ~/.sky/sky_app && touch ~/.sudo_as_admin_successful;
+-    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[azure]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash);
++    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[azure]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash; python3 -u -c "import sky; sky.backends.wheel_utils.clean_up_wheel_dir()");
+     sudo systemctl stop unattended-upgrades;
+     sudo kill -9 `sudo lsof /var/lib/dpkg/lock-frontend | awk '{print $2}' | tail -n 1` || true;
+     sudo pkill -9 apt-get;
+diff --git a/sky/templates/gcp-ray.yml.j2 b/sky/templates/gcp-ray.yml.j2
+index 38b7551bab6..f7d21421175 100644
+--- a/sky/templates/gcp-ray.yml.j2
++++ b/sky/templates/gcp-ray.yml.j2
+@@ -143,7 +143,7 @@ setup_commands:
+     pip3 install --upgrade google-api-python-client;
+   {%- endif %}
+     (pip3 list | grep ray | grep {{ray_version}} 2>&1 > /dev/null || pip3 install -U ray[default]=={{ray_version}}) && mkdir -p ~/sky_workdir && mkdir -p ~/.sky/sky_app;
+-    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[gcp]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash);
++    [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ] || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[gcp]" || exit 1; echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash; python3 -u -c "import sky; sky.backends.wheel_utils.clean_up_wheel_dir()");
+     sudo bash -c 'rm -rf /etc/security/limits.d; echo "* soft nofile 1048576" >> /etc/security/limits.conf; echo "* hard nofile 1048576" >> /etc/security/limits.conf';
+     sudo grep -e '^DefaultTasksMax' /etc/systemd/system.conf || (sudo bash -c 'echo "DefaultTasksMax=infinity" >> /etc/systemd/system.conf'); sudo systemctl set-property user-$(id -u $(whoami)).slice TasksMax=infinity; sudo systemctl daemon-reload;
+     mkdir -p ~/.ssh; (grep -Pzo -q "Host \*\n  StrictHostKeyChecking no" ~/.ssh/config) || printf "Host *\n  StrictHostKeyChecking no\n" >> ~/.ssh/config;
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

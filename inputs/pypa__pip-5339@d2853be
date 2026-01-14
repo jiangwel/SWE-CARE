@@ -1,0 +1,288 @@
+  Task-ID: pypa__pip-5339@d2853be
+  Please checkout to this commit first: e1abd23865770505c5e6394be4c5df928bd92129
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  index-url password is displayed on pip install.
+* Pip version: 10.0.0
+* Python version: 2.7.14
+* Operating system: macOS
+
+### Description:
+
+When **index-url** is set (with either `--index-url` or `--extra-index-url`) with user credentials, the password is displayed each time pip is used. This is clearly a security issue, before pip 10 this was displayed only in verbose mode. The password should always be masked.  
+
+### What I've run:
+
+```
+pip install private-package
+```
+  </issue>
+  
+  <patch>
+  diff --git a/news/5249.bugfix b/news/5249.bugfix
+new file mode 100644
+index 00000000000..32f8a972180
+--- /dev/null
++++ b/news/5249.bugfix
+@@ -0,0 +1 @@
++Remove username/password from log message when using index with basic auth
+diff --git a/src/pip/_internal/index.py b/src/pip/_internal/index.py
+index 3c3a92b7c1a..e85c7cd952f 100644
+--- a/src/pip/_internal/index.py
++++ b/src/pip/_internal/index.py
+@@ -33,7 +33,7 @@
+ from pip._internal.utils.logging import indent_log
+ from pip._internal.utils.misc import (
+     ARCHIVE_EXTENSIONS, SUPPORTED_EXTENSIONS, cached_property, normalize_path,
+-    splitext,
++    remove_auth_from_url, splitext,
+ )
+ from pip._internal.utils.packaging import check_requires_python
+ from pip._internal.wheel import Wheel, wheel_ext
+@@ -193,7 +193,8 @@ def get_formatted_locations(self):
+         lines = []
+         if self.index_urls and self.index_urls != [PyPI.simple_url]:
+             lines.append(
+-                "Looking in indexes: {}".format(", ".join(self.index_urls))
++                "Looking in indexes: {}".format(", ".join(
++                    remove_auth_from_url(url) for url in self.index_urls))
+             )
+         if self.find_links:
+             lines.append(
+diff --git a/src/pip/_internal/utils/misc.py b/src/pip/_internal/utils/misc.py
+index 9d4c9b16fc8..571b6bf4fda 100644
+--- a/src/pip/_internal/utils/misc.py
++++ b/src/pip/_internal/utils/misc.py
+@@ -24,6 +24,7 @@
+ from pip._vendor.retrying import retry  # type: ignore
+ from pip._vendor.six import PY2
+ from pip._vendor.six.moves import input
++from pip._vendor.six.moves.urllib import parse as urllib_parse
+ 
+ from pip._internal.compat import console_to_str, expanduser, stdlib_pkgs
+ from pip._internal.exceptions import InstallationError
+@@ -47,7 +48,7 @@
+            'unzip_file', 'untar_file', 'unpack_file', 'call_subprocess',
+            'captured_stdout', 'ensure_dir',
+            'ARCHIVE_EXTENSIONS', 'SUPPORTED_EXTENSIONS',
+-           'get_installed_version']
++           'get_installed_version', 'remove_auth_from_url']
+ 
+ 
+ logger = std_logging.getLogger(__name__)
+@@ -849,3 +850,21 @@ def enum(*sequential, **named):
+     reverse = {value: key for key, value in enums.items()}
+     enums['reverse_mapping'] = reverse
+     return type('Enum', (), enums)
++
++
++def remove_auth_from_url(url):
++    # Return a copy of url with 'username:password@' removed.
++    # username/pass params are passed to subversion through flags
++    # and are not recognized in the url.
++
++    # parsed url
++    purl = urllib_parse.urlsplit(url)
++    stripped_netloc = \
++        purl.netloc.split('@')[-1]
++
++    # stripped url
++    url_pieces = (
++        purl.scheme, stripped_netloc, purl.path, purl.query, purl.fragment
++    )
++    surl = urllib_parse.urlunsplit(url_pieces)
++    return surl
+diff --git a/src/pip/_internal/vcs/subversion.py b/src/pip/_internal/vcs/subversion.py
+index 7f369efa490..de448c7c685 100644
+--- a/src/pip/_internal/vcs/subversion.py
++++ b/src/pip/_internal/vcs/subversion.py
+@@ -8,7 +8,7 @@
+ 
+ from pip._internal.index import Link
+ from pip._internal.utils.logging import indent_log
+-from pip._internal.utils.misc import display_path, rmtree
++from pip._internal.utils.misc import display_path, remove_auth_from_url, rmtree
+ from pip._internal.vcs import VersionControl, vcs
+ 
+ _svn_xml_url_re = re.compile('url="([^"]+)"')
+@@ -63,7 +63,7 @@ def export(self, location):
+         """Export the svn repository at the url to the destination location"""
+         url, rev = self.get_url_rev()
+         rev_options = get_rev_options(self, url, rev)
+-        url = self.remove_auth_from_url(url)
++        url = remove_auth_from_url(url)
+         logger.info('Exporting svn repository %s to %s', url, location)
+         with indent_log():
+             if os.path.exists(location):
+@@ -84,7 +84,7 @@ def update(self, dest, rev_options):
+     def obtain(self, dest):
+         url, rev = self.get_url_rev()
+         rev_options = get_rev_options(self, url, rev)
+-        url = self.remove_auth_from_url(url)
++        url = remove_auth_from_url(url)
+         if self.check_destination(dest, url, rev_options):
+             rev_display = rev_options.to_display()
+             logger.info(
+@@ -221,24 +221,6 @@ def is_commit_id_equal(self, dest, name):
+         """Always assume the versions don't match"""
+         return False
+ 
+-    @staticmethod
+-    def remove_auth_from_url(url):
+-        # Return a copy of url with 'username:password@' removed.
+-        # username/pass params are passed to subversion through flags
+-        # and are not recognized in the url.
+-
+-        # parsed url
+-        purl = urllib_parse.urlsplit(url)
+-        stripped_netloc = \
+-            purl.netloc.split('@')[-1]
+-
+-        # stripped url
+-        url_pieces = (
+-            purl.scheme, stripped_netloc, purl.path, purl.query, purl.fragment
+-        )
+-        surl = urllib_parse.urlunsplit(url_pieces)
+-        return surl
+-
+ 
+ def get_rev_options(vcs, url, rev):
+     """
+diff --git a/tests/unit/test_index.py b/tests/unit/test_index.py
+index b059fff82ad..4ede2958975 100644
+--- a/tests/unit/test_index.py
++++ b/tests/unit/test_index.py
+@@ -139,3 +139,18 @@ def test_secure_origin(location, trusted, expected):
+     logger = MockLogger()
+     finder._validate_secure_origin(logger, location)
+     assert logger.called == expected
++
++
++def test_get_formatted_locations_basic_auth():
++    """
++    Test that basic authentication credentials defined in URL
++    is not included in formatted output.
++    """
++    index_urls = [
++        'https://pypi.org/simple',
++        'https://user:pass@repo.domain.com',
++    ]
++    finder = PackageFinder([], index_urls, session=[])
++
++    result = finder.get_formatted_locations()
++    assert 'user' not in result and 'pass' not in result
+diff --git a/tests/unit/test_utils.py b/tests/unit/test_utils.py
+index d6a27dc180b..6904fedc0b5 100644
+--- a/tests/unit/test_utils.py
++++ b/tests/unit/test_utils.py
+@@ -24,7 +24,8 @@
+ from pip._internal.utils.hashes import Hashes, MissingHashes
+ from pip._internal.utils.misc import (
+     call_subprocess, egg_link_path, ensure_dir, get_installed_distributions,
+-    get_prog, normalize_path, rmtree, untar_file, unzip_file,
++    get_prog, normalize_path, remove_auth_from_url, rmtree, untar_file,
++    unzip_file,
+ )
+ from pip._internal.utils.packaging import check_dist_requires_python
+ from pip._internal.utils.temp_dir import TempDirectory
+@@ -624,3 +625,29 @@ def test_call_subprocess_works_okay_when_just_given_nothing():
+ def test_call_subprocess_closes_stdin():
+     with pytest.raises(InstallationError):
+         call_subprocess([sys.executable, '-c', 'input()'])
++
++
++def test_remove_auth_from_url():
++    # Check that the url is doctored appropriately to remove auth elements
++    #    from the url
++    svn_auth_url = 'https://user:pass@svnrepo.org/svn/project/tags/v0.2'
++    expected_url = 'https://svnrepo.org/svn/project/tags/v0.2'
++    url = remove_auth_from_url(svn_auth_url)
++    assert url == expected_url
++
++    # Check that this doesn't impact urls without authentication'
++    svn_noauth_url = 'https://svnrepo.org/svn/project/tags/v0.2'
++    expected_url = svn_noauth_url
++    url = remove_auth_from_url(svn_noauth_url)
++    assert url == expected_url
++
++    # Check that links to specific revisions are handled properly
++    svn_rev_url = 'https://user:pass@svnrepo.org/svn/project/trunk@8181'
++    expected_url = 'https://svnrepo.org/svn/project/trunk@8181'
++    url = remove_auth_from_url(svn_rev_url)
++    assert url == expected_url
++
++    svn_rev_url = 'https://svnrepo.org/svn/project/trunk@8181'
++    expected_url = 'https://svnrepo.org/svn/project/trunk@8181'
++    url = remove_auth_from_url(svn_rev_url)
++    assert url == expected_url
+diff --git a/tests/unit/test_vcs.py b/tests/unit/test_vcs.py
+index 4ebcee642fa..817b42bd452 100644
+--- a/tests/unit/test_vcs.py
++++ b/tests/unit/test_vcs.py
+@@ -173,32 +173,6 @@ def test_bazaar_simple_urls():
+     )
+ 
+ 
+-def test_subversion_remove_auth_from_url():
+-    # Check that the url is doctored appropriately to remove auth elements
+-    #    from the url
+-    svn_auth_url = 'https://user:pass@svnrepo.org/svn/project/tags/v0.2'
+-    expected_url = 'https://svnrepo.org/svn/project/tags/v0.2'
+-    url = Subversion.remove_auth_from_url(svn_auth_url)
+-    assert url == expected_url
+-
+-    # Check that this doesn't impact urls without authentication'
+-    svn_noauth_url = 'https://svnrepo.org/svn/project/tags/v0.2'
+-    expected_url = svn_noauth_url
+-    url = Subversion.remove_auth_from_url(svn_noauth_url)
+-    assert url == expected_url
+-
+-    # Check that links to specific revisions are handled properly
+-    svn_rev_url = 'https://user:pass@svnrepo.org/svn/project/trunk@8181'
+-    expected_url = 'https://svnrepo.org/svn/project/trunk@8181'
+-    url = Subversion.remove_auth_from_url(svn_rev_url)
+-    assert url == expected_url
+-
+-    svn_rev_url = 'https://svnrepo.org/svn/project/trunk@8181'
+-    expected_url = 'https://svnrepo.org/svn/project/trunk@8181'
+-    url = Subversion.remove_auth_from_url(svn_rev_url)
+-    assert url == expected_url
+-
+-
+ def test_get_git_version():
+     git_version = Git().get_git_version()
+     assert git_version >= parse_version('1.0.0')
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

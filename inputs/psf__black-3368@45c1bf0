@@ -1,0 +1,449 @@
+  Task-ID: psf__black-3368@45c1bf0
+  Please checkout to this commit first: a2821815af5f5a706c673279d6405e286d6e95b8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Prefer expanding RHS of item assignment over LHS
+Hi guys, first of all thanks for this amazing tool! Glad to see it taking the Python world by storm.
+
+This is a fairly minor style change request.
+
+The formatting I take issue with occurs during item assignment. When the assignment exceeds the line length and the RHS has no "required" parentheses to break on, it chooses to break on the square brackets on the LHS of the assignment:
+
+```py
+# CURRENT BEHAVIOUR
+# in:
+
+some_dictionary["some_key"] = some_long_expression_causing_long_line
+
+# out:
+
+some_dictionary[
+    "some_key"
+] = some_long_expression_causing_long_line
+```
+
+Personally I think this is really ugly - looking at this expression, it is not immediately obvious that an **assignment** is happening, since the `=` is moved to the 3rd line. Of all the non-blacked code I've ever read, not one line has ever been formatted like that, which tells me it's not totally human-friendly.
+
+My desired result for the above input would be like the following:
+
+```py
+# DESIRED BEHAVIOUR
+some_dictionary["some_key"] = (
+    some_long_expression_causing_long_line
+)
+```
+
+Obviously for the cases where my desired behaviour would still result in the 1st line being longer than the desired line length, the current behaviour should be applied.
+
+My current workaround for this styling caveat is to use `dict.update()` instead (though obviously this isn't a general solution since `__setitem__` is not exclusive to MutableMappings):
+
+```py
+some_dictionary.update(
+    some_key=some_long_expression_causing_long_line,
+)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGES.md b/CHANGES.md
+index 1a7c320baf8..9868349c9a8 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -70,6 +70,8 @@
+   present) or as a single newline character (if a newline is present) (#3348)
+ - Implicitly concatenated strings used as function args are now wrapped inside
+   parentheses (#3307)
++- For assignment statements, prefer splitting the right hand side if the left hand side
++  fits on a single line (#3368)
+ - Correctly handle trailing commas that are inside a line's leading non-nested parens
+   (#3370)
+ 
+diff --git a/src/black/linegen.py b/src/black/linegen.py
+index 644824a3c86..80f17095ff3 100644
+--- a/src/black/linegen.py
++++ b/src/black/linegen.py
+@@ -2,6 +2,7 @@
+ Generating lines of code.
+ """
+ import sys
++from dataclasses import dataclass
+ from enum import Enum, auto
+ from functools import partial, wraps
+ from typing import Collection, Iterator, List, Optional, Set, Union, cast
+@@ -24,6 +25,7 @@
+ from black.mode import Feature, Mode, Preview
+ from black.nodes import (
+     ASSIGNMENTS,
++    BRACKETS,
+     CLOSING_BRACKETS,
+     OPENING_BRACKETS,
+     RARROW,
+@@ -617,6 +619,17 @@ def left_hand_split(line: Line, _features: Collection[Feature] = ()) -> Iterator
+             yield result
+ 
+ 
++@dataclass
++class _RHSResult:
++    """Intermediate split result from a right hand split."""
++
++    head: Line
++    body: Line
++    tail: Line
++    opening_bracket: Leaf
++    closing_bracket: Leaf
++
++
+ def right_hand_split(
+     line: Line,
+     line_length: int,
+@@ -631,6 +644,22 @@ def right_hand_split(
+ 
+     Note: running this function modifies `bracket_depth` on the leaves of `line`.
+     """
++    rhs_result = _first_right_hand_split(line, omit=omit)
++    yield from _maybe_split_omitting_optional_parens(
++        rhs_result, line, line_length, features=features, omit=omit
++    )
++
++
++def _first_right_hand_split(
++    line: Line,
++    omit: Collection[LeafID] = (),
++) -> _RHSResult:
++    """Split the line into head, body, tail starting with the last bracket pair.
++
++    Note: this function should not have side effects. It's replied upon by
++    _maybe_split_omitting_optional_parens to get an opinion whether to prefer
++    splitting on the right side of an assignment statement.
++    """
+     tail_leaves: List[Leaf] = []
+     body_leaves: List[Leaf] = []
+     head_leaves: List[Leaf] = []
+@@ -666,37 +695,71 @@ def right_hand_split(
+         tail_leaves, line, opening_bracket, component=_BracketSplitComponent.tail
+     )
+     bracket_split_succeeded_or_raise(head, body, tail)
++    return _RHSResult(head, body, tail, opening_bracket, closing_bracket)
++
++
++def _maybe_split_omitting_optional_parens(
++    rhs: _RHSResult,
++    line: Line,
++    line_length: int,
++    features: Collection[Feature] = (),
++    omit: Collection[LeafID] = (),
++) -> Iterator[Line]:
+     if (
+         Feature.FORCE_OPTIONAL_PARENTHESES not in features
+         # the opening bracket is an optional paren
+-        and opening_bracket.type == token.LPAR
+-        and not opening_bracket.value
++        and rhs.opening_bracket.type == token.LPAR
++        and not rhs.opening_bracket.value
+         # the closing bracket is an optional paren
+-        and closing_bracket.type == token.RPAR
+-        and not closing_bracket.value
++        and rhs.closing_bracket.type == token.RPAR
++        and not rhs.closing_bracket.value
+         # it's not an import (optional parens are the only thing we can split on
+         # in this case; attempting a split without them is a waste of time)
+         and not line.is_import
+         # there are no standalone comments in the body
+-        and not body.contains_standalone_comments(0)
++        and not rhs.body.contains_standalone_comments(0)
+         # and we can actually remove the parens
+-        and can_omit_invisible_parens(body, line_length)
++        and can_omit_invisible_parens(rhs.body, line_length)
+     ):
+-        omit = {id(closing_bracket), *omit}
++        omit = {id(rhs.closing_bracket), *omit}
+         try:
+-            yield from right_hand_split(line, line_length, features=features, omit=omit)
+-            return
++            # The _RHSResult Omitting Optional Parens.
++            rhs_oop = _first_right_hand_split(line, omit=omit)
++            if not (
++                Preview.prefer_splitting_right_hand_side_of_assignments in line.mode
++                # the split is right after `=`
++                and len(rhs.head.leaves) >= 2
++                and rhs.head.leaves[-2].type == token.EQUAL
++                # the left side of assignement contains brackets
++                and any(leaf.type in BRACKETS for leaf in rhs.head.leaves[:-1])
++                # the left side of assignment is short enough (the -1 is for the ending
++                # optional paren)
++                and is_line_short_enough(rhs.head, line_length=line_length - 1)
++                # the left side of assignment won't explode further because of magic
++                # trailing comma
++                and rhs.head.magic_trailing_comma is None
++                # the split by omitting optional parens isn't preferred by some other
++                # reason
++                and not _prefer_split_rhs_oop(rhs_oop, line_length=line_length)
++            ):
++                yield from _maybe_split_omitting_optional_parens(
++                    rhs_oop, line, line_length, features=features, omit=omit
++                )
++                return
+ 
+         except CannotSplit as e:
+             if not (
+-                can_be_split(body)
+-                or is_line_short_enough(body, line_length=line_length)
++                can_be_split(rhs.body)
++                or is_line_short_enough(rhs.body, line_length=line_length)
+             ):
+                 raise CannotSplit(
+                     "Splitting failed, body is still too long and can't be split."
+                 ) from e
+ 
+-            elif head.contains_multiline_strings() or tail.contains_multiline_strings():
++            elif (
++                rhs.head.contains_multiline_strings()
++                or rhs.tail.contains_multiline_strings()
++            ):
+                 raise CannotSplit(
+                     "The current optional pair of parentheses is bound to fail to"
+                     " satisfy the splitting algorithm because the head or the tail"
+@@ -704,13 +767,42 @@ def right_hand_split(
+                     " line."
+                 ) from e
+ 
+-    ensure_visible(opening_bracket)
+-    ensure_visible(closing_bracket)
+-    for result in (head, body, tail):
++    ensure_visible(rhs.opening_bracket)
++    ensure_visible(rhs.closing_bracket)
++    for result in (rhs.head, rhs.body, rhs.tail):
+         if result:
+             yield result
+ 
+ 
++def _prefer_split_rhs_oop(rhs_oop: _RHSResult, line_length: int) -> bool:
++    """
++    Returns whether we should prefer the result from a split omitting optional parens.
++    """
++    has_closing_bracket_after_assign = False
++    for leaf in reversed(rhs_oop.head.leaves):
++        if leaf.type == token.EQUAL:
++            break
++        if leaf.type in CLOSING_BRACKETS:
++            has_closing_bracket_after_assign = True
++            break
++    return (
++        # contains matching brackets after the `=` (done by checking there is a
++        # closing bracket)
++        has_closing_bracket_after_assign
++        or (
++            # the split is actually from inside the optional parens (done by checking
++            # the first line still contains the `=`)
++            any(leaf.type == token.EQUAL for leaf in rhs_oop.head.leaves)
++            # the first line is short enough
++            and is_line_short_enough(rhs_oop.head, line_length=line_length)
++        )
++        # contains unsplittable type ignore
++        or rhs_oop.head.contains_unsplittable_type_ignore()
++        or rhs_oop.body.contains_unsplittable_type_ignore()
++        or rhs_oop.tail.contains_unsplittable_type_ignore()
++    )
++
++
+ def bracket_split_succeeded_or_raise(head: Line, body: Line, tail: Line) -> None:
+     """Raise :exc:`CannotSplit` if the last left- or right-hand split failed.
+ 
+diff --git a/src/black/mode.py b/src/black/mode.py
+index a3ce20b8619..9b5b9c43a96 100644
+--- a/src/black/mode.py
++++ b/src/black/mode.py
+@@ -155,6 +155,7 @@ class Preview(Enum):
+     long_docstring_quotes_on_newline = auto()
+     normalize_docstring_quotes_and_prefixes_properly = auto()
+     one_element_subscript = auto()
++    prefer_splitting_right_hand_side_of_assignments = auto()
+     remove_block_trailing_newline = auto()
+     remove_redundant_parens = auto()
+     string_processing = auto()
+diff --git a/tests/data/preview/long_strings__regression.py b/tests/data/preview/long_strings__regression.py
+index 8b00e76f40e..55cfd9bba82 100644
+--- a/tests/data/preview/long_strings__regression.py
++++ b/tests/data/preview/long_strings__regression.py
+@@ -976,9 +976,9 @@ def xxxxxxx_xxxxxx(xxxx):
+         )
+ 
+ 
+-value.__dict__[
+-    key
+-] = "test"  # set some Thrift field to non-None in the struct aa bb cc dd ee
++value.__dict__[key] = (
++    "test"  # set some Thrift field to non-None in the struct aa bb cc dd ee
++)
+ 
+ RE_ONE_BACKSLASH = {
+     "asdf_hjkl_jkl": re.compile(
+diff --git a/tests/data/preview/prefer_rhs_split.py b/tests/data/preview/prefer_rhs_split.py
+new file mode 100644
+index 00000000000..5b89113e618
+--- /dev/null
++++ b/tests/data/preview/prefer_rhs_split.py
+@@ -0,0 +1,85 @@
++first_item, second_item = (
++    some_looooooooong_module.some_looooooooooooooong_function_name(
++        first_argument, second_argument, third_argument
++    )
++)
++
++some_dict["with_a_long_key"] = (
++    some_looooooooong_module.some_looooooooooooooong_function_name(
++        first_argument, second_argument, third_argument
++    )
++)
++
++# Make sure it works when the RHS only has one pair of (optional) parens.
++first_item, second_item = (
++    some_looooooooong_module.SomeClass.some_looooooooooooooong_variable_name
++)
++
++some_dict["with_a_long_key"] = (
++    some_looooooooong_module.SomeClass.some_looooooooooooooong_variable_name
++)
++
++# Make sure chaining assignments work.
++first_item, second_item, third_item, forth_item = m["everything"] = (
++    some_looooooooong_module.some_looooooooooooooong_function_name(
++        first_argument, second_argument, third_argument
++    )
++)
++
++# Make sure when the RHS's first split at the non-optional paren fits,
++# we split there instead of the outer RHS optional paren.
++first_item, second_item = some_looooooooong_module.some_loooooog_function_name(
++    first_argument, second_argument, third_argument
++)
++
++(
++    first_item,
++    second_item,
++    third_item,
++    forth_item,
++    fifth_item,
++    last_item_very_loooooong,
++) = some_looooooooong_module.some_looooooooooooooong_function_name(
++    first_argument, second_argument, third_argument
++)
++
++(
++    first_item,
++    second_item,
++    third_item,
++    forth_item,
++    fifth_item,
++    last_item_very_loooooong,
++) = everyting = some_loooooog_function_name(
++    first_argument, second_argument, third_argument
++)
++
++
++# Make sure unsplittable type ignore won't be moved.
++some_kind_of_table[some_key] = util.some_function(  # type: ignore  # noqa: E501
++    some_arg
++).intersection(pk_cols)
++
++some_kind_of_table[
++    some_key
++] = lambda obj: obj.some_long_named_method()  # type: ignore  # noqa: E501
++
++some_kind_of_table[
++    some_key  # type: ignore  # noqa: E501
++] = lambda obj: obj.some_long_named_method()
++
++
++# Make when when the left side of assignement plus the opening paren "... = (" is
++# exactly line length limit + 1, it won't be split like that.
++xxxxxxxxx_yyy_zzzzzzzz[
++    xx.xxxxxx(x_yyy_zzzzzz.xxxxx[0]), x_yyy_zzzzzz.xxxxxx(xxxx=1)
++] = 1
++
++
++# Right side of assignment contains un-nested pairs of inner parens.
++some_kind_of_instance.some_kind_of_map[a_key] = (
++    isinstance(some_var, SomeClass)
++    and table.something_and_something != table.something_else
++) or (
++    isinstance(some_other_var, BaseClass) and table.something != table.some_other_thing
++)
+diff --git a/tests/data/preview/prefer_rhs_split_reformatted.py b/tests/data/preview/prefer_rhs_split_reformatted.py
+new file mode 100644
+index 00000000000..781e75be0aa
+--- /dev/null
++++ b/tests/data/preview/prefer_rhs_split_reformatted.py
+@@ -0,0 +1,38 @@
++# Test cases separate from `prefer_rhs_split.py` that contains unformatted source.
++
++# Left hand side fits in a single line but will still be exploded by the
++# magic trailing comma.
++first_value, (m1, m2,), third_value = xxxxxx_yyyyyy_zzzzzz_wwwwww_uuuuuuu_vvvvvvvvvvv(
++    arg1,
++    arg2,
++)
++
++# Make when when the left side of assignement plus the opening paren "... = (" is
++# exactly line length limit + 1, it won't be split like that.
++xxxxxxxxx_yyy_zzzzzzzz[xx.xxxxxx(x_yyy_zzzzzz.xxxxx[0]), x_yyy_zzzzzz.xxxxxx(xxxx=1)] = 1
++
++
++# output
++
++
++# Test cases separate from `prefer_rhs_split.py` that contains unformatted source.
++
++# Left hand side fits in a single line but will still be exploded by the
++# magic trailing comma.
++(
++    first_value,
++    (
++        m1,
++        m2,
++    ),
++    third_value,
++) = xxxxxx_yyyyyy_zzzzzz_wwwwww_uuuuuuu_vvvvvvvvvvv(
++    arg1,
++    arg2,
++)
++
++# Make when when the left side of assignement plus the opening paren "... = (" is
++# exactly line length limit + 1, it won't be split like that.
++xxxxxxxxx_yyy_zzzzzzzz[
++    xx.xxxxxx(x_yyy_zzzzzz.xxxxx[0]), x_yyy_zzzzzz.xxxxxx(xxxx=1)
++] = 1
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

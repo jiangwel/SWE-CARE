@@ -1,0 +1,503 @@
+  Task-ID: sqlfluff__sqlfluff-2610@211ed12
+  Please checkout to this commit first: dbc718719b8b463b6f8c0572d3f75ba8ac0f4c19
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Extend Rule L052 to handle all statements
+I would expect that rule L052 would append a semi-colon to all statements missing one, but it looks like its current intent is not to do this.  Can we extend the rule?
+
+## Expected Behaviour
+
+The following code
+```
+CREATE FUNCTION dbo.funxn (
+    @incoming varchar(50)
+) RETURNS int
+AS
+BEGIN
+    DECLARE @result int
+    IF 1 = 1 SET @result = 1
+    ELSE
+        BEGIN
+            SET @result = 0
+        END
+
+    RETURN @result
+END;
+```
+Lints to
+```
+CREATE FUNCTION dbo.funxn (
+    @incoming varchar(50)
+) RETURNS int
+AS
+BEGIN
+    DECLARE @result int;
+    IF 1 = 1 SET @result = 1;
+    ELSE
+        BEGIN
+            SET @result = 0;
+        END
+
+    RETURN @result;
+END;
+```
+
+## Observed Behaviour
+
+The code passes linting.
+
+## Steps to Reproduce
+
+## Dialect
+
+TSQL
+
+## Version
+
+0.9.4
+
+## Configuration
+```
+[sqlfluff]
+dialect = tsql
+rules = L001,L002,L005,L006,L008,L009,L052
+
+[sqlfluff:rules]
+max_line_length = 140
+comma_style = leading
+single_table_references = qualified
+unquoted_identifiers_policy = all
+
+[sqlfluff:rules:L010]  # Keywords
+capitalisation_policy = upper
+
+[sqlfluff:rules:L040]  # Null & Boolean Literals
+capitalisation_policy = upper
+
+[sqlfluff:rules:L042]
+# By default, allow subqueries in from clauses, but not join clauses.
+forbid_subquery_in = both
+
+[sqlfluff:rules:L052]
+require_final_semicolon = True
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/core/rules/base.py b/src/sqlfluff/core/rules/base.py
+index 2706f9d792d..6468b5c3aea 100644
+--- a/src/sqlfluff/core/rules/base.py
++++ b/src/sqlfluff/core/rules/base.py
+@@ -641,6 +641,45 @@ def indent(self) -> str:
+ 
+     def is_final_segment(self, context: RuleContext) -> bool:
+         """Is the current segment the final segment in the parse tree."""
++        if not self._is_final_segment_helper(context):
++            return False
++
++        # We know we are at a leaf of the tree but not necessarily at the end of the
++        # tree. Therefore we look backwards up the parent stack and ask if any of
++        # the parent segments have another non-meta child segment after the current
++        # one.
++        child_segment = context.segment
++        for parent_segment in context.parent_stack[::-1]:
++            possible_children = [s for s in parent_segment.segments if not s.is_meta]
++            if len(possible_children) > possible_children.index(child_segment) + 1:
++                return False
++            child_segment = parent_segment
++
++        return True
++
++    def is_final_segment_of_types(
++        self, context: RuleContext, types: Iterable[str]
++    ) -> bool:
++        """Is the current segment the final segment in the parse tree."""
++        if not self._is_final_segment_helper(context):
++            return False
++
++        # We know we are at a leaf of the tree but not necessarily at the end of the
++        # tree. Therefore we look backwards up the parent stack and ask if any of
++        # the parent segments have another non-meta child segment after the current
++        # one.
++        child_segment = context.segment
++        for parent_segment in context.parent_stack[::-1]:
++            possible_children = [s for s in parent_segment.segments if not s.is_meta]
++            if len(possible_children) > possible_children.index(child_segment) + 1:
++                return False
++            elif parent_segment.is_type(*types):
++                return True
++            child_segment = parent_segment
++
++        return False
++
++    def _is_final_segment_helper(self, context: RuleContext):
+         if len(self.filter_meta(context.siblings_post)) > 0:
+             # This can only fail on the last segment
+             return False
+@@ -650,20 +689,6 @@ def is_final_segment(self, context: RuleContext) -> bool:
+         elif context.segment.is_meta:
+             # We can't fail on a meta segment
+             return False
+-        else:
+-            # We know we are at a leaf of the tree but not necessarily at the end of the
+-            # tree. Therefore we look backwards up the parent stack and ask if any of
+-            # the parent segments have another non-meta child segment after the current
+-            # one.
+-            child_segment = context.segment
+-            for parent_segment in context.parent_stack[::-1]:
+-                possible_children = [
+-                    s for s in parent_segment.segments if not s.is_meta
+-                ]
+-                if len(possible_children) > possible_children.index(child_segment) + 1:
+-                    return False
+-                child_segment = parent_segment
+-
+         return True
+ 
+     @staticmethod
+diff --git a/src/sqlfluff/rules/L052.py b/src/sqlfluff/rules/L052.py
+index c0dfe40b930..b794d8eecb3 100644
+--- a/src/sqlfluff/rules/L052.py
++++ b/src/sqlfluff/rules/L052.py
+@@ -129,8 +129,18 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+         self.multiline_newline: bool
+         self.require_final_semicolon: bool
+ 
++        if not context.memory:
++            memory: dict = {
++                "ended_statements": [],
++            }
++        else:
++            memory = context.memory
++
+         # First we can simply handle the case of existing semi-colon alignment.
+         if context.segment.name == "semicolon":
++            save_ended_statement: Optional[BaseSegment] = None
++            if memory["ended_statements"]:
++                save_ended_statement = memory["ended_statements"].pop()
+ 
+             # Locate semicolon and search back over the raw stack
+             # to find the end of the preceding statement.
+@@ -160,23 +170,29 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                     # If preceding segments are found then delete the old
+                     # semi-colon and its preceding whitespace and then insert
+                     # the semi-colon in the correct location.
+-                    fixes = [
+-                        LintFix.replace(
+-                            anchor_segment,
+-                            [
+-                                anchor_segment,
+-                                SymbolSegment(raw=";", type="symbol", name="semicolon"),
+-                            ],
+-                        ),
+-                        LintFix.delete(
+-                            context.segment,
+-                        ),
+-                    ]
+-                    fixes.extend(LintFix.delete(d) for d in whitespace_deletions)
+-                    return LintResult(
+-                        anchor=anchor_segment,
+-                        fixes=fixes,
+-                    )
++                    self.logger.debug("case 1")
++                    if save_ended_statement:
++                        fixes = [
++                            LintFix.create_after(
++                                save_ended_statement,
++                                [
++                                    SymbolSegment(
++                                        raw=";", type="symbol", name="semicolon"
++                                    ),
++                                ],
++                            ),
++                            LintFix.delete(
++                                context.segment,
++                            ),
++                        ]
++                        fixes.extend(LintFix.delete(d) for d in whitespace_deletions)
++                        return LintResult(
++                            anchor=anchor_segment,
++                            fixes=fixes,
++                            memory=memory,
++                        )
++                    else:
++                        return LintResult(memory=memory)
+             # Semi-colon on new line.
+             else:
+                 # Adjust pre_semicolon_segments and anchor_segment for preceding inline
+@@ -204,6 +220,7 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                     )
+                     fixes = []
+                     if anchor_segment is context.segment:
++                        self.logger.debug("case 2")
+                         fixes.append(
+                             LintFix.replace(
+                                 anchor_segment,
+@@ -216,8 +233,9 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                             )
+                         )
+                     else:
+-                        fixes.extend(
+-                            [
++                        self.logger.debug("case 3")
++                        if anchor_segment.is_comment:
++                            fixes = [
+                                 LintFix.replace(
+                                     anchor_segment,
+                                     [
+@@ -232,21 +250,65 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                                     context.segment,
+                                 ),
+                             ]
+-                        )
++                        else:
++                            fixes.extend(
++                                [
++                                    LintFix.replace(
++                                        anchor_segment,
++                                        [
++                                            anchor_segment,
++                                            NewlineSegment(),
++                                        ],
++                                    ),
++                                    LintFix.delete(
++                                        context.segment,
++                                    ),
++                                    LintFix.create_after(
++                                        save_ended_statement
++                                        if save_ended_statement
++                                        else anchor_segment,
++                                        [
++                                            SymbolSegment(
++                                                raw=";", type="symbol", name="semicolon"
++                                            ),
++                                        ],
++                                    ),
++                                ]
++                            )
+                         fixes.extend(LintFix.delete(d) for d in whitespace_deletions)
++                    self.logger.debug("case 4")
+                     return LintResult(
+                         anchor=anchor_segment,
+                         fixes=fixes,
++                        memory=memory,
+                     )
+ 
++        # Locate the end of the statement or file.
++        end_of_file = self.is_final_segment(context)
++        end_of_statement = self.is_final_segment_of_types(context, ["statement"])
++        if end_of_statement:
++            reversed_parent_stack = context.functional.parent_stack.reversed()
++            statement = reversed_parent_stack.first(sp.is_type("statement"))
++            memory["ended_statements"].append(statement.get())
++
+         # SQL does not require a final trailing semi-colon, however
+         # this rule looks to enforce that it is there.
+         if self.require_final_semicolon:
+-            # Locate the end of the file.
+-            if not self.is_final_segment(context):
+-                return None
++            if end_of_statement and not end_of_file:
++                return LintResult(memory=memory)
++            if not end_of_file:
++                if (
++                    not memory["ended_statements"]
++                    or not context.segment.is_raw()
++                    or context.segment.is_meta
++                    or context.segment.is_whitespace
++                    or context.segment.is_comment
++                ):
++                    return LintResult(memory=memory)
+ 
+-            # Include current segment for complete stack.
++            # If we reach here, it's either:
++            # - First non-whitespace segment after the end of a statement
++            # - End of file
+             complete_stack: List[BaseSegment] = list(context.raw_stack)
+             complete_stack.append(context.segment)
+ 
+@@ -270,14 +332,13 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+ 
+             if not semi_colon_exist_flag:
+                 # Create the final semi-colon if it does not yet exist.
+-
+                 # Semi-colon on same line.
+                 if not semicolon_newline:
++                    self.logger.debug("case 5")
+                     fixes = [
+-                        LintFix.replace(
+-                            anchor_segment,
++                        LintFix.create_after(
++                            memory["ended_statements"][-1],
+                             [
+-                                anchor_segment,
+                                 SymbolSegment(raw=";", type="symbol", name="semicolon"),
+                             ],
+                         )
+@@ -292,20 +353,41 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                     ) = self._handle_preceding_inline_comments(
+                         pre_semicolon_segments, anchor_segment
+                     )
+-                    fixes = [
+-                        LintFix.replace(
+-                            anchor_segment,
+-                            [
++                    if anchor_segment.is_comment:
++                        self.logger.debug("case 6")
++                        fixes = [
++                            LintFix.replace(
+                                 anchor_segment,
+-                                NewlineSegment(),
+-                                SymbolSegment(raw=";", type="symbol", name="semicolon"),
+-                            ],
+-                        )
+-                    ]
++                                [
++                                    anchor_segment,
++                                    NewlineSegment(),
++                                    SymbolSegment(
++                                        raw=";", type="symbol", name="semicolon"
++                                    ),
++                                ],
++                            ),
++                        ]
++                    else:
++                        self.logger.debug("case 7")
++                        fixes = [
++                            LintFix.create_after(
++                                memory["ended_statements"][-1],
++                                [
++                                    NewlineSegment(),
++                                    SymbolSegment(
++                                        raw=";", type="symbol", name="semicolon"
++                                    ),
++                                ],
++                            )
++                        ]
+ 
++                self.logger.info(
++                    "Adding final semicolon for %r", memory["ended_statements"][-1]
++                )
+                 return LintResult(
+-                    anchor=anchor_segment,
++                    anchor=memory["ended_statements"][-1],
+                     fixes=fixes,
++                    memory=memory,
+                 )
+ 
+-        return None
++        return LintResult(memory=memory)
+diff --git a/test/fixtures/rules/std_rule_cases/L052.yml b/test/fixtures/rules/std_rule_cases/L052.yml
+index 2ccedf9187f..cc718b56190 100644
+--- a/test/fixtures/rules/std_rule_cases/L052.yml
++++ b/test/fixtures/rules/std_rule_cases/L052.yml
+@@ -464,3 +464,75 @@ test_fail_newline_create_table_inline_comment:
+     rules:
+       L052:
+         multiline_newline: true
++
++test_pass_multiple_semicolons:
++  pass_str: |
++    SELECT foo FROM bar;;
++    SELECT foo FROM bar;
++    ;
++    ;
++    SELECT foo FROM bar;
++
++test_fail_tsql_semicolon_after_each_statement_1:
++  fail_str: |
++    CREATE FUNCTION dbo.funxn (
++        @incoming varchar(50)
++    ) RETURNS int
++    AS
++    BEGIN
++        IF 1 = 1 SET @result = 1
++        RETURN @result
++    END
++  fix_str: |
++    CREATE FUNCTION dbo.funxn (
++        @incoming varchar(50)
++    ) RETURNS int
++    AS
++    BEGIN
++        IF 1 = 1 SET @result = 1;;
++        RETURN @result
++    END;
++  configs:
++    core:
++      dialect: tsql
++    rules:
++      L052:
++        require_final_semicolon: true
++
++test_fail_tsql_semicolon_after_each_statement_2:
++  fail_str: |
++    CREATE FUNCTION dbo.funxn (
++        @incoming varchar(50)
++    ) RETURNS int
++    AS
++    BEGIN
++        DECLARE @result int
++        IF 1 = 1 SET @result = 1
++        ELSE
++            BEGIN
++                SET @result = 0
++            END
++
++        RETURN @result
++    END
++  fix_str: |
++    CREATE FUNCTION dbo.funxn (
++        @incoming varchar(50)
++    ) RETURNS int
++    AS
++    BEGIN
++        DECLARE @result int;
++        IF 1 = 1 SET @result = 1;
++        ELSE
++            BEGIN
++                SET @result = 0;
++            END;;
++
++        RETURN @result
++    END;
++  configs:
++    core:
++      dialect: tsql
++    rules:
++      L052:
++        require_final_semicolon: true
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

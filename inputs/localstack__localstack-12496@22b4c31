@@ -1,0 +1,688 @@
+  Task-ID: localstack__localstack-12496@22b4c31
+  Please checkout to this commit first: 72ed3cd9374533911543ba62f5d74ef8bd351398
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  bug: StepFunctions: ListStateMachineAliases action does not support pagination
+### Is there an existing issue for this?
+
+- [x] I have searched the existing issues
+
+### Current Behavior
+
+When using the awslocal CLI to list all state machine aliases, pagination is currently not supported. The --next-token and --max-results flags have no effect on the query and will alway return a full list of aliases.
+
+### Expected Behavior
+
+Pagination in line with the behaviour of AWS.
+
+- Setting the --max-results parameter should return a list the size of the value passed. If there are more results to show, a nextToken value should be returned to be used in the subsequent call by setting the --next-token parameter to the token value. This should return a list of aliases starting from the alias mapped to the passed in token.
+- A --max-results value of 0 or a value larger than the number of aliases should return a full list of aliases(or, if a nextToken is passed, from the next alias)
+- Invalid tokens should raise an InvalidToken error
+
+### How are you starting LocalStack?
+
+With a docker-compose file
+
+### Steps To Reproduce
+
+#### How are you starting localstack (e.g., `bin/localstack` command, arguments, or `docker-compose.yml`)
+
+    docker run localstack/localstack
+
+#### Client commands (e.g., AWS SDK code snippet, or sequence of "awslocal" commands)
+
+**Create a state machine:**
+```
+awslocal stepfunctions create-state-machine \
+    --name "MyInlineStateMachine" \
+    --definition '{
+        "Comment": "A simple example state machine",
+        "StartAt": "Hello",
+        "States": {
+            "Hello": {
+                "Type": "Pass",
+                "Result": "Hello, World!",
+                "End": true
+            }
+        }
+    }' \
+    --role-arn "arn:aws:iam::000000000000:stateMachine:MyStateMachine"
+```
+
+
+
+**Publish state machine version:**
+`awslocal stepfunctions publish-state-machine-version --state-machine-arn "arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine"`
+
+
+**Create alias:**
+```
+awslocal stepfunctions create-state-machine-alias \
+    --name Production \
+    --routing-configuration '[{"stateMachineVersionArn": "arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine:1", "weight": 100}]'
+```
+
+
+**Update state-machine (needed to create new version):**
+```
+awslocal stepfunctions update-state-machine \
+    --definition '{
+        "Comment": "A simple example state machine",
+        "StartAt": "Hello",
+        "States": {
+            "Hello": {
+                "Type": "Pass",
+                "Result": "Hello, World1!",
+                "End": true
+            }
+        }
+    }' \
+	--state-machine-arn arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine
+```
+
+
+**Create another alias:**
+```
+awslocal stepfunctions create-state-machine-alias \
+    --name QA \
+    --routing-configuration '[{"stateMachineVersionArn": "arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine:1", "weight": 100}]'
+```
+
+
+**Update state-machine again (needed to create new version):**
+```
+awslocal stepfunctions update-state-machine \
+    --definition '{
+        "Comment": "A simple example state machine",
+        "StartAt": "Hello",
+        "States": {
+            "Hello": {
+                "Type": "Pass",
+                "Result": "Hello, World2!”,
+                "End": true
+            }
+        }
+    }' \
+	--state-machine-arn arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine
+```
+
+
+**Create another alias:**
+```
+awslocal stepfunctions create-state-machine-alias \
+    --name Test \
+    --routing-configuration '[{"stateMachineVersionArn": "arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine:1", "weight": 100}]'
+```
+
+
+**List aliases:**
+`awslocal stepfunctions list-state-machine-aliases --state-machine-arn arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine`
+
+
+**List aliases with pagination (does not work right now):**
+`awslocal stepfunctions list-state-machine-aliases --state-machine-arn arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine --max-results 1`
+
+**List aliases with next token pagination (does not work right now):**
+`awslocal stepfunctions list-state-machine-aliases --state-machine-arn arn:aws:states:eu-west-1:000000000000:stateMachine:MyInlineStateMachine --next-token<token>`
+
+### Environment
+
+```markdown
+- OS:
+- LocalStack:
+  LocalStack version:
+  LocalStack Docker image sha:
+  LocalStack build date:
+  LocalStack build git hash:
+```
+
+### Anything else?
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/localstack-core/localstack/services/stepfunctions/backend/alias.py b/localstack-core/localstack/services/stepfunctions/backend/alias.py
+index f6c4995bc7df8..8ad8fbddd056f 100644
+--- a/localstack-core/localstack/services/stepfunctions/backend/alias.py
++++ b/localstack-core/localstack/services/stepfunctions/backend/alias.py
+@@ -11,9 +11,11 @@
+     Arn,
+     CharacterRestrictedName,
+     DescribeStateMachineAliasOutput,
++    PageToken,
+     RoutingConfigurationList,
+     StateMachineAliasListItem,
+ )
++from localstack.services.stepfunctions.stepfunctions_utils import tokenize_item
+ 
+ 
+ class Alias:
+@@ -25,6 +27,7 @@ class Alias:
+     _state_machine_version_arns: list[Arn]
+     _execution_probability_distribution: list[int]
+     state_machine_alias_arn: Final[Arn]
++    _tokenized_state_machine_alias_arn: PageToken
+     create_date: datetime.datetime
+ 
+     def __init__(
+@@ -39,6 +42,7 @@ def __init__(
+         self.name = name
+         self._description = None
+         self.state_machine_alias_arn = f"{state_machine_arn}:{name}"
++        self._tokenized_state_machine_alias_arn = tokenize_item(self.state_machine_alias_arn)
+         self.update(description=description, routing_configuration_list=routing_configuration_list)
+         self.create_date = self._get_mutex_date()
+ 
+@@ -119,3 +123,6 @@ def to_item(self) -> StateMachineAliasListItem:
+         return StateMachineAliasListItem(
+             stateMachineAliasArn=self.state_machine_alias_arn, creationDate=self.create_date
+         )
++
++    def get_token(self) -> PageToken:
++        return self._tokenized_state_machine_alias_arn
+diff --git a/localstack-core/localstack/services/stepfunctions/provider.py b/localstack-core/localstack/services/stepfunctions/provider.py
+index 40f7bbb6e4483..f95748a64714e 100644
+--- a/localstack-core/localstack/services/stepfunctions/provider.py
++++ b/localstack-core/localstack/services/stepfunctions/provider.py
+@@ -1057,7 +1057,8 @@ def list_state_machine_aliases(
+         max_results: PageSize = None,
+         **kwargs,
+     ) -> ListStateMachineAliasesOutput:
+-        # TODO: add pagination support.
++        assert_pagination_parameters_valid(max_results, next_token)
++
+         self._validate_state_machine_arn(state_machine_arn)
+         state_machines = self.get_store(context).state_machines
+         state_machine_revision = state_machines.get(state_machine_arn)
+@@ -1065,11 +1066,31 @@ def list_state_machine_aliases(
+             raise InvalidArn(f"Invalid arn: {state_machine_arn}")
+ 
+         state_machine_aliases: StateMachineAliasList = list()
++        valid_token_found = next_token is None
++
+         for alias in state_machine_revision.aliases:
+             state_machine_aliases.append(alias.to_item())
++            if alias.get_token() == next_token:
++                valid_token_found = True
++
++        if not valid_token_found:
++            raise InvalidToken("Invalid Token: 'Invalid token'")
++
+         state_machine_aliases.sort(key=lambda item: item["creationDate"])
+ 
+-        return ListStateMachineAliasesOutput(stateMachineAliases=state_machine_aliases)
++        paginated_list = PaginatedList(state_machine_aliases)
++
++        paginated_aliases, next_token = paginated_list.get_page(
++            token_generator=lambda item: get_next_page_token_from_arn(
++                item.get("stateMachineAliasArn")
++            ),
++            next_token=next_token,
++            page_size=None if max_results == 0 else max_results,
++        )
++
++        return ListStateMachineAliasesOutput(
++            stateMachineAliases=paginated_aliases, nextToken=next_token
++        )
+ 
+     def list_state_machine_versions(
+         self,
+diff --git a/localstack-core/localstack/services/stepfunctions/stepfunctions_utils.py b/localstack-core/localstack/services/stepfunctions/stepfunctions_utils.py
+index a331f44efcd1c..bc69d96a6cd6b 100644
+--- a/localstack-core/localstack/services/stepfunctions/stepfunctions_utils.py
++++ b/localstack-core/localstack/services/stepfunctions/stepfunctions_utils.py
+@@ -46,7 +46,7 @@ def assert_pagination_parameters_valid(
+     next_token: str,
+     next_token_length_limit: int = 1024,
+     max_results_upper_limit: int = 1000,
+-) -> tuple[int, str]:
++):
+     validation_errors = []
+ 
+     match max_results:
+@@ -67,3 +67,9 @@ def assert_pagination_parameters_valid(
+         errors_message = "; ".join(validation_errors)
+         message = f"{len(validation_errors)} validation {'errors' if len(validation_errors) > 1 else 'error'} detected: {errors_message}"
+         raise ValidationException(message)
++
++
++def tokenize_item(item: str) -> str:
++    base64_bytes = base64.b64encode(item.encode("utf-8"))
++    token = base64_bytes.decode("utf-8")
++    return token
+diff --git a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py
+index eb5527c821e7a..db7dc9dbfa4fc 100644
+--- a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py
++++ b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py
+@@ -1075,3 +1075,218 @@ def test_delete_no_such_alias_arn(
+         sfn_snapshot.match(
+             "delete_state_machine_alias_response", delete_state_machine_alias_response
+         )
++
++    @markers.aws.validated
++    def test_list_state_machine_aliases_pagination_max_results_0(
++        self,
++        create_state_machine_iam_role,
++        create_state_machine,
++        create_state_machine_alias,
++        sfn_snapshot,
++        aws_client,
++    ):
++        sfn_client = aws_client.stepfunctions
++
++        sfn_role_arn = create_state_machine_iam_role(aws_client)
++        sfn_snapshot.add_transformer(RegexTransformer(sfn_role_arn, "sfn_role_arn"))
++
++        definition = BaseTemplate.load_sfn_template(BaseTemplate.BASE_PASS_RESULT)
++
++        state_machine_name = f"state_machine_{short_uid()}"
++        create_state_machine_response = create_state_machine(
++            target_aws_client=aws_client,
++            name=state_machine_name,
++            definition=json.dumps(definition),
++            roleArn=sfn_role_arn,
++            publish=True,
++        )
++
++        sfn_snapshot.add_transformer(
++            sfn_snapshot.transform.sfn_sm_create_arn(create_state_machine_response, 0)
++        )
++
++        state_machine_arn = create_state_machine_response["stateMachineArn"]
++        state_machine_version_arn = create_state_machine_response["stateMachineVersionArn"]
++
++        state_machine_alias_name = f"AliasName-{short_uid()}"
++
++        sfn_snapshot.add_transformer(
++            RegexTransformer(state_machine_alias_name, "state_machine_alias_name")
++        )
++
++        create_state_machine_alias_response = create_state_machine_alias(
++            target_aws_client=aws_client,
++            description="create state machine alias description",
++            name=state_machine_alias_name,
++            routingConfiguration=[
++                RoutingConfigurationListItem(
++                    stateMachineVersionArn=state_machine_version_arn, weight=100
++                )
++            ],
++        )
++
++        sfn_snapshot.match(
++            "create_state_machine_alias_response", create_state_machine_alias_response
++        )
++
++        state_machine_alias_arn = create_state_machine_alias_response["stateMachineAliasArn"]
++        await_state_machine_alias_is_created(
++            stepfunctions_client=sfn_client,
++            state_machine_arn=state_machine_arn,
++            state_machine_alias_arn=state_machine_alias_arn,
++        )
++
++        list_state_machine_alias_response = sfn_client.list_state_machine_aliases(
++            stateMachineArn=state_machine_arn, maxResults=0
++        )
++
++        sfn_snapshot.match(
++            "list_state_machine_alias_max_results_0_response", list_state_machine_alias_response
++        )
++
++    @markers.aws.validated
++    def test_list_state_machine_aliases_pagination_invalid_next_token(
++        self,
++        create_state_machine_iam_role,
++        create_state_machine,
++        create_state_machine_alias,
++        sfn_snapshot,
++        aws_client,
++    ):
++        sfn_client = aws_client.stepfunctions
++
++        sfn_role_arn = create_state_machine_iam_role(aws_client)
++        sfn_snapshot.add_transformer(RegexTransformer(sfn_role_arn, "sfn_role_arn"))
++
++        definition = BaseTemplate.load_sfn_template(BaseTemplate.BASE_PASS_RESULT)
++
++        state_machine_name = f"state_machine_{short_uid()}"
++        create_state_machine_response = create_state_machine(
++            target_aws_client=aws_client,
++            name=state_machine_name,
++            definition=json.dumps(definition),
++            roleArn=sfn_role_arn,
++            publish=True,
++        )
++
++        sfn_snapshot.add_transformer(
++            sfn_snapshot.transform.sfn_sm_create_arn(create_state_machine_response, 0)
++        )
++
++        state_machine_arn = create_state_machine_response["stateMachineArn"]
++        state_machine_version_arn = create_state_machine_response["stateMachineVersionArn"]
++
++        state_machine_alias_name = f"AliasName-{short_uid()}"
++
++        sfn_snapshot.add_transformer(
++            RegexTransformer(state_machine_alias_name, "state_machine_alias_name")
++        )
++
++        create_state_machine_alias_response = create_state_machine_alias(
++            target_aws_client=aws_client,
++            description="create state machine alias description",
++            name=state_machine_alias_name,
++            routingConfiguration=[
++                RoutingConfigurationListItem(
++                    stateMachineVersionArn=state_machine_version_arn, weight=100
++                )
++            ],
++        )
++
++        sfn_snapshot.match(
++            "create_state_machine_alias_response", create_state_machine_alias_response
++        )
++
++        state_machine_alias_arn = create_state_machine_alias_response["stateMachineAliasArn"]
++        await_state_machine_alias_is_created(
++            stepfunctions_client=sfn_client,
++            state_machine_arn=state_machine_arn,
++            state_machine_alias_arn=state_machine_alias_arn,
++        )
++
++        with pytest.raises(Exception) as exc:
++            sfn_client.list_state_machine_aliases(
++                stateMachineArn=state_machine_arn, nextToken="InvalidToken"
++            )
++
++        sfn_snapshot.match(
++            "invalidTokenException",
++            {"exception_typename": exc.typename, "exception_value": exc.value},
++        )
++
++    @markers.aws.validated
++    def test_list_state_machine_aliases_pagination_max_results_1_next_token(
++        self,
++        create_state_machine_iam_role,
++        create_state_machine,
++        create_state_machine_alias,
++        sfn_snapshot,
++        aws_client,
++    ):
++        sfn_client = aws_client.stepfunctions
++
++        sfn_role_arn = create_state_machine_iam_role(aws_client)
++        sfn_snapshot.add_transformer(RegexTransformer(sfn_role_arn, "sfn_role_arn"))
++
++        definition = BaseTemplate.load_sfn_template(BaseTemplate.BASE_PASS_RESULT)
++
++        state_machine_name = "state_machine_test"
++        create_state_machine_response = create_state_machine(
++            target_aws_client=aws_client,
++            name=state_machine_name,
++            definition=json.dumps(definition),
++            roleArn=sfn_role_arn,
++            publish=True,
++        )
++
++        sfn_snapshot.add_transformer(
++            sfn_snapshot.transform.sfn_sm_create_arn(create_state_machine_response, 0)
++        )
++
++        state_machine_arn = create_state_machine_response["stateMachineArn"]
++        state_machine_version_arn = create_state_machine_response["stateMachineVersionArn"]
++
++        for i in range(3):
++            create_state_machine_alias_response = create_state_machine_alias(
++                target_aws_client=aws_client,
++                description=f"Description {i + 1} - create state machine alias",
++                name=f"AliasName-{i + 1}",
++                routingConfiguration=[
++                    RoutingConfigurationListItem(
++                        stateMachineVersionArn=state_machine_version_arn, weight=100
++                    )
++                ],
++            )
++
++            sfn_snapshot.match(
++                f"create_state_machine_alias_response-{i + 1}", create_state_machine_alias_response
++            )
++
++            definition["Comment"] = f"Comment {i + 1}"
++            sfn_client.update_state_machine(
++                stateMachineArn=state_machine_arn, definition=json.dumps(definition)
++            )
++
++            state_machine_alias_arn = create_state_machine_alias_response["stateMachineAliasArn"]
++            await_state_machine_alias_is_created(
++                stepfunctions_client=sfn_client,
++                state_machine_arn=state_machine_arn,
++                state_machine_alias_arn=state_machine_alias_arn,
++            )
++
++        list_state_machine_aliases_response = sfn_client.list_state_machine_aliases(
++            stateMachineArn=state_machine_arn, maxResults=1
++        )
++
++        sfn_snapshot.match(
++            "list_state_machine_aliases_max_results_1_response", list_state_machine_aliases_response
++        )
++
++        list_state_machine_aliases_response = sfn_client.list_state_machine_aliases(
++            stateMachineArn=state_machine_arn,
++            nextToken=list_state_machine_aliases_response.get("nextToken"),
++        )
++
++        sfn_snapshot.match(
++            "list_state_machine_aliases_next_token_response", list_state_machine_aliases_response
++        )
+diff --git a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.snapshot.json b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.snapshot.json
+index d4cd2ff073d7c..f8f74bbbdf660 100644
+--- a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.snapshot.json
++++ b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.snapshot.json
+@@ -567,5 +567,105 @@
+         "exception_value": "An error occurred (ResourceNotFound) when calling the UpdateStateMachineAlias operation: Request references a resource that does not exist."
+       }
+     }
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination_invalid_next_token": {
++    "recorded-date": "07-04-2025, 16:48:15",
++    "recorded-content": {
++      "create_state_machine_alias_response": {
++        "creationDate": "datetime",
++        "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:state_machine_alias_name",
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "invalidTokenException": {
++        "exception_typename": "InvalidToken",
++        "exception_value": "An error occurred (InvalidToken) when calling the ListStateMachineAliases operation: Invalid Token: 'Invalid token'"
++      }
++    }
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination_max_results_1_next_token": {
++    "recorded-date": "07-04-2025, 16:51:07",
++    "recorded-content": {
++      "create_state_machine_alias_response-1": {
++        "creationDate": "datetime",
++        "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-1",
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "create_state_machine_alias_response-2": {
++        "creationDate": "datetime",
++        "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-2",
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "create_state_machine_alias_response-3": {
++        "creationDate": "datetime",
++        "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-3",
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "list_state_machine_aliases_max_results_1_response": {
++        "nextToken": "YXJuOmF3czpzdGF0ZXM6dXMtZWFzdC0xOjAwMDAwMDAwMDAwMDpzdGF0ZU1hY2hpbmU6c3RhdGVfbWFjaGluZV90ZXN0OkFsaWFzTmFtZS0y",
++        "stateMachineAliases": [
++          {
++            "creationDate": "datetime",
++            "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-1"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "list_state_machine_aliases_next_token_response": {
++        "stateMachineAliases": [
++          {
++            "creationDate": "datetime",
++            "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-2"
++          },
++          {
++            "creationDate": "datetime",
++            "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:AliasName-3"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      }
++    }
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination_max_results_0": {
++    "recorded-date": "07-04-2025, 21:11:20",
++    "recorded-content": {
++      "create_state_machine_alias_response": {
++        "creationDate": "datetime",
++        "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:state_machine_alias_name",
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "list_state_machine_alias_max_results_0_response": {
++        "stateMachineAliases": [
++          {
++            "creationDate": "datetime",
++            "stateMachineAliasArn": "arn:<partition>:states:<region>:111111111111:stateMachine:<ArnPart_0idx>:state_machine_alias_name"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      }
++    }
+   }
+ }
+diff --git a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.validation.json b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.validation.json
+index 05de14b07fb4f..8bfc9f76b5f03 100644
+--- a/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.validation.json
++++ b/tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.validation.json
+@@ -1,41 +1,50 @@
+ {
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_base_create_alias_single_router_config": {
+-    "last_validated_date": "2025-03-03T13:12:29+00:00"
++    "last_validated_date": "2025-04-07T13:30:58+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_base_lifecycle_create_delete_list": {
+-    "last_validated_date": "2025-03-03T13:14:23+00:00"
++    "last_validated_date": "2025-04-07T13:32:46+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_base_lifecycle_create_invoke_describe_list": {
+-    "last_validated_date": "2025-03-03T13:20:29+00:00"
++    "last_validated_date": "2025-04-07T13:33:23+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_base_lifecycle_create_update_describe": {
+-    "last_validated_date": "2025-03-03T13:15:57+00:00"
++    "last_validated_date": "2025-04-07T13:34:39+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_delete_no_such_alias_arn": {
+-    "last_validated_date": "2025-03-03T13:37:24+00:00"
++    "last_validated_date": "2025-04-07T13:35:58+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_delete_revision_with_alias": {
+-    "last_validated_date": "2025-03-03T13:34:23+00:00"
++    "last_validated_date": "2025-04-07T13:35:40+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_delete_version_with_alias": {
+-    "last_validated_date": "2025-03-03T13:16:42+00:00"
++    "last_validated_date": "2025-04-07T13:35:26+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_error_create_alias_invalid_name": {
+-    "last_validated_date": "2025-03-03T13:13:52+00:00"
++    "last_validated_date": "2025-04-07T13:32:16+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_error_create_alias_invalid_router_configs": {
+-    "last_validated_date": "2025-03-03T13:13:32+00:00"
++    "last_validated_date": "2025-04-07T13:32:01+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_error_create_alias_not_idempotent": {
+-    "last_validated_date": "2025-03-03T13:13:02+00:00"
++    "last_validated_date": "2025-04-07T13:31:29+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_error_create_alias_with_state_machine_arn": {
+-    "last_validated_date": "2025-03-03T13:12:48+00:00"
++    "last_validated_date": "2025-04-07T13:31:13+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_idempotent_create_alias": {
+-    "last_validated_date": "2025-03-03T13:13:16+00:00"
++    "last_validated_date": "2025-04-07T13:31:44+00:00"
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination": {
++    "last_validated_date": "2025-04-07T16:51:07+00:00"
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination_invalid_next_token": {
++    "last_validated_date": "2025-04-07T16:48:15+00:00"
++  },
++  "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_list_state_machine_aliases_pagination_max_results_0": {
++    "last_validated_date": "2025-04-07T21:11:20+00:00"
+   },
+   "tests/aws/services/stepfunctions/v2/test_sfn_api_aliasing.py::TestSfnApiAliasing::test_update_no_such_alias_arn": {
+-    "last_validated_date": "2025-03-03T15:00:26+00:00"
++    "last_validated_date": "2025-04-07T13:33:04+00:00"
+   }
+ }
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

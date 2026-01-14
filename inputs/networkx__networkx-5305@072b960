@@ -1,0 +1,476 @@
+  Task-ID: networkx__networkx-5305@072b960
+  Please checkout to this commit first: 98060487ad192918cfc2415fc0b5c309ff2d3565
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Distance_measures.py functions should work for weighted graphs too.
+Many of the functions in `distance_measures.py` work for unweighted graphs, but have straightforward definitions for weighted graphs too.  We should go through this module and upgrade each function to work for weighted graphs.  It should be a straightforward fix with a keyword "weight" input which defaults to the current unweighted treatment.  The `shortest_path` functions provide a nice interface for that to use as an example.
+  </issue>
+  
+  <patch>
+  diff --git a/networkx/algorithms/distance_measures.py b/networkx/algorithms/distance_measures.py
+index 5edd3962152..5b70fe6cc88 100644
+--- a/networkx/algorithms/distance_measures.py
++++ b/networkx/algorithms/distance_measures.py
+@@ -14,7 +14,7 @@
+ ]
+ 
+ 
+-def _extrema_bounding(G, compute="diameter"):
++def _extrema_bounding(G, compute="diameter", weight="weight"):
+     """Compute requested extreme distance metric of undirected graph G
+ 
+     Computation is based on smart lower and upper bounds, and in practice
+@@ -33,6 +33,24 @@ def _extrema_bounding(G, compute="diameter"):
+        "center" for the set of nodes with eccentricity equal to the radius,
+        "eccentricities" for the maximum distance from each node to all other nodes in G
+ 
++    weight : string or function
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     value : value of the requested metric
+@@ -46,25 +64,26 @@ def _extrema_bounding(G, compute="diameter"):
+         If the graph consists of multiple components
+     ValueError
+         If `compute` is not one of "diameter", "radius", "periphery", "center", or "eccentricities".
++
+     Notes
+     -----
+-    This algorithm was proposed in the following papers:
++    This algorithm was proposed in [1]_ and discussed further in [2]_ and [3]_.
+ 
+-    F.W. Takes and W.A. Kosters, Determining the Diameter of Small World
+-    Networks, in Proceedings of the 20th ACM International Conference on
+-    Information and Knowledge Management (CIKM 2011), pp. 1191-1196, 2011.
+-    doi: https://doi.org/10.1145/2063576.2063748
+-
+-    F.W. Takes and W.A. Kosters, Computing the Eccentricity Distribution of
+-    Large Graphs, Algorithms 6(1): 100-118, 2013.
+-    doi: https://doi.org/10.3390/a6010100
+-
+-    M. Borassi, P. Crescenzi, M. Habib, W.A. Kosters, A. Marino and F.W. Takes,
+-    Fast Graph Diameter and Radius BFS-Based Computation in (Weakly Connected)
+-    Real-World Graphs, Theoretical Computer Science 586: 59-80, 2015.
+-    doi: https://doi.org/10.1016/j.tcs.2015.02.033
++    References
++    ----------
++    .. [1] F. W. Takes, W. A. Kosters,
++       "Determining the diameter of small world networks."
++       Proceedings of the 20th ACM international conference on Information and knowledge management, 2011
++       https://dl.acm.org/doi/abs/10.1145/2063576.2063748
++    .. [2] F. W. Takes, W. A. Kosters,
++       "Computing the Eccentricity Distribution of Large Graphs."
++       Algorithms, 2013
++       https://www.mdpi.com/1999-4893/6/1/100
++    .. [3] M. Borassi, P. Crescenzi, M. Habib, W. A. Kosters, A. Marino, F. W. Takes,
++       "Fast diameter and radius BFS-based computation in (weakly connected) real-world graphs: With an application to the six degrees of separation games. "
++       Theoretical Computer Science, 2015
++       https://www.sciencedirect.com/science/article/pii/S0304397515001644
+     """
+-
+     # init variables
+     degrees = dict(G.degree())  # start with the highest degree node
+     minlowernode = max(degrees, key=degrees.get)
+@@ -91,7 +110,8 @@ def _extrema_bounding(G, compute="diameter"):
+         high = not high
+ 
+         # get distances from/to current node and derive eccentricity
+-        dist = dict(nx.single_source_shortest_path_length(G, current))
++        dist = nx.shortest_path_length(G=G, source=current, weight=weight)
++
+         if len(dist) != N:
+             msg = "Cannot compute metric because graph is not connected."
+             raise nx.NetworkXError(msg)
+@@ -200,20 +220,20 @@ def _extrema_bounding(G, compute="diameter"):
+     # return the correct value of the requested metric
+     if compute == "diameter":
+         return maxlower
+-    elif compute == "radius":
++    if compute == "radius":
+         return minupper
+-    elif compute == "periphery":
++    if compute == "periphery":
+         p = [v for v in G if ecc_lower[v] == maxlower]
+         return p
+-    elif compute == "center":
++    if compute == "center":
+         c = [v for v in G if ecc_upper[v] == minupper]
+         return c
+-    elif compute == "eccentricities":
++    if compute == "eccentricities":
+         return ecc_lower
+     return None
+ 
+ 
+-def eccentricity(G, v=None, sp=None):
++def eccentricity(G, v=None, sp=None, weight="weight"):
+     """Returns the eccentricity of nodes in G.
+ 
+     The eccentricity of a node v is the maximum distance from v to
+@@ -230,6 +250,24 @@ def eccentricity(G, v=None, sp=None):
+     sp : dict of dicts, optional
+        All pairs shortest path lengths as a dictionary of dictionaries
+ 
++    weight : string or function (default="weight")
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     ecc : dictionary
+@@ -252,11 +290,11 @@ def eccentricity(G, v=None, sp=None):
+     #    else:                      # assume v is a container of nodes
+     #        nodes=v
+     order = G.order()
+-
+     e = {}
+     for n in G.nbunch_iter(v):
+         if sp is None:
+-            length = nx.single_source_shortest_path_length(G, n)
++            length = nx.shortest_path_length(G=G, source=n, weight=weight)
++
+             L = len(length)
+         else:
+             try:
+@@ -278,11 +316,10 @@ def eccentricity(G, v=None, sp=None):
+ 
+     if v in G:
+         return e[v]  # return single value
+-    else:
+-        return e
++    return e
+ 
+ 
+-def diameter(G, e=None, usebounds=False):
++def diameter(G, e=None, usebounds=False, weight="weight"):
+     """Returns the diameter of the graph G.
+ 
+     The diameter is the maximum eccentricity.
+@@ -295,6 +332,24 @@ def diameter(G, e=None, usebounds=False):
+     e : eccentricity dictionary, optional
+       A precomputed dictionary of eccentricities.
+ 
++    weight : string or function
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     d : integer
+@@ -311,13 +366,13 @@ def diameter(G, e=None, usebounds=False):
+     eccentricity
+     """
+     if usebounds is True and e is None and not G.is_directed():
+-        return _extrema_bounding(G, compute="diameter")
++        return _extrema_bounding(G=G, compute="diameter", weight=weight)
+     if e is None:
+-        e = eccentricity(G)
++        e = eccentricity(G, weight=weight)
+     return max(e.values())
+ 
+ 
+-def periphery(G, e=None, usebounds=False):
++def periphery(G, e=None, usebounds=False, weight="weight"):
+     """Returns the periphery of the graph G.
+ 
+     The periphery is the set of nodes with eccentricity equal to the diameter.
+@@ -330,6 +385,24 @@ def periphery(G, e=None, usebounds=False):
+     e : eccentricity dictionary, optional
+       A precomputed dictionary of eccentricities.
+ 
++    weight : string or function
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     p : list
+@@ -347,15 +420,15 @@ def periphery(G, e=None, usebounds=False):
+     center
+     """
+     if usebounds is True and e is None and not G.is_directed():
+-        return _extrema_bounding(G, compute="periphery")
++        return _extrema_bounding(G=G, compute="periphery", weight=weight)
+     if e is None:
+-        e = eccentricity(G)
++        e = eccentricity(G, weight=weight)
+     diameter = max(e.values())
+     p = [v for v in e if e[v] == diameter]
+     return p
+ 
+ 
+-def radius(G, e=None, usebounds=False):
++def radius(G, e=None, usebounds=False, weight="weight"):
+     """Returns the radius of the graph G.
+ 
+     The radius is the minimum eccentricity.
+@@ -368,6 +441,24 @@ def radius(G, e=None, usebounds=False):
+     e : eccentricity dictionary, optional
+       A precomputed dictionary of eccentricities.
+ 
++    weight : string or function
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     r : integer
+@@ -381,13 +472,13 @@ def radius(G, e=None, usebounds=False):
+ 
+     """
+     if usebounds is True and e is None and not G.is_directed():
+-        return _extrema_bounding(G, compute="radius")
++        return _extrema_bounding(G=G, compute="radius", weight=weight)
+     if e is None:
+-        e = eccentricity(G)
++        e = eccentricity(G, weight=weight)
+     return min(e.values())
+ 
+ 
+-def center(G, e=None, usebounds=False):
++def center(G, e=None, usebounds=False, weight="weight"):
+     """Returns the center of the graph G.
+ 
+     The center is the set of nodes with eccentricity equal to radius.
+@@ -400,6 +491,24 @@ def center(G, e=None, usebounds=False):
+     e : eccentricity dictionary, optional
+       A precomputed dictionary of eccentricities.
+ 
++    weight : string or function
++        If this is a string, then edge weights will be accessed via the
++        edge attribute with this key (that is, the weight of the edge
++        joining `u` to `v` will be ``G.edges[u, v][weight]``). If no
++        such edge attribute exists, the weight of the edge is assumed to
++        be one.
++
++        If this is a function, the weight of an edge is the value
++        returned by the function. The function must accept exactly three
++        positional arguments: the two endpoints of an edge and the
++        dictionary of edge attributes for that edge. The function must
++        return a number.
++
++        Weights stored as floating point values can lead to small round-off
++        errors in distances. Use integer weights to avoid this.
++
++        Weights should be positive, since they are distances.
++
+     Returns
+     -------
+     c : list
+@@ -417,9 +526,9 @@ def center(G, e=None, usebounds=False):
+     periphery
+     """
+     if usebounds is True and e is None and not G.is_directed():
+-        return _extrema_bounding(G, compute="center")
++        return _extrema_bounding(G=G, compute="center", weight=weight)
+     if e is None:
+-        e = eccentricity(G)
++        e = eccentricity(G, weight=weight)
+     radius = min(e.values())
+     p = [v for v in e if e[v] == radius]
+     return p
+@@ -560,14 +669,23 @@ def resistance_distance(G, nodeA, nodeB, weight=None, invert_weight=True):
+ 
+     Notes
+     -----
+-    Overview discussion:
+-    * https://en.wikipedia.org/wiki/Resistance_distance
+-    * http://mathworld.wolfram.com/ResistanceDistance.html
+-
+-    Additional details:
+-    Vaya Sapobi Samui Vos, “Methods for determining the effective resistance,” M.S.,
+-    Mathematisch Instituut, Universiteit Leiden, Leiden, Netherlands, 2016
+-    Available: `Link to thesis <https://www.universiteitleiden.nl/binaries/content/assets/science/mi/scripties/master/vos_vaya_master.pdf>`_
++    Overviews are provided in [1]_ and [2]_. Additional details on computational
++    methods, proofs of properties, and corresponding MATLAB codes are provided
++    in [3]_.
++
++    References
++    ----------
++    .. [1] Wikipedia
++       "Resistance distance."
++       https://en.wikipedia.org/wiki/Resistance_distance
++    .. [2] E. W. Weisstein
++       "Resistance Distance."
++       MathWorld--A Wolfram Web Resource
++       https://mathworld.wolfram.com/ResistanceDistance.html
++    .. [3] V. S. S. Vos,
++       "Methods for determining the effective resistance."
++       Mestrado, Mathematisch Instituut Universiteit Leiden, 2016
++       https://www.universiteitleiden.nl/binaries/content/assets/science/mi/scripties/master/vos_vaya_master.pdf
+     """
+     import numpy as np
+     import scipy as sp
+diff --git a/networkx/algorithms/tests/test_distance_measures.py b/networkx/algorithms/tests/test_distance_measures.py
+index 72f23fc50e3..33c1f013f82 100644
+--- a/networkx/algorithms/tests/test_distance_measures.py
++++ b/networkx/algorithms/tests/test_distance_measures.py
+@@ -97,6 +97,62 @@ def test_eccentricity_directed_weakly_connected(self):
+             nx.eccentricity(DG)
+ 
+ 
++class TestWeightedDistance:
++    def setup_method(self):
++        G = nx.Graph()
++        G.add_edge(0, 1, weight=0.6)
++        G.add_edge(0, 2, weight=0.2)
++        G.add_edge(2, 3, weight=0.1)
++        G.add_edge(2, 4, weight=0.7)
++        G.add_edge(2, 5, weight=0.9)
++        G.add_edge(1, 5, weight=0.3)
++        self.G = G
++
++    def test_eccentricity(self):
++        assert nx.eccentricity(self.G, 1) == 1.5
++        e = nx.eccentricity(self.G)
++        assert e[1] == 1.5
++
++        e = nx.eccentricity(self.G, v=1)
++        assert e == 1.5
++
++        # This behavior changed in version 1.8 (ticket #739)
++        e = nx.eccentricity(self.G, v=[1, 1])
++        assert e[1] == 1.5
++        e = nx.eccentricity(self.G, v=[1, 2])
++        assert e[1] == 1.5
++
++    def test_diameter(self):
++        assert nx.diameter(self.G) == 1.6
++
++    def test_radius(self):
++        assert nx.radius(self.G) != 0.9
++        assert pytest.approx(nx.radius(self.G)) == 0.9
++
++    def test_periphery(self):
++        for v in set(nx.periphery(self.G)):
++            assert nx.eccentricity(self.G, v) == nx.diameter(self.G)
++
++    def test_center(self):
++        for v in set(nx.center(self.G)):
++            assert nx.eccentricity(self.G, v) == nx.radius(self.G)
++
++    def test_bound_diameter(self):
++        assert nx.diameter(self.G, usebounds=True) == 1.6
++
++    def test_bound_radius(self):
++        assert nx.radius(self.G, usebounds=True) != 0.9
++        assert pytest.approx(nx.radius(self.G, usebounds=True)) == 0.9
++
++    def test_bound_periphery(self):
++        result = {4, 5}
++        assert set(nx.periphery(self.G, usebounds=True)) == result
++
++    def test_bound_center(self):
++        result = {0}
++        assert set(nx.center(self.G, usebounds=True)) == result
++
++
+ class TestResistanceDistance:
+     @classmethod
+     def setup_class(cls):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

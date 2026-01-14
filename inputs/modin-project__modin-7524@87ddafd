@@ -1,0 +1,587 @@
+  Task-ID: modin-project__modin-7524@87ddafd
+  Please checkout to this commit first: 48582391be7903c6c098cb0014f1e528f9f9b9dd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  FEAT: Improve formal definition of the automatic switching algorithm
+We add the `move_to_me_cost` function as something to be consulted during automatic switching. This allows for the /other/ query compiler to have more of a say in a potential data migration. This also helps to formalize the questions being asked of each participating query compiler, specifically the `move_to_cost` can be precisely defined as just the transmission and serialization cost of data movement.
+
+We also allow ourselves to disregard transmission cost, or the `move_to_cost` when the current engine is simply unable to execute the current workload.
+
+In general; with the set of functions we currently consult we should be able to implement most of the behaviors needed for multi-engine transitions. These functions can be written in the same way, but configured differently as described in the tests.
+
+In a future commit we will implement a default function similar to what is configured in the tests.
+  </issue>
+  
+  <patch>
+  diff --git a/docs/development/architecture.rst b/docs/development/architecture.rst
+index 75df7e4adcd..47f26a39c58 100644
+--- a/docs/development/architecture.rst
++++ b/docs/development/architecture.rst
+@@ -89,12 +89,40 @@ Dataframe.
+ In the interest of reducing the pandas API, the Query Compiler layer closely follows the
+ pandas API, but cuts out a large majority of the repetition.
+ 
++Automatic Engine Switching and Casting
++""""""""""""""""""""""""""""""""""""""
++
+ QueryCompilers which are derived from QueryCompilerCaster can participate in automatic casting when
+ different query compilers, representing different underlying engines, are used together in a
+ function. A relative "cost" of casting is used to determine which query compiler everything should
+ be moved to. Each query compiler must implement the functions, `move_to_cost`, `move_to_me_cost`, 
+ `max_cost` and `stay_cost` to provide information and query costs associated with different decision
+-points in cost opimization.
++points in cost opimization. With the exception of `max_cost` these methods need to return a 
++QCCoercionCost in the range of 0-1000.
++
++These functions have precise meanings:
++
++* `move_to_cost` is the transmission cost of moving the data, including known serialization costs
++  from the perspective of that particular compiler. Colloquially, the question being asked of the
++  query compiler is, "What is the normalized cost of moving my data to the other engine?"
++* `move_to_me_cost` is the execution cost for the data and operation on the proposed *destination*
++  query compiler. Since this method is called before the data has been migrated this is a class
++  method and the destination query_compiler may have very limited information on the possible cost
++  after migration. Factors that may be considered here include available memory, cpu, and the
++  unique characteristics of the engine. The question being asked is, "If this data were moved to
++  me, what would be the normalized execution cost to perform that operation?"
++* `stay_cost` is the execution cost on the current query compilier ( where the data is ). The question
++  asked of the query compiler is, "If I were to keep this data on my engine, what would the normalized
++  execution cost?"
++* `max_cost` is the maximum cost allowed by this query compiler across all data movements. This method
++  sets a normalized upper bound for situations where multiple data frames from different engines all
++  need to move to the same engine. The value returned by this method can exceed 
++  QCCoercionCost.COST_IMPOSSIBLE
++
++There are generally two places where automatic casting is considered: When two or more DataFrames on
++different engines are participating in an operation ( such as pd.concat ) or at registered functions
++for particular engines through the `register_function_for_pre_op_switch` and 
++`register_function_for_post_op_switch` methods.
+ 
+ Core Modin Dataframe
+ """"""""""""""""""""
+diff --git a/modin/config/envvars.py b/modin/config/envvars.py
+index 72cbd03fff8..26511ee31ab 100644
+--- a/modin/config/envvars.py
++++ b/modin/config/envvars.py
+@@ -490,6 +490,42 @@ def add_option(cls, choice: str) -> NoReturn:
+             "Cannot add an option to Backend directly. Use Backend.register_backend instead."
+         )
+ 
++    @classmethod
++    def set_active_backends(cls, new_choices: tuple) -> None:
++        """
++        Set the active backends available for manual and automatic switching.
++
++        Other backends may have been registered, and those backends remain registered, but the
++        set of engines that can be used is dynamically modified.
++
++        Parameters
++        ----------
++        new_choices : tuple
++            Choices to add.
++
++        Raises
++        ------
++        ValueError
++            Raises a ValueError when the set of new_choices are not already registered
++        """
++        if not all(i in cls._BACKEND_TO_EXECUTION.keys() for i in new_choices):
++            raise ValueError(
++                "Active backend choices {new_choices} are not all registered."
++            )
++        cls.choices = new_choices
++
++    @classmethod
++    def get_active_backends(cls) -> tuple[str, ...]:
++        """
++        Get the active backends available for manual and automatic switching.
++
++        Returns
++        -------
++        tuple[str, ...]
++            returns the active set of backends for switching
++        """
++        return cls.choices
++
+     @classmethod
+     def get_backend_for_execution(cls, execution: Execution) -> str:
+         """
+diff --git a/modin/core/storage_formats/base/query_compiler.py b/modin/core/storage_formats/base/query_compiler.py
+index ef031455755..a2e173d1aa9 100644
+--- a/modin/core/storage_formats/base/query_compiler.py
++++ b/modin/core/storage_formats/base/query_compiler.py
+@@ -322,6 +322,9 @@ def move_to_cost(
+         decision points. Values returned must be within the acceptable
+         range of QCCoercionCost
+ 
++        The question is: What are the transfer costs associated with
++        moving this data to the other_qc_type?
++
+         Parameters
+         ----------
+         other_qc_type : QueryCompiler Class
+@@ -360,6 +363,9 @@ def stay_cost(
+         the other engine, where as the cost returned by 'stay_cost'
+         may be simply the cost of running the operation locally.
+ 
++        The question is: What is the cost of running this operation on
++        the current dataframe?
++
+         Values returned must be within the acceptable range of
+         QCCoercionCost
+ 
+@@ -389,11 +395,17 @@ def move_to_me_cost(
+         operation: Optional[str] = None,
+     ) -> Optional[int]:
+         """
+-        Return the coercion costs from other_qc to this qc type.
++        Return the execution and hidden coercion costs from other_qc.
++
++        This can be implemented as a class method version of stay_cost, though
++        since this class is not yet instantiated it may have a different
++        implementation. It may also include hidden transport or serialization
++        costs.
++
++        Values returned must be within the acceptable range of QCCoercionCost.
+ 
+-        This is called for forced casting decision points, where one or more
+-        DataFrames from different engines must interoperate. Values returned
+-        must be within the acceptable range of QCCoercionCost
++        The question is: What is the cost of executing this operation if it
++        were to move to this query compiler?
+ 
+         Parameters
+         ----------
+diff --git a/modin/core/storage_formats/pandas/query_compiler_caster.py b/modin/core/storage_formats/pandas/query_compiler_caster.py
+index 386e1516f3d..dd9c96959ee 100644
+--- a/modin/core/storage_formats/pandas/query_compiler_caster.py
++++ b/modin/core/storage_formats/pandas/query_compiler_caster.py
+@@ -35,6 +35,7 @@
+ from modin.config import context as config_context
+ from modin.core.storage_formats.base.query_compiler import (
+     BaseQueryCompiler,
++    QCCoercionCost,
+ )
+ from modin.core.storage_formats.base.query_compiler_calculator import (
+     BackendCostCalculator,
+@@ -484,7 +485,7 @@ def _get_backend_for_auto_switch(
+         api_cls_name=class_of_wrapped_fn,
+         operation=function_name,
+     )
+-    for backend in Backend._BACKEND_TO_EXECUTION:
++    for backend in Backend.get_active_backends():
+         if backend in ("Ray", "Unidist", "Dask"):
+             # Disable automatically switching to these engines for now, because
+             # 1) _get_prepared_factory_for_backend() currently calls
+@@ -502,8 +503,25 @@ def _get_backend_for_auto_switch(
+             api_cls_name=class_of_wrapped_fn,
+             operation=function_name,
+         )
+-        if move_to_cost is not None and stay_cost is not None:
+-            move_stay_delta = move_to_cost - stay_cost
++        other_execute_cost = move_to_class.move_to_me_cost(
++            input_qc,
++            api_cls_name=class_of_wrapped_fn,
++            operation=function_name,
++        )
++        if (
++            move_to_cost is not None
++            and stay_cost is not None
++            and other_execute_cost is not None
++        ):
++            if stay_cost >= QCCoercionCost.COST_IMPOSSIBLE:
++                # We cannot execute the workload on the current engine
++                # disregard the move_to_cost and just consider whether
++                # the other engine can execute the workload
++                move_stay_delta = other_execute_cost - stay_cost
++            else:
++                # We can execute this workload if we need to, consider
++                # move_to_cost/transfer time in our decision
++                move_stay_delta = (move_to_cost + other_execute_cost) - stay_cost
+             if move_stay_delta < 0 and (
+                 min_move_stay_delta is None or move_stay_delta < min_move_stay_delta
+             ):
+@@ -511,8 +529,9 @@ def _get_backend_for_auto_switch(
+                 best_backend = backend
+             logging.info(
+                 f"After {class_of_wrapped_fn} function {function_name}, "
+-                + f"considered moving to backend {backend} with move_to_cost "
+-                + f"{move_to_cost}, stay_cost {stay_cost}, and move-stay delta "
++                + f"considered moving to backend {backend} with "
++                + f"(transfer_cost {move_to_cost} + other_execution_cost {other_execute_cost}) "
++                + f", stay_cost {stay_cost}, and move-stay delta "
+                 + f"{move_stay_delta}"
+             )
+     if best_backend == starting_backend:
+diff --git a/modin/tests/pandas/native_df_interoperability/test_compiler_caster.py b/modin/tests/pandas/native_df_interoperability/test_compiler_caster.py
+index c0c903714da..d907ea6261d 100644
+--- a/modin/tests/pandas/native_df_interoperability/test_compiler_caster.py
++++ b/modin/tests/pandas/native_df_interoperability/test_compiler_caster.py
+@@ -11,8 +11,10 @@
+ # ANY KIND, either express or implied. See the License for the specific language
+ # governing permissions and limitations under the License.
+ 
++import contextlib
+ import json
+ from io import StringIO
++from typing import Iterator
+ from unittest import mock
+ 
+ import pandas
+@@ -20,7 +22,6 @@
+ from pytest import param
+ 
+ import modin.pandas as pd
+-from modin.config import context as config_context
+ from modin.config.envvars import Backend, Engine, Execution
+ from modin.core.execution.dispatching.factories import factories
+ from modin.core.execution.dispatching.factories.factories import BaseFactory
+@@ -39,6 +40,7 @@
+ from modin.tests.pandas.utils import create_test_dfs, df_equals, eval_general
+ 
+ BIG_DATA_CLOUD_MIN_NUM_ROWS = 10
++SMALL_DATA_NUM_ROWS = 5
+ 
+ 
+ class CloudQC(NativeQueryCompiler):
+@@ -157,7 +159,7 @@ def move_to_cost(self, other_qc_cls, api_cls_name, op):
+ 
+     # try to force other workloads to my engine
+     @classmethod
+-    def move_to_me_cost(cls, other_qc, api_cls_name, op):
++    def move_to_me_cost(cls, other_qc, api_cls_name, operation):
+         return QCCoercionCost.COST_ZERO
+ 
+ 
+@@ -173,7 +175,7 @@ def move_to_cost(self, other_qc_cls, api_cls_name, op):
+ 
+     # try to keep other workloads from getting my workload
+     @classmethod
+-    def move_to_me_cost(cls, other_qc, api_cls_name, op):
++    def move_to_me_cost(cls, other_qc, api_cls_name, operation):
+         if isinstance(other_qc, cls):
+             return QCCoercionCost.COST_ZERO
+         return QCCoercionCost.COST_IMPOSSIBLE
+@@ -193,22 +195,100 @@ def get_backend(self):
+         return "Test_casting_default_2"
+ 
+ 
+-class CloudForBigDataQC(NativeQueryCompiler):
+-    """Represents a cloud-hosted query compiler that prefers to stay on the cloud only for big data"""
++class BaseTestAutoMover(NativeQueryCompiler):
+ 
+-    def get_backend(self) -> str:
+-        return "Big_Data_Cloud"
++    # four variables can handle reasonably
++    # complex behavior, though the operation overhead
++    # (both initial and per-row) values may vary
++    # by engine of course
++    _MAX_SIZE_THIS_ENGINE_CAN_HANDLE = BIG_DATA_CLOUD_MIN_NUM_ROWS
++    _OPERATION_INITIALIZATION_OVERHEAD = 0
++    _OPERATION_PER_ROW_OVERHEAD = 0
++    _TRANSFER_THRESHOLD = 0
+ 
++    def __init__(self, pandas_frame):
++        super().__init__(pandas_frame)
++
++    # transmission cost
+     def move_to_cost(self, other_qc_type, api_cls_name, operation):
+-        return (
+-            QCCoercionCost.COST_LOW
+-            if other_qc_type is NativeQueryCompiler
+-            and self.get_axis_len(axis=0) < BIG_DATA_CLOUD_MIN_NUM_ROWS
+-            else None
++        if self._TRANSFER_THRESHOLD <= 0:
++            return QCCoercionCost.COST_ZERO
++        cost = int(
++            (
++                QCCoercionCost.COST_IMPOSSIBLE
++                * self.get_axis_len(axis=0)
++                / self._TRANSFER_THRESHOLD
++            )
+         )
++        if cost > QCCoercionCost.COST_IMPOSSIBLE:
++            return QCCoercionCost.COST_IMPOSSIBLE
++        return cost
+ 
++    @classmethod
++    def _stay_cost_rows(cls, rows, per_row_overhead, max_size, op_init_overhead):
++        if rows > max_size:
++            return QCCoercionCost.COST_IMPOSSIBLE
++        cost_all_rows = rows * per_row_overhead
++        normalized_cost_all_rows = (
++            cost_all_rows / max_size * QCCoercionCost.COST_IMPOSSIBLE
++        )
++        total_cost = normalized_cost_all_rows + op_init_overhead
++        if total_cost > QCCoercionCost.COST_IMPOSSIBLE:
++            return QCCoercionCost.COST_IMPOSSIBLE
++        return total_cost
++
++    # cost to execute current df locally "
+     def stay_cost(self, api_cls_name, operation):
+-        return QCCoercionCost.COST_MEDIUM
++        return self._stay_cost_rows(
++            self.get_axis_len(axis=0),
++            self._OPERATION_PER_ROW_OVERHEAD,
++            self._MAX_SIZE_THIS_ENGINE_CAN_HANDLE,
++            self._OPERATION_INITIALIZATION_OVERHEAD,
++        )
++
++    # cost to execute remote df locally if it were moved to me
++    @classmethod
++    def move_to_me_cost(cls, other_qc, api_cls_name, operation):
++        return cls._stay_cost_rows(
++            other_qc.get_axis_len(axis=0),
++            cls._OPERATION_PER_ROW_OVERHEAD,
++            cls._MAX_SIZE_THIS_ENGINE_CAN_HANDLE,
++            cls._OPERATION_INITIALIZATION_OVERHEAD,
++        )
++
++
++class CloudForBigDataQC(BaseTestAutoMover):
++    """Represents a cloud-hosted query compiler that prefers to stay on the cloud only for big data"""
++
++    # Operations are more costly on this engine, even though it can handle larger datasets
++    _MAX_SIZE_THIS_ENGINE_CAN_HANDLE = BIG_DATA_CLOUD_MIN_NUM_ROWS * 10
++    _OPERATION_INITIALIZATION_OVERHEAD = QCCoercionCost.COST_MEDIUM
++    _OPERATION_PER_ROW_OVERHEAD = 10
++
++    def __init__(self, pandas_frame):
++        super().__init__(pandas_frame)
++
++    def stay_cost(self, api_cls_name, operation):
++        if operation == "read_json":
++            return QCCoercionCost.COST_IMPOSSIBLE
++        return super().stay_cost(api_cls_name, operation)
++
++    def get_backend(self) -> str:
++        return "Big_Data_Cloud"
++
++
++class LocalForSmallDataQC(BaseTestAutoMover):
++    """Represents a local query compiler that prefers small data."""
++
++    # Operations are cheap on this engine for small data, but there is an upper bound
++    _MAX_SIZE_THIS_ENGINE_CAN_HANDLE = BIG_DATA_CLOUD_MIN_NUM_ROWS
++    _OPERATION_PER_ROW_OVERHEAD = 1
++
++    def __init__(self, pandas_frame):
++        super().__init__(pandas_frame)
++
++    def get_backend(self) -> str:
++        return "Small_Data_Local"
+ 
+ 
+ def register_backend(name, qc):
+@@ -239,6 +319,7 @@ def prepare(cls):
+ register_backend("Test_Casting_Default", DefaultQC)
+ register_backend("Test_Casting_Default_2", DefaultQC2)
+ register_backend("Big_Data_Cloud", CloudForBigDataQC)
++register_backend("Small_Data_Local", LocalForSmallDataQC)
+ 
+ 
+ @pytest.fixture()
+@@ -553,9 +634,26 @@ def test_stay_or_move_evaluation(cloud_df, default_df):
+     assert move_cost is None
+ 
+ 
++@contextlib.contextmanager
++def backend_test_context(test_backend: str, choices: set) -> Iterator[None]:
++
++    old_default_backend = Backend.get()
++    old_backend_choices = Backend.get_active_backends()
++    try:
++        Backend.set_active_backends(choices)
++        Backend.put(test_backend)
++        yield
++    finally:
++        Backend.set_active_backends(old_backend_choices)
++        Backend.put(old_default_backend)
++
++
+ class TestSwitchBackendPostOpDependingOnDataSize:
+     def test_read_json(self):
+-        with config_context(Backend="Big_Data_Cloud"):
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
++        ):
+             big_json = json.dumps({"col0": list(range(BIG_DATA_CLOUD_MIN_NUM_ROWS))})
+             small_json = json.dumps(
+                 {"col0": list(range(BIG_DATA_CLOUD_MIN_NUM_ROWS - 1))}
+@@ -566,10 +664,15 @@ def test_read_json(self):
+                 class_name=None, backend="Big_Data_Cloud", method="read_json"
+             )
+             assert pd.read_json(StringIO(big_json)).get_backend() == "Big_Data_Cloud"
+-            assert pd.read_json(StringIO(small_json)).get_backend() == "Pandas"
++            assert (
++                pd.read_json(StringIO(small_json)).get_backend() == "Small_Data_Local"
++            )
+ 
+     def test_agg(self):
+-        with config_context(Backend="Big_Data_Cloud"):
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
++        ):
+             df = pd.DataFrame([[1, 2], [3, 4]])
+             assert df.get_backend() == "Big_Data_Cloud"
+             assert df.sum().get_backend() == "Big_Data_Cloud"
+@@ -577,7 +680,7 @@ def test_agg(self):
+                 class_name="DataFrame", backend="Big_Data_Cloud", method="sum"
+             )
+             assert df.get_backend() == "Big_Data_Cloud"
+-            assert df.sum().get_backend() == "Pandas"
++            assert df.sum().get_backend() == "Small_Data_Local"
+ 
+ 
+ class TestSwitchBackendPreOp:
+@@ -586,8 +689,8 @@ class TestSwitchBackendPreOp:
+         [
+             param(
+                 BIG_DATA_CLOUD_MIN_NUM_ROWS - 1,
+-                "Pandas",
+-                id="small_data_should_move_to_pandas",
++                "Small_Data_Local",
++                id="small_data_should_move_to_small_engine",
+             ),
+             param(
+                 BIG_DATA_CLOUD_MIN_NUM_ROWS,
+@@ -615,7 +718,10 @@ def test_describe_switches_depending_on_data_size(
+                 or mock.DEFAULT
+             ),
+         )
+-        with config_context(Backend="Big_Data_Cloud"):
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
++        ):
+             df = pd.DataFrame(list(range(data_size)))
+             with mock.patch.dict(
+                 pd.DataFrame._extensions[None], {"describe": mock_describe}
+@@ -655,7 +761,7 @@ def test_read_json_with_extensions(self):
+             wraps=(
+                 lambda *args, **kwargs: _GENERAL_EXTENSIONS[None]["read_json"](
+                     *args, **kwargs
+-                ).move_to("Pandas")
++                ).move_to("Small_Data_Local")
+             )
+         )
+         cloud_read_json = mock.Mock(
+@@ -666,19 +772,12 @@ def test_read_json_with_extensions(self):
+             )
+         )
+ 
+-        def move_to_cost(self, other_qc_type, api_cls_name, operation):
+-            """Make read_json() always move to Pandas backend."""
+-            return (
+-                QCCoercionCost.COST_LOW
+-                if other_qc_type is NativeQueryCompiler and operation == "read_json"
+-                else None
+-            )
+-
+-        register_pd_accessor("read_json", backend="Pandas")(pandas_read_json)
++        register_pd_accessor("read_json", backend="Small_Data_Local")(pandas_read_json)
+         register_pd_accessor("read_json", backend="Big_Data_Cloud")(cloud_read_json)
+ 
+-        with config_context(Backend="Big_Data_Cloud"), mock.patch.object(
+-            CloudForBigDataQC, "move_to_cost", move_to_cost
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
+         ):
+             df = pd.read_json(StringIO(json_input))
+             assert df.get_backend() == "Big_Data_Cloud"
+@@ -694,23 +793,16 @@ def move_to_cost(self, other_qc_type, api_cls_name, operation):
+ 
+             df = pd.read_json(StringIO(json_input))
+ 
+-            assert df.get_backend() == "Pandas"
++            assert df.get_backend() == "Small_Data_Local"
+             pandas_read_json.assert_called_once()
+             cloud_read_json.assert_not_called()
+ 
+     def test_read_json_without_extensions(self):
+         json_input = json.dumps({"col0": [1]})
+ 
+-        def move_to_cost(self, other_qc_type, api_cls_name, operation):
+-            """Make read_json() always move to Pandas backend."""
+-            return (
+-                QCCoercionCost.COST_LOW
+-                if other_qc_type is NativeQueryCompiler and operation == "read_json"
+-                else None
+-            )
+-
+-        with config_context(Backend="Big_Data_Cloud"), mock.patch.object(
+-            CloudForBigDataQC, "move_to_cost", move_to_cost
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
+         ):
+             df = pd.read_json(StringIO(json_input))
+             assert df.get_backend() == "Big_Data_Cloud"
+@@ -721,15 +813,15 @@ def move_to_cost(self, other_qc_type, api_cls_name, operation):
+ 
+             df = pd.read_json(StringIO(json_input))
+ 
+-            assert df.get_backend() == "Pandas"
++            assert df.get_backend() == "Small_Data_Local"
+ 
+     @pytest.mark.parametrize(
+         "data_size, expected_backend",
+         [
+             param(
+                 BIG_DATA_CLOUD_MIN_NUM_ROWS - 1,
+-                "Pandas",
+-                id="small_data_should_move_to_pandas",
++                "Small_Data_Local",
++                id="small_data_should_move_to_small_engine",
+             ),
+             param(
+                 BIG_DATA_CLOUD_MIN_NUM_ROWS,
+@@ -741,7 +833,10 @@ def move_to_cost(self, other_qc_type, api_cls_name, operation):
+     def test_iloc_setitem_switches_depending_on_data_size(
+         self, data_size, expected_backend
+     ):
+-        with config_context(Backend="Big_Data_Cloud"):
++        with backend_test_context(
++            test_backend="Big_Data_Cloud",
++            choices=("Big_Data_Cloud", "Small_Data_Local"),
++        ):
+             md_df, pd_df = create_test_dfs(list(range(data_size)))
+             assert md_df.get_backend() == "Big_Data_Cloud"
+             eval_general(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

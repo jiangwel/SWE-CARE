@@ -1,0 +1,417 @@
+  Task-ID: dask__dask-5163@5473bd1
+  Please checkout to this commit first: 5f335e9c383d54bc8f376a8cb153171e1f905e65
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Slow performance adding to a large Dask-graph
+I was replacing a delayed object (`A` in the example), with a Dask array of 1000 chunks (`B` in the example). This increased the bottom of the Dask-graph with a factor of 1000.
+The result was that the time for constructing the graph became unpleasantly long.
+Testing some more, the speed of adding elements to the Dask-graph seems to be heavily dependent on the prior size of the graph (See the result below). (Line-)Profiling the code, didn't gave me one particular function to blame.
+I would have expected it to be more depended on the amount of nodes added, and less on the prior size of the Dask-graph.
+
+Is there something I can change to speed this up?
+Is it possible to construct parts of a Dask-graph separately, and connecting them afterwards? Thereby applying the checks and optimizations on the Dask-graph only once, and not 1000 times.
+
+Note: Computing the graph with a large N_prior in this example, leads to a recursion error.
+```python
+# -*- coding: utf-8 -*-
+from dask import delayed, array
+import numpy as np
+import sys
+import dask
+print('Dask:',dask.__version__)
+print('Numpy:',np.__version__)
+print('Python:', sys.version)
+
+from time import clock as time
+
+N_Signal = 10000
+
+
+d0 = None
+for N_Prior in [1000,2000,10000]:
+  print('N_Prior',N_Prior)
+
+
+  ### Existing graph1
+  R1 = np.zeros((1000,1))
+  for i in range(N_Prior):
+    R1 = delayed(np.sum)(R1)
+
+  ### Existing graph2
+  R2 = np.zeros((1000,1))
+  for i in range(N_Prior):
+    R2 = delayed(np.sum)(R2)
+    
+  @delayed
+  def A(a):
+    Result = np.zeros((1000,N_Signal))
+    for i in range(1000):
+      Result[i,:] = np.zeros((N_Signal,)) + i
+    return Result
+  
+  def B(a):
+    @delayed
+    def Bsub(a,i):
+      return np.zeros((N_Signal,)) + i
+    Results = []
+    for i in range(1000):
+      Results.append(array.from_delayed(Bsub(a,i),shape=(N_Signal,),dtype=float))
+    return array.stack(Results)
+  
+  t = time()
+  Ra = A(R1)
+  matrixA = array.from_delayed(Ra, shape=(1000,N_Signal), dtype=float)
+  d1 = time()-t;print('A:',d1);t=time()
+  
+  Rb = B(R2)
+  matrixB = Rb
+  d2 = time()-t;print('B:',d2);t=time()
+  if not d0:
+    d0 = d2
+  
+  print('Ratio between A & B', round(d2/d1))
+  print('Ratio between N_Prior 1000', round(d2/d0,2))
+  print()
+```
+
+```
+Dask: 0.15.3
+Numpy: 1.13.3
+Python: 3.6.3 |Anaconda custom (64-bit)| (default, Oct 15 2017, 03:27:45) [MSC v.1900 64 bit (AMD64)]
+N_Prior 1000
+A: 0.0003334181934633307
+B: 0.37659461767773905
+Ratio between A & B 1129
+Ratio between N_Prior 1000 1.0
+
+N_Prior 2000
+A: 0.0007378725291573573
+B: 0.5679343675319615
+Ratio between A & B 770
+Ratio between N_Prior 1000 1.51
+
+N_Prior 10000
+A: 0.0020814000279187894
+B: 2.278880913861485
+Ratio between A & B 1095
+Ratio between N_Prior 1000 6.05
+```
+  </issue>
+  
+  <patch>
+  diff --git a/docs/source/futures.rst b/docs/source/futures.rst
+index e12118c07c9..aca0e1cf079 100644
+--- a/docs/source/futures.rst
++++ b/docs/source/futures.rst
+@@ -257,7 +257,7 @@ Or collect all futures in batches that had arrived since the last iteration:
+       for future, result in batch:
+           ...
+ 
+-Additionally, for iterative algorithms, you can add more futures into the 
++Additionally, for iterative algorithms, you can add more futures into the
+ ``as_completed`` iterator *during* iteration:
+ 
+ .. code-block:: python
+@@ -380,7 +380,7 @@ thread that does not take up a slot within the Dask worker:
+ If you intend to do more work in the same thread after waiting on client work,
+ you may want to explicitly block until the thread is able to *rejoin* the
+ thread pool.  This allows some control over the number of threads that are
+-created and stops too many threads from being active at once, over-saturating 
++created and stops too many threads from being active at once, over-saturating
+ your hardware:
+ 
+ .. code-block:: python
+@@ -575,7 +575,7 @@ Using a consistent name is convenient when you want to lock some known named res
+ 
+    futures = client.map(load, filenames)
+ 
+-Passing around a lock works as well and is easier when you want to create short-term 
++Passing around a lock works as well and is easier when you want to create short-term
+ locks for a particular situation:
+ 
+ .. code-block:: python
+@@ -793,7 +793,6 @@ API
+ .. autoclass:: Future
+    :members:
+ 
+-
+ .. autoclass:: Queue
+    :members:
+ 
+diff --git a/docs/source/setup/python-advanced.rst b/docs/source/setup/python-advanced.rst
+index 9a7c34232a4..de0392205ed 100644
+--- a/docs/source/setup/python-advanced.rst
++++ b/docs/source/setup/python-advanced.rst
+@@ -1,62 +1,207 @@
+ Python API (advanced)
+ =====================
+ 
+-In some rare cases, experts may want to create ``Scheduler`` and ``Worker``
+-objects explicitly in Python manually.  This is often necessary when making
++.. currentmodule:: distributed
++
++In some rare cases, experts may want to create ``Scheduler``, ``Worker``, and
++``Nanny``  objects explicitly in Python.  This is often necessary when making
+ tools to automatically deploy Dask in custom settings.
+ 
+-However, often it is sufficient to rely on the :doc:`Dask command line interface
+-<cli>`.
++It is more common to create a :doc:`Local cluster with Client() on a single
++machine <single-distributed>` or use the :doc:`Command Line Interface (CLI) <cli>`.
++New readers are recommended to start there.
++
++If you do want to start Scheduler and Worker objects yourself you should be a
++little familiar with ``async``/``await`` style Python syntax.  These objects
++are awaitable and are commonly used within ``async with`` context managers.
++Here are a few examples to show a few ways to start and finish things.
++
++Full Example
++------------
++
++.. autosummary::
++   Scheduler
++   Worker
++   Client
++
++We first start with a comprehensive example of setting up a Scheduler, two Workers,
++and one Client in the same event loop, running a simple computation, and then
++cleaning everything up.
++
++.. code-block:: python
++
++   import asyncio
++   from dask.distributed import Scheduler, Worker, Client
++
++   async def f():
++       async with Scheduler() as s:
++           async with Worker(s.address) as w1, Worker(s.address) as w2:
++               async with Client(s.address, asynchronous=True) as client:
++                   future = client.submit(lambda x: x + 1, 10)
++                   result = await future
++                   print(result)
++
++   asyncio.get_event_loop().run_until_complete(f())
++
++Now we look at simpler examples that build up to this case.
+ 
+ Scheduler
+ ---------
+ 
+-To start the Scheduler, provide the listening port (defaults to 8786) and Tornado
+-IOLoop (defaults to ``IOLoop.current()``)
++.. autosummary::
++   Scheduler
++
++We create scheduler by creating a ``Scheduler()`` object, and then ``await``
++that object to wait for it to start up.  We can then wait on the ``.finished``
++method to wait until it closes.  In the meantime the scheduler will be active
++managing the cluster..
+ 
+ .. code-block:: python
+ 
+-   from distributed import Scheduler
+-   from tornado.ioloop import IOLoop
+-   from threading import Thread
++   import asyncio
++   from dask.distributed import Scheduler, Worker
+ 
+-   s = Scheduler()
+-   s.start('tcp://:8786')   # Listen on TCP port 8786
++   async def f():
++       s = Scheduler()        # scheduler created, but not yet running
++       s = await Scheduler()  # the scheduler is running
++       await s.finished()     # wait until the scheduler closes
+ 
+-   loop = IOLoop.current()
+-   loop.start()
++   asyncio.get_event_loop().run_until_complete(f())
+ 
+-Alternatively, you may want the IOLoop and scheduler to run in a separate
+-thread.  In this case, you would replace the ``loop.start()`` call with the
+-following:
++This program will run forever, or until some external process connects to the
++scheduler and tells it to stop.  If you want to close things yourself you can
++close any ``Scheduler``, ``Worker``, ``Nanny``, or ``Client`` class by awaiting
++the ``.close`` method:
+ 
+ .. code-block:: python
+ 
+-   t = Thread(target=loop.start, daemon=True)
+-   t.start()
++   await s.close()
+ 
+ 
+ Worker
+ ------
+ 
+-On other nodes, start worker processes that point to the URL of the scheduler.
++.. autosummary::
++   Worker
++
++The worker follows the same API.
++The only difference is that the worker needs to know the address of the
++scheduler.
+ 
+ .. code-block:: python
+ 
+-   from distributed import Worker
+-   from tornado.ioloop import IOLoop
+-   from threading import Thread
++   import asyncio
++   from dask.distributed import Scheduler, Worker
+ 
+-   w = Worker('tcp://127.0.0.1:8786')
+-   w.start()  # choose randomly assigned port
++   async def f(scheduler_address):
++       w = await Worker(scheduler_address)
++       await w.finished()
+ 
+-   loop = IOLoop.current()
+-   loop.start()
++   asyncio.get_event_loop().run_until_complete(f("tcp://127.0.0.1:8786"))
+ 
+-Alternatively, replace ``Worker`` with ``Nanny`` if you want your workers to be
+-managed in a separate process by a local nanny process.  This allows workers to
+-restart themselves in case of failure. Also, it provides some additional monitoring, 
+-and is useful when coordinating many workers that should live in different
+-processes in order to avoid the GIL_.
++
++Start many in one event loop
++----------------------------
++
++.. autosummary::
++   Scheduler
++   Worker
++
++We can run as many of these objects as we like in the same event loop.
++
++.. code-block:: python
++
++   import asyncio
++   from dask.distributed import Scheduler, Worker
++
++   async def f():
++       s = await Scheduler()
++       w = await Worker(s.address)
++       await w.finished()
++       await s.finished()
++
++   asyncio.get_event_loop().run_until_complete(f())
++
++
++Use Context Managers
++--------------------
++
++We can also use ``async with`` context managers to make sure that we clean up
++properly.  Here is the same example as from above:
++
++.. code-block:: python
++
++   import asyncio
++   from dask.distributed import Scheduler, Worker
++
++   async def f():
++       async with Scheduler() as s:
++           async with Worker(s.address) as w:
++               await w.finished()
++               await s.finished()
++
++   asyncio.get_event_loop().run_until_complete(f())
++
++Alternatively, in the example below we also include a ``Client``, run a small
++computation, and then allow things to clean up after that computation..
++
++.. code-block:: python
++
++   import asyncio
++   from dask.distributed import Scheduler, Worker, Client
++
++   async def f():
++       async with Scheduler() as s:
++           async with Worker(s.address) as w1, Worker(s.address) as w2:
++               async with Client(s.address, asynchronous=True) as client:
++                   future = client.submit(lambda x: x + 1, 10)
++                   result = await future
++                   print(result)
++
++   asyncio.get_event_loop().run_until_complete(f())
++
++This is equivalent to creating and ``awaiting`` each server, and then calling
++``.close`` on each as we leave the context.
++In this example we don't wait on ``s.finished()``, so this will terminate
++relatively quickly.  You could have called ``await s.finished()`` though if you
++wanted this to run forever.
++
++Nanny
++-----
++
++.. autosummary::
++   Nanny
++
++Alternatively, we can replace ``Worker`` with ``Nanny`` if we want your workers
++to be managed in a separate process.  The ``Nanny`` constructor follows the
++same API. This allows workers to restart themselves in case of failure. Also,
++it provides some additional monitoring, and is useful when coordinating many
++workers that should live in different processes in order to avoid the GIL_.
++
++.. code-block:: python
++
++   # w = await Worker(s.address)
++   w = await Nanny(s.address)
+ 
+ .. _GIL: https://docs.python.org/3/glossary.html#term-gil
++
++
++API
++---
++
++Scheduler
++~~~~~~~~~
++.. autoclass:: Scheduler
++   :members:
++
++Worker
++~~~~~~
++
++.. autoclass:: Worker
++   :members:
++
++Nanny
++~~~~~
++
++.. autoclass:: Nanny
++   :members:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

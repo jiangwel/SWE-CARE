@@ -1,0 +1,2136 @@
+  Task-ID: pandas-dev__pandas-43930@fef88a7
+  Please checkout to this commit first: 61e0eeff630fb901dac29a453206831be46384df
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add interface for defining an ExtensionIndex
+These occur naturally with `.groupby(extensionarray)` and `Seres[extensionarray].value_counts`. We should define a public API so that we don't have to convert to object in these cases.
+
+You'd likely end up with an `Index` with a non-object dtype.
+
+---
+
+*more radically* this kind of removes the *need* for all our Index subclasses, aside from MultiIndex. But we can think about that separately from the interface.
+
+I don't think this is blocking for 1.0, but it may not be too much effort.
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/_libs/index.pyi b/pandas/_libs/index.pyi
+index 446a980487cde..21f1c3e147a59 100644
+--- a/pandas/_libs/index.pyi
++++ b/pandas/_libs/index.pyi
+@@ -1,9 +1,17 @@
++from typing import TYPE_CHECKING
++
+ import numpy as np
+ 
+ from pandas._typing import npt
+ 
+ from pandas import MultiIndex
+ 
++if TYPE_CHECKING:
++    from pandas.core.arrays import (
++        BaseMaskedArray,
++        ExtensionArray,
++    )
++
+ class IndexEngine:
+     over_size_threshold: bool
+     def __init__(self, values: np.ndarray): ...
+@@ -63,3 +71,39 @@ class BaseMultiIndexCodesEngine:
+         method: str,
+         limit: int | None,
+     ) -> npt.NDArray[np.intp]: ...
++
++class NullableEngine:
++    def __init__(self, values: "BaseMaskedArray"): ...
++    def __contains__(self, val: object) -> bool: ...
++    def get_loc(self, val: object) -> int | slice | np.ndarray: ...
++    def get_indexer(self, values: np.ndarray) -> npt.NDArray[np.intp]: ...
++    def get_indexer_non_unique(
++        self,
++        targets: np.ndarray,
++    ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]: ...
++    @property
++    def is_unique(self) -> bool: ...
++    @property
++    def is_monotonic_increasing(self) -> bool: ...
++    @property
++    def is_monotonic_decreasing(self) -> bool: ...
++    def sizeof(self, deep: bool = ...) -> int: ...
++    def clear_mapping(self): ...
++
++class ExtensionEngine:
++    def __init__(self, values: "ExtensionArray"): ...
++    def __contains__(self, val: object) -> bool: ...
++    def get_loc(self, val: object) -> int | slice | np.ndarray: ...
++    def get_indexer(self, values: np.ndarray) -> npt.NDArray[np.intp]: ...
++    def get_indexer_non_unique(
++        self,
++        targets: np.ndarray,
++    ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]: ...
++    @property
++    def is_unique(self) -> bool: ...
++    @property
++    def is_monotonic_increasing(self) -> bool: ...
++    @property
++    def is_monotonic_decreasing(self) -> bool: ...
++    def sizeof(self, deep: bool = ...) -> int: ...
++    def clear_mapping(self): ...
+diff --git a/pandas/_libs/index.pyx b/pandas/_libs/index.pyx
+index 92837a43e2b69..c289e21dba87e 100644
+--- a/pandas/_libs/index.pyx
++++ b/pandas/_libs/index.pyx
+@@ -33,7 +33,9 @@ from pandas._libs import (
+     hashtable as _hash,
+ )
+ 
++from pandas._libs.lib cimport eq_NA_compat
+ from pandas._libs.missing cimport (
++    C_NA as NA,
+     checknull,
+     is_matching_na,
+ )
+@@ -62,7 +64,7 @@ cdef ndarray _get_bool_indexer(ndarray values, object val):
+     if values.descr.type_num == cnp.NPY_OBJECT:
+         # i.e. values.dtype == object
+         if not checknull(val):
+-            indexer = values == val
++            indexer = eq_NA_compat(values, val)
+ 
+         else:
+             # We need to check for _matching_ NA values
+@@ -790,3 +792,522 @@ cdef class BaseMultiIndexCodesEngine:
+ 
+ # Generated from template.
+ include "index_class_helper.pxi"
++
++
++@cython.freelist(32)
++cdef class ExtensionEngine:
++    cdef readonly:
++        object values  # ExtensionArray
++        bint over_size_threshold
++
++    cdef:
++        bint unique, monotonic_inc, monotonic_dec
++        bint need_monotonic_check, need_unique_check
++
++    def __init__(self, values: "ExtensionArray"):
++        self.values = values
++
++        self.over_size_threshold = len(values) >= _SIZE_CUTOFF
++        self.need_unique_check = True
++        self.need_monotonic_check = True
++        self.need_unique_check = True
++
++    def clear_mapping(self):
++        # for compat with IndexEngine
++        pass
++
++    @property
++    def is_unique(self) -> bool:
++        if self.need_unique_check:
++            arr = self.values.unique()
++            self.unique = len(arr) == len(self.values)
++
++            self.need_unique_check = False
++        return self.unique
++
++    @property
++    def is_monotonic_increasing(self) -> bool:
++        if self.need_monotonic_check:
++            self._do_monotonic_check()
++
++        return self.monotonic_inc == 1
++
++    @property
++    def is_monotonic_decreasing(self) -> bool:
++        if self.need_monotonic_check:
++            self._do_monotonic_check()
++
++        return self.monotonic_dec == 1
++
++    cdef inline _do_monotonic_check(self):
++        cdef:
++            bint is_unique
++
++        # FIXME: shouldn't depend on non-required _values_for_argsort
++        try:
++            self.monotonic_inc, self.monotonic_dec, is_unique = \
++                self._call_monotonic(self.values._values_for_argsort())
++        except TypeError:
++            self.monotonic_inc = 0
++            self.monotonic_dec = 0
++            is_unique = 0
++
++        self.need_monotonic_check = 0
++
++        # we can only be sure of uniqueness if is_unique=1
++        if is_unique:
++            self.unique = 1
++            self.need_unique_check = 0
++
++    cdef _call_monotonic(self, values):
++        return algos.is_monotonic(values, timelike=False)
++
++    def __contains__(self, val: object) -> bool:
++        # We assume before we get here:
++        #  - val is hashable
++        try:
++            self.get_loc(val)
++            return True
++        except KeyError:
++            return False
++
++    cpdef get_loc(self, object val):
++        # -> Py_ssize_t | slice | ndarray[bool]
++        cdef:
++            Py_ssize_t loc
++
++        if is_definitely_invalid_key(val):
++            raise TypeError(f"'{val}' is an invalid key")
++
++        self._check_type(val)
++
++        if self.over_size_threshold and self.is_monotonic_increasing:
++            if not self.is_unique:
++                return self._get_loc_duplicates(val)
++
++            values = self.values
++
++            loc = self._searchsorted_left(val)
++            if loc >= len(values):
++                raise KeyError(val)
++            if values[loc] != val:
++                raise KeyError(val)
++            return loc
++
++        if not self.unique:
++            return self._get_loc_duplicates(val)
++
++        return self._get_loc_duplicates(val)
++
++    cdef Py_ssize_t _searchsorted_left(self, val) except? -1:
++        """
++        See ObjectEngine._searchsorted_left.__doc__.
++        """
++        try:
++            loc = self.values.searchsorted(val, side="left")
++        except TypeError as err:
++            # GH#35788 e.g. val=None with float64 values
++            raise KeyError(val)
++        return loc
++
++    cdef inline _get_loc_duplicates(self, object val):
++        # -> Py_ssize_t | slice | ndarray[bool]
++        cdef:
++            Py_ssize_t diff
++
++        if self.is_monotonic_increasing:
++            values = self.values
++            try:
++                left = values.searchsorted(val, side='left')
++                right = values.searchsorted(val, side='right')
++            except TypeError:
++                # e.g. GH#29189 get_loc(None) with a Float64Index
++                raise KeyError(val)
++
++            diff = right - left
++            if diff == 0:
++                raise KeyError(val)
++            elif diff == 1:
++                return left
++            else:
++                return slice(left, right)
++
++        return self._maybe_get_bool_indexer(val)
++
++    cdef ndarray _get_bool_indexer(self, val):
++        if checknull(val):
++            return self.values.isna().view("uint8")
++
++        try:
++            return self.values == val
++        except TypeError:
++            # e.g. if __eq__ returns a BooleanArray instead of ndarry[bool]
++            try:
++                return (self.values == val).to_numpy(dtype=bool, na_value=False)
++            except (TypeError, AttributeError) as err:
++                # e.g. (self.values == val) returned a bool
++                #  see test_get_loc_generator[string[pyarrow]]
++                # e.g. self.value == val raises TypeError bc generator has no len
++                #  see test_get_loc_generator[string[python]]
++                raise KeyError from err
++
++    cdef _maybe_get_bool_indexer(self, object val):
++        # Returns ndarray[bool] or int
++        cdef:
++            ndarray[uint8_t, ndim=1, cast=True] indexer
++
++        indexer = self._get_bool_indexer(val)
++        return _unpack_bool_indexer(indexer, val)
++
++    def sizeof(self, deep: bool = False) -> int:
++        """ return the sizeof our mapping """
++        return 0
++
++    def __sizeof__(self) -> int:
++        return self.sizeof()
++
++    cdef _check_type(self, object val):
++        hash(val)
++
++    def get_indexer(self, values: "ExtensionArray") -> np.ndarray:
++        # Note: we only get here with self.is_unique
++        cdef:
++            Py_ssize_t i, N = len(values)
++
++        res = np.empty(N, dtype=np.intp)
++
++        for i in range(N):
++            val = values[i]
++            try:
++                loc = self.get_loc(val)
++                # Because we are unique, loc should always be an integer
++            except KeyError:
++                loc = -1
++            else:
++                assert util.is_integer_object(loc), (loc, val)
++            res[i] = loc
++
++        return res
++
++    def get_indexer_non_unique(self, targets: "ExtensionArray"):
++        """
++        Return an indexer suitable for taking from a non unique index
++        return the labels in the same order as the target
++        and a missing indexer into the targets (which correspond
++        to the -1 indices in the results
++
++        Returns
++        -------
++        indexer : np.ndarray[np.intp]
++        missing : np.ndarray[np.intp]
++        """
++        cdef:
++            Py_ssize_t i, N = len(targets)
++
++        indexer = []
++        missing = []
++
++        # See also IntervalIndex.get_indexer_pointwise
++        for i in range(N):
++            val = targets[i]
++
++            try:
++                locs = self.get_loc(val)
++            except KeyError:
++                locs = np.array([-1], dtype=np.intp)
++                missing.append(i)
++            else:
++                if isinstance(locs, slice):
++                    # Only needed for get_indexer_non_unique
++                    locs = np.arange(locs.start, locs.stop, locs.step, dtype=np.intp)
++                elif util.is_integer_object(locs):
++                    locs = np.array([locs], dtype=np.intp)
++                else:
++                    assert locs.dtype.kind == "b"
++                    locs = locs.nonzero()[0]
++
++            indexer.append(locs)
++
++        try:
++            indexer = np.concatenate(indexer, dtype=np.intp)
++        except TypeError:
++            # numpy<1.20 doesn't accept dtype keyword
++            indexer = np.concatenate(indexer).astype(np.intp, copy=False)
++        missing = np.array(missing, dtype=np.intp)
++
++        return indexer, missing
++
++
++@cython.freelist(32)
++cdef class NullableEngine:
++
++    cdef readonly:
++        ndarray _values, _mask
++        bint over_size_threshold
++        bint has_missing
++        object values  # MaskedArray
++
++    cdef:
++        bint unique, monotonic_inc, monotonic_dec
++        bint need_monotonic_check, need_unique_check
++
++    def __init__(self, values: "MaskedArray"):
++        self.values = values
++
++        self._values = values._data
++        self._mask = values._mask
++
++        self.has_missing = values._mask.any()
++
++        self.over_size_threshold = len(values) >= _SIZE_CUTOFF
++        self.need_unique_check = True
++
++    def clear_mapping(self):
++        # for compat with IndexEngine
++        pass
++
++    @property
++    def is_unique(self) -> bool:
++        if self.need_unique_check:
++            arr = self.values.unique()
++            self.unique = len(arr) == len(self.values)
++
++            self.need_unique_check = False
++        return self.unique
++
++    @property
++    def is_monotonic_increasing(self) -> bool:
++        if self.need_monotonic_check:
++            self._do_monotonic_check()
++
++        return self.monotonic_inc == 1
++
++    @property
++    def is_monotonic_decreasing(self) -> bool:
++        if self.need_monotonic_check:
++            self._do_monotonic_check()
++
++        return self.monotonic_dec == 1
++
++    cdef inline _do_monotonic_check(self):
++        cdef:
++            bint is_unique
++
++        if self.has_missing:
++            self.monotonic_inc = 0
++            self.monotonic_dec = 0
++            self.need_monotonic_check = 0
++            return
++
++        # If there are no missing, then we can just look at self._values
++        try:
++            self.monotonic_inc, self.monotonic_dec, is_unique = \
++                self._call_monotonic(self._values)
++        except TypeError:
++            self.monotonic_inc = 0
++            self.monotonic_dec = 0
++            is_unique = 0
++
++        self.need_monotonic_check = 0
++
++        # we can only be sure of uniqueness if is_unique=1
++        if is_unique:
++            self.unique = 1
++            self.need_unique_check = 0
++
++    cdef _call_monotonic(self, values):
++        return algos.is_monotonic(values, timelike=False)
++
++    def __contains__(self, val: object) -> bool:
++        # We assume before we get here:
++        #  - val is hashable
++        try:
++            self.get_loc(val)
++            return True
++        except KeyError:
++            return False
++
++    cpdef get_loc(self, object val):
++        # -> Py_ssize_t | slice | ndarray[bool]
++        cdef:
++            Py_ssize_t loc
++
++        if is_definitely_invalid_key(val):
++            raise TypeError(f"'{val}' is an invalid key")
++
++        if val is NA:
++            # TODO: return copy? readonly view?
++            # TODO: do this later on to keep same pattern as IndexEngine?
++            if not self.has_missing:
++                raise KeyError(val)
++            return _unpack_bool_indexer(self._mask, val)
++
++        self._check_type(val)
++
++        if self.over_size_threshold and self.is_monotonic_increasing:
++            if not self.is_unique:
++                return self._get_loc_duplicates(val)
++
++            values = self.values
++
++            loc = self._searchsorted_left(val)
++            if loc >= len(values):
++                raise KeyError(val)
++            if values[loc] != val:
++                raise KeyError(val)
++            return loc
++
++        if not self.unique:
++            return self._get_loc_duplicates(val)
++
++        return self._get_loc_duplicates(val)
++
++    cdef Py_ssize_t _searchsorted_left(self, val) except? -1:
++        """
++        See ObjectEngine._searchsorted_left.__doc__.
++        """
++        try:
++            loc = self.values.searchsorted(val, side="left")
++        except TypeError as err:
++            # GH#35788 e.g. val=None with float64 values
++            raise KeyError(val)
++        return loc
++
++    cdef inline _get_loc_duplicates(self, object val):
++        # -> Py_ssize_t | slice | ndarray[bool]
++        cdef:
++            Py_ssize_t diff
++
++        if self.is_monotonic_increasing:
++            values = self.values
++            try:
++                left = values.searchsorted(val, side='left')
++                right = values.searchsorted(val, side='right')
++            except TypeError:
++                # e.g. GH#29189 get_loc(None) with a Float64Index
++                raise KeyError(val)
++
++            diff = right - left
++            if diff == 0:
++                raise KeyError(val)
++            elif diff == 1:
++                return left
++            else:
++                return slice(left, right)
++
++        return self._maybe_get_bool_indexer(val)
++
++    cdef _get_bool_indexer(self, val):
++        if val is NA:
++            # TODO: KeyError(val) if not has_missing?
++            # TODO: readonly? copy?
++            return self._mask.view("uint8")
++
++        if util.is_nan(val):
++            res = np.isnan(self._values)
++        else:
++            res = self._values == val
++
++        res[self._mask] = False
++        return res
++
++    cdef _maybe_get_bool_indexer(self, object val):
++        # Returns ndarray[bool] or int
++        cdef:
++            ndarray[uint8_t, ndim=1, cast=True] indexer
++
++        indexer = self._get_bool_indexer(val)
++        return _unpack_bool_indexer(indexer, val)
++
++    def sizeof(self, deep: bool = False) -> int:
++        """ return the sizeof our mapping """
++        return 0
++
++    def __sizeof__(self) -> int:
++        return self.sizeof()
++
++    cdef _check_type(self, object val):
++        kind = self._values.dtype.kind
++        if kind in ["i", "u"]:
++            if not util.is_integer_object(val):
++                raise KeyError(val)
++            if kind == "u":
++                if val < 0:
++                    # cannot have negative values with unsigned int dtype
++                    raise KeyError(val)
++        elif kind == "b":
++            if not util.is_bool_object(val):
++                raise KeyError(val)
++        else:
++            if not util.is_integer_object(val) and not util.is_float_object(val):
++                # in particular catch bool and avoid casting True -> 1.0
++                raise KeyError(val)
++
++    def get_indexer(self, values: "MaskedArray") -> np.ndarray:
++        # Note: we only get here with self.is_unique
++        cdef:
++            Py_ssize_t i, N = len(values)
++
++        res = np.empty(N, dtype=np.intp)
++
++        for i in range(N):
++            val = values[i]
++            try:
++                loc = self.get_loc(val)
++                # Because we are unique, loc should always be an integer
++            except KeyError:
++                loc = -1
++            else:
++                assert util.is_integer_object(loc), (loc, val)
++
++            res[i] = loc
++
++        return res
++
++    def get_indexer_non_unique(self, targets: "MaskedArray"):
++        """
++        Return an indexer suitable for taking from a non unique index
++        return the labels in the same order as the target
++        and a missing indexer into the targets (which correspond
++        to the -1 indices in the results
++
++        Returns
++        -------
++        indexer : np.ndarray[np.intp]
++        missing : np.ndarray[np.intp]
++        """
++        cdef:
++            Py_ssize_t i, N = len(targets)
++
++        indexer = []
++        missing = []
++
++        # See also IntervalIndex.get_indexer_pointwise
++        for i in range(N):
++            val = targets[i]
++
++            try:
++                locs = self.get_loc(val)
++            except KeyError:
++                locs = np.array([-1], dtype=np.intp)
++                missing.append(i)
++            else:
++                if isinstance(locs, slice):
++                    # Only needed for get_indexer_non_unique
++                    locs = np.arange(locs.start, locs.stop, locs.step, dtype=np.intp)
++                elif util.is_integer_object(locs):
++                    locs = np.array([locs], dtype=np.intp)
++                else:
++                    assert locs.dtype.kind == "b"
++                    locs = locs.nonzero()[0]
++
++            indexer.append(locs)
++
++        try:
++            indexer = np.concatenate(indexer, dtype=np.intp)
++        except TypeError:
++            # numpy<1.20 doesn't accept dtype keyword
++            indexer = np.concatenate(indexer).astype(np.intp, copy=False)
++        missing = np.array(missing, dtype=np.intp)
++
++        return indexer, missing
+diff --git a/pandas/_libs/lib.pxd b/pandas/_libs/lib.pxd
+index b3c72c30a74de..46a339f2e7cbb 100644
+--- a/pandas/_libs/lib.pxd
++++ b/pandas/_libs/lib.pxd
+@@ -1 +1,6 @@
++from numpy cimport ndarray
++
++
+ cdef bint c_is_list_like(object, bint) except -1
++
++cpdef ndarray eq_NA_compat(ndarray[object] arr, object key)
+diff --git a/pandas/_libs/lib.pyx b/pandas/_libs/lib.pyx
+index ec89e52e2eff7..08eef27913f82 100644
+--- a/pandas/_libs/lib.pyx
++++ b/pandas/_libs/lib.pyx
+@@ -3028,3 +3028,23 @@ def is_bool_list(obj: list) -> bool:
+ 
+     # Note: we return True for empty list
+     return True
++
++
++cpdef ndarray eq_NA_compat(ndarray[object] arr, object key):
++    cdef:
++        ndarray[uint8_t, cast=True] result = np.empty(len(arr), dtype=bool)
++        Py_ssize_t i
++        object item
++
++    if key is C_NA:
++        for i in range(len(arr)):
++            item = arr[i]
++            result[i] = item is C_NA
++    else:
++        for i in range(len(arr)):
++            item = arr[i]
++            if item is C_NA:
++                result[i] = False
++            else:
++                result[i] = item == key  # FIXME: compat for other NAs
++    return result
+diff --git a/pandas/_testing/asserters.py b/pandas/_testing/asserters.py
+index c9f7fd43c1050..696b237935dd2 100644
+--- a/pandas/_testing/asserters.py
++++ b/pandas/_testing/asserters.py
+@@ -42,6 +42,7 @@
+     take_nd,
+ )
+ from pandas.core.arrays import (
++    BaseMaskedArray,
+     DatetimeArray,
+     ExtensionArray,
+     IntervalArray,
+@@ -401,9 +402,16 @@ def _get_ilevel_values(index, level):
+     # skip exact index checking when `check_categorical` is False
+     if check_exact and check_categorical:
+         if not left.equals(right):
+-            diff = (
+-                np.sum((left._values != right._values).astype(int)) * 100.0 / len(left)
+-            )
++            mismatch = left._values != right._values
++
++            if isinstance(mismatch, BaseMaskedArray):
++                lvalues = cast(BaseMaskedArray, left._values)
++                rvalues = cast(BaseMaskedArray, right._values)
++                mismatch = mismatch.to_numpy(dtype=int, na_value=0)
++                mismask = lvalues._mask ^ rvalues._mask
++                mismatch[mismask] = 1
++
++            diff = np.sum(mismatch.astype(int)) * 100.0 / len(left)
+             msg = f"{obj} values are different ({np.round(diff, 5)} %)"
+             raise_assert_detail(obj, msg, left, right)
+     else:
+diff --git a/pandas/conftest.py b/pandas/conftest.py
+index 65d4b936efe44..a2b47153b6ee1 100644
+--- a/pandas/conftest.py
++++ b/pandas/conftest.py
+@@ -67,6 +67,14 @@
+     MultiIndex,
+ )
+ 
++try:
++    import pyarrow as pa
++except ImportError:
++    has_pyarrow = False
++else:
++    del pa
++    has_pyarrow = True
++
+ # Until https://github.com/numpy/numpy/issues/19078 is sorted out, just suppress
+ suppress_npdev_promotion_warning = pytest.mark.filterwarnings(
+     "ignore:Promotion of numbers and bools:FutureWarning"
+@@ -512,7 +520,17 @@ def _create_mi_with_dt64tz_level():
+     "mi-with-dt64tz-level": _create_mi_with_dt64tz_level(),
+     "multi": _create_multiindex(),
+     "repeats": Index([0, 0, 1, 1, 2, 2]),
++    # TODO: make sure we have cases that also have NA values
++    #  (not allowed in this fixture)
++    "nullable_int": Index(np.arange(100), dtype="Int64"),
++    "nullable_uint": Index(np.arange(100), dtype="UInt16"),
++    "nullable_float": Index(np.arange(100), dtype="Float32"),
++    "nullable_bool": Index(np.arange(100).astype(bool), dtype="boolean"),
++    "string-python": Index(pd.array(tm.makeStringIndex(100), dtype="string[python]")),
+ }
++if has_pyarrow:
++    idx = Index(pd.array(tm.makeStringIndex(100), dtype="string[pyarrow]"))
++    indices_dict["string-pyarrow"] = idx
+ 
+ 
+ @pytest.fixture(params=indices_dict.keys())
+diff --git a/pandas/core/algorithms.py b/pandas/core/algorithms.py
+index c1b587ce3a6b2..a1005d5f2cf9f 100644
+--- a/pandas/core/algorithms.py
++++ b/pandas/core/algorithms.py
+@@ -1848,5 +1848,5 @@ def union_with_duplicates(lvals: ArrayLike, rvals: ArrayLike) -> ArrayLike:
+     unique_array = ensure_wrapped_if_datetimelike(unique_array)
+ 
+     for i, value in enumerate(unique_array):
+-        indexer += [i] * int(max(l_count[value], r_count[value]))
++        indexer += [i] * int(max(l_count.at[value], r_count.at[value]))
+     return unique_array.take(indexer)
+diff --git a/pandas/core/arrays/base.py b/pandas/core/arrays/base.py
+index 46b505e7384b4..e2241b2461d19 100644
+--- a/pandas/core/arrays/base.py
++++ b/pandas/core/arrays/base.py
+@@ -1363,6 +1363,25 @@ def _reduce(self, name: str, *, skipna: bool = True, **kwargs):
+     # ------------------------------------------------------------------------
+     # Non-Optimized Default Methods
+ 
++    def putmask(self, mask: np.ndarray, value) -> None:
++        """
++        Analogue to np.putmask(self, mask, value)
++
++        Parameters
++        ----------
++        mask : np.ndarray[bool]
++        value : scalar or listlike
++
++        Raises
++        ------
++        TypeError
++            If value cannot be inserted into self.
++        """
++        if not is_list_like(value):
++            self[mask] = value
++        else:
++            self[mask] = value[mask]
++
+     def tolist(self) -> list:
+         """
+         Return a list of the values.
+diff --git a/pandas/core/arrays/floating.py b/pandas/core/arrays/floating.py
+index 6d6cc03a1c83e..1dee05954d8d5 100644
+--- a/pandas/core/arrays/floating.py
++++ b/pandas/core/arrays/floating.py
+@@ -108,6 +108,8 @@ def coerce_to_array(
+     if dtype is None and hasattr(values, "dtype"):
+         if is_float_dtype(values.dtype):
+             dtype = values.dtype
++            if dtype == "float16":
++                raise TypeError("FloatingArray does not support float16 dtype")
+ 
+     if dtype is not None:
+         if isinstance(dtype, str) and dtype.startswith("Float"):
+@@ -254,7 +256,12 @@ def dtype(self) -> FloatingDtype:
+         return FLOAT_STR_TO_DTYPE[str(self._data.dtype)]
+ 
+     def __init__(self, values: np.ndarray, mask: np.ndarray, copy: bool = False):
+-        if not (isinstance(values, np.ndarray) and values.dtype.kind == "f"):
++        if not (
++            isinstance(values, np.ndarray)
++            and values.dtype.kind == "f"
++            and values.dtype.itemsize > 2
++        ):
++            # We do not support float16
+             raise TypeError(
+                 "values should be floating numpy array. Use "
+                 "the 'pd.array' function instead"
+@@ -422,6 +429,9 @@ def _maybe_mask_result(self, result, mask, other, op_name: str):
+ 
+         return type(self)(result, mask, copy=False)
+ 
++    def isna(self):
++        return self._mask | np.isnan(self._data)
++
+ 
+ _dtype_docstring = """
+ An ExtensionDtype for {dtype} data.
+diff --git a/pandas/core/arrays/masked.py b/pandas/core/arrays/masked.py
+index 0247cd717edec..e8b2d0791a2de 100644
+--- a/pandas/core/arrays/masked.py
++++ b/pandas/core/arrays/masked.py
+@@ -452,6 +452,10 @@ def reconstruct(x):
+                 m = mask.copy()
+                 return IntegerArray(x, m)
+             elif is_float_dtype(x.dtype):
++                if x.dtype.itemsize <= 2:
++                    # reached in e.g. np.sqrt on BooleanArray
++                    # we don't support float16
++                    x = x.astype(np.float32)
+                 m = mask.copy()
+                 return FloatingArray(x, m)
+             else:
+@@ -610,10 +614,7 @@ def value_counts(self, dropna: bool = True) -> Series:
+         data = self._data[~self._mask]
+         value_counts = Index(data).value_counts()
+ 
+-        # TODO(extension)
+-        # if we have allow Index to hold an ExtensionArray
+-        # this is easier
+-        index = value_counts.index._values.astype(object)
++        index = value_counts.index
+ 
+         # if we want nans, count the mask
+         if dropna:
+@@ -623,10 +624,9 @@ def value_counts(self, dropna: bool = True) -> Series:
+             counts[:-1] = value_counts
+             counts[-1] = self._mask.sum()
+ 
+-            index = Index(
+-                np.concatenate([index, np.array([self.dtype.na_value], dtype=object)]),
+-                dtype=object,
+-            )
++            index = index.insert(len(index), self.dtype.na_value)
++
++        index = index.astype(self.dtype)
+ 
+         mask = np.zeros(len(counts), dtype="bool")
+         counts = IntegerArray(counts, mask)
+diff --git a/pandas/core/arrays/sparse/array.py b/pandas/core/arrays/sparse/array.py
+index 960544a2f89ea..4af9d5fefe96d 100644
+--- a/pandas/core/arrays/sparse/array.py
++++ b/pandas/core/arrays/sparse/array.py
+@@ -954,10 +954,10 @@ def __getitem__(
+                 # mypy doesn't know we have an array here
+                 key = cast(np.ndarray, key)
+                 return self.take(np.arange(len(key), dtype=np.int32)[key])
+-            elif hasattr(key, "__len__"):
++            elif lib.is_list_like(key):
+                 return self.take(key)
+             else:
+-                raise ValueError(f"Cannot slice with '{key}'")
++                raise IndexError(f"Cannot slice with '{key}'")
+ 
+         return type(self)(data_slice, kind=self.kind)
+ 
+diff --git a/pandas/core/arrays/string_.py b/pandas/core/arrays/string_.py
+index e9fb5bdf80045..0fa6044345645 100644
+--- a/pandas/core/arrays/string_.py
++++ b/pandas/core/arrays/string_.py
+@@ -473,7 +473,9 @@ def max(self, axis=None, skipna: bool = True, **kwargs) -> Scalar:
+     def value_counts(self, dropna: bool = True):
+         from pandas import value_counts
+ 
+-        return value_counts(self._ndarray, dropna=dropna).astype("Int64")
++        result = value_counts(self._ndarray, dropna=dropna).astype("Int64")
++        result.index = result.index.astype(self.dtype)
++        return result
+ 
+     def memory_usage(self, deep: bool = False) -> int:
+         result = self._ndarray.nbytes
+diff --git a/pandas/core/arrays/string_arrow.py b/pandas/core/arrays/string_arrow.py
+index b3278a81e93b7..10cc78ecdba5e 100644
+--- a/pandas/core/arrays/string_arrow.py
++++ b/pandas/core/arrays/string_arrow.py
+@@ -622,8 +622,7 @@ def value_counts(self, dropna: bool = True) -> Series:
+         # No missing values so we can adhere to the interface and return a numpy array.
+         counts = np.array(counts)
+ 
+-        # Index cannot hold ExtensionArrays yet
+-        index = Index(type(self)(values)).astype(object)
++        index = Index(type(self)(values))
+ 
+         return Series(counts, index=index).astype("Int64")
+ 
+diff --git a/pandas/core/indexes/base.py b/pandas/core/indexes/base.py
+index 0cbe16c9aaf13..7538017c29663 100644
+--- a/pandas/core/indexes/base.py
++++ b/pandas/core/indexes/base.py
+@@ -34,7 +34,6 @@
+ )
+ from pandas._libs.tslibs import (
+     IncompatibleFrequency,
+-    NaTType,
+     OutOfBoundsDatetime,
+     Timestamp,
+     tz_compare,
+@@ -68,6 +67,7 @@
+     can_hold_element,
+     find_common_type,
+     infer_dtype_from,
++    maybe_cast_pointwise_result,
+     validate_numeric_casting,
+ )
+ from pandas.core.dtypes.common import (
+@@ -138,6 +138,7 @@
+     tz_to_dtype,
+     validate_tz_from_dtype,
+ )
++from pandas.core.arrays.masked import BaseMaskedArray
+ from pandas.core.arrays.sparse import SparseDtype
+ from pandas.core.base import (
+     IndexOpsMixin,
+@@ -359,7 +360,10 @@ def _outer_indexer(
+ 
+     _typ: str = "index"
+     _data: ExtensionArray | np.ndarray
+-    _data_cls: type[np.ndarray] | type[ExtensionArray] = np.ndarray
++    _data_cls: type[ExtensionArray] | tuple[type[np.ndarray], type[ExtensionArray]] = (
++        np.ndarray,
++        ExtensionArray,
++    )
+     _id: object | None = None
+     _name: Hashable = None
+     # MultiIndex.levels previously allowed setting the index name. We
+@@ -377,7 +381,9 @@ def _outer_indexer(
+     # associated code in pandas 2.0.
+     _is_backward_compat_public_numeric_index: bool = False
+ 
+-    _engine_type: type[libindex.IndexEngine] = libindex.ObjectEngine
++    _engine_type: type[libindex.IndexEngine] | type[libindex.NullableEngine] | type[
++        libindex.ExtensionEngine
++    ] = libindex.ObjectEngine
+     # whether we support partial string indexing. Overridden
+     # in DatetimeIndex and PeriodIndex
+     _supports_partial_string_indexing = False
+@@ -414,8 +420,9 @@ def __new__(
+             validate_tz_from_dtype(dtype, tz)
+             dtype = tz_to_dtype(tz)
+ 
+-        if isinstance(data, PandasArray):
+-            # ensure users don't accidentally put a PandasArray in an index.
++        if type(data) is PandasArray:
++            # ensure users don't accidentally put a PandasArray in an index,
++            #  but don't unpack StringArray
+             data = data.to_numpy()
+         if isinstance(dtype, PandasDtype):
+             dtype = dtype.numpy_dtype
+@@ -437,7 +444,6 @@ def __new__(
+ 
+             ea_cls = dtype.construct_array_type()
+             data = ea_cls._from_sequence(data, dtype=dtype, copy=copy)
+-            data = np.asarray(data, dtype=object)
+             disallow_kwargs(kwargs)
+             return Index._simple_new(data, name=name)
+ 
+@@ -449,8 +455,8 @@ def __new__(
+                     return result.astype(dtype, copy=False)
+                 return result
+ 
+-            data = np.array(data, dtype=object, copy=copy)
+             disallow_kwargs(kwargs)
++            data = extract_array(data, extract_numpy=True)
+             return Index._simple_new(data, name=name)
+ 
+         # index-like
+@@ -660,6 +666,7 @@ def _with_infer(cls, *args, **kwargs):
+         Constructor that uses the 1.0.x behavior inferring numeric dtypes
+         for ndarray[object] inputs.
+         """
++
+         with warnings.catch_warnings():
+             warnings.filterwarnings("ignore", ".*the Index constructor", FutureWarning)
+             result = cls(*args, **kwargs)
+@@ -828,13 +835,24 @@ def _cleanup(self) -> None:
+         self._engine.clear_mapping()
+ 
+     @cache_readonly
+-    def _engine(self) -> libindex.IndexEngine:
++    def _engine(
++        self,
++    ) -> libindex.IndexEngine | libindex.NullableEngine | libindex.ExtensionEngine:
+         # For base class (object dtype) we get ObjectEngine
+ 
++        if isinstance(self._values, BaseMaskedArray):
++            return libindex.NullableEngine(self._values)
++        elif (
++            isinstance(self._values, ExtensionArray)
++            and self._engine_type is libindex.ObjectEngine
++        ):
++            return libindex.ExtensionEngine(self._values)
++
++        engine_type = cast("type[libindex.IndexEngine]", self._engine_type)
+         # to avoid a reference cycle, bind `target_values` to a local variable, so
+         # `self` is not passed into the lambda.
+         target_values = self._get_engine_target()
+-        return self._engine_type(target_values)
++        return engine_type(target_values)
+ 
+     @final
+     @cache_readonly
+@@ -1064,9 +1082,16 @@ def take(
+ 
+         # Note: we discard fill_value and use self._na_value, only relevant
+         #  in the case where allow_fill is True and fill_value is not None
+-        taken = algos.take(
+-            self._values, indices, allow_fill=allow_fill, fill_value=self._na_value
+-        )
++        values = self._values
++        if isinstance(values, np.ndarray):
++            taken = algos.take(
++                values, indices, allow_fill=allow_fill, fill_value=self._na_value
++            )
++        else:
++            # algos.take passes 'axis' keyword which not all EAs accept
++            taken = values.take(
++                indices, allow_fill=allow_fill, fill_value=self._na_value
++            )
+         # _constructor so RangeIndex->Int64Index
+         return self._constructor._simple_new(taken, name=self.name)
+ 
+@@ -2560,8 +2585,12 @@ def __reduce__(self):
+     # --------------------------------------------------------------------
+     # Null Handling Methods
+ 
+-    _na_value: float | NaTType = np.nan
+-    """The expected NA value to use with this index."""
++    @cache_readonly
++    def _na_value(self):
++        """The expected NA value to use with this index."""
++        if isinstance(self.dtype, np.dtype):
++            return np.nan
++        return self.dtype.na_value
+ 
+     @cache_readonly
+     def _isnan(self) -> npt.NDArray[np.bool_]:
+@@ -3437,7 +3466,7 @@ def symmetric_difference(self, other, result_name=None, sort=None):
+         res_values = concat_compat([left_diff, right_diff])
+         res_values = _maybe_try_sort(res_values, sort)
+ 
+-        result = Index(res_values, name=result_name)
++        result = Index(res_values, name=result_name, dtype=res_values.dtype)
+ 
+         if self._is_multi:
+             self = cast("MultiIndex", self)
+@@ -3461,7 +3490,13 @@ def _assert_can_do_setop(self, other) -> bool:
+ 
+     def _convert_can_do_setop(self, other) -> tuple[Index, Hashable]:
+         if not isinstance(other, Index):
+-            other = Index(other, name=self.name)
++            # TODO(2.0): no need to special-case here once _with_infer
++            #  deprecation is enforced
++            if hasattr(other, "dtype"):
++                other = Index(other, name=self.name, dtype=other.dtype)
++            else:
++                # e.g. list
++                other = Index(other, name=self.name)
+             result_name = self.name
+         else:
+             result_name = get_op_result_name(self, other)
+@@ -3687,7 +3722,7 @@ def _get_indexer(
+             if target._is_multi and self._is_multi:
+                 engine = self._engine
+                 # error: "IndexEngine" has no attribute "_extract_level_codes"
+-                tgt_values = engine._extract_level_codes(  # type: ignore[attr-defined]
++                tgt_values = engine._extract_level_codes(  # type: ignore[union-attr]
+                     target
+                 )
+ 
+@@ -3767,7 +3802,7 @@ def _get_fill_indexer(
+             # TODO: get_indexer_with_fill docstring says values must be _sorted_
+             #  but that doesn't appear to be enforced
+             # error: "IndexEngine" has no attribute "get_indexer_with_fill"
+-            return self._engine.get_indexer_with_fill(  # type: ignore[attr-defined]
++            return self._engine.get_indexer_with_fill(  # type: ignore[union-attr]
+                 target=target._values, values=self._values, method=method, limit=limit
+             )
+ 
+@@ -4439,8 +4474,7 @@ def _join_non_unique(
+         if isinstance(join_array, np.ndarray):
+             np.putmask(join_array, mask, right)
+         else:
+-            # error: "ExtensionArray" has no attribute "putmask"
+-            join_array.putmask(mask, right)  # type: ignore[attr-defined]
++            join_array.putmask(mask, right)
+ 
+         join_index = self._wrap_joined_index(join_array, other)
+ 
+@@ -5046,8 +5080,7 @@ def putmask(self, mask, value) -> Index:
+         else:
+             # Note: we use the original value here, not converted, as
+             #  _validate_fill_value is not idempotent
+-            # error: "ExtensionArray" has no attribute "putmask"
+-            values.putmask(mask, value)  # type: ignore[attr-defined]
++            values.putmask(mask, value)
+ 
+         return self._shallow_copy(values)
+ 
+@@ -5609,9 +5642,7 @@ def get_indexer_non_unique(
+         if self._is_multi and target._is_multi:
+             engine = self._engine
+             # error: "IndexEngine" has no attribute "_extract_level_codes"
+-            tgt_values = engine._extract_level_codes(  # type: ignore[attr-defined]
+-                target
+-            )
++            tgt_values = engine._extract_level_codes(target)  # type: ignore[union-attr]
+ 
+         indexer, missing = self._engine.get_indexer_non_unique(tgt_values)
+         return ensure_platform_int(indexer), ensure_platform_int(missing)
+@@ -5813,9 +5844,6 @@ def _maybe_promote(self, other: Index) -> tuple[Index, Index]:
+         elif self.inferred_type == "timedelta" and isinstance(other, ABCTimedeltaIndex):
+             # TODO: we dont have tests that get here
+             return type(other)(self), other
+-        elif self.inferred_type == "boolean":
+-            if not is_object_dtype(self.dtype):
+-                return self.astype("object"), other.astype("object")
+ 
+         elif self.dtype.kind == "u" and other.dtype.kind == "i":
+             # GH#41873
+@@ -5968,6 +5996,15 @@ def map(self, mapper, na_action=None):
+             # empty
+             dtype = self.dtype
+ 
++        # e.g. if we are floating and new_values is all ints, then we
++        #  don't want to cast back to floating.  But if we are UInt64
++        #  and new_values is all ints, we want to try.
++        same_dtype = lib.infer_dtype(new_values, skipna=False) == self.inferred_type
++        if same_dtype:
++            new_values = maybe_cast_pointwise_result(
++                new_values, self.dtype, same_dtype=same_dtype
++            )
++
+         if self._is_backward_compat_public_numeric_index and is_numeric_dtype(
+             new_values.dtype
+         ):
+@@ -5975,7 +6012,8 @@ def map(self, mapper, na_action=None):
+                 new_values, dtype=dtype, copy=False, name=self.name
+             )
+ 
+-        return Index._with_infer(new_values, dtype=dtype, copy=False, name=self.name)
++        result = Index._with_infer(new_values, dtype=dtype, copy=False, name=self.name)
++        return result
+ 
+     # TODO: De-duplicate with map, xref GH#32349
+     @final
+diff --git a/pandas/core/indexes/category.py b/pandas/core/indexes/category.py
+index 005c5f75e6cfa..e037a7e0ed75f 100644
+--- a/pandas/core/indexes/category.py
++++ b/pandas/core/indexes/category.py
+@@ -462,7 +462,7 @@ def reindex(
+         else:
+             # e.g. test_reindex_with_categoricalindex, test_reindex_duplicate_target
+             new_target = np.asarray(new_target)
+-            new_target = Index(new_target, name=self.name)
++            new_target = Index._with_infer(new_target, name=self.name)
+ 
+         return new_target, indexer
+ 
+diff --git a/pandas/core/indexes/interval.py b/pandas/core/indexes/interval.py
+index 5791f89828ca3..7c61b31b8ef66 100644
+--- a/pandas/core/indexes/interval.py
++++ b/pandas/core/indexes/interval.py
+@@ -727,7 +727,14 @@ def _get_indexer_pointwise(
+                 if isinstance(locs, slice):
+                     # Only needed for get_indexer_non_unique
+                     locs = np.arange(locs.start, locs.stop, locs.step, dtype="intp")
+-                locs = np.array(locs, ndmin=1)
++                elif lib.is_integer(locs):
++                    locs = np.array(locs, ndmin=1)
++                else:
++                    # FIXME: This is wrong; its boolean; not reached
++                    # error: Item "int" of "Union[int, ndarray[Any, Any]]"
++                    #  has no attribute "dtype"
++                    assert locs.dtype.kind == "i"  # type: ignore[union-attr]
++
+             except KeyError:
+                 missing.append(i)
+                 locs = np.array([-1])
+diff --git a/pandas/core/indexes/multi.py b/pandas/core/indexes/multi.py
+index fe97d61be7548..febd0ce1279e8 100644
+--- a/pandas/core/indexes/multi.py
++++ b/pandas/core/indexes/multi.py
+@@ -283,6 +283,13 @@ class MultiIndex(Index):
+     of the mentioned helper methods.
+     """
+ 
++    # error: Incompatible types in assignment (expression has type
++    # "Type[BaseMultiIndexCodesEngine]", base class "Index" defined the type as
++    # "Union[Type[IndexEngine], Type[NullableEngine], Type[ExtensionEngine]]")
++    _engine_type: type[
++        libindex.BaseMultiIndexCodesEngine
++    ] = libindex.BaseMultiIndexCodesEngine  # type: ignore[assignment]
++
+     _hidden_attrs = Index._hidden_attrs | frozenset()
+ 
+     # initialize to zero-length tuples to make everything work
+diff --git a/pandas/core/indexing.py b/pandas/core/indexing.py
+index 669274e034905..68e914a186381 100644
+--- a/pandas/core/indexing.py
++++ b/pandas/core/indexing.py
+@@ -993,7 +993,9 @@ def _validate_key(self, key, axis: int):
+         # slice of labels (where start-end in labels)
+         # slice of integers (only if in the labels)
+         # boolean not in slice and with boolean index
+-        if isinstance(key, bool) and not is_bool_dtype(self.obj.index):
++        if isinstance(key, bool) and not (
++            is_bool_dtype(self.obj.index) or self.obj.index.dtype.name == "boolean"
++        ):
+             raise KeyError(
+                 f"{key}: boolean label can not be used without a boolean index"
+             )
+diff --git a/pandas/tests/arithmetic/test_numeric.py b/pandas/tests/arithmetic/test_numeric.py
+index 9932adccdbaf2..d14a236ef3f83 100644
+--- a/pandas/tests/arithmetic/test_numeric.py
++++ b/pandas/tests/arithmetic/test_numeric.py
+@@ -1403,14 +1403,23 @@ def test_integer_array_add_list_like(
+     left = container + box_1d_array(data)
+     right = box_1d_array(data) + container
+ 
+-    if Series == box_pandas_1d_array:
+-        expected = Series(expected_data, dtype="Int64")
+-    elif Series == box_1d_array:
+-        expected = Series(expected_data, dtype="object")
+-    elif Index in (box_pandas_1d_array, box_1d_array):
+-        expected = Int64Index(expected_data)
++    if Series in [box_1d_array, box_pandas_1d_array]:
++        cls = Series
++    elif Index in [box_1d_array, box_pandas_1d_array]:
++        cls = Index
+     else:
+-        expected = np.array(expected_data, dtype="object")
++        cls = np.array
++
++    if box_pandas_1d_array in [Index, Series]:
++        expected = cls(expected_data, dtype="Int64")
++
++    elif box_1d_array == Index:
++        # tm.to_array casts to object, Index constructor does inference
++        expected = cls(expected_data, dtype="int64")
++
++    else:
++        # tm.to_array casts to object, no inference
++        expected = cls(expected_data, dtype="object")
+ 
+     tm.assert_equal(left, expected)
+     tm.assert_equal(right, expected)
+diff --git a/pandas/tests/arrays/boolean/test_function.py b/pandas/tests/arrays/boolean/test_function.py
+index d90655b6e2820..6871fbb1e29d2 100644
+--- a/pandas/tests/arrays/boolean/test_function.py
++++ b/pandas/tests/arrays/boolean/test_function.py
+@@ -77,18 +77,21 @@ def test_ufunc_reduce_raises(values):
+ def test_value_counts_na():
+     arr = pd.array([True, False, pd.NA], dtype="boolean")
+     result = arr.value_counts(dropna=False)
+-    expected = pd.Series([1, 1, 1], index=[True, False, pd.NA], dtype="Int64")
++    expected = pd.Series([1, 1, 1], index=arr, dtype="Int64")
++    assert expected.index.dtype == arr.dtype
+     tm.assert_series_equal(result, expected)
+ 
+     result = arr.value_counts(dropna=True)
+-    expected = pd.Series([1, 1], index=[True, False], dtype="Int64")
++    expected = pd.Series([1, 1], index=arr[:-1], dtype="Int64")
++    assert expected.index.dtype == arr.dtype
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_with_normalize():
+-    s = pd.Series([True, False, pd.NA], dtype="boolean")
+-    result = s.value_counts(normalize=True)
+-    expected = pd.Series([1, 1], index=[True, False], dtype="Float64") / 2
++    ser = pd.Series([True, False, pd.NA], dtype="boolean")
++    result = ser.value_counts(normalize=True)
++    expected = pd.Series([1, 1], index=ser[:-1], dtype="Float64") / 2
++    assert expected.index.dtype == "boolean"
+     tm.assert_series_equal(result, expected)
+ 
+ 
+diff --git a/pandas/tests/arrays/categorical/test_constructors.py b/pandas/tests/arrays/categorical/test_constructors.py
+index ee24ecb4964ec..05ea29081cc7c 100644
+--- a/pandas/tests/arrays/categorical/test_constructors.py
++++ b/pandas/tests/arrays/categorical/test_constructors.py
+@@ -728,7 +728,8 @@ def test_categorical_extension_array_nullable(self, nulls_fixture):
+         # GH:
+         arr = pd.arrays.StringArray._from_sequence([nulls_fixture] * 2)
+         result = Categorical(arr)
+-        expected = Categorical(Series([pd.NA, pd.NA], dtype="object"))
++        assert arr.dtype == result.categories.dtype
++        expected = Categorical(Series([pd.NA, pd.NA], dtype=arr.dtype))
+         tm.assert_categorical_equal(result, expected)
+ 
+     def test_from_sequence_copy(self):
+diff --git a/pandas/tests/arrays/floating/test_function.py b/pandas/tests/arrays/floating/test_function.py
+index ef95eac316397..f96cbb8366564 100644
+--- a/pandas/tests/arrays/floating/test_function.py
++++ b/pandas/tests/arrays/floating/test_function.py
+@@ -97,26 +97,30 @@ def test_stat_method(pandasmethname, kwargs):
+ def test_value_counts_na():
+     arr = pd.array([0.1, 0.2, 0.1, pd.NA], dtype="Float64")
+     result = arr.value_counts(dropna=False)
+-    expected = pd.Series([2, 1, 1], index=[0.1, 0.2, pd.NA], dtype="Int64")
++    idx = pd.Index([0.1, 0.2, pd.NA], dtype=arr.dtype)
++    assert idx.dtype == arr.dtype
++    expected = pd.Series([2, 1, 1], index=idx, dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+     result = arr.value_counts(dropna=True)
+-    expected = pd.Series([2, 1], index=[0.1, 0.2], dtype="Int64")
++    expected = pd.Series([2, 1], index=idx[:-1], dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_empty():
+-    s = pd.Series([], dtype="Float64")
+-    result = s.value_counts()
+-    idx = pd.Index([], dtype="object")
++    ser = pd.Series([], dtype="Float64")
++    result = ser.value_counts()
++    idx = pd.Index([], dtype="Float64")
++    assert idx.dtype == "Float64"
+     expected = pd.Series([], index=idx, dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_with_normalize():
+-    s = pd.Series([0.1, 0.2, 0.1, pd.NA], dtype="Float64")
+-    result = s.value_counts(normalize=True)
+-    expected = pd.Series([2, 1], index=[0.1, 0.2], dtype="Float64") / 3
++    ser = pd.Series([0.1, 0.2, 0.1, pd.NA], dtype="Float64")
++    result = ser.value_counts(normalize=True)
++    expected = pd.Series([2, 1], index=ser[:2], dtype="Float64") / 3
++    assert expected.index.dtype == ser.dtype
+     tm.assert_series_equal(result, expected)
+ 
+ 
+diff --git a/pandas/tests/arrays/integer/test_dtypes.py b/pandas/tests/arrays/integer/test_dtypes.py
+index f8b1ea2ebde23..c71ba7209cc44 100644
+--- a/pandas/tests/arrays/integer/test_dtypes.py
++++ b/pandas/tests/arrays/integer/test_dtypes.py
+@@ -72,7 +72,8 @@ def test_construct_index(all_data, dropna):
+         other = all_data
+ 
+     result = pd.Index(pd.array(other, dtype=all_data.dtype))
+-    expected = pd.Index(other, dtype=object)
++    expected = pd.Index(other, dtype=all_data.dtype)
++    assert all_data.dtype == expected.dtype  # dont coerce to object
+ 
+     tm.assert_index_equal(result, expected)
+ 
+diff --git a/pandas/tests/arrays/integer/test_function.py b/pandas/tests/arrays/integer/test_function.py
+index 6f53b44776900..306bac96da3d0 100644
+--- a/pandas/tests/arrays/integer/test_function.py
++++ b/pandas/tests/arrays/integer/test_function.py
+@@ -108,29 +108,33 @@ def test_stat_method(pandasmethname, kwargs):
+ def test_value_counts_na():
+     arr = pd.array([1, 2, 1, pd.NA], dtype="Int64")
+     result = arr.value_counts(dropna=False)
+-    expected = pd.Series([2, 1, 1], index=[1, 2, pd.NA], dtype="Int64")
++    ex_index = pd.Index([1, 2, pd.NA], dtype="Int64")
++    assert ex_index.dtype == "Int64"
++    expected = pd.Series([2, 1, 1], index=ex_index, dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+     result = arr.value_counts(dropna=True)
+-    expected = pd.Series([2, 1], index=[1, 2], dtype="Int64")
++    expected = pd.Series([2, 1], index=arr[:2], dtype="Int64")
++    assert expected.index.dtype == arr.dtype
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_empty():
+     # https://github.com/pandas-dev/pandas/issues/33317
+-    s = pd.Series([], dtype="Int64")
+-    result = s.value_counts()
+-    # TODO: The dtype of the index seems wrong (it's int64 for non-empty)
+-    idx = pd.Index([], dtype="object")
++    ser = pd.Series([], dtype="Int64")
++    result = ser.value_counts()
++    idx = pd.Index([], dtype=ser.dtype)
++    assert idx.dtype == ser.dtype
+     expected = pd.Series([], index=idx, dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_with_normalize():
+     # GH 33172
+-    s = pd.Series([1, 2, 1, pd.NA], dtype="Int64")
+-    result = s.value_counts(normalize=True)
+-    expected = pd.Series([2, 1], index=[1, 2], dtype="Float64") / 3
++    ser = pd.Series([1, 2, 1, pd.NA], dtype="Int64")
++    result = ser.value_counts(normalize=True)
++    expected = pd.Series([2, 1], index=ser[:2], dtype="Float64") / 3
++    assert expected.index.dtype == ser.dtype
+     tm.assert_series_equal(result, expected)
+ 
+ 
+diff --git a/pandas/tests/arrays/string_/test_string.py b/pandas/tests/arrays/string_/test_string.py
+index 501a79a8bc5ed..90d29d5ac3f56 100644
+--- a/pandas/tests/arrays/string_/test_string.py
++++ b/pandas/tests/arrays/string_/test_string.py
+@@ -466,18 +466,18 @@ def test_arrow_load_from_zero_chunks(dtype, string_storage2):
+ def test_value_counts_na(dtype):
+     arr = pd.array(["a", "b", "a", pd.NA], dtype=dtype)
+     result = arr.value_counts(dropna=False)
+-    expected = pd.Series([2, 1, 1], index=["a", "b", pd.NA], dtype="Int64")
++    expected = pd.Series([2, 1, 1], index=arr[[0, 1, 3]], dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+     result = arr.value_counts(dropna=True)
+-    expected = pd.Series([2, 1], index=["a", "b"], dtype="Int64")
++    expected = pd.Series([2, 1], index=arr[:2], dtype="Int64")
+     tm.assert_series_equal(result, expected)
+ 
+ 
+ def test_value_counts_with_normalize(dtype):
+-    s = pd.Series(["a", "b", "a", pd.NA], dtype=dtype)
+-    result = s.value_counts(normalize=True)
+-    expected = pd.Series([2, 1], index=["a", "b"], dtype="Float64") / 3
++    ser = pd.Series(["a", "b", "a", pd.NA], dtype=dtype)
++    result = ser.value_counts(normalize=True)
++    expected = pd.Series([2, 1], index=ser[:2], dtype="Float64") / 3
+     tm.assert_series_equal(result, expected)
+ 
+ 
+diff --git a/pandas/tests/base/test_misc.py b/pandas/tests/base/test_misc.py
+index c0250e2b3e958..d4708cb4dcfcc 100644
+--- a/pandas/tests/base/test_misc.py
++++ b/pandas/tests/base/test_misc.py
+@@ -10,6 +10,7 @@
+ 
+ from pandas.core.dtypes.common import (
+     is_categorical_dtype,
++    is_dtype_equal,
+     is_object_dtype,
+ )
+ 
+@@ -76,12 +77,16 @@ def test_memory_usage(index_or_series_obj):
+     res = obj.memory_usage()
+     res_deep = obj.memory_usage(deep=True)
+ 
++    is_ser = isinstance(obj, Series)
+     is_object = is_object_dtype(obj) or (
+         isinstance(obj, Series) and is_object_dtype(obj.index)
+     )
+     is_categorical = is_categorical_dtype(obj.dtype) or (
+         isinstance(obj, Series) and is_categorical_dtype(obj.index.dtype)
+     )
++    is_string = is_dtype_equal(obj, "string[python]") or (
++        is_ser and is_dtype_equal(obj.index.dtype, "string[python]")
++    )
+ 
+     if len(obj) == 0:
+         if isinstance(obj, Index):
+@@ -89,9 +94,10 @@ def test_memory_usage(index_or_series_obj):
+         else:
+             expected = 108 if IS64 else 64
+         assert res_deep == res == expected
+-    elif is_object or is_categorical:
++    elif is_object or is_categorical or is_string:
+         # only deep will pick them up
+         assert res_deep > res
++        assert res_deep > res
+     else:
+         assert res == res_deep
+ 
+@@ -150,6 +156,14 @@ def test_access_by_position(index):
+     assert index[-1] == index[size - 1]
+ 
+     msg = f"index {size} is out of bounds for axis 0 with size {size}"
++    try:
++        eq = is_dtype_equal(index.dtype, "string[pyarrow]")
++    except ImportError:
++        # TODO(GH#44276) is_dtype_equal can raise here
++        eq = False
++
++    if eq:
++        msg = "index out of bounds"
+     with pytest.raises(IndexError, match=msg):
+         index[size]
+     msg = "single positional indexer is out-of-bounds"
+diff --git a/pandas/tests/base/test_value_counts.py b/pandas/tests/base/test_value_counts.py
+index 5431baf493260..a5f143590ba03 100644
+--- a/pandas/tests/base/test_value_counts.py
++++ b/pandas/tests/base/test_value_counts.py
+@@ -32,10 +32,16 @@ def test_value_counts(index_or_series_obj):
+     if isinstance(obj, pd.MultiIndex):
+         expected.index = Index(expected.index)
+ 
++    if not isinstance(result.dtype, np.dtype):
++        # TODO: be more specific
++        # i.e IntegerDtype
++        expected = expected.astype(result.dtype)
++
+     # TODO: Order of entries with the same count is inconsistent on CI (gh-32449)
+     if obj.duplicated().any():
+         result = result.sort_index()
+         expected = expected.sort_index()
++
+     tm.assert_series_equal(result, expected)
+ 
+ 
+@@ -70,12 +76,18 @@ def test_value_counts_null(null_obj, index_or_series_obj):
+         #  Order of entries with the same count is inconsistent on CI (gh-32449)
+         expected = expected.sort_index()
+         result = result.sort_index()
++
++    if not isinstance(result.dtype, np.dtype):
++        # TODO: be more specific
++        # i.e IntegerDtype
++        expected = expected.astype(result.dtype)
+     tm.assert_series_equal(result, expected)
+ 
+     # can't use expected[null_obj] = 3 as
+     # IntervalIndex doesn't allow assignment
+-    new_entry = Series({np.nan: 3}, dtype=np.int64)
+-    expected = expected.append(new_entry)
++    # TODO: test that both expected.append(Series({np.nan: 3}, dtype=np.int64))
++    #  and expected[null_obj] = 3 work with IntegerNAIndex
++    expected[null_obj] = 3
+ 
+     result = obj.value_counts(dropna=False)
+     if obj.duplicated().any():
+diff --git a/pandas/tests/extension/base/ea_index.py b/pandas/tests/extension/base/ea_index.py
+new file mode 100644
+index 0000000000000..8309842f7134f
+--- /dev/null
++++ b/pandas/tests/extension/base/ea_index.py
+@@ -0,0 +1,11 @@
++"""
++Tests for Indexes backed by arbitrary ExtensionArrays.
++"""
++import pandas as pd
++from pandas.tests.extension.base.base import BaseExtensionTests
++
++
++class BaseExtensionIndexTests(BaseExtensionTests):
++    def test_index_from_array(self, data):
++        idx = pd.Index(data)
++        assert data.dtype == idx.dtype
+diff --git a/pandas/tests/extension/json/array.py b/pandas/tests/extension/json/array.py
+index befbf3b445d62..538ca83667ef5 100644
+--- a/pandas/tests/extension/json/array.py
++++ b/pandas/tests/extension/json/array.py
+@@ -33,6 +33,7 @@
+ 
+ from pandas.core.dtypes.cast import construct_1d_object_array_from_listlike
+ from pandas.core.dtypes.common import (
++    is_bool_dtype,
+     is_list_like,
+     pandas_dtype,
+ )
+@@ -42,7 +43,6 @@
+     ExtensionArray,
+     ExtensionDtype,
+ )
+-from pandas.api.types import is_bool_dtype
+ from pandas.core.indexers import unpack_tuple_and_ellipses
+ 
+ 
+diff --git a/pandas/tests/extension/json/test_json.py b/pandas/tests/extension/json/test_json.py
+index f090396a70724..d5ecd8909319e 100644
+--- a/pandas/tests/extension/json/test_json.py
++++ b/pandas/tests/extension/json/test_json.py
+@@ -306,6 +306,20 @@ def test_groupby_extension_apply(self):
+         we'll be able to dispatch unique.
+         """
+ 
++    @unhashable
++    def test_groupby_extension_agg(self):
++        """
++        This fails when we get to tm.assert_series_equal when left.index
++        contains dictionaries, which are not hashable.
++        """
++
++    @unhashable
++    def test_groupby_extension_no_sort(self):
++        """
++        This fails when we get to tm.assert_series_equal when left.index
++        contains dictionaries, which are not hashable.
++        """
++
+     @pytest.mark.xfail(reason="GH#39098: Converts agg result to object")
+     def test_groupby_agg_extension(self, data_for_grouping):
+         super().test_groupby_agg_extension(data_for_grouping)
+diff --git a/pandas/tests/extension/test_string.py b/pandas/tests/extension/test_string.py
+index 5049116a9320e..af6c149447d15 100644
+--- a/pandas/tests/extension/test_string.py
++++ b/pandas/tests/extension/test_string.py
+@@ -18,6 +18,8 @@
+ import numpy as np
+ import pytest
+ 
++from pandas.compat import pa_version_under2p0
++
+ import pandas as pd
+ from pandas.core.arrays import ArrowStringArray
+ from pandas.core.arrays.string_ import StringDtype
+@@ -186,7 +188,12 @@ class TestPrinting(base.BasePrintingTests):
+ 
+ 
+ class TestGroupBy(base.BaseGroupbyTests):
+-    pass
++    def test_groupby_extension_transform(self, data_for_grouping, request):
++        if data_for_grouping.dtype.storage == "pyarrow" and pa_version_under2p0:
++            # failure observed in 1.0.1, not in 2.0 or later
++            mark = pytest.mark.xfail(reason="pyarrow raises in self._data[item]")
++            request.node.add_marker(mark)
++        super().test_groupby_extension_transform(data_for_grouping)
+ 
+ 
+ class Test2DCompat(base.Dim2CompatTests):
+diff --git a/pandas/tests/frame/test_reductions.py b/pandas/tests/frame/test_reductions.py
+index 258e4e6eb0cc9..d30d810703594 100644
+--- a/pandas/tests/frame/test_reductions.py
++++ b/pandas/tests/frame/test_reductions.py
+@@ -1067,7 +1067,7 @@ def test_idxmax_idxmin_convert_dtypes(self, op, expected_value):
+         result = getattr(df, op)()
+         expected = DataFrame(
+             {"value": expected_value},
+-            index=Index([100, 200], name="ID"),
++            index=Index([100, 200], name="ID", dtype="Int64"),
+         )
+         tm.assert_frame_equal(result, expected)
+ 
+diff --git a/pandas/tests/groupby/test_function.py b/pandas/tests/groupby/test_function.py
+index 3c402480ea2ec..fccf20d46d2eb 100644
+--- a/pandas/tests/groupby/test_function.py
++++ b/pandas/tests/groupby/test_function.py
+@@ -1126,7 +1126,7 @@ def test_apply_to_nullable_integer_returns_float(values, function):
+     # https://github.com/pandas-dev/pandas/issues/32219
+     output = 0.5 if function == "var" else 1.5
+     arr = np.array([output] * 3, dtype=float)
+-    idx = Index([1, 2, 3], name="a")
++    idx = Index([1, 2, 3], name="a", dtype="Int64")
+     expected = DataFrame({"b": arr}, index=idx).astype("Float64")
+ 
+     groups = DataFrame(values, dtype="Int64").groupby("a")
+@@ -1146,7 +1146,7 @@ def test_groupby_sum_below_mincount_nullable_integer():
+     # https://github.com/pandas-dev/pandas/issues/32861
+     df = DataFrame({"a": [0, 1, 2], "b": [0, 1, 2], "c": [0, 1, 2]}, dtype="Int64")
+     grouped = df.groupby("a")
+-    idx = Index([0, 1, 2], name="a")
++    idx = Index([0, 1, 2], name="a", dtype="Int64")
+ 
+     result = grouped["b"].sum(min_count=2)
+     expected = Series([pd.NA] * 3, dtype="Int64", index=idx, name="b")
+diff --git a/pandas/tests/groupby/test_quantile.py b/pandas/tests/groupby/test_quantile.py
+index bcb2abeed75e4..1badc4aa7995a 100644
+--- a/pandas/tests/groupby/test_quantile.py
++++ b/pandas/tests/groupby/test_quantile.py
+@@ -251,14 +251,14 @@ def test_groupby_quantile_NA_float(any_float_dtype):
+     # GH#42849
+     df = DataFrame({"x": [1, 1], "y": [0.2, np.nan]}, dtype=any_float_dtype)
+     result = df.groupby("x")["y"].quantile(0.5)
+-    expected = pd.Series([0.2], dtype=float, index=[1.0], name="y")
+-    expected.index.name = "x"
++    exp_index = Index([1.0], dtype=any_float_dtype, name="x")
++    expected = pd.Series([0.2], dtype=float, index=exp_index, name="y")
+     tm.assert_series_equal(expected, result)
+ 
+     result = df.groupby("x")["y"].quantile([0.5, 0.75])
+     expected = pd.Series(
+         [0.2] * 2,
+-        index=pd.MultiIndex.from_product(([1.0], [0.5, 0.75]), names=["x", None]),
++        index=pd.MultiIndex.from_product((exp_index, [0.5, 0.75]), names=["x", None]),
+         name="y",
+     )
+     tm.assert_series_equal(result, expected)
+@@ -268,11 +268,13 @@ def test_groupby_quantile_NA_int(any_int_ea_dtype):
+     # GH#42849
+     df = DataFrame({"x": [1, 1], "y": [2, 5]}, dtype=any_int_ea_dtype)
+     result = df.groupby("x")["y"].quantile(0.5)
+-    expected = pd.Series([3.5], dtype=float, index=Index([1], name="x"), name="y")
++    expected = pd.Series(
++        [3.5], dtype=float, index=Index([1], name="x", dtype=any_int_ea_dtype), name="y"
++    )
+     tm.assert_series_equal(expected, result)
+ 
+     result = df.groupby("x").quantile(0.5)
+-    expected = DataFrame({"y": 3.5}, index=Index([1], name="x"))
++    expected = DataFrame({"y": 3.5}, index=Index([1], name="x", dtype=any_int_ea_dtype))
+     tm.assert_frame_equal(result, expected)
+ 
+ 
+@@ -281,7 +283,9 @@ def test_groupby_quantile_allNA_column(dtype):
+     # GH#42849
+     df = DataFrame({"x": [1, 1], "y": [pd.NA] * 2}, dtype=dtype)
+     result = df.groupby("x")["y"].quantile(0.5)
+-    expected = pd.Series([np.nan], dtype=float, index=[1.0], name="y")
++    expected = pd.Series(
++        [np.nan], dtype=float, index=Index([1.0], dtype=dtype), name="y"
++    )
+     expected.index.name = "x"
+     tm.assert_series_equal(expected, result)
+ 
+diff --git a/pandas/tests/indexes/common.py b/pandas/tests/indexes/common.py
+index e34620d4caf17..db98ab9a83136 100644
+--- a/pandas/tests/indexes/common.py
++++ b/pandas/tests/indexes/common.py
+@@ -10,9 +10,7 @@
+ 
+ from pandas.core.dtypes.common import (
+     is_datetime64tz_dtype,
+-    is_float_dtype,
+     is_integer_dtype,
+-    is_unsigned_integer_dtype,
+ )
+ from pandas.core.dtypes.dtypes import CategoricalDtype
+ 
+@@ -36,6 +34,7 @@
+     Int64Index,
+     UInt64Index,
+ )
++from pandas.core.arrays import BaseMaskedArray
+ 
+ 
+ class Base:
+@@ -294,6 +293,33 @@ def test_ensure_copied_data(self, index):
+         elif isinstance(index, IntervalIndex):
+             # checked in test_interval.py
+             pass
++        elif type(index) is Index and not isinstance(index.dtype, np.dtype):
++            result = index_type(index.values, copy=False, **init_kwargs)
++            tm.assert_index_equal(result, index)
++
++            if isinstance(index._values, BaseMaskedArray):
++                assert np.shares_memory(index._values._data, result._values._data)
++                tm.assert_numpy_array_equal(
++                    index._values._data, result._values._data, check_same="same"
++                )
++                assert np.shares_memory(index._values._mask, result._values._mask)
++                tm.assert_numpy_array_equal(
++                    index._values._mask, result._values._mask, check_same="same"
++                )
++            elif index.dtype == "string[python]":
++                assert np.shares_memory(index._values._ndarray, result._values._ndarray)
++                tm.assert_numpy_array_equal(
++                    index._values._ndarray, result._values._ndarray, check_same="same"
++                )
++            elif index.dtype == "string[pyarrow]":
++                # https://github.com/pandas-dev/pandas/pull/43930#discussion_r736862669
++                result_pa_data = result._values._data
++                index_pa_data = index._values._data
++                res_buf1 = result_pa_data.chunk(0).buffers()[1]
++                idx_buf1 = index_pa_data.chunk(0).buffers()[1]
++                assert res_buf1.address == idx_buf1.address
++            else:
++                raise NotImplementedError(index.dtype)
+         else:
+             result = index_type(index.values, copy=False, **init_kwargs)
+             tm.assert_numpy_array_equal(index.values, result.values, check_same="same")
+@@ -313,7 +339,10 @@ def test_memory_usage(self, index):
+ 
+         # RangeIndex, IntervalIndex
+         # don't have engines
+-        if not isinstance(index, (RangeIndex, IntervalIndex)):
++        # Index[EA] has engine but it does not have a Hashtable .mapping
++        if not isinstance(index, (RangeIndex, IntervalIndex)) and not (
++            type(index) is Index and not isinstance(index.dtype, np.dtype)
++        ):
+             assert result2 > result
+ 
+         if index.inferred_type == "object":
+@@ -460,7 +489,9 @@ def test_equals(self, index):
+ 
+         assert index.equals(index)
+         assert index.equals(index.copy())
+-        assert index.equals(index.astype(object))
++        if not (type(index) is Index and not isinstance(index.dtype, np.dtype)):
++            # doesn't hold for e.g. IntegerDtype
++            assert index.equals(index.astype(object))
+ 
+         assert not index.equals(list(index))
+         assert not index.equals(np.array(index))
+@@ -617,20 +648,9 @@ def test_map(self, simple_index):
+         # callable
+         idx = simple_index
+ 
+-        # we don't infer UInt64
+-        if is_integer_dtype(idx.dtype):
+-            expected = idx.astype("int64")
+-        elif is_float_dtype(idx.dtype):
+-            expected = idx.astype("float64")
+-            if idx._is_backward_compat_public_numeric_index:
+-                # We get a NumericIndex back, not Float64Index
+-                expected = type(idx)(expected)
+-        else:
+-            expected = idx
+-
+         result = idx.map(lambda x: x)
+         # For RangeIndex we convert to Int64Index
+-        tm.assert_index_equal(result, expected, exact="equiv")
++        tm.assert_index_equal(result, idx, exact="equiv")
+ 
+     @pytest.mark.parametrize(
+         "mapper",
+@@ -647,23 +667,20 @@ def test_map_dictlike(self, mapper, simple_index):
+ 
+         identity = mapper(idx.values, idx)
+ 
+-        # we don't infer to UInt64 for a dict
+-        if is_unsigned_integer_dtype(idx.dtype) and isinstance(identity, dict):
+-            expected = idx.astype("int64")
+-        else:
+-            expected = idx
+-
+         result = idx.map(identity)
+         # For RangeIndex we convert to Int64Index
+-        tm.assert_index_equal(result, expected, exact="equiv")
++        tm.assert_index_equal(result, idx, exact="equiv")
+ 
+         # empty mappable
++        dtype = None
+         if idx._is_backward_compat_public_numeric_index:
+             new_index_cls = NumericIndex
++            if idx.dtype.kind == "f":
++                dtype = idx.dtype
+         else:
+             new_index_cls = Float64Index
+ 
+-        expected = new_index_cls([np.nan] * len(idx))
++        expected = new_index_cls([np.nan] * len(idx), dtype=dtype)
+         result = idx.map(mapper(expected, idx))
+         tm.assert_index_equal(result, expected)
+ 
+diff --git a/pandas/tests/indexes/test_any_index.py b/pandas/tests/indexes/test_any_index.py
+index 39a1ddcbc8a6a..05fb48db1fa1d 100644
+--- a/pandas/tests/indexes/test_any_index.py
++++ b/pandas/tests/indexes/test_any_index.py
+@@ -3,11 +3,8 @@
+ """
+ import re
+ 
+-import numpy as np
+ import pytest
+ 
+-from pandas.core.dtypes.common import is_float_dtype
+-
+ import pandas._testing as tm
+ 
+ 
+@@ -49,16 +46,7 @@ def test_mutability(index):
+ def test_map_identity_mapping(index):
+     # GH#12766
+     result = index.map(lambda x: x)
+-    if index._is_backward_compat_public_numeric_index:
+-        if is_float_dtype(index.dtype):
+-            expected = index.astype(np.float64)
+-        elif index.dtype == np.uint64:
+-            expected = index.astype(np.uint64)
+-        else:
+-            expected = index.astype(np.int64)
+-    else:
+-        expected = index
+-    tm.assert_index_equal(result, expected, exact="equiv")
++    tm.assert_index_equal(result, index, exact="equiv")
+ 
+ 
+ def test_wrong_number_names(index):
+@@ -137,9 +125,18 @@ def test_slice_keeps_name(self, index):
+     # FutureWarning from non-tuple sequence of nd indexing
+     @pytest.mark.filterwarnings("ignore::FutureWarning")
+     def test_getitem_error(self, index, item):
+-        msg = r"index 101 is out of bounds for axis 0 with size [\d]+|" + re.escape(
+-            "only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) "
+-            "and integer or boolean arrays are valid indices"
++        msg = "|".join(
++            [
++                r"index 101 is out of bounds for axis 0 with size [\d]+",
++                re.escape(
++                    "only integers, slices (`:`), ellipsis (`...`), "
++                    "numpy.newaxis (`None`) and integer or boolean arrays "
++                    "are valid indices"
++                ),
++                "index out of bounds",  # string[pyarrow]
++                "Only integers, slices and integer or "
++                "boolean arrays are valid indices.",  # string[pyarrow]
++            ]
+         )
+         with pytest.raises(IndexError, match=msg):
+             index[item]
+diff --git a/pandas/tests/indexes/test_base.py b/pandas/tests/indexes/test_base.py
+index f1ece3e363bb6..32889b47344bd 100644
+--- a/pandas/tests/indexes/test_base.py
++++ b/pandas/tests/indexes/test_base.py
+@@ -672,7 +672,15 @@ def test_map_dictlike(self, index, mapper):
+                 exp_dtype = np.float64
+             else:
+                 exp_dtype = np.int64
++            exp_dtype = index.dtype
+             expected = index._constructor(np.arange(len(index), 0, -1), dtype=exp_dtype)
++        elif type(index) is Index and index.dtype != object:
++            # i.e. EA-backed, for now just Nullable
++            expected = Index(np.arange(len(index), 0, -1), dtype=index.dtype)
++        elif index.dtype.kind == "u":
++            # TODO: case where e.g. we cannot hold result in UInt8?
++            expected = Index(np.arange(len(index), 0, -1), dtype=index.dtype)
++
+         else:
+             expected = Index(np.arange(len(index), 0, -1))
+ 
+diff --git a/pandas/tests/indexes/test_common.py b/pandas/tests/indexes/test_common.py
+index ed9243a5ba8d0..574163366fee0 100644
+--- a/pandas/tests/indexes/test_common.py
++++ b/pandas/tests/indexes/test_common.py
+@@ -404,7 +404,9 @@ def test_sort_values_with_missing(index_with_missing, na_position):
+         sorted_values = np.concatenate([[None] * missing_count, sorted_values])
+     else:
+         sorted_values = np.concatenate([sorted_values, [None] * missing_count])
+-    expected = type(index_with_missing)(sorted_values)
++
++    # Explicitly pass dtype needed for Index backed by EA e.g. IntegerArray
++    expected = type(index_with_missing)(sorted_values, dtype=index_with_missing.dtype)
+ 
+     result = index_with_missing.sort_values(na_position=na_position)
+     tm.assert_index_equal(result, expected)
+diff --git a/pandas/tests/indexes/test_numpy_compat.py b/pandas/tests/indexes/test_numpy_compat.py
+index 93b51cf9611f9..0c9b40f464e30 100644
+--- a/pandas/tests/indexes/test_numpy_compat.py
++++ b/pandas/tests/indexes/test_numpy_compat.py
+@@ -10,6 +10,7 @@
+ )
+ import pandas._testing as tm
+ from pandas.core.api import Float64Index
++from pandas.core.arrays import BooleanArray
+ from pandas.core.indexes.datetimelike import DatetimeIndexOpsMixin
+ 
+ 
+@@ -49,14 +50,21 @@ def test_numpy_ufuncs_basic(index, func):
+         with tm.external_error_raised((TypeError, AttributeError)):
+             with np.errstate(all="ignore"):
+                 func(index)
+-    elif isinstance(index, NumericIndex):
++    elif isinstance(index, NumericIndex) or (
++        not isinstance(index.dtype, np.dtype) and index.dtype._is_numeric
++    ):
+         # coerces to float (e.g. np.sin)
+         with np.errstate(all="ignore"):
+             result = func(index)
+             exp = Index(func(index.values), name=index.name)
+ 
+         tm.assert_index_equal(result, exp)
+-        assert isinstance(result, Float64Index)
++        if type(index) is not Index:
++            # i.e NumericIndex
++            assert isinstance(result, Float64Index)
++        else:
++            # e.g. np.exp with Int64 -> Float64
++            assert type(result) is Index
+     else:
+         # raise AttributeError or TypeError
+         if len(index) == 0:
+@@ -87,10 +95,16 @@ def test_numpy_ufuncs_other(index, func, request):
+         with tm.external_error_raised(TypeError):
+             func(index)
+ 
+-    elif isinstance(index, NumericIndex):
++    elif isinstance(index, NumericIndex) or (
++        not isinstance(index.dtype, np.dtype) and index.dtype._is_numeric
++    ):
+         # Results in bool array
+         result = func(index)
+-        assert isinstance(result, np.ndarray)
++        if not isinstance(index.dtype, np.dtype):
++            # e.g. Int64 we expect to get BooleanArray back
++            assert isinstance(result, BooleanArray)
++        else:
++            assert isinstance(result, np.ndarray)
+         assert not isinstance(result, Index)
+     else:
+         if len(index) == 0:
+diff --git a/pandas/tests/indexes/test_setops.py b/pandas/tests/indexes/test_setops.py
+index a0e97223435e6..5e2c2a55fa713 100644
+--- a/pandas/tests/indexes/test_setops.py
++++ b/pandas/tests/indexes/test_setops.py
+@@ -9,6 +9,7 @@
+ import pytest
+ 
+ from pandas.core.dtypes.cast import find_common_type
++from pandas.core.dtypes.common import is_dtype_equal
+ 
+ from pandas import (
+     CategoricalIndex,
+@@ -46,12 +47,24 @@ def test_union_same_types(index):
+     assert idx1.union(idx2).dtype == idx1.dtype
+ 
+ 
+-def test_union_different_types(index_flat, index_flat2):
++def test_union_different_types(index_flat, index_flat2, request):
+     # This test only considers combinations of indices
+     # GH 23525
+     idx1 = index_flat
+     idx2 = index_flat2
+ 
++    if (
++        not idx1.is_unique
++        and idx1.dtype.kind == "i"
++        and is_dtype_equal(idx2.dtype, "boolean")
++    ) or (
++        not idx2.is_unique
++        and idx2.dtype.kind == "i"
++        and is_dtype_equal(idx1.dtype, "boolean")
++    ):
++        mark = pytest.mark.xfail(reason="GH#44000 True==1", raises=ValueError)
++        request.node.add_marker(mark)
++
+     common_dtype = find_common_type([idx1.dtype, idx2.dtype])
+ 
+     any_uint64 = idx1.dtype == np.uint64 or idx2.dtype == np.uint64
+@@ -195,7 +208,14 @@ def test_union_base(self, index):
+         first = index[3:]
+         second = index[:5]
+         everything = index
+-        union = first.union(second)
++
++        warn = None
++        if is_dtype_equal(index.dtype, "boolean") and index.isna().any():
++            warn = RuntimeWarning
++
++        msg = "boolean value of NA is ambiguous"
++        with tm.assert_produces_warning(warn, match=msg):
++            union = first.union(second)
+         assert tm.equalContents(union, everything)
+ 
+         if is_datetime64tz_dtype(index.dtype):
+diff --git a/pandas/tests/indexing/test_indexing.py b/pandas/tests/indexing/test_indexing.py
+index d6402e027be98..871e4c518eb72 100644
+--- a/pandas/tests/indexing/test_indexing.py
++++ b/pandas/tests/indexing/test_indexing.py
+@@ -99,6 +99,13 @@ def test_getitem_ndarray_3d(
+             msgs.append("Data must be 1-dimensional")
+         if len(index) == 0 or isinstance(index, pd.MultiIndex):
+             msgs.append("positional indexers are out-of-bounds")
++        if type(index) is Index and not isinstance(index._values, np.ndarray):
++            # e.g. Int64
++            msgs.append("values must be a 1D array")
++
++            # string[pyarrow]
++            msgs.append("only handle 1-dimensional arrays")
++
+         msg = "|".join(msgs)
+ 
+         potential_errors = (IndexError, ValueError, NotImplementedError)
+diff --git a/pandas/tests/series/methods/test_astype.py b/pandas/tests/series/methods/test_astype.py
+index 732d375d136d0..a9833e746ecb2 100644
+--- a/pandas/tests/series/methods/test_astype.py
++++ b/pandas/tests/series/methods/test_astype.py
+@@ -427,9 +427,13 @@ def test_astype_string_to_extension_dtype_roundtrip(
+             )
+             request.node.add_marker(mark)
+         # GH-40351
+-        s = Series(data, dtype=dtype)
+-        result = s.astype(nullable_string_dtype).astype(dtype)
+-        tm.assert_series_equal(result, s)
++        ser = Series(data, dtype=dtype)
++
++        # Note: just passing .astype(dtype) fails for dtype="category"
++        #  with bc ser.dtype.categories will be object dtype whereas
++        #  result.dtype.categories will have string dtype
++        result = ser.astype(nullable_string_dtype).astype(ser.dtype)
++        tm.assert_series_equal(result, ser)
+ 
+ 
+ class TestAstypeCategorical:
+diff --git a/pandas/tests/strings/test_extract.py b/pandas/tests/strings/test_extract.py
+index 16ec4a8c6831c..0f4ffccd8ad7f 100644
+--- a/pandas/tests/strings/test_extract.py
++++ b/pandas/tests/strings/test_extract.py
+@@ -257,8 +257,7 @@ def test_extract_expand_True_single_capture_group(index_or_series, any_string_dt
+     # single group renames series/index properly
+     s_or_idx = index_or_series(["A1", "A2"], dtype=any_string_dtype)
+     result = s_or_idx.str.extract(r"(?P<uno>A)\d", expand=True)
+-    expected_dtype = "object" if index_or_series is Index else any_string_dtype
+-    expected = DataFrame({"uno": ["A", "A"]}, dtype=expected_dtype)
++    expected = DataFrame({"uno": ["A", "A"]}, dtype=any_string_dtype)
+     tm.assert_frame_equal(result, expected)
+ 
+ 
+diff --git a/pandas/tests/test_algos.py b/pandas/tests/test_algos.py
+index 779d6e6b6bb0f..2c7b5a7cccd95 100644
+--- a/pandas/tests/test_algos.py
++++ b/pandas/tests/test_algos.py
+@@ -2446,6 +2446,5 @@ def test_union_with_duplicates(op):
+         result = algos.union_with_duplicates(lvals, rvals)
+         tm.assert_numpy_array_equal(result, expected)
+     else:
+-        with tm.assert_produces_warning(RuntimeWarning):
+-            result = algos.union_with_duplicates(lvals, rvals)
++        result = algos.union_with_duplicates(lvals, rvals)
+         tm.assert_extension_array_equal(result, expected)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

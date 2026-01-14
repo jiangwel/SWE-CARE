@@ -1,0 +1,354 @@
+  Task-ID: skypilot-org__skypilot-5435@50d9632
+  Please checkout to this commit first: 7b804dafe2f6b775f8a357ac6e147b83e792af93
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support launch controller and jobs on different cloud
+we should support it from our codebase instead of the buildkite infra. For example:
+
+`sky jobs launch --controller_cloud aws --cloud gcp`
+
+We don’t necessarily need to support these exact parameters, but provide a way to configure the controller cloud and set this in the test case.
+  </issue>
+  
+  <patch>
+  diff --git a/.buildkite/generate_pipeline.py b/.buildkite/generate_pipeline.py
+index 3ea4d9eb27f..3cce4b17e35 100644
+--- a/.buildkite/generate_pipeline.py
++++ b/.buildkite/generate_pipeline.py
+@@ -114,6 +114,8 @@ def _parse_args(args: Optional[str] = None):
+ 
+     parser.add_argument('--base-branch')
+ 
++    parser.add_argument('--controller-cloud')
++
+     parsed_args, _ = parser.parse_known_args(args_list)
+ 
+     # Collect chosen clouds from the flags
+@@ -142,6 +144,8 @@ def _parse_args(args: Optional[str] = None):
+         extra_args.append('--remote-server')
+     if parsed_args.base_branch:
+         extra_args.append(f'--base-branch {parsed_args.base_branch}')
++    if parsed_args.controller_cloud:
++        extra_args.append(f'--controller-cloud {parsed_args.controller_cloud}')
+ 
+     return default_clouds_to_run, parsed_args.k, extra_args
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 6c24bcb0919..79ad4518ca4 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -140,6 +140,12 @@ def pytest_addoption(parser):
+         default='master',
+         help='Base branch to test backward compatibility against',
+     )
++    parser.addoption(
++        '--controller-cloud',
++        type=str,
++        default=None,
++        help='Controller cloud to use for tests',
++    )
+ 
+ 
+ def pytest_configure(config):
+@@ -437,3 +443,16 @@ def setup_docker_container(request):
+         # Release the lock and close the file
+         fcntl.flock(lock_fd, fcntl.LOCK_UN)
+         lock_fd.close()
++
++
++@pytest.fixture(scope='session', autouse=True)
++def setup_controller_cloud_env(request):
++    """Setup controller cloud environment variable if --controller-cloud is specified."""
++    if not request.config.getoption('--controller-cloud'):
++        yield
++        return
++
++    # Set environment variable to indicate we're using remote server
++    controller_cloud = request.config.getoption('--controller-cloud')
++    os.environ['PYTEST_SKYPILOT_CONTROLLER_CLOUD'] = controller_cloud
++    yield controller_cloud
+diff --git a/tests/smoke_tests/smoke_tests_utils.py b/tests/smoke_tests/smoke_tests_utils.py
+index 7300319385d..49d11443aa9 100644
+--- a/tests/smoke_tests/smoke_tests_utils.py
++++ b/tests/smoke_tests/smoke_tests_utils.py
+@@ -8,7 +8,8 @@
+ import subprocess
+ import sys
+ import tempfile
+-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
++from typing import (Any, Dict, Generator, List, NamedTuple, Optional, Sequence,
++                    Set, Tuple)
+ import uuid
+ 
+ import colorama
+@@ -355,6 +356,64 @@ def terminate_gcp_replica(name: str, zone: str, replica_id: int) -> str:
+             f' --quiet $({query_cmd})')
+ 
+ 
++@contextlib.contextmanager
++def override_sky_config(
++    test: Test, env_dict: Dict[str, str]
++) -> Generator[Optional[tempfile.NamedTemporaryFile], None, None]:
++
++    def deep_update(base_dict: Dict[str, Any],
++                    update_dict: Dict[str, Any]) -> Dict[str, Any]:
++        """
++        Recursively update a dictionary with another dictionary.
++        """
++        for key, value in update_dict.items():
++            if isinstance(value, dict) and key in base_dict and isinstance(
++                    base_dict[key], dict):
++                deep_update(base_dict[key], value)
++            else:
++                base_dict[key] = value
++        return base_dict
++
++    override_sky_config_dict = dict()
++    if is_remote_server_test():
++        override_sky_config_dict['api_server'] = {
++            'endpoint': docker_utils.get_api_server_endpoint_inside_docker()
++        }
++        test.echo(
++            f'Overriding API server endpoint: {override_sky_config_dict["api_server"]["endpoint"]}'
++        )
++
++    if pytest_controller_cloud():
++        override_sky_config_dict['jobs'] = {
++            'controller': {
++                'resources': {
++                    'cloud': pytest_controller_cloud()
++                }
++            }
++        }
++        test.echo(
++            f'Overriding controller cloud: {override_sky_config_dict["jobs"]["controller"]["resources"]["cloud"]}'
++        )
++
++    if not override_sky_config_dict:
++        yield None
++        return
++
++    temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml')
++    if skypilot_config.ENV_VAR_SKYPILOT_CONFIG in env_dict:
++        # Read the original config
++        with open(env_dict[skypilot_config.ENV_VAR_SKYPILOT_CONFIG], 'r') as f:
++            original_config = yaml.safe_load(f)
++    else:
++        original_config = {}
++    original_config = deep_update(original_config, override_sky_config_dict)
++    yaml.dump(original_config, temp_config_file)
++    temp_config_file.flush()
++    # Update the environment variable to use the temporary file
++    env_dict[skypilot_config.ENV_VAR_SKYPILOT_CONFIG] = temp_config_file.name
++    yield temp_config_file
++
++
+ def run_one_test(test: Test) -> None:
+     # Fail fast if `sky` CLI somehow errors out.
+     subprocess.run(['sky', 'status'], stdout=subprocess.DEVNULL, check=True)
+@@ -378,86 +437,65 @@ def run_one_test(test: Test) -> None:
+     if test.env:
+         env_dict.update(test.env)
+ 
+-    # Create a temporary config file with API server config only if running with remote server
+-    if is_remote_server_test():
+-        temp_config = tempfile.NamedTemporaryFile(mode='w',
+-                                                  suffix='.yaml',
+-                                                  delete=False)
+-        if skypilot_config.ENV_VAR_SKYPILOT_CONFIG in env_dict:
+-            # Read the original config
+-            with open(env_dict[skypilot_config.ENV_VAR_SKYPILOT_CONFIG],
+-                      'r') as f:
+-                config = yaml.safe_load(f)
+-        else:
+-            config = {}
+-        config['api_server'] = {
+-            'endpoint': docker_utils.get_api_server_endpoint_inside_docker()
+-        }
+-        test.echo(
+-            f'Overriding API server endpoint: {config["api_server"]["endpoint"]}'
+-        )
+-        yaml.dump(config, temp_config)
+-        temp_config.close()
+-        # Update the environment variable to use the temporary file
+-        env_dict[skypilot_config.ENV_VAR_SKYPILOT_CONFIG] = temp_config.name
+-
+-    for command in test.commands:
+-        write(f'+ {command}\n')
+-        flush()
+-        proc = subprocess.Popen(
+-            command,
+-            stdout=subprocess_out,
+-            stderr=subprocess.STDOUT,
+-            shell=True,
+-            executable='/bin/bash',
+-            env=env_dict,
+-        )
+-        try:
+-            proc.wait(timeout=test.timeout)
+-        except subprocess.TimeoutExpired as e:
++    with override_sky_config(test, env_dict):
++        for command in test.commands:
++            write(f'+ {command}\n')
+             flush()
+-            test.echo(f'Timeout after {test.timeout} seconds.')
+-            test.echo(str(e))
+-            write(f'Timeout after {test.timeout} seconds.\n')
+-            flush()
+-            # Kill the current process.
+-            proc.terminate()
+-            proc.returncode = 1  # None if we don't set it.
+-            break
+-
+-        if proc.returncode:
+-            break
+-
+-    style = colorama.Style
+-    fore = colorama.Fore
+-    outcome = (f'{fore.RED}Failed{style.RESET_ALL} (returned {proc.returncode})'
+-               if proc.returncode else f'{fore.GREEN}Passed{style.RESET_ALL}')
+-    reason = f'\nReason: {command}' if proc.returncode else ''
+-    msg = (f'{outcome}.'
+-           f'{reason}')
+-    if log_to_stdout:
+-        test.echo(msg)
+-    else:
+-        msg += f'\nLog: less -r {log_file.name}\n'
+-        test.echo(msg)
+-        write(msg)
+-
+-    if (proc.returncode == 0 or
+-            pytest.terminate_on_failure) and test.teardown is not None:
+-        subprocess_utils.run(
+-            test.teardown,
+-            stdout=subprocess_out,
+-            stderr=subprocess.STDOUT,
+-            timeout=10 * 60,  # 10 mins
+-            shell=True,
+-            env=env_dict,
+-        )
+-
+-    if proc.returncode:
++            proc = subprocess.Popen(
++                command,
++                stdout=subprocess_out,
++                stderr=subprocess.STDOUT,
++                shell=True,
++                executable='/bin/bash',
++                env=env_dict,
++            )
++            try:
++                proc.wait(timeout=test.timeout)
++            except subprocess.TimeoutExpired as e:
++                flush()
++                test.echo(f'Timeout after {test.timeout} seconds.')
++                test.echo(str(e))
++                write(f'Timeout after {test.timeout} seconds.\n')
++                flush()
++                # Kill the current process.
++                proc.terminate()
++                proc.returncode = 1  # None if we don't set it.
++                break
++
++            if proc.returncode:
++                break
++
++        style = colorama.Style
++        fore = colorama.Fore
++        outcome = (
++            f'{fore.RED}Failed{style.RESET_ALL} (returned {proc.returncode})'
++            if proc.returncode else f'{fore.GREEN}Passed{style.RESET_ALL}')
++        reason = f'\nReason: {command}' if proc.returncode else ''
++        msg = (f'{outcome}.'
++               f'{reason}')
+         if log_to_stdout:
+-            raise Exception(f'test failed')
++            test.echo(msg)
+         else:
+-            raise Exception(f'test failed: less -r {log_file.name}')
++            msg += f'\nLog: less -r {log_file.name}\n'
++            test.echo(msg)
++            write(msg)
++
++        if (proc.returncode == 0 or
++                pytest.terminate_on_failure) and test.teardown is not None:
++            subprocess_utils.run(
++                test.teardown,
++                stdout=subprocess_out,
++                stderr=subprocess.STDOUT,
++                timeout=10 * 60,  # 10 mins
++                shell=True,
++                env=env_dict,
++            )
++
++        if proc.returncode:
++            if log_to_stdout:
++                raise Exception(f'test failed')
++            else:
++                raise Exception(f'test failed: less -r {log_file.name}')
+ 
+ 
+ def get_aws_region_for_quota_failover() -> Optional[str]:
+@@ -663,6 +701,16 @@ def is_remote_server_test() -> bool:
+     return 'PYTEST_SKYPILOT_REMOTE_SERVER_TEST' in os.environ
+ 
+ 
++def pytest_controller_cloud() -> Optional[str]:
++    return os.environ.get('PYTEST_SKYPILOT_CONTROLLER_CLOUD', None)
++
++
++def override_env_config(config: Dict[str, str]):
++    """Override the environment variable for the test."""
++    for key, value in config.items():
++        os.environ[key] = value
++
++
+ def get_api_server_url() -> str:
+     """Get the API server URL in the test environment."""
+     if is_remote_server_test():
+diff --git a/tests/smoke_tests/test_basic.py b/tests/smoke_tests/test_basic.py
+index 951b35cba00..43150607087 100644
+--- a/tests/smoke_tests/test_basic.py
++++ b/tests/smoke_tests/test_basic.py
+@@ -33,7 +33,6 @@
+ 
+ import sky
+ from sky import skypilot_config
+-from sky.clouds import Lambda
+ from sky.skylet import constants
+ from sky.skylet import events
+ from sky.utils import common_utils
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

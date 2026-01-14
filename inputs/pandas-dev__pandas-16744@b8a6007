@@ -1,0 +1,220 @@
+  Task-ID: pandas-dev__pandas-16744@b8a6007
+  Please checkout to this commit first: 8a98f5ed541c87a9bf101c9331bd6cfa8f007cc9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Different behaviour on two different environments. TypeError: data type "datetime" not understood
+#### I have an aggregation logic
+
+```python
+In [19]: datewise_prices
+Out[19]: 
+[{'arrivalDate': 1490227200000,
+  'maxPrice': 3300,
+  'minPrice': 3300,
+  'modalPrice': 3300},
+ {'arrivalDate': 1490400000000,
+  'maxPrice': 3300,
+  'minPrice': 3300,
+  'modalPrice': 3300},
+ {'arrivalDate': 1490832000000,
+  'maxPrice': 3500,
+  'minPrice': 3500,
+  'modalPrice': 3500},
+ {'arrivalDate': 1490918400000,
+  'maxPrice': 3300,
+  'minPrice': 3300,
+  'modalPrice': 3300},
+ {'arrivalDate': 1491091200000,
+  'maxPrice': 3300,
+  'minPrice': 3300,
+  'modalPrice': 3300}]
+
+In [20]: weekly_dataframe = pandas.DataFrame(datewise_prices)
+    ...: weekly_dataframe.drop('minPrice', axis=1, inplace=True)
+    ...: weekly_dataframe.drop('maxPrice', axis=1, inplace=True)
+    ...: weekly_dataframe['arrivalDate'] = pandas.to_datetime(weekly_dataframe['arrivalDate'], unit='ms')
+    ...: weekly_dataframe = weekly_dataframe.resample('W', on='arrivalDate')['modalPrice'].mean().dropna().reset_index()
+    ...: weekly_dataframe['label'] = (weekly_dataframe['arrivalDate'] - pandas.offsets.DateOffset(days=6)).dt.strftime('%d %b') + ' to ' + weekly_dataframe['arriv
+    ...: alDate'].dt.strftime('%d %b')
+
+```
+#### It results in an error on my Staging environment but works fine on my local.
+
+The staging environment gives an error in `(weekly_dataframe['arrivalDate'] - pandas.offsets.DateOffset(days=6)).dt.strftime('%d %b')`
+
+```
+Traceback (most recent call last):
+  File "/root/myapp/myapp/handlers/aggregation_handler.py", line 290, in get_daily_weekly_and_monthly_aggregates
+    weekly_dataframe['label'] = (weekly_dataframe['arrivalDate'] - pandas.offsets.DateOffset(days=6)).dt.strftime('%d %b') + ' to ' + weekly_dataframe['arrivalDate'].dt.strftime('%d %b')
+  File "/usr/local/lib/python2.7/dist-packages/pandas/core/ops.py", line 696, in wrapper
+    converted = _Op.get_op(left, right, name, na_op)
+  File "/usr/local/lib/python2.7/dist-packages/pandas/core/ops.py", line 330, in get_op
+    return _TimeOp(left, right, name, na_op)
+  File "/usr/local/lib/python2.7/dist-packages/pandas/core/ops.py", line 343, in __init__
+    lvalues = self._convert_to_array(left, name=name)
+  File "/usr/local/lib/python2.7/dist-packages/pandas/core/ops.py", line 454, in _convert_to_array
+    if (inferred_type in ('datetime64', 'datetime', 'date', 'time') or
+TypeError: data type "datetime" not understood
+```
+
+but it works fine on my local.
+
+#### Output of ``pd.show_versions()`` on local
+
+<details>
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 2.7.6.final.0
+python-bits: 64
+OS: Linux
+OS-release: 4.4.0-78-generic
+machine: x86_64
+processor: x86_64
+byteorder: little
+LC_ALL: None
+LANG: en_IN
+LOCALE: None.None
+
+pandas: 0.19.2
+nose: None
+pip: 9.0.1
+setuptools: 36.0.1
+Cython: None
+numpy: 1.12.1
+scipy: None
+statsmodels: None
+xarray: None
+IPython: 5.4.1
+sphinx: None
+patsy: None
+dateutil: 2.5.3
+pytz: 2016.7
+blosc: None
+bottleneck: None
+tables: None
+numexpr: None
+matplotlib: None
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: 0.9.6
+lxml: None
+bs4: None
+html5lib: 0.999
+httplib2: 0.8
+apiclient: None
+sqlalchemy: None
+pymysql: None
+psycopg2: None
+jinja2: 2.8
+boto: 2.40.0
+pandas_datareader: None
+</details>
+
+#### Output of ``pd.show_versions()`` on Staging
+<details>
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 2.7.6.final.0
+python-bits: 64
+OS: Linux
+OS-release: 3.13.0-57-generic
+machine: x86_64
+processor: x86_64
+byteorder: little
+LC_ALL: None
+LANG: en_US.UTF-8
+LOCALE: None.None
+
+pandas: 0.19.2
+nose: None
+pip: 1.5.4
+setuptools: 3.3
+Cython: None
+numpy: 1.13.0
+scipy: None
+statsmodels: None
+xarray: None
+IPython: 4.0.0
+sphinx: None
+patsy: None
+dateutil: 2.5.3
+pytz: 2017.2
+blosc: None
+bottleneck: None
+tables: None
+numexpr: None
+matplotlib: None
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: 0.9.6
+lxml: None
+bs4: None
+html5lib: 0.999
+httplib2: None
+apiclient: None
+sqlalchemy: 1.0.8
+pymysql: None
+psycopg2: None
+jinja2: 2.9.6
+boto: 2.40.0
+pandas_datareader: None
+</details>
+
+Please help me out.
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/tests/series/test_datetime_values.py b/pandas/tests/series/test_datetime_values.py
+index e1fc9af0cca89..456d337ce2b1c 100644
+--- a/pandas/tests/series/test_datetime_values.py
++++ b/pandas/tests/series/test_datetime_values.py
+@@ -409,3 +409,11 @@ def test_date_tz(self):
+                            date(2015, 11, 22)])
+         assert_series_equal(s.dt.date, expected)
+         assert_series_equal(s.apply(lambda x: x.date()), expected)
++
++    def test_datetime_understood(self):
++        # Ensures it doesn't throw an exception reported in #16726
++        try:
++            pd.Series(pd.date_range("2012-01-01", periods=3)) - pd.offsets.DateOffset(days=6)
++        except Exception:
++            assert 'data type "datetime" not understood'
++
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

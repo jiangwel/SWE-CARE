@@ -1,0 +1,216 @@
+  Task-ID: ccxt__ccxt-15862@a8a89fb
+  Please checkout to this commit first: 1660ebec34cf7b762d64b8fab552c3dcddbf668e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Gemini get exchange balance got errors
+- OS: Windows 10 PRO (22H2)
+- Programming Language version: Node.js (Ver 19.2.0)
+- CCXT version: 2.2.91
+
+```js
+const ccxt = require('ccxt');
+console.log(ccxt.version);
+
+let exchange = new ccxt.gemini({
+    apiKey: 'My_Account_API_Key',
+    secret: 'My_Account_Secret_Key',
+    'options': {
+        'adjustForTimeDifference': true,
+        'fetchCurrencies': true,
+        'verbose': true,
+    }
+});
+
+async function getExchangeBalance() {
+    try {
+        const balance = await exchange.fetchBalance();
+        console.log(balance);
+    } catch (err) {
+        console.error(err)
+    }
+};
+getExchangeBalance();
+```
+
+```
+C:\ArbitApps\CCXT\CCXTNodeByFunctions>node gemini_getExchangeBalance.js
+2.2.91
+InvalidNonce: gemini Nonce '1670623439828' is not within 30 seconds of server time '1670623440''
+    at gemini.throwExactlyMatchedException (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\base\Exchange.js:2351:19)
+    at gemini.handleErrors (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\gemini.js:1503:18)
+    at C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\base\Exchange.js:600:51
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async timeout (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\base\functions\time.js:181:20)
+    at async gemini.fetch2 (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\base\Exchange.js:1995:16)
+    at async gemini.request (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\base\Exchange.js:1999:16)
+    at async gemini.fetchBalance (C:\ArbitApps\CCXT\CCXTNodeByFunctions\node_modules\ccxt\js\gemini.js:847:26)
+    at async getExchangeBalance (C:\ArbitApps\CCXT\CCXTNodeByFunctions\gemini_getExchangeBalance.js:18:17) {
+  constructor: [class InvalidNonce extends NetworkError]
+```
+
+Hello,
+I just open an account with gemini and create my account API keys.
+I did some testing, to get exchange account balance for all tokens, I got some errors.
+I synchronize my PC clock with NTP time server.
+But I still got the same error.
+Any idea on how to fix this?
+
+Thanks
+  </issue>
+  
+  <patch>
+  diff --git a/js/gemini.js b/js/gemini.js
+index 7fe6229d81250..a7c23fe828ba4 100644
+--- a/js/gemini.js
++++ b/js/gemini.js
+@@ -232,7 +232,7 @@ module.exports = class gemini extends Exchange {
+                 },
+             },
+             'options': {
+-                'fetchMarketsMethod': 'fetch_markets_from_web',
++                'fetchMarketsMethod': 'fetch_markets_from_api',
+                 'fetchTickerMethod': 'fetchTickerV1', // fetchTickerV1, fetchTickerV2, fetchTickerV1AndV2
+                 'networkIds': {
+                     'bitcoin': 'BTC',
+@@ -371,6 +371,17 @@ module.exports = class gemini extends Exchange {
+         return result;
+     }
+ 
++    parseMarketActive (status) {
++        const statuses = {
++            'open': true,
++            'closed': false,
++            'cancel_only': true,
++            'post_only': true,
++            'limit_only': true,
++        };
++        return this.safeValue (statuses, status, true);
++    }
++
+     async fetchMarketsFromAPI (params = {}) {
+         const response = await this.publicGetV1Symbols (params);
+         //
+@@ -381,14 +392,37 @@ module.exports = class gemini extends Exchange {
+         //     ]
+         //
+         const result = [];
++        let promises = [];
+         for (let i = 0; i < response.length; i++) {
+-            const marketId = response[i];
+-            const market = marketId;
+-            const idLength = marketId.length - 0;
+-            const baseId = marketId.slice (0, idLength - 3);
+-            const quoteId = marketId.slice (idLength - 3, idLength);
++            let marketId = response[i];
++            marketId = marketId.toUpperCase ();
++            const method = 'publicGetV1SymbolsDetailsSymbol';
++            const request = {
++                'symbol': marketId,
++            };
++            //
++            //     {
++            //         "symbol": "BTCUSD",
++            //         "base_currency": "BTC",
++            //         "quote_currency": "USD",
++            //         "tick_size": 1E-8,
++            //         "quote_increment": 0.01,
++            //         "min_order_size": "0.00001",
++            //         "status": "open",
++            //         "wrap_enabled": false
++            //     }
++            //
++            promises.push (this[method] (this.extend (request, params)));
++        }
++        promises = await Promise.all (promises);
++        for (let i = 0; i < promises.length; i++) {
++            const response = promises[i];
++            const marketId = this.safeString (response, 'symbol');
++            const baseId = this.safeString (response, 'base_currency');
+             const base = this.safeCurrencyCode (baseId);
++            const quoteId = this.safeString (response, 'quote_currency');
+             const quote = this.safeCurrencyCode (quoteId);
++            const status = this.safeString (response, 'status');
+             result.push ({
+                 'id': marketId,
+                 'symbol': base + '/' + quote,
+@@ -404,7 +438,7 @@ module.exports = class gemini extends Exchange {
+                 'swap': false,
+                 'future': false,
+                 'option': false,
+-                'active': undefined,
++                'active': this.parseMarketActive (status),
+                 'contract': false,
+                 'linear': undefined,
+                 'inverse': undefined,
+@@ -414,8 +448,8 @@ module.exports = class gemini extends Exchange {
+                 'strike': undefined,
+                 'optionType': undefined,
+                 'precision': {
+-                    'price': undefined,
+-                    'amount': undefined,
++                    'price': this.safeNumber (response, 'quote_increment'),
++                    'amount': this.safeNumber (response, 'tick_size'),
+                 },
+                 'limits': {
+                     'leverage': {
+@@ -423,7 +457,7 @@ module.exports = class gemini extends Exchange {
+                         'max': undefined,
+                     },
+                     'amount': {
+-                        'min': undefined,
++                        'min': this.safeNumber (response, 'min_order_size'),
+                         'max': undefined,
+                     },
+                     'price': {
+@@ -435,7 +469,7 @@ module.exports = class gemini extends Exchange {
+                         'max': undefined,
+                     },
+                 },
+-                'info': market,
++                'info': response,
+             });
+         }
+         return result;
+@@ -1317,7 +1351,7 @@ module.exports = class gemini extends Exchange {
+     }
+ 
+     nonce () {
+-        return this.milliseconds ();
++        return this.seconds ();
+     }
+ 
+     async fetchTransactions (code = undefined, since = undefined, limit = undefined, params = {}) {
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

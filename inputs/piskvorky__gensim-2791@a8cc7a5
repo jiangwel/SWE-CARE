@@ -1,0 +1,469 @@
+  Task-ID: piskvorky__gensim-2791@a8cc7a5
+  Please checkout to this commit first: ec222e8e3e72608a59805040eadcf5c734a2b96c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  FastText RAM usage
+#### Problem description
+
+The `FastText` model takes too much RAM. We saw this issue many times in our CI systems, this typically looks like
+
+```
+____________________ TestFastTextModel.test_cbow_hs_online _____________________
+self = <gensim.test.test_fasttext.TestFastTextModel testMethod=test_cbow_hs_online>
+    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+    def test_cbow_hs_online(self):
+        model = FT_gensim(
+>           sg=0, cbow_mean=1, alpha=0.05, window=2, hs=1, negative=0, min_count=3, iter=1, seed=42, workers=1
+        )
+self       = <gensim.test.test_fasttext.TestFastTextModel testMethod=test_cbow_hs_online>
+/venv/lib/python3.7/site-packages/gensim/test/test_fasttext.py:733: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/venv/lib/python3.7/site-packages/gensim/models/fasttext.py:595: in __init__
+    self.trainables.prepare_weights(hs, negative, self.wv, update=False, vocabulary=self.vocabulary)
+...
+/venv/lib/python3.7/site-packages/gensim/models/fasttext.py:1130: in prepare_weights
+    self.init_ngrams_weights(wv, update=update, vocabulary=vocabulary)
+ ...
+mtrand.pyx:1307: in mtrand.RandomState.uniform
+    ???
+        ...
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+>   ???
+E   MemoryError
+
+```
+#### Steps/code/corpus to reproduce
+
+```python
+from gensim.models import FastText
+
+m = FastText()  # and measure RAM after that
+```
+It will "eat" around 1.6GB after `__init__`. I guess than issue in "bucket" matrix (too large). 
+Itself, this isn't a problem, but this is an issue in our tests (because we almost never pin this parameter).
+
+#### Versions
+
+Please provide the output of:
+
+```python
+>>> import platform; print(platform.platform())
+Linux-5.3.0-46-generic-x86_64-with-Ubuntu-19.10-eoan
+>>> import sys; print("Python", sys.version)
+('Python', '2.7.17 (default, Nov  7 2019, 10:07:09) \n[GCC 9.2.1 20191008]')
+>>> import numpy; print("NumPy", numpy.__version__)
+('NumPy', '1.16.1')
+>>> import scipy; print("SciPy", scipy.__version__)
+('SciPy', '1.2.3')
+>>> import gensim; print("gensim", gensim.__version__)
+('gensim', '3.8.1')
+>>> from gensim.models import word2vec;print("FAST_VERSION", word2vec.FAST_VERSION)
+('FAST_VERSION', 1)
+```
+I'm sure than other `py` versions and more early gensim versions affected in the same way
+  </issue>
+  
+  <patch>
+  diff --git a/gensim/test/test_fasttext.py b/gensim/test/test_fasttext.py
+index ba424a7178..89fed0d353 100644
+--- a/gensim/test/test_fasttext.py
++++ b/gensim/test/test_fasttext.py
+@@ -32,9 +32,8 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-IS_WIN32 = (os.name == "nt") and (struct.calcsize('P') * 8 == 32)
+-
+ MAX_WORDVEC_COMPONENT_DIFFERENCE = 1.0e-10
++BUCKET = 5000
+ 
+ FT_HOME = os.environ.get("FT_HOME")
+ FT_CMD = os.path.join(FT_HOME, "fasttext") if FT_HOME else None
+@@ -67,7 +66,7 @@ def setUp(self):
+         self.test_new_model_file = datapath('lee_fasttext_new.bin')
+ 
+     def test_training(self):
+-        model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1)
++        model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1, bucket=BUCKET)
+         model.build_vocab(sentences)
+         self.model_sanity(model)
+ 
+@@ -87,7 +86,7 @@ def test_training(self):
+         self.assertEqual(sims, sims2)
+ 
+         # build vocab and train in one step; must be the same as above
+-        model2 = FT_gensim(sentences, size=10, min_count=1, hs=1, negative=0, seed=42, workers=1)
++        model2 = FT_gensim(sentences, size=10, min_count=1, hs=1, negative=0, seed=42, workers=1, bucket=BUCKET)
+         self.models_equal(model, model2)
+ 
+         # verify oov-word vector retrieval
+@@ -99,7 +98,7 @@ def test_training(self):
+ 
+     def testFastTextTrainParameters(self):
+ 
+-        model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1)
++        model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1, bucket=BUCKET)
+         model.build_vocab(sentences=sentences)
+ 
+         self.assertRaises(TypeError, model.train, corpus_file=11111)
+@@ -112,7 +111,7 @@ def test_training_fromfile(self):
+         with temporary_file(get_tmpfile('gensim_fasttext.tst')) as corpus_file:
+             utils.save_as_line_sentence(sentences, corpus_file)
+ 
+-            model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1)
++            model = FT_gensim(size=10, min_count=1, hs=1, negative=0, seed=42, workers=1, bucket=BUCKET)
+             model.build_vocab(corpus_file=corpus_file)
+             self.model_sanity(model)
+ 
+@@ -151,10 +150,9 @@ def models_equal(self, model, model2):
+         most_common_word = max(model.wv.vocab.items(), key=lambda item: item[1].count)[0]
+         self.assertTrue(np.allclose(model.wv[most_common_word], model2.wv[most_common_word]))
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_persistence(self):
+         tmpf = get_tmpfile('gensim_fasttext.tst')
+-        model = FT_gensim(sentences, min_count=1)
++        model = FT_gensim(sentences, min_count=1, bucket=BUCKET)
+         model.save(tmpf)
+         self.models_equal(model, FT_gensim.load(tmpf))
+         #  test persistence of the KeyedVectors of a model
+@@ -169,7 +167,7 @@ def test_persistence_fromfile(self):
+             utils.save_as_line_sentence(sentences, corpus_file)
+ 
+             tmpf = get_tmpfile('gensim_fasttext.tst')
+-            model = FT_gensim(corpus_file=corpus_file, min_count=1)
++            model = FT_gensim(corpus_file=corpus_file, min_count=1, bucket=BUCKET)
+             model.save(tmpf)
+             self.models_equal(model, FT_gensim.load(tmpf))
+             #  test persistence of the KeyedVectors of a model
+@@ -179,10 +177,9 @@ def test_persistence_fromfile(self):
+             self.assertTrue(np.allclose(wv.vectors_ngrams, loaded_wv.vectors_ngrams))
+             self.assertEqual(len(wv.vocab), len(loaded_wv.vocab))
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_norm_vectors_not_saved(self):
+         tmpf = get_tmpfile('gensim_fasttext.tst')
+-        model = FT_gensim(sentences, min_count=1)
++        model = FT_gensim(sentences, min_count=1, bucket=BUCKET)
+         model.init_sims()
+         model.save(tmpf)
+         loaded_model = FT_gensim.load(tmpf)
+@@ -406,7 +403,7 @@ def test_cbow_hs_training(self):
+         model_gensim = FT_gensim(
+             size=50, sg=0, cbow_mean=1, alpha=0.05, window=5, hs=1, negative=0,
+             min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-            sorted_vocab=1, workers=1, min_alpha=0.0)
++            sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -435,7 +432,7 @@ def test_cbow_hs_training_fromfile(self):
+             model_gensim = FT_gensim(
+                 size=50, sg=0, cbow_mean=1, alpha=0.05, window=5, hs=1, negative=0,
+                 min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                sorted_vocab=1, workers=1, min_alpha=0.0)
++                sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET * 4)
+ 
+             lee_data = LineSentence(datapath('lee_background.cor'))
+             utils.save_as_line_sentence(lee_data, corpus_file)
+@@ -468,7 +465,7 @@ def test_sg_hs_training(self):
+         model_gensim = FT_gensim(
+             size=50, sg=1, cbow_mean=1, alpha=0.025, window=5, hs=1, negative=0,
+             min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-            sorted_vocab=1, workers=1, min_alpha=0.0)
++            sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -497,7 +494,7 @@ def test_sg_hs_training_fromfile(self):
+             model_gensim = FT_gensim(
+                 size=50, sg=1, cbow_mean=1, alpha=0.025, window=5, hs=1, negative=0,
+                 min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                sorted_vocab=1, workers=1, min_alpha=0.0)
++                sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+             lee_data = LineSentence(datapath('lee_background.cor'))
+             utils.save_as_line_sentence(lee_data, corpus_file)
+@@ -530,7 +527,7 @@ def test_cbow_neg_training(self):
+         model_gensim = FT_gensim(
+             size=50, sg=0, cbow_mean=1, alpha=0.05, window=5, hs=0, negative=5,
+             min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-            sorted_vocab=1, workers=1, min_alpha=0.0)
++            sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -559,7 +556,7 @@ def test_cbow_neg_training_fromfile(self):
+             model_gensim = FT_gensim(
+                 size=50, sg=0, cbow_mean=1, alpha=0.05, window=5, hs=0, negative=5,
+                 min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                sorted_vocab=1, workers=1, min_alpha=0.0)
++                sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+             lee_data = LineSentence(datapath('lee_background.cor'))
+             utils.save_as_line_sentence(lee_data, corpus_file)
+@@ -592,7 +589,7 @@ def test_sg_neg_training(self):
+         model_gensim = FT_gensim(
+             size=50, sg=1, cbow_mean=1, alpha=0.025, window=5, hs=0, negative=5,
+             min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-            sorted_vocab=1, workers=1, min_alpha=0.0)
++            sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET * 4)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -621,7 +618,7 @@ def test_sg_neg_training_fromfile(self):
+             model_gensim = FT_gensim(
+                 size=50, sg=1, cbow_mean=1, alpha=0.025, window=5, hs=0, negative=5,
+                 min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                sorted_vocab=1, workers=1, min_alpha=0.0)
++                sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET * 4)
+ 
+             lee_data = LineSentence(datapath('lee_background.cor'))
+             utils.save_as_line_sentence(lee_data, corpus_file)
+@@ -650,7 +647,7 @@ def test_sg_neg_training_fromfile(self):
+             self.assertGreaterEqual(overlap_count, 2)
+ 
+     def test_online_learning(self):
+-        model_hs = FT_gensim(sentences, size=10, min_count=1, seed=42, hs=1, negative=0)
++        model_hs = FT_gensim(sentences, size=10, min_count=1, seed=42, hs=1, negative=0, bucket=BUCKET)
+         self.assertTrue(len(model_hs.wv.vocab), 12)
+         self.assertTrue(model_hs.wv.vocab['graph'].count, 3)
+         model_hs.build_vocab(new_sentences, update=True)  # update vocab
+@@ -664,7 +661,8 @@ def test_online_learning_fromfile(self):
+             utils.save_as_line_sentence(sentences, corpus_file)
+             utils.save_as_line_sentence(new_sentences, new_corpus_file)
+ 
+-            model_hs = FT_gensim(corpus_file=corpus_file, size=10, min_count=1, seed=42, hs=1, negative=0)
++            model_hs = FT_gensim(
++                corpus_file=corpus_file, size=10, min_count=1, seed=42, hs=1, negative=0, bucket=BUCKET)
+             self.assertTrue(len(model_hs.wv.vocab), 12)
+             self.assertTrue(model_hs.wv.vocab['graph'].count, 3)
+             model_hs.build_vocab(corpus_file=new_corpus_file, update=True)  # update vocab
+@@ -674,7 +672,7 @@ def test_online_learning_fromfile(self):
+ 
+     def test_online_learning_after_save(self):
+         tmpf = get_tmpfile('gensim_fasttext.tst')
+-        model_neg = FT_gensim(sentences, size=10, min_count=0, seed=42, hs=0, negative=5)
++        model_neg = FT_gensim(sentences, size=10, min_count=0, seed=42, hs=0, negative=5, bucket=BUCKET)
+         model_neg.save(tmpf)
+         model_neg = FT_gensim.load(tmpf)
+         self.assertTrue(len(model_neg.wv.vocab), 12)
+@@ -689,7 +687,8 @@ def test_online_learning_after_save_fromfile(self):
+             utils.save_as_line_sentence(new_sentences, new_corpus_file)
+ 
+             tmpf = get_tmpfile('gensim_fasttext.tst')
+-            model_neg = FT_gensim(corpus_file=corpus_file, size=10, min_count=0, seed=42, hs=0, negative=5)
++            model_neg = FT_gensim(
++                corpus_file=corpus_file, size=10, min_count=0, seed=42, hs=0, negative=5, bucket=BUCKET)
+             model_neg.save(tmpf)
+             model_neg = FT_gensim.load(tmpf)
+             self.assertTrue(len(model_neg.wv.vocab), 12)
+@@ -720,33 +719,30 @@ def online_sanity(self, model):
+         sim = model.wv.n_similarity(['war'], ['terrorism'])
+         self.assertLess(0., sim)
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_sg_hs_online(self):
+-        model = FT_gensim(sg=1, window=2, hs=1, negative=0, min_count=3, iter=1, seed=42, workers=1)
++        model = FT_gensim(sg=1, window=2, hs=1, negative=0, min_count=3, iter=1, seed=42, workers=1, bucket=BUCKET)
+         self.online_sanity(model)
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_sg_neg_online(self):
+-        model = FT_gensim(sg=1, window=2, hs=0, negative=5, min_count=3, iter=1, seed=42, workers=1)
++        model = FT_gensim(sg=1, window=2, hs=0, negative=5, min_count=3, iter=1, seed=42, workers=1, bucket=BUCKET)
+         self.online_sanity(model)
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_cbow_hs_online(self):
+         model = FT_gensim(
+-            sg=0, cbow_mean=1, alpha=0.05, window=2, hs=1, negative=0, min_count=3, iter=1, seed=42, workers=1
++            sg=0, cbow_mean=1, alpha=0.05, window=2, hs=1, negative=0, min_count=3, iter=1, seed=42, workers=1,
++            bucket=BUCKET,
+         )
+         self.online_sanity(model)
+ 
+-    @unittest.skipIf(IS_WIN32, "avoid memory error with Appveyor x32")
+     def test_cbow_neg_online(self):
+         model = FT_gensim(
+             sg=0, cbow_mean=1, alpha=0.05, window=2, hs=0, negative=5,
+-            min_count=5, iter=1, seed=42, workers=1, sample=0
++            min_count=5, iter=1, seed=42, workers=1, sample=0, bucket=BUCKET
+         )
+         self.online_sanity(model)
+ 
+     def test_get_vocab_word_vecs(self):
+-        model = FT_gensim(size=10, min_count=1, seed=42)
++        model = FT_gensim(size=10, min_count=1, seed=42, bucket=BUCKET)
+         model.build_vocab(sentences)
+         original_syn0_vocab = np.copy(model.wv.vectors_vocab)
+         model.wv.adjust_vectors()
+@@ -755,7 +751,7 @@ def test_get_vocab_word_vecs(self):
+     def test_persistence_word2vec_format(self):
+         """Test storing/loading the model in word2vec format."""
+         tmpf = get_tmpfile('gensim_fasttext_w2v_format.tst')
+-        model = FT_gensim(sentences, min_count=1, size=10)
++        model = FT_gensim(sentences, min_count=1, size=10, bucket=BUCKET)
+         model.wv.save_word2vec_format(tmpf, binary=True)
+         loaded_model_kv = Word2VecKeyedVectors.load_word2vec_format(tmpf, binary=True)
+         self.assertEqual(len(model.wv.vocab), len(loaded_model_kv.vocab))
+@@ -769,7 +765,7 @@ def test_bucket_ngrams(self):
+         self.assertEqual(model.wv.vectors_ngrams.shape, (20, 10))
+ 
+     def test_estimate_memory(self):
+-        model = FT_gensim(sg=1, hs=1, size=10, negative=5, min_count=3)
++        model = FT_gensim(sg=1, hs=1, size=10, negative=5, min_count=3, bucket=BUCKET)
+         model.build_vocab(sentences)
+         report = model.estimate_memory()
+         self.assertEqual(report['vocab'], 2800)
+@@ -835,7 +831,7 @@ def test_cbow_hs_against_wrapper(self):
+ 
+         model_gensim = FT_gensim(size=50, sg=0, cbow_mean=1, alpha=0.05, window=5, hs=1, negative=0,
+                                  min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                                 sorted_vocab=1, workers=1, min_alpha=0.0)
++                                 sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -856,7 +852,7 @@ def test_sg_hs_against_wrapper(self):
+ 
+         model_gensim = FT_gensim(size=50, sg=1, cbow_mean=1, alpha=0.025, window=5, hs=1, negative=0,
+                                  min_count=5, iter=5, batch_words=1000, word_ngrams=1, sample=1e-3, min_n=3, max_n=6,
+-                                 sorted_vocab=1, workers=1, min_alpha=0.0)
++                                 sorted_vocab=1, workers=1, min_alpha=0.0, bucket=BUCKET)
+ 
+         lee_data = LineSentence(datapath('lee_background.cor'))
+         model_gensim.build_vocab(lee_data)
+@@ -1334,6 +1330,7 @@ def _check_roundtrip(self, sg):
+             "hs": 1,
+             "negative": 5,
+             "seed": 42,
++            "bucket": BUCKET,
+             "workers": 1}
+ 
+         with temporary_file("roundtrip_model_to_model.bin") as fpath:
+@@ -1387,6 +1384,7 @@ def _check_roundtrip_file_file(self, sg):
+             "min_count": 1,
+             "hs": 1,
+             "negative": 0,
++            "bucket": BUCKET,
+             "seed": 42,
+             "workers": 1}
+ 
+@@ -1486,6 +1484,7 @@ def _check_load_fasttext_format(self, sg):
+             "min_count": 1,
+             "hs": 1,
+             "negative": 5,
++            "bucket": BUCKET,
+             "seed": 42,
+             "workers": 1}
+ 
+diff --git a/gensim/test/test_nmf.py b/gensim/test/test_nmf.py
+index e807c051e3..763f61360c 100644
+--- a/gensim/test/test_nmf.py
++++ b/gensim/test/test_nmf.py
+@@ -98,7 +98,7 @@ def testTransform(self):
+         vec = matutils.sparse2full(transformed, 2)
+         expected = [0.35023746, 0.64976251]
+         # must contain the same values, up to re-ordering
+-        self.assertTrue(np.allclose(sorted(vec), sorted(expected), rtol=1e-4))
++        self.assertTrue(np.allclose(sorted(vec), sorted(expected), rtol=1e-3))
+ 
+     def testTopTopics(self):
+         top_topics = self.model.top_topics(common_corpus)
+diff --git a/gensim/test/test_similarities.py b/gensim/test/test_similarities.py
+index 1052dfcb74..013fa18b02 100644
+--- a/gensim/test/test_similarities.py
++++ b/gensim/test/test_similarities.py
+@@ -570,7 +570,7 @@ def __iter__(self):
+                     for line in infile:
+                         yield line.lower().strip().split()
+ 
+-        model = FastText(LeeReader(datapath('lee.cor')))
++        model = FastText(LeeReader(datapath('lee.cor')), bucket=5000)
+         model.init_sims()
+         index = self.indexer(model, 10)
+ 
+@@ -733,7 +733,7 @@ def __iter__(self):
+                     for line in infile:
+                         yield line.lower().strip().split()
+ 
+-        model = FastText(LeeReader(datapath('lee.cor')))
++        model = FastText(LeeReader(datapath('lee.cor')), bucket=5000)
+         model.init_sims()
+         index = self.indexer(model)
+ 
+diff --git a/gensim/test/test_sklearn_api.py b/gensim/test/test_sklearn_api.py
+index e325910b48..baef9e5ee3 100644
+--- a/gensim/test/test_sklearn_api.py
++++ b/gensim/test/test_sklearn_api.py
+@@ -1327,12 +1327,12 @@ def testTransform(self):
+ 
+     def testConsistencyWithGensimModel(self):
+         # training a FTTransformer
+-        self.model = FTTransformer(size=10, min_count=0, seed=42, workers=1)
++        self.model = FTTransformer(size=10, min_count=0, seed=42, workers=1, bucket=5000)
+         self.model.fit(texts)
+ 
+         # training a Gensim FastText model with the same params
+         gensim_ftmodel = models.FastText(texts, size=10, min_count=0, seed=42,
+-                                         workers=1)
++                                         workers=1, bucket=5000)
+ 
+         # vectors returned by FTTransformer
+         vecs_transformer_api = self.model.transform(
+diff --git a/setup.py b/setup.py
+index 5422a32ad9..fc829a8079 100644
+--- a/setup.py
++++ b/setup.py
+@@ -284,7 +284,7 @@ def run(self):
+ #   https://packaging.python.org/discussions/install-requires-vs-requirements/
+ #
+ docs_testenv = linux_testenv + distributed_env + [
+-    'sphinx',
++    'sphinx <= 2.4.4',  # avoid `sphinx >= 3.0` that breaks build
+     'sphinxcontrib-napoleon',
+     'plotly',
+     #
+@@ -304,6 +304,7 @@ def run(self):
+     'statsmodels',
+     'pyemd',
+     'pandas',
++    'matplotlib',  # sphinx-gallery expect this deps
+ ]
+ 
+ if sys.version_info < (3, 7):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

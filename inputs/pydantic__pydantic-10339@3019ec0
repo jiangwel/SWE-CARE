@@ -1,0 +1,182 @@
+  Task-ID: pydantic__pydantic-10339@3019ec0
+  Please checkout to this commit first: e0604253bd56abf1bf0660fa2c6779a3cff98c46
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Type alias for model_dump include/exclude is broken
+### Initial Checks
+
+- [X] I confirm that I'm using Pydantic V2
+
+### Description
+
+Version 2.9.0 changed the `IncEx` type alias to the following:
+
+`IncEx: TypeAlias = Union[Set[int], Set[str], Dict[int, 'IncEx'], Dict[str, 'IncEx'], None]`
+
+This is not correct for the `include` and `exclude` parameters of the `model_dump` method. For example, it's now not possible to use a `Dict[str, bool]` as the value for include/exclude (see the code example below).
+
+### Example Code
+
+```Python
+from pydantic import BaseModel
+
+class ExampleModel(BaseModel):
+    example_field: str
+    field_to_be_excluded: str
+
+e = ExampleModel(example_field="Hello Pydantic", field_to_be_excluded="To be excluded")
+e.model_dump(exclude={"field_to_be_excluded": True}) # mypy complains about this
+```
+
+
+### Python, Pydantic & OS Version
+
+```Text
+pydantic version: 2.9.0
+
+pydantic-core version: 2.23.2
+
+pydantic-core build: profile=release pgo=false
+
+install path: /Users/*****/.venv/lib/python3.12/site-packages/pydantic
+
+python version: 3.12.2 (main, Mar  7 2024, 08:27:42) [Clang 15.0.0 (clang-1500.3.9.4)]
+
+platform: macOS-14.6.1-arm64-arm-64bit
+
+related packages: mypy-1.11.2 fastapi-0.113.0 pydantic-extra-types-2.9.0 typing_extensions-4.12.2 pydantic-settings-2.4.0
+
+commit: unknown
+```
+  </issue>
+  
+  <patch>
+  diff --git a/pydantic/main.py b/pydantic/main.py
+index 4b3d8eff730..8f231c335a7 100644
+--- a/pydantic/main.py
++++ b/pydantic/main.py
+@@ -16,10 +16,8 @@
+     Dict,
+     Generator,
+     Literal,
+-    Set,
+     Tuple,
+     TypeVar,
+-    Union,
+     cast,
+     overload,
+ )
+@@ -51,13 +49,6 @@
+ from .plugin._schema_validator import PluggableSchemaValidator
+ from .warnings import PydanticDeprecatedSince20
+ 
+-# Always define certain types that are needed to resolve method type hints/annotations
+-# (even when not type checking) via typing.get_type_hints.
+-ModelT = TypeVar('ModelT', bound='BaseModel')
+-TupleGenerator = Generator[Tuple[str, Any], None, None]
+-IncEx: TypeAlias = Union[Set[int], Set[str], Dict[int, 'IncEx'], Dict[str, 'IncEx'], None]
+-
+-
+ if TYPE_CHECKING:
+     from inspect import Signature
+     from pathlib import Path
+@@ -74,6 +65,11 @@
+ 
+ __all__ = 'BaseModel', 'create_model'
+ 
++# Keep these type aliases available at runtime:
++TupleGenerator: TypeAlias = Generator[Tuple[str, Any], None, None]
++# Keep this type alias in sync with the stub definition in `pydantic-core`:
++IncEx: TypeAlias = 'set[int] | set[str] | dict[int, IncEx | bool] | dict[str, IncEx | bool]'
++
+ _object_setattr = _model_construction.object_setattr
+ 
+ 
+@@ -352,8 +348,8 @@ def model_dump(
+         self,
+         *,
+         mode: Literal['json', 'python'] | str = 'python',
+-        include: IncEx = None,
+-        exclude: IncEx = None,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
+         context: Any | None = None,
+         by_alias: bool = False,
+         exclude_unset: bool = False,
+@@ -405,8 +401,8 @@ def model_dump_json(
+         self,
+         *,
+         indent: int | None = None,
+-        include: IncEx = None,
+-        exclude: IncEx = None,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
+         context: Any | None = None,
+         by_alias: bool = False,
+         exclude_unset: bool = False,
+@@ -1103,8 +1099,8 @@ def __fields_set__(self) -> set[str]:
+     def dict(  # noqa: D102
+         self,
+         *,
+-        include: IncEx = None,
+-        exclude: IncEx = None,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
+         by_alias: bool = False,
+         exclude_unset: bool = False,
+         exclude_defaults: bool = False,
+@@ -1124,8 +1120,8 @@ def dict(  # noqa: D102
+     def json(  # noqa: D102
+         self,
+         *,
+-        include: IncEx = None,
+-        exclude: IncEx = None,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
+         by_alias: bool = False,
+         exclude_unset: bool = False,
+         exclude_defaults: bool = False,
+@@ -1453,6 +1449,9 @@ def _calculate_keys(self, *args: Any, **kwargs: Any) -> Any:
+         return copy_internals._calculate_keys(self, *args, **kwargs)
+ 
+ 
++ModelT = TypeVar('ModelT', bound=BaseModel)
++
++
+ @overload
+ def create_model(
+     model_name: str,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,175 @@
+  Task-ID: ccxt__ccxt-16729@284cdce
+  Please checkout to this commit first: ec5909917e8ca741c3b44762b28bbb85a315b772
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Huobi fetchBalance of linear error 4002
+### Operating System
+
+Windows 10
+
+### Programming Languages
+
+JS
+
+### CCXT Version
+
+2.2.62
+
+### Description
+
+I am trying to fetch Huobi futures account balance and catch error
+
+`
+ExchangeError: Huobi {"status":"error","err_code":4002,"err_msg":"The merged cross and isolated margin account for USDT-M futures is unavailable. Please complete the query with linear-swap-api/v3/unified_account_info","ts":1674149112391}
+`
+
+Would someone be able to help me?
+
+
+### Code
+
+```
+const balance = await huobiExchange.fetchTotalBalance({
+		"defaultType" : "swap",
+		"defaultSubType": "linear"
+});
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/js/huobi.js b/js/huobi.js
+index 23aa527ee5ade..2966bb7cb0ebc 100644
+--- a/js/huobi.js
++++ b/js/huobi.js
+@@ -2929,7 +2929,6 @@ module.exports = class huobi extends Exchange {
+         const options = this.safeValue (this.options, 'fetchBalance', {});
+         const request = {};
+         let method = undefined;
+-        const margin = (type === 'margin');
+         const spot = (type === 'spot');
+         const future = (type === 'future');
+         const swap = (type === 'swap');
+@@ -2943,23 +2942,20 @@ module.exports = class huobi extends Exchange {
+         params = this.omit (params, [ 'defaultSubType', 'subType' ]);
+         const isolated = (marginMode === 'isolated');
+         const cross = (marginMode === 'cross');
+-        if (spot) {
+-            if (isolated) {
+-                method = 'spotPrivateGetV1MarginAccountsBalance';
+-            } else if (cross) {
+-                method = 'spotPrivateGetV1CrossMarginAccountsBalance';
++        const margin = (type === 'margin') || cross || isolated;
++        if (spot || margin) {
++            if (margin) {
++                if (isolated) {
++                    method = 'spotPrivateGetV1MarginAccountsBalance';
++                } else {
++                    method = 'spotPrivateGetV1CrossMarginAccountsBalance';
++                }
+             } else {
+                 await this.loadAccounts ();
+                 const accountId = await this.fetchAccountIdByType (type, params);
+                 request['account-id'] = accountId;
+                 method = 'spotPrivateGetV1AccountAccountsAccountIdBalance';
+             }
+-        } else if (margin) {
+-            if (isolated) {
+-                method = 'spotPrivateGetV1MarginAccountsBalance';
+-            } else {
+-                method = 'spotPrivateGetV1CrossMarginAccountsBalance';
+-            }
+         } else if (linear) {
+             if (isolated) {
+                 method = 'contractPrivatePostLinearSwapApiV1SwapAccountInfo';
+@@ -3131,7 +3127,7 @@ module.exports = class huobi extends Exchange {
+         //
+         // TODO add balance parsing for linear swap
+         //
+-        const result = { 'info': response };
++        let result = { 'info': response };
+         const data = this.safeValue (response, 'data');
+         if (spot || margin) {
+             if (isolated) {
+@@ -3156,17 +3152,11 @@ module.exports = class huobi extends Exchange {
+                     const code = this.safeCurrencyCode (currencyId);
+                     result[code] = this.parseMarginBalanceHelper (balance, code, result);
+                 }
++                result = this.safeBalance (result);
+             }
+         } else if (linear) {
+             const first = this.safeValue (data, 0, {});
+-            if (cross) {
+-                const account = this.account ();
+-                account['free'] = this.safeString (first, 'margin_balance', 'margin_available');
+-                account['used'] = this.safeString (first, 'margin_frozen');
+-                const currencyId = this.safeString2 (first, 'margin_asset', 'symbol');
+-                const code = this.safeCurrencyCode (currencyId);
+-                result[code] = account;
+-            } else if (isolated) {
++            if (isolated) {
+                 for (let i = 0; i < data.length; i++) {
+                     const balance = data[i];
+                     const marketId = this.safeString2 (balance, 'contract_code', 'margin_account');
+@@ -3187,7 +3177,14 @@ module.exports = class huobi extends Exchange {
+                         result[symbol] = this.safeBalance (accountsByCode);
+                     }
+                 }
+-                return result;
++            } else {
++                const account = this.account ();
++                account['free'] = this.safeString (first, 'margin_balance', 'margin_available');
++                account['used'] = this.safeString (first, 'margin_frozen');
++                const currencyId = this.safeString2 (first, 'margin_asset', 'symbol');
++                const code = this.safeCurrencyCode (currencyId);
++                result[code] = account;
++                result = this.safeBalance (result);
+             }
+         } else if (inverse) {
+             for (let i = 0; i < data.length; i++) {
+@@ -3199,9 +3196,9 @@ module.exports = class huobi extends Exchange {
+                 account['used'] = this.safeString (balance, 'margin_frozen');
+                 result[code] = account;
+             }
++            result = this.safeBalance (result);
+         }
+-        const isolatedMargin = isolated && (spot || margin);
+-        return isolatedMargin ? result : this.safeBalance (result);
++        return result;
+     }
+ 
+     async fetchOrder (id, symbol = undefined, params = {}) {
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

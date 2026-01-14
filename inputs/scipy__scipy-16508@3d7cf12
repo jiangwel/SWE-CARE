@@ -1,0 +1,545 @@
+  Task-ID: scipy__scipy-16508@3d7cf12
+  Please checkout to this commit first: 0a1778310072d7a6aeef1be3d68f5479c6b92bfe
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  handle spline interpolation methods in `interpn`
+As long as `interpn` is (mostly) a convenience wrapper over RegularGridInterpolator, it may make sense for it to grow support for new `cubic`, `quintic` and `pchip` modes which were added for 1.9.0.
+
+Currently it only supports `nearest` and `linear` modes of RGI, plus `splinef2d` which should probably kept for backwards compatibility.
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/interpolate/_rgi.py b/scipy/interpolate/_rgi.py
+index c774cb3247f9..e5d40930d223 100644
+--- a/scipy/interpolate/_rgi.py
++++ b/scipy/interpolate/_rgi.py
+@@ -268,9 +268,15 @@ def __call__(self, xi, method=None):
+         xi : ndarray of shape (..., ndim)
+             The coordinates to evaluate the interpolator at.
+ 
+-        method : str
+-            The method of interpolation to perform. Supported are "linear" and
+-            "nearest".
++        method : str, optional
++            The method of interpolation to perform. Supported are "linear",
++            "nearest", "slinear", "cubic", "quintic" and "pchip". Default is
++            the method chosen when the interpolator was created.
++
++        Returns
++        -------
++        values_x : ndarray, shape xi.shape[:-1] + values.shape[ndim:]
++            Interpolated values at `xi`.
+ 
+         Examples
+         --------
+@@ -325,18 +331,14 @@ def __call__(self, xi, method=None):
+ 
+         if method == "linear":
+             indices, norm_distances = self._find_indices(xi.T)
+-            result = self._evaluate_linear(indices,
+-                                           norm_distances,
+-                                           out_of_bounds)
++            result = self._evaluate_linear(indices, norm_distances)
+         elif method == "nearest":
+             indices, norm_distances = self._find_indices(xi.T)
+-            result = self._evaluate_nearest(indices,
+-                                            norm_distances,
+-                                            out_of_bounds)
++            result = self._evaluate_nearest(indices, norm_distances)
+         elif method in self._SPLINE_METHODS:
+             if is_method_changed:
+                 self._validate_grid_dimensions(self.grid, method)
+-            result = self._evaluate_spline(self.values.T, xi, method)
++            result = self._evaluate_spline(self.values, xi, method)
+ 
+         if not self.bounds_error and self.fill_value is not None:
+             result[out_of_bounds] = self.fill_value
+@@ -346,7 +348,7 @@ def __call__(self, xi, method=None):
+             result[nans] = np.nan
+         return result.reshape(xi_shape[:-1] + self.values.shape[ndim:])
+ 
+-    def _evaluate_linear(self, indices, norm_distances, out_of_bounds):
++    def _evaluate_linear(self, indices, norm_distances):
+         # slice for broadcasting over trailing dimensions in self.values
+         vslice = (slice(None),) + (None,)*(self.values.ndim - len(indices))
+ 
+@@ -376,7 +378,7 @@ def _evaluate_linear(self, indices, norm_distances, out_of_bounds):
+             values += np.asarray(self.values[edge_indices]) * weight[vslice]
+         return values
+ 
+-    def _evaluate_nearest(self, indices, norm_distances, out_of_bounds):
++    def _evaluate_nearest(self, indices, norm_distances):
+         idx_res = [np.where(yi <= .5, i, i + 1)
+                    for i, yi in zip(indices, norm_distances)]
+         return self.values[tuple(idx_res)]
+@@ -391,11 +393,23 @@ def _validate_grid_dimensions(self, points, method):
+                                  f" {k+1} points per dimension.")
+ 
+     def _evaluate_spline(self, values, xi, method):
+-        # ensure xi is 2D list of points to evaluate
++        # ensure xi is 2D list of points to evaluate (`m` is the number of
++        # points and `n` is the number of interpolation dimensions,
++        # ``n == len(self.grid)``.)
+         if xi.ndim == 1:
+             xi = xi.reshape((1, xi.size))
+         m, n = xi.shape
+ 
++        # Reorder the axes: n-dimensional process iterates over the
++        # interpolation axes from the last axis downwards: E.g. for a 4D grid
++        # the order of axes is 3, 2, 1, 0. Each 1D interpolation works along
++        # the 0th axis of its argument array (for 1D routine it's its ``y``
++        # array). Thus permute the interpolation axes of `values` *and keep
++        # trailing dimensions trailing*.
++        axes = tuple(range(values.ndim))
++        axx = axes[:n][::-1] + axes[n:]
++        values = values.transpose(axx)
++
+         if method == 'pchip':
+             _eval_func = self._do_pchip
+         else:
+@@ -415,12 +429,13 @@ def _evaluate_spline(self, values, xi, method):
+                                   k)
+ 
+         # the rest of the dimensions have to be on a per point-in-xi basis
+-        result = np.empty(m, dtype=self.values.dtype)
++        shape = (m, *self.values.shape[n:])
++        result = np.empty(shape, dtype=self.values.dtype)
+         for j in range(m):
+             # Main process: Apply 1D interpolate in each dimension
+             # sequentially, starting with the last dimension.
+             # These are then "folded" into the next dimension in-place.
+-            folded_values = first_values[j]
++            folded_values = first_values[j, ...]
+             for i in range(last_dim-1, -1, -1):
+                 # Interpolate for each 1D from the last dimensions.
+                 # This collapses each 1D sequence into a scalar.
+@@ -428,7 +443,7 @@ def _evaluate_spline(self, values, xi, method):
+                                            folded_values,
+                                            xi[j, i],
+                                            k)
+-            result[j] = folded_values
++            result[j, ...] = folded_values
+ 
+         return result
+ 
+@@ -499,9 +514,9 @@ def interpn(points, values, xi, method="linear", bounds_error=True,
+         The coordinates to sample the gridded data at
+ 
+     method : str, optional
+-        The method of interpolation to perform. Supported are "linear" and
+-        "nearest", and "splinef2d". "splinef2d" is only supported for
+-        2-dimensional data.
++        The method of interpolation to perform. Supported are "linear",
++        "nearest", "slinear", "cubic", "quintic", "pchip", and "splinef2d".
++        "splinef2d" is only supported for 2-dimensional data.
+ 
+     bounds_error : bool, optional
+         If True, when interpolated values are requested outside of the
+@@ -562,10 +577,11 @@ def interpn(points, values, xi, method="linear", bounds_error=True,
+ 
+     """
+     # sanity check 'method' kwarg
+-    if method not in ["linear", "nearest", "splinef2d"]:
++    if method not in ["linear", "nearest", "cubic", "quintic", "pchip",
++                      "splinef2d", "slinear"]:
+         raise ValueError("interpn only understands the methods 'linear', "
+-                         "'nearest', and 'splinef2d'. You provided %s." %
+-                         method)
++                         "'nearest', 'slinear', 'cubic', 'quintic', 'pchip', "
++                         f"and 'splinef2d'. You provided {method}.")
+ 
+     if not hasattr(values, 'ndim'):
+         values = np.asarray(values)
+@@ -619,13 +635,8 @@ def interpn(points, values, xi, method="linear", bounds_error=True,
+                                 "in dimension %d" % i)
+ 
+     # perform interpolation
+-    if method == "linear":
+-        interp = RegularGridInterpolator(points, values, method="linear",
+-                                         bounds_error=bounds_error,
+-                                         fill_value=fill_value)
+-        return interp(xi)
+-    elif method == "nearest":
+-        interp = RegularGridInterpolator(points, values, method="nearest",
++    if method in ["linear", "nearest", "slinear", "cubic", "quintic", "pchip"]:
++        interp = RegularGridInterpolator(points, values, method=method,
+                                          bounds_error=bounds_error,
+                                          fill_value=fill_value)
+         return interp(xi)
+diff --git a/scipy/interpolate/tests/test_rgi.py b/scipy/interpolate/tests/test_rgi.py
+index a17d73c33f1b..830d01d0cba6 100644
+--- a/scipy/interpolate/tests/test_rgi.py
++++ b/scipy/interpolate/tests/test_rgi.py
+@@ -270,21 +270,19 @@ def test_linear_compare_qhull(self):
+                              [0.5, 0.5, .5, .5]])
+         assert_array_almost_equal(interp(sample), interp_qhull(sample))
+ 
+-    def test_duck_typed_values(self):
++    @pytest.mark.parametrize("method", ["nearest", "linear"])
++    def test_duck_typed_values(self, method):
+         x = np.linspace(0, 2, 5)
+         y = np.linspace(0, 1, 7)
+ 
+         values = MyValue((5, 7))
+ 
+-        for method in ('nearest', 'linear'):
+-            interp = RegularGridInterpolator((x, y), values,
+-                                             method=method)
+-            v1 = interp([0.4, 0.7])
++        interp = RegularGridInterpolator((x, y), values, method=method)
++        v1 = interp([0.4, 0.7])
+ 
+-            interp = RegularGridInterpolator((x, y), values._v,
+-                                             method=method)
+-            v2 = interp([0.4, 0.7])
+-            assert_allclose(v1, v2)
++        interp = RegularGridInterpolator((x, y), values._v, method=method)
++        v2 = interp([0.4, 0.7])
++        assert_allclose(v1, v2)
+ 
+     def test_invalid_fill_value(self):
+         np.random.seed(1234)
+@@ -484,6 +482,71 @@ def test_fill_value(self, method):
+                                          method=method, bounds_error=False)
+         assert np.isnan(interp([10]))
+ 
++    @parametrize_rgi_interp_methods
++    def test_nonscalar_values(self, method):
++        # Verify that non-scalar valued values also works
++        points = [(0.0, 0.5, 1.0, 1.5, 2.0, 2.5)] * 2 + [
++            (0.0, 5.0, 10.0, 15.0, 20, 25.0)
++        ] * 2
++
++        rng = np.random.default_rng(1234)
++        values = rng.random((6, 6, 6, 6, 8))
++        sample = rng.random((7, 11, 4))
++
++        interp = RegularGridInterpolator(points, values, method=method,
++                                         bounds_error=False)
++        v = interp(sample)
++        assert_equal(v.shape, (7, 11, 8), err_msg=method)
++
++        vs = []
++        for j in range(8):
++            interp = RegularGridInterpolator(points, values[..., j],
++                                             method=method,
++                                             bounds_error=False)
++            vs.append(interp(sample))
++        v2 = np.array(vs).transpose(1, 2, 0)
++
++        assert_allclose(v, v2, err_msg=method)
++
++    @parametrize_rgi_interp_methods
++    @pytest.mark.parametrize("num_trailing_dims", range(1, 5))
++    def test_nonscalar_values_2(self, method, num_trailing_dims):
++        # Verify that non-scalar valued values also work : use different
++        # lengths of axes to simplify tracing the internals
++        points = [(0.0, 0.5, 1.0, 1.5, 2.0, 2.5),
++                  (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0),
++                  (0.0, 5.0, 10.0, 15.0, 20, 25.0, 35.0, 36.0),
++                  (0.0, 5.0, 10.0, 15.0, 20, 25.0, 35.0, 36.0, 47)]
++
++        rng = np.random.default_rng(1234)
++
++        trailing_points = [3 + i for i in range(num_trailing_dims)]
++        # NB: values has a `num_trailing_dims` trailing dimension
++        values = rng.random((6, 7, 8, 9, *trailing_points))
++        sample = rng.random(4)   # a single sample point !
++
++        interp = RegularGridInterpolator(points, values, method=method,
++                                         bounds_error=False)
++        v = interp(sample)
++
++        # v has a single sample point *per entry in the trailing dimensions*
++        assert v.shape == (1, *trailing_points)
++
++        # check the values, too : manually loop over the trailing dimensions
++        vs = []
++        for j in range(values.shape[-1]):
++            interp = RegularGridInterpolator(points, values[..., j],
++                                             method=method,
++                                             bounds_error=False)
++            vs.append(interp(sample))
++
++        # need to transpose otherwise first dimension is in the wrong place
++        axes = tuple(range(1 + num_trailing_dims))
++        axx = axes[1:] + axes[:1]
++        v2 = np.asarray(vs).transpose(axx)
++
++        assert_allclose(v, v2, atol=1e-14, err_msg=method)
++
+ 
+ class MyValue:
+     """
+@@ -507,12 +570,18 @@ def __array__(self):
+ 
+ class TestInterpN:
+     def _sample_2d_data(self):
+-        x = np.arange(1, 6)
+-        x = np.array([.5, 2., 3., 4., 5.5])
+-        y = np.arange(1, 6)
+-        y = np.array([.5, 2., 3., 4., 5.5])
+-        z = np.array([[1, 2, 1, 2, 1], [1, 2, 1, 2, 1], [1, 2, 3, 2, 1],
+-                      [1, 2, 2, 2, 1], [1, 2, 1, 2, 1]])
++        x = np.array([.5, 2., 3., 4., 5.5, 6.])
++        y = np.array([.5, 2., 3., 4., 5.5, 6.])
++        z = np.array(
++            [
++                [1, 2, 1, 2, 1, 1],
++                [1, 2, 1, 2, 1, 1],
++                [1, 2, 3, 2, 1, 1],
++                [1, 2, 2, 2, 1, 1],
++                [1, 2, 1, 2, 1, 1],
++                [1, 2, 2, 2, 1, 1],
++            ]
++        )
+         return x, y, z
+ 
+     def test_spline_2d(self):
+@@ -524,16 +593,17 @@ def test_spline_2d(self):
+         assert_array_almost_equal(interpn((x, y), z, xi, method="splinef2d"),
+                                   lut.ev(xi[:, 0], xi[:, 1]))
+ 
+-    def test_list_input(self):
++    @parametrize_rgi_interp_methods
++    def test_list_input(self, method):
+         x, y, z = self._sample_2d_data()
+         xi = np.array([[1, 2.3, 5.3, 0.5, 3.3, 1.2, 3],
+                        [1, 3.3, 1.2, 4.0, 5.0, 1.0, 3]]).T
+ 
+-        for method in ['nearest', 'linear', 'splinef2d']:
+-            v1 = interpn((x, y), z, xi, method=method)
+-            v2 = interpn((x.tolist(), y.tolist()), z.tolist(),
+-                         xi.tolist(), method=method)
+-            assert_allclose(v1, v2, err_msg=method)
++        v1 = interpn((x, y), z, xi, method=method)
++        v2 = interpn(
++            (x.tolist(), y.tolist()), z.tolist(), xi.tolist(), method=method
++        )
++        assert_allclose(v1, v2, err_msg=method)
+ 
+     def test_spline_2d_outofbounds(self):
+         x = np.array([.5, 2., 3., 4., 5.5])
+@@ -621,7 +691,8 @@ def test_xi_nd(self):
+                      method='nearest', bounds_error=False)
+         assert_allclose(v1, v2.reshape(v1.shape))
+ 
+-    def test_xi_broadcast(self):
++    @parametrize_rgi_interp_methods
++    def test_xi_broadcast(self, method):
+         # verify that the interpolators broadcast xi
+         x, y, values = self._sample_2d_data()
+         points = (x, y)
+@@ -629,44 +700,83 @@ def test_xi_broadcast(self):
+         xi = np.linspace(0, 1, 2)
+         yi = np.linspace(0, 3, 3)
+ 
+-        for method in ['nearest', 'linear', 'splinef2d']:
+-            sample = (xi[:,None], yi[None,:])
+-            v1 = interpn(points, values, sample, method=method,
+-                         bounds_error=False)
+-            assert_equal(v1.shape, (2, 3))
++        sample = (xi[:, None], yi[None, :])
++        v1 = interpn(points, values, sample, method=method, bounds_error=False)
++        assert_equal(v1.shape, (2, 3))
+ 
+-            xx, yy = np.meshgrid(xi, yi)
+-            sample = np.c_[xx.T.ravel(), yy.T.ravel()]
++        xx, yy = np.meshgrid(xi, yi)
++        sample = np.c_[xx.T.ravel(), yy.T.ravel()]
+ 
+-            v2 = interpn(points, values, sample,
+-                         method=method, bounds_error=False)
+-            assert_allclose(v1, v2.reshape(v1.shape))
++        v2 = interpn(points, values, sample,
++                     method=method, bounds_error=False)
++        assert_allclose(v1, v2.reshape(v1.shape))
+ 
+-    def test_nonscalar_values(self):
++    @parametrize_rgi_interp_methods
++    def test_nonscalar_values(self, method):
+         # Verify that non-scalar valued values also works
+-        points, values = self._sample_4d_data()
++        points = [(0.0, 0.5, 1.0, 1.5, 2.0, 2.5)] * 2 + [
++            (0.0, 5.0, 10.0, 15.0, 20, 25.0)
++        ] * 2
+ 
+-        np.random.seed(1234)
+-        values = np.random.rand(3, 3, 3, 3, 6)
+-        sample = np.random.rand(7, 11, 4)
++        rng = np.random.default_rng(1234)
++        values = rng.random((6, 6, 6, 6, 8))
++        sample = rng.random((7, 11, 4))
++
++        v = interpn(points, values, sample, method=method,
++                    bounds_error=False)
++        assert_equal(v.shape, (7, 11, 8), err_msg=method)
++
++        vs = [interpn(points, values[..., j], sample, method=method,
++                      bounds_error=False) for j in range(8)]
++        v2 = np.array(vs).transpose(1, 2, 0)
++
++        assert_allclose(v, v2, err_msg=method)
++
++    @parametrize_rgi_interp_methods
++    @pytest.mark.parametrize("num_trailing_dims", range(1, 5))
++    def test_nonscalar_values_2(self, method, num_trailing_dims):
++        # Verify that non-scalar valued values also work : use different
++        # lengths of axes to simplify tracing the internals
++        points = [(0.0, 0.5, 1.0, 1.5, 2.0, 2.5),
++                  (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0),
++                  (0.0, 5.0, 10.0, 15.0, 20, 25.0, 35.0, 36.0),
++                  (0.0, 5.0, 10.0, 15.0, 20, 25.0, 35.0, 36.0, 47)]
+ 
+-        for method in ['nearest', 'linear']:
+-            v = interpn(points, values, sample, method=method,
+-                        bounds_error=False)
+-            assert_equal(v.shape, (7, 11, 6), err_msg=method)
++        rng = np.random.default_rng(1234)
+ 
+-            vs = [interpn(points, values[...,j], sample, method=method,
+-                          bounds_error=False)
+-                  for j in range(6)]
+-            v2 = np.array(vs).transpose(1, 2, 0)
++        trailing_points = [3 + i for i in range(num_trailing_dims)]
++        # NB: values has a `num_trailing_dims` trailing dimension
++        values = rng.random((6, 7, 8, 9, *trailing_points))
++        sample = rng.random(4)   # a single sample point !
+ 
+-            assert_allclose(v, v2, err_msg=method)
++        v = interpn(points, values, sample, method=method, bounds_error=False)
+ 
++        # v has a single sample point *per entry in the trailing dimensions*
++        assert v.shape == (1, *trailing_points)
++
++        # check the values, too : manually loop over the trailing dimensions
++        vs = [interpn(points, values[..., j], sample, method=method,
++                      bounds_error=False) for j in range(values.shape[-1])]
++
++        # need to transpose otherwise first dimension is in the wrong place
++        axes = tuple(range(1 + num_trailing_dims))
++        axx = axes[1:] + axes[:1]
++        v2 = np.asarray(vs).transpose(axx)
++
++        assert_allclose(v, v2, atol=1e-14, err_msg=method)
++
++    def test_non_scalar_values_splinef2d(self):
+         # Vector-valued splines supported with fitpack
++        points, values = self._sample_4d_data()
++
++        np.random.seed(1234)
++        values = np.random.rand(3, 3, 3, 3, 6)
++        sample = np.random.rand(7, 11, 4)
+         assert_raises(ValueError, interpn, points, values, sample,
+                       method='splinef2d')
+ 
+-    def test_complex(self):
++    @parametrize_rgi_interp_methods
++    def test_complex(self, method):
+         x, y, values = self._sample_2d_data()
+         points = (x, y)
+         values = values - 2j*values
+@@ -674,40 +784,49 @@ def test_complex(self):
+         sample = np.array([[1, 2.3, 5.3, 0.5, 3.3, 1.2, 3],
+                            [1, 3.3, 1.2, 4.0, 5.0, 1.0, 3]]).T
+ 
+-        for method in ['linear', 'nearest']:
+-            v1 = interpn(points, values, sample, method=method)
+-            v2r = interpn(points, values.real, sample, method=method)
+-            v2i = interpn(points, values.imag, sample, method=method)
+-            v2 = v2r + 1j*v2i
+-            assert_allclose(v1, v2)
++        v1 = interpn(points, values, sample, method=method)
++        v2r = interpn(points, values.real, sample, method=method)
++        v2i = interpn(points, values.imag, sample, method=method)
++        v2 = v2r + 1j*v2i
++        assert_allclose(v1, v2)
+ 
++    def test_complex_spline2fd(self):
+         # Complex-valued data not supported by spline2fd
+-        assert_warns(np.ComplexWarning, interpn, points, values,
+-                     sample, method='splinef2d')
++        x, y, values = self._sample_2d_data()
++        points = (x, y)
++        values = values - 2j*values
+ 
+-    def test_duck_typed_values(self):
++        sample = np.array([[1, 2.3, 5.3, 0.5, 3.3, 1.2, 3],
++                           [1, 3.3, 1.2, 4.0, 5.0, 1.0, 3]]).T
++        with assert_warns(np.ComplexWarning):
++            interpn(points, values, sample, method='splinef2d')
++
++    @pytest.mark.parametrize(
++        "method",
++        ["linear", "nearest"]
++    )
++    def test_duck_typed_values(self, method):
+         x = np.linspace(0, 2, 5)
+         y = np.linspace(0, 1, 7)
+ 
+         values = MyValue((5, 7))
+ 
+-        for method in ('nearest', 'linear'):
+-            v1 = interpn((x, y), values, [0.4, 0.7], method=method)
+-            v2 = interpn((x, y), values._v, [0.4, 0.7], method=method)
+-            assert_allclose(v1, v2)
++        v1 = interpn((x, y), values, [0.4, 0.7], method=method)
++        v2 = interpn((x, y), values._v, [0.4, 0.7], method=method)
++        assert_allclose(v1, v2)
+ 
+-    def test_matrix_input(self):
+-        x = np.linspace(0, 2, 5)
++    @parametrize_rgi_interp_methods
++    def test_matrix_input(self, method):
++        x = np.linspace(0, 2, 6)
+         y = np.linspace(0, 1, 7)
+ 
+-        values = matrix(np.random.rand(5, 7))
++        values = matrix(np.random.rand(6, 7))
+ 
+         sample = np.random.rand(3, 7, 2)
+ 
+-        for method in ('nearest', 'linear', 'splinef2d'):
+-            v1 = interpn((x, y), values, sample, method=method)
+-            v2 = interpn((x, y), np.asarray(values), sample, method=method)
+-            assert_allclose(v1, v2)
++        v1 = interpn((x, y), values, sample, method=method)
++        v2 = interpn((x, y), np.asarray(values), sample, method=method)
++        assert_allclose(v1, v2)
+ 
+     def test_length_one_axis(self):
+         # gh-5890, gh-9524 : length-1 axis is legal for method='linear'.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

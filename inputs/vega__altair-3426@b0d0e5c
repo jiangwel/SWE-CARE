@@ -1,0 +1,897 @@
+  Task-ID: vega__altair-3426@b0d0e5c
+  Please checkout to this commit first: 9e2762c6ac9636fd9a3f9e919d33863cf0ce5a18
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Opt in or opt out on vegafusion dependencies
+Opening this issue to discuss and collect insights.
+
+Currently we have an altair package that relies on a few hard dependencies:
+
+```yaml
+dependencies = [
+    "typing_extensions>=4.0.1; python_version<\"3.11\"",
+    "jinja2",
+    "jsonschema>=3.0",
+    "numpy",
+    "pandas>=0.25",
+    "toolz",
+    "packaging"
+]
+```
+In parallel efforts we are trying to reduce these hard dependencies (like pandas, do we really need numpy?)
+
+But simultaneously, with the recent developments around `vegafusion` in combination with vl-convert, it would be great to have it somehow installed as a hard dependency instead as the current soft dependency approach.
+
+I see four options, but maybe there are more (from a conda perspective)
+1. Do nothing, keep it as it is.
+2. Extend `altair` with `vegafusion`, `anywidget` and `vl-convert-python` as hard dependencies.
+3. Create an `altair-base` package which has the current minimal dependencies.
+4. Create an `altair-vegafusion` package that includes `vegafusion`, `anywidget` and `vl-convert-python` as hard dependencies.
+
+Option 3 enables an opt-out approach.
+Option 4 enables an opt-in approach.
+
+Topics for consideration are at least:
+- WASM builds
+- ease-of-use
+- ease-of-installation
+  </issue>
+  
+  <patch>
+  diff --git a/altair/_magics.py b/altair/_magics.py
+index bac190aa3..246ea2a1f 100644
+--- a/altair/_magics.py
++++ b/altair/_magics.py
+@@ -10,7 +10,6 @@
+ import IPython
+ from IPython.core import magic_arguments
+ import pandas as pd
+-from toolz import curried
+ 
+ from altair.vegalite import v5 as vegalite_v5
+ 
+@@ -41,7 +40,9 @@ def _prepare_data(data, data_transformers):
+     if data is None or isinstance(data, dict):
+         return data
+     elif isinstance(data, pd.DataFrame):
+-        return curried.pipe(data, data_transformers.get())
++        if func := data_transformers.get():
++            data = func(data)
++        return data
+     elif isinstance(data, str):
+         return {"url": data}
+     else:
+diff --git a/altair/utils/_importers.py b/altair/utils/_importers.py
+index b7fa8a958..cc407a45d 100644
+--- a/altair/utils/_importers.py
++++ b/altair/utils/_importers.py
+@@ -1,6 +1,12 @@
++import warnings
++from importlib import import_module
++from importlib.metadata import version as importlib_version
+ from types import ModuleType
++from typing import Any, Callable
++
+ from packaging.version import Version
+-from importlib.metadata import version as importlib_version
++
++from altair.utils.deprecation import AltairDeprecationWarning
+ 
+ 
+ def import_vegafusion() -> ModuleType:
+@@ -95,3 +101,24 @@ def pyarrow_available() -> bool:
+         return True
+     except (ImportError, RuntimeError):
+         return False
++
++
++def import_toolz_function(
++    function: str, module: str = "toolz.curried"
++) -> Callable[..., Any]:
++    msg = (
++        f"alt.{function}() is deprecated, and will be removed in a future release. "
++        f"Use {module}.{function}() instead."
++    )
++    warnings.warn(msg, AltairDeprecationWarning, stacklevel=1)
++    msg_start = f"Usage of deprecated alt.{function}() requires {module}\n\n"
++    msg = f"{msg_start}ImportError: "
++    try:
++        toolz_curried = import_module(module)
++    except ImportError as err:
++        msg = f"{msg} {err.args[0]}"
++        raise ImportError(msg) from err
++    if func := getattr(toolz_curried, function, None):
++        return func
++    else:
++        raise ImportError(msg_start)
+diff --git a/altair/utils/_vegafusion_data.py b/altair/utils/_vegafusion_data.py
+index ce30e8d6d..32c36b44d 100644
+--- a/altair/utils/_vegafusion_data.py
++++ b/altair/utils/_vegafusion_data.py
+@@ -1,8 +1,9 @@
+-from toolz import curried
++from __future__ import annotations
+ import uuid
+ from weakref import WeakValueDictionary
+-
+ from typing import (
++    Any,
++    Optional,
+     Union,
+     Dict,
+     Set,
+@@ -10,14 +11,22 @@
+     TypedDict,
+     Final,
+     TYPE_CHECKING,
++    overload,
++    Callable,
+ )
+ 
+ from altair.utils._importers import import_vegafusion
+ from altair.utils.core import DataFrameLike
+-from altair.utils.data import DataType, ToValuesReturnType, MaxRowsError
++from altair.utils.data import (
++    DataType,
++    ToValuesReturnType,
++    MaxRowsError,
++    SupportsGeoInterface,
++)
+ from altair.vegalite.data import default_data_transformer
+ 
+ if TYPE_CHECKING:
++    import pandas as pd
+     from vegafusion.runtime import ChartState  # type: ignore
+ 
+ # Temporary storage for dataframes that have been extracted
+@@ -36,21 +45,41 @@ class _ToVegaFusionReturnUrlDict(TypedDict):
+     url: str
+ 
+ 
+-@curried.curry
++_VegaFusionReturnType = Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]
++
++
++@overload
++def vegafusion_data_transformer(
++    data: None = ..., max_rows: int = ...
++) -> Callable[..., Any]: ...
++
++
++@overload
++def vegafusion_data_transformer(
++    data: DataFrameLike, max_rows: int
++) -> ToValuesReturnType: ...
++
++
++@overload
+ def vegafusion_data_transformer(
+-    data: DataType, max_rows: int = 100000
+-) -> Union[_ToVegaFusionReturnUrlDict, ToValuesReturnType]:
++    data: Union[dict, pd.DataFrame, SupportsGeoInterface], max_rows: int
++) -> _VegaFusionReturnType: ...
++
++
++def vegafusion_data_transformer(
++    data: Optional[DataType] = None, max_rows: int = 100000
++) -> Union[Callable[..., Any], _VegaFusionReturnType]:
+     """VegaFusion Data Transformer"""
+-    if hasattr(data, "__geo_interface__"):
+-        # Use default transformer for geo interface objects
+-        # # (e.g. a geopandas GeoDataFrame)
+-        return default_data_transformer(data)
++    if data is None:
++        return vegafusion_data_transformer
+     elif isinstance(data, DataFrameLike):
+         table_name = f"table_{uuid.uuid4()}".replace("-", "_")
+         extracted_inline_tables[table_name] = data
+         return {"url": VEGAFUSION_PREFIX + table_name}
+     else:
+-        # Use default transformer if we don't recognize data type
++        # Use default transformer for geo interface objects
++        # # (e.g. a geopandas GeoDataFrame)
++        # Or if we don't recognize data type
+         return default_data_transformer(data)
+ 
+ 
+diff --git a/altair/utils/data.py b/altair/utils/data.py
+index 871b43092..342967e06 100644
+--- a/altair/utils/data.py
++++ b/altair/utils/data.py
+@@ -1,37 +1,60 @@
++from functools import partial
+ import json
+-import os
+ import random
+ import hashlib
+-import warnings
+-from typing import Union, MutableMapping, Optional, Dict, Sequence, TYPE_CHECKING, List
++import sys
++from pathlib import Path
++from typing import (
++    Union,
++    MutableMapping,
++    Optional,
++    Dict,
++    Sequence,
++    TYPE_CHECKING,
++    List,
++    TypeVar,
++    Protocol,
++    TypedDict,
++    Literal,
++    overload,
++    runtime_checkable,
++    Any,
++)
+ 
+ import pandas as pd
+-from toolz import curried
+-from typing import TypeVar
+ 
+-from ._importers import import_pyarrow_interchange
++from ._importers import import_pyarrow_interchange, import_toolz_function
+ from .core import sanitize_dataframe, sanitize_arrow_table, DataFrameLike
+ from .core import sanitize_geo_interface
+-from .deprecation import AltairDeprecationWarning
+ from .plugin_registry import PluginRegistry
+ 
+-
+-from typing import Protocol, TypedDict, Literal
+-
++if sys.version_info >= (3, 13):
++    from typing import TypeIs
++else:
++    from typing_extensions import TypeIs
+ 
+ if TYPE_CHECKING:
+     import pyarrow.lib
+ 
+ 
++@runtime_checkable
+ class SupportsGeoInterface(Protocol):
+     __geo_interface__: MutableMapping
+ 
+ 
+ DataType = Union[dict, pd.DataFrame, SupportsGeoInterface, DataFrameLike]
+ TDataType = TypeVar("TDataType", bound=DataType)
++NonGeoDataType = Union[dict, pd.DataFrame, DataFrameLike]
+ 
+ VegaLiteDataDict = Dict[str, Union[str, dict, List[dict]]]
+ ToValuesReturnType = Dict[str, Union[dict, List[dict]]]
++SampleReturnType = Optional[
++    Union[pd.DataFrame, Dict[str, Sequence], "pyarrow.lib.Table"]
++]
++
++
++def is_data_type(obj: Any) -> TypeIs[DataType]:
++    return isinstance(obj, (dict, pd.DataFrame, DataFrameLike, SupportsGeoInterface))
+ 
+ 
+ # ==============================================================================
+@@ -46,8 +69,13 @@ class SupportsGeoInterface(Protocol):
+ # form.
+ # ==============================================================================
+ class DataTransformerType(Protocol):
+-    def __call__(self, data: DataType, **kwargs) -> VegaLiteDataDict:
+-        pass
++    @overload
++    def __call__(self, data: None = None, **kwargs) -> "DataTransformerType": ...
++    @overload
++    def __call__(self, data: DataType, **kwargs) -> VegaLiteDataDict: ...
++    def __call__(
++        self, data: Optional[DataType] = None, **kwargs
++    ) -> Union["DataTransformerType", VegaLiteDataDict]: ...
+ 
+ 
+ class DataTransformerRegistry(PluginRegistry[DataTransformerType]):
+@@ -69,12 +97,19 @@ class MaxRowsError(Exception):
+     pass
+ 
+ 
+-@curried.curry
+-def limit_rows(data: TDataType, max_rows: Optional[int] = 5000) -> TDataType:
++@overload
++def limit_rows(data: None = ..., max_rows: Optional[int] = ...) -> partial: ...
++@overload
++def limit_rows(data: DataType, max_rows: Optional[int]) -> DataType: ...
++def limit_rows(
++    data: Optional[DataType] = None, max_rows: Optional[int] = 5000
++) -> Union[partial, DataType]:
+     """Raise MaxRowsError if the data model has more than max_rows.
+ 
+     If max_rows is None, then do not perform any check.
+     """
++    if data is None:
++        return partial(limit_rows, max_rows=max_rows)
+     check_data_type(data)
+ 
+     def raise_max_rows_error():
+@@ -91,7 +126,7 @@ def raise_max_rows_error():
+             "on how to plot large datasets."
+         )
+ 
+-    if hasattr(data, "__geo_interface__"):
++    if isinstance(data, SupportsGeoInterface):
+         if data.__geo_interface__["type"] == "FeatureCollection":
+             values = data.__geo_interface__["features"]
+         else:
+@@ -102,9 +137,7 @@ def raise_max_rows_error():
+         if "values" in data:
+             values = data["values"]
+         else:
+-            # mypy gets confused as it doesn't see Dict[Any, Any]
+-            # as equivalent to TDataType
+-            return data  # type: ignore[return-value]
++            return data
+     elif isinstance(data, DataFrameLike):
+         pa_table = arrow_table_from_dfi_dataframe(data)
+         if max_rows is not None and pa_table.num_rows > max_rows:
+@@ -119,11 +152,22 @@ def raise_max_rows_error():
+     return data
+ 
+ 
+-@curried.curry
++@overload
++def sample(
++    data: None = ..., n: Optional[int] = ..., frac: Optional[float] = ...
++) -> partial: ...
++@overload
++def sample(
++    data: DataType, n: Optional[int], frac: Optional[float]
++) -> SampleReturnType: ...
+ def sample(
+-    data: DataType, n: Optional[int] = None, frac: Optional[float] = None
+-) -> Optional[Union[pd.DataFrame, Dict[str, Sequence], "pyarrow.lib.Table"]]:
++    data: Optional[DataType] = None,
++    n: Optional[int] = None,
++    frac: Optional[float] = None,
++) -> Union[partial, SampleReturnType]:
+     """Reduce the size of the data model by sampling without replacement."""
++    if data is None:
++        return partial(sample, n=n, frac=frac)
+     check_data_type(data)
+     if isinstance(data, pd.DataFrame):
+         return data.sample(n=n, frac=frac)
+@@ -157,65 +201,115 @@ def sample(
+         return None
+ 
+ 
+-class _JsonFormatDict(TypedDict):
+-    type: Literal["json"]
++_FormatType = Literal["csv", "json"]
+ 
+ 
+-class _CsvFormatDict(TypedDict):
+-    type: Literal["csv"]
++class _FormatDict(TypedDict):
++    type: _FormatType
+ 
+ 
+-class _ToJsonReturnUrlDict(TypedDict):
++class _ToFormatReturnUrlDict(TypedDict):
+     url: str
+-    format: _JsonFormatDict
++    format: _FormatDict
+ 
+ 
+-class _ToCsvReturnUrlDict(TypedDict):
+-    url: str
+-    format: _CsvFormatDict
++@overload
++def to_json(
++    data: None = ...,
++    prefix: str = ...,
++    extension: str = ...,
++    filename: str = ...,
++    urlpath: str = ...,
++) -> partial: ...
+ 
+ 
+-@curried.curry
++@overload
+ def to_json(
+     data: DataType,
++    prefix: str,
++    extension: str,
++    filename: str,
++    urlpath: str,
++) -> _ToFormatReturnUrlDict: ...
++
++
++def to_json(
++    data: Optional[DataType] = None,
+     prefix: str = "altair-data",
+     extension: str = "json",
+     filename: str = "{prefix}-{hash}.{extension}",
+     urlpath: str = "",
+-) -> _ToJsonReturnUrlDict:
++) -> Union[partial, _ToFormatReturnUrlDict]:
+     """
+     Write the data model to a .json file and return a url based data model.
+     """
+-    data_json = _data_to_json_string(data)
+-    data_hash = _compute_data_hash(data_json)
+-    filename = filename.format(prefix=prefix, hash=data_hash, extension=extension)
+-    with open(filename, "w") as f:
+-        f.write(data_json)
+-    return {"url": os.path.join(urlpath, filename), "format": {"type": "json"}}
++    kwds = _to_text_kwds(prefix, extension, filename, urlpath)
++    if data is None:
++        return partial(to_json, **kwds)
++    else:
++        data_str = _data_to_json_string(data)
++        return _to_text(data_str, **kwds, format=_FormatDict(type="json"))
++
++
++@overload
++def to_csv(
++    data: None = ...,
++    prefix: str = ...,
++    extension: str = ...,
++    filename: str = ...,
++    urlpath: str = ...,
++) -> partial: ...
+ 
+ 
+-@curried.curry
++@overload
+ def to_csv(
+-    data: Union[dict, pd.DataFrame, DataFrameLike],
++    data: NonGeoDataType,
++    prefix: str,
++    extension: str,
++    filename: str,
++    urlpath: str,
++) -> _ToFormatReturnUrlDict: ...
++
++
++def to_csv(
++    data: Optional[NonGeoDataType] = None,
+     prefix: str = "altair-data",
+     extension: str = "csv",
+     filename: str = "{prefix}-{hash}.{extension}",
+     urlpath: str = "",
+-) -> _ToCsvReturnUrlDict:
++) -> Union[partial, _ToFormatReturnUrlDict]:
+     """Write the data model to a .csv file and return a url based data model."""
+-    data_csv = _data_to_csv_string(data)
+-    data_hash = _compute_data_hash(data_csv)
++    kwds = _to_text_kwds(prefix, extension, filename, urlpath)
++    if data is None:
++        return partial(to_csv, **kwds)
++    else:
++        data_str = _data_to_csv_string(data)
++        return _to_text(data_str, **kwds, format=_FormatDict(type="csv"))
++
++
++def _to_text(
++    data: str,
++    prefix: str,
++    extension: str,
++    filename: str,
++    urlpath: str,
++    format: _FormatDict,
++) -> _ToFormatReturnUrlDict:
++    data_hash = _compute_data_hash(data)
+     filename = filename.format(prefix=prefix, hash=data_hash, extension=extension)
+-    with open(filename, "w") as f:
+-        f.write(data_csv)
+-    return {"url": os.path.join(urlpath, filename), "format": {"type": "csv"}}
++    Path(filename).write_text(data)
++    url = str(Path(urlpath, filename))
++    return _ToFormatReturnUrlDict({"url": url, "format": format})
++
++
++def _to_text_kwds(prefix: str, extension: str, filename: str, urlpath: str, /) -> Dict[str, str]:  # fmt: skip
++    return {"prefix": prefix, "extension": extension, "filename": filename, "urlpath": urlpath}  # fmt: skip
+ 
+ 
+-@curried.curry
+ def to_values(data: DataType) -> ToValuesReturnType:
+     """Replace a DataFrame by a data model with values."""
+     check_data_type(data)
+-    if hasattr(data, "__geo_interface__"):
++    if isinstance(data, SupportsGeoInterface):
+         if isinstance(data, pd.DataFrame):
+             data = sanitize_dataframe(data)
+         # Maybe the type could be further clarified here that it is
+@@ -238,9 +332,7 @@ def to_values(data: DataType) -> ToValuesReturnType:
+ 
+ 
+ def check_data_type(data: DataType) -> None:
+-    if not isinstance(data, (dict, pd.DataFrame, DataFrameLike)) and not any(
+-        hasattr(data, attr) for attr in ["__geo_interface__"]
+-    ):
++    if not is_data_type(data):
+         raise TypeError(
+             "Expected dict, DataFrame or a __geo_interface__ attribute, got: {}".format(
+                 type(data)
+@@ -258,7 +350,7 @@ def _compute_data_hash(data_str: str) -> str:
+ def _data_to_json_string(data: DataType) -> str:
+     """Return a JSON string representation of the input data"""
+     check_data_type(data)
+-    if hasattr(data, "__geo_interface__"):
++    if isinstance(data, SupportsGeoInterface):
+         if isinstance(data, pd.DataFrame):
+             data = sanitize_dataframe(data)
+         # Maybe the type could be further clarified here that it is
+@@ -284,7 +376,7 @@ def _data_to_json_string(data: DataType) -> str:
+ def _data_to_csv_string(data: Union[dict, pd.DataFrame, DataFrameLike]) -> str:
+     """return a CSV string representation of the input data"""
+     check_data_type(data)
+-    if hasattr(data, "__geo_interface__"):
++    if isinstance(data, SupportsGeoInterface):
+         raise NotImplementedError(
+             "to_csv does not work with data that "
+             "contains the __geo_interface__ attribute"
+@@ -317,13 +409,7 @@ def pipe(data, *funcs):
+ 
+     Deprecated: use toolz.curried.pipe() instead.
+     """
+-    warnings.warn(
+-        "alt.pipe() is deprecated, and will be removed in a future release. "
+-        "Use toolz.curried.pipe() instead.",
+-        AltairDeprecationWarning,
+-        stacklevel=1,
+-    )
+-    return curried.pipe(data, *funcs)
++    return import_toolz_function("pipe")(data, *funcs)
+ 
+ 
+ def curry(*args, **kwargs):
+@@ -331,13 +417,7 @@ def curry(*args, **kwargs):
+ 
+     Deprecated: use toolz.curried.curry() instead.
+     """
+-    warnings.warn(
+-        "alt.curry() is deprecated, and will be removed in a future release. "
+-        "Use toolz.curried.curry() instead.",
+-        AltairDeprecationWarning,
+-        stacklevel=1,
+-    )
+-    return curried.curry(*args, **kwargs)
++    return import_toolz_function("curry")(*args, **kwargs)
+ 
+ 
+ def arrow_table_from_dfi_dataframe(dfi_df: DataFrameLike) -> "pyarrow.lib.Table":
+diff --git a/altair/utils/plugin_registry.py b/altair/utils/plugin_registry.py
+index f6281ed14..b1cce92ec 100644
+--- a/altair/utils/plugin_registry.py
++++ b/altair/utils/plugin_registry.py
+@@ -1,10 +1,8 @@
+-from typing import Any, Dict, List, Optional, Generic, TypeVar, cast
++from functools import partial
++from typing import Any, Dict, List, Optional, Generic, TypeVar, Union, cast, Callable
+ from types import TracebackType
+-
+ from importlib.metadata import entry_points
+ 
+-from toolz import curry
+-
+ 
+ PluginType = TypeVar("PluginType")
+ 
+@@ -71,7 +69,7 @@ class PluginRegistry(Generic[PluginType]):
+     # in the registry rather than passed to the plugins
+     _global_settings = {}  # type: Dict[str, Any]
+ 
+-    def __init__(self, entry_point_group: str = "", plugin_type: type = object):
++    def __init__(self, entry_point_group: str = "", plugin_type: type = Callable):  # type: ignore[assignment]
+         """Create a PluginRegistry for a named entry point group.
+ 
+         Parameters
+@@ -90,7 +88,9 @@ def __init__(self, entry_point_group: str = "", plugin_type: type = object):
+         self._options = {}  # type: Dict[str, Any]
+         self._global_settings = self.__class__._global_settings.copy()  # type: dict
+ 
+-    def register(self, name: str, value: Optional[PluginType]) -> Optional[PluginType]:
++    def register(
++        self, name: str, value: Union[Optional[PluginType], Any]
++    ) -> Optional[PluginType]:
+         """Register a plugin by name and value.
+ 
+         This method is used for explicit registration of a plugin and shouldn't be
+@@ -199,10 +199,15 @@ def options(self) -> Dict[str, Any]:
+         """Return the current options dictionary"""
+         return self._options
+ 
+-    def get(self) -> Optional[PluginType]:
++    def get(self) -> Optional[Union[PluginType, Callable[..., Any]]]:
+         """Return the currently active plugin."""
+         if self._options:
+-            return curry(self._active, **self._options)
++            if func := self._active:
++                # NOTE: Fully do not understand this one
++                # error: Argument 1 to "partial" has incompatible type "PluginType"; expected "Callable[..., Never]"
++                return partial(func, **self._options)  # type: ignore[arg-type]
++            else:
++                raise TypeError("Unclear what this meant by passing to curry.")
+         else:
+             return self._active
+ 
+diff --git a/altair/vegalite/data.py b/altair/vegalite/data.py
+index fbeda0fee..84f30fbaa 100644
+--- a/altair/vegalite/data.py
++++ b/altair/vegalite/data.py
+@@ -1,4 +1,3 @@
+-from toolz import curried
+ from ..utils.core import sanitize_dataframe
+ from ..utils.data import (
+     MaxRowsError,
+@@ -14,13 +13,30 @@
+ from ..utils.data import DataTransformerRegistry as _DataTransformerRegistry
+ from ..utils.data import DataType, ToValuesReturnType
+ from ..utils.plugin_registry import PluginEnabler
++from typing import Optional, Union, overload, Callable
+ 
+ 
+-@curried.curry
++@overload
+ def default_data_transformer(
+-    data: DataType, max_rows: int = 5000
+-) -> ToValuesReturnType:
+-    return curried.pipe(data, limit_rows(max_rows=max_rows), to_values)
++    data: None = ..., max_rows: int = ...
++) -> Callable[[DataType], ToValuesReturnType]: ...
++@overload
++def default_data_transformer(
++    data: DataType, max_rows: int = ...
++) -> ToValuesReturnType: ...
++def default_data_transformer(
++    data: Optional[DataType] = None, max_rows: int = 5000
++) -> Union[Callable[[DataType], ToValuesReturnType], ToValuesReturnType]:
++    if data is None:
++
++        def pipe(data: DataType, /) -> ToValuesReturnType:
++            data = limit_rows(data, max_rows=max_rows)
++            return to_values(data)
++
++        return pipe
++
++    else:
++        return to_values(limit_rows(data, max_rows=max_rows))
+ 
+ 
+ class DataTransformerRegistry(_DataTransformerRegistry):
+diff --git a/altair/vegalite/v5/api.py b/altair/vegalite/v5/api.py
+index 37a13c2ae..6425c77fe 100644
+--- a/altair/vegalite/v5/api.py
++++ b/altair/vegalite/v5/api.py
+@@ -4,8 +4,6 @@
+ import io
+ import json
+ import jsonschema
+-import pandas as pd
+-from toolz.curried import pipe as _pipe
+ import itertools
+ import sys
+ import pathlib
+@@ -29,7 +27,7 @@
+     compile_with_vegafusion as _compile_with_vegafusion,
+ )
+ from ...utils.core import DataFrameLike
+-from ...utils.data import DataType
++from ...utils.data import DataType, is_data_type as _is_data_type
+ from ...utils.deprecation import AltairDeprecationWarning
+ 
+ if sys.version_info >= (3, 13):
+@@ -114,16 +112,14 @@ def _prepare_data(data, context=None):
+         return data
+ 
+     # convert dataframes  or objects with __geo_interface__ to dict
+-    elif isinstance(data, pd.DataFrame) or hasattr(data, "__geo_interface__"):
+-        data = _pipe(data, data_transformers.get())
++    elif not isinstance(data, dict) and _is_data_type(data):
++        if func := data_transformers.get():
++            data = func(data)
+ 
+     # convert string input to a URLData
+     elif isinstance(data, str):
+         data = core.UrlData(data)
+ 
+-    elif isinstance(data, DataFrameLike):
+-        data = _pipe(data, data_transformers.get())
+-
+     # consolidate inline data to top-level datasets
+     if context is not None and data_transformers.consolidate_datasets:
+         data = _consolidate_data(data, context)
+diff --git a/pyproject.toml b/pyproject.toml
+index a7ad687f7..6196d4790 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -22,7 +22,6 @@ dependencies = [
+     "numpy",
+     # If you update the minimum required pandas version, also update it in build.yml
+     "pandas>=0.25",
+-    "toolz",
+     "packaging"
+ ]
+ description = "Vega-Altair: A declarative statistical visualization library for Python."
+diff --git a/tests/utils/test_data.py b/tests/utils/test_data.py
+index 0d746e79d..e37cb402f 100644
+--- a/tests/utils/test_data.py
++++ b/tests/utils/test_data.py
+@@ -1,9 +1,8 @@
+ import os
+-
++import re
++from typing import Any, Callable
+ import pytest
+ import pandas as pd
+-from toolz import pipe
+-
+ from altair.utils.data import (
+     limit_rows,
+     MaxRowsError,
+@@ -11,7 +10,19 @@
+     to_values,
+     to_json,
+     to_csv,
++    curry,
++    pipe,
+ )
++from altair.utils._importers import import_toolz_function
++from altair.utils.deprecation import AltairDeprecationWarning
++
++
++def _pipe(data: Any, *funcs: Callable[..., Any]) -> Any:
++    # Redefined to maintain existing tests
++    # Originally part of `toolz` dependency
++    for func in funcs:
++        data = func(data)
++    return data
+ 
+ 
+ def _create_dataframe(N):
+@@ -30,9 +41,9 @@ def test_limit_rows():
+     result = limit_rows(data, max_rows=20)
+     assert data is result
+     with pytest.raises(MaxRowsError):
+-        pipe(data, limit_rows(max_rows=5))
++        _pipe(data, limit_rows(max_rows=5))
+     data = _create_data_with_values(10)
+-    result = pipe(data, limit_rows(max_rows=20))
++    result = _pipe(data, limit_rows(max_rows=20))
+     assert data is result
+     with pytest.raises(MaxRowsError):
+         limit_rows(data, max_rows=5)
+@@ -41,7 +52,7 @@ def test_limit_rows():
+ def test_sample():
+     """Test the sample data transformer."""
+     data = _create_dataframe(20)
+-    result = pipe(data, sample(n=10))
++    result = _pipe(data, sample(n=10))
+     assert len(result) == 10
+     assert isinstance(result, pd.DataFrame)
+     data = _create_data_with_values(20)
+@@ -50,7 +61,7 @@ def test_sample():
+     assert "values" in result
+     assert len(result["values"]) == 10
+     data = _create_dataframe(20)
+-    result = pipe(data, sample(frac=0.5))
++    result = _pipe(data, sample(frac=0.5))
+     assert len(result) == 10
+     assert isinstance(result, pd.DataFrame)
+     data = _create_data_with_values(20)
+@@ -63,7 +74,7 @@ def test_sample():
+ def test_to_values():
+     """Test the to_values data transformer."""
+     data = _create_dataframe(10)
+-    result = pipe(data, to_values)
++    result = _pipe(data, to_values)
+     assert result == {"values": data.to_dict(orient="records")}
+ 
+ 
+@@ -71,7 +82,7 @@ def test_type_error():
+     """Ensure that TypeError is raised for types other than dict/DataFrame."""
+     for f in (sample, limit_rows, to_values):
+         with pytest.raises(TypeError):
+-            pipe(0, f)
++            _pipe(0, f)
+ 
+ 
+ def test_dataframe_to_json():
+@@ -81,8 +92,8 @@ def test_dataframe_to_json():
+     """
+     data = _create_dataframe(10)
+     try:
+-        result1 = pipe(data, to_json)
+-        result2 = pipe(data, to_json)
++        result1 = _pipe(data, to_json)
++        result2 = _pipe(data, to_json)
+         filename = result1["url"]
+         output = pd.read_json(filename)
+     finally:
+@@ -99,8 +110,8 @@ def test_dict_to_json():
+     """
+     data = _create_data_with_values(10)
+     try:
+-        result1 = pipe(data, to_json)
+-        result2 = pipe(data, to_json)
++        result1 = _pipe(data, to_json)
++        result2 = _pipe(data, to_json)
+         filename = result1["url"]
+         output = pd.read_json(filename).to_dict(orient="records")
+     finally:
+@@ -117,8 +128,8 @@ def test_dataframe_to_csv():
+     """
+     data = _create_dataframe(10)
+     try:
+-        result1 = pipe(data, to_csv)
+-        result2 = pipe(data, to_csv)
++        result1 = _pipe(data, to_csv)
++        result2 = _pipe(data, to_csv)
+         filename = result1["url"]
+         output = pd.read_csv(filename)
+     finally:
+@@ -135,8 +146,8 @@ def test_dict_to_csv():
+     """
+     data = _create_data_with_values(10)
+     try:
+-        result1 = pipe(data, to_csv)
+-        result2 = pipe(data, to_csv)
++        result1 = _pipe(data, to_csv)
++        result2 = _pipe(data, to_csv)
+         filename = result1["url"]
+         output = pd.read_csv(filename).to_dict(orient="records")
+     finally:
+@@ -144,3 +155,24 @@ def test_dict_to_csv():
+ 
+     assert result1 == result2
+     assert data == {"values": output}
++
++
++def test_toolz():
++    expected_msg = r"Usage.+ requires"
++    data = _create_data_with_values(10)
++    try:
++        with pytest.warns(AltairDeprecationWarning, match="toolz.curried.pipe"):
++            result1 = pipe(data, to_values)
++        assert isinstance(result1, dict)
++        kwds = {"prefix": "dummy"}
++        with pytest.warns(AltairDeprecationWarning, match="toolz.curried.curry"):
++            result2 = curry(to_csv, **kwds)
++        assert "curry" in type(result2).__name__
++        assert result2.func_name == to_csv.__name__
++        assert result2.keywords == kwds
++    except ImportError as err:
++        assert re.search(expected_msg, err.msg)
++    with pytest.raises(ImportError, match=expected_msg):
++        dummy = "fake_function_name"
++        with pytest.warns(AltairDeprecationWarning, match=f"toolz.curried.{dummy}"):
++            func = import_toolz_function(dummy)  # noqa: F841
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,340 @@
+  Task-ID: Lightning-AI__pytorch-lightning-7351@7b3f48d
+  Please checkout to this commit first: b64aea637cce2df4ed0275d6c5709ecf1dc26011
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Bug] Logging Separately Per Epoch
+## 🐛 Bug
+
+Logs separate plots for each epoch
+
+### To Reproduce
+
+```python
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader
+from pytorch_lightning import LightningModule, Trainer
+from torch.nn import functional as F
+from torchmetrics.classification import Accuracy
+
+class RandomDataset(Dataset):
+    def __init__(self, size, length):
+        self.len = length
+        self.data = torch.randn(length, size)
+    def __getitem__(self, index):
+        return self.data[index], 1
+    def __len__(self):
+        return self.len
+
+class BoringModel(LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.layer = torch.nn.Linear(32, 2)
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.train_accuracy = Accuracy()
+        self.val_accuracy = Accuracy()
+
+    def forward(self, x):
+        return self.layer(x)
+
+    def training_step(self, batch, batch_id):
+        return self.step(batch, step_type="train")
+
+    def validation_step(self, batch, batch_id):
+        return self.step(batch, step_type="val")
+
+    def step(self, batch, step_type: str):
+        data, y = batch
+        y_pred = self(data)
+        loss = self.loss_fn(y_pred, y)
+        self.log(f"{step_type}_loss", loss, prog_bar=True, sync_dist=False)
+        # Compute accuracy
+        y_pred = F.softmax(y_pred, dim=1)
+        self.__getattr__(f"{step_type}_accuracy")(y_pred, y)
+        self.log(f"{step_type}_accuracy", self.__getattr__(f"{step_type}_accuracy"), on_step=True, on_epoch=True)
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.layer.parameters(), lr=0.1)
+
+def run():
+    train_data = DataLoader(RandomDataset(32, 64), batch_size=2)
+    val_data = DataLoader(RandomDataset(32, 64), batch_size=2)
+    test_data = DataLoader(RandomDataset(32, 64), batch_size=2)
+    model = BoringModel()
+    trainer = Trainer(
+        default_root_dir=os.getcwd(),
+        limit_train_batches=5,
+        limit_val_batches=5,
+        num_sanity_val_steps=0,
+        max_epochs=4,
+        weights_summary=None,
+    )
+    trainer.fit(model, train_dataloader=train_data, val_dataloaders=val_data)
+    trainer.test(model, test_dataloaders=test_data)
+
+if __name__ == '__main__':
+    run()
+```
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b61aa5939dbef..753ddda0d60ea 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -199,6 +199,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
+ - Changed `resume_from_checkpoint` warning to an error when the checkpoint file does not exist ([#7075](https://github.com/PyTorchLightning/pytorch-lightning/pull/7075))
+ 
+ 
++- Changed the behaviour when logging evaluation step metrics to no longer append `/epoch_*` to the metric name ([#7351](https://github.com/PyTorchLightning/pytorch-lightning/pull/7351))
++
++
+ ### Deprecated
+ 
+ 
+diff --git a/pytorch_lightning/trainer/connectors/logger_connector/logger_connector.py b/pytorch_lightning/trainer/connectors/logger_connector/logger_connector.py
+index 7a4a7292ad97f..45e8c90a3807e 100644
+--- a/pytorch_lightning/trainer/connectors/logger_connector/logger_connector.py
++++ b/pytorch_lightning/trainer/connectors/logger_connector/logger_connector.py
+@@ -43,6 +43,8 @@ def __init__(self, trainer, log_gpu_memory: Optional[str] = None):
+         self._cached_results = {stage: EpochResultStore(trainer) for stage in RunningStage}
+         self._cached_results[None] = EpochResultStore(trainer)
+         self._callback_hook_validator = CallbackHookNameValidator()
++        self._val_log_step: int = 0
++        self._test_log_step: int = 0
+ 
+     @property
+     def callback_metrics(self) -> Dict:
+@@ -201,7 +203,8 @@ def log_metrics(self, metrics, grad_norm_dic, step=None):
+         Args:
+             metrics (dict): Metric values
+             grad_norm_dic (dict): Gradient norms
+-            step (int): Step for which metrics should be logged. Default value corresponds to `self.global_step`
++            step (int): Step for which metrics should be logged. Default value is `self.global_step` during training or
++                the total validation / test log step count during validation and testing.
+         """
+         # add gpu memory
+         if self.trainer._device_type == DeviceType.GPU and self.log_gpu_memory:
+@@ -371,3 +374,31 @@ def log_train_step_metrics(self, batch_output):
+             if len(batch_log_metrics) > 0 or len(grad_norm_dic) > 0:
+                 self.log_metrics(batch_log_metrics, grad_norm_dic)
+                 self._callback_metrics.update(batch_log_metrics)
++
++    @property
++    def evaluation_log_step(self) -> Optional[int]:
++        if self.trainer.state.stage is RunningStage.VALIDATING:
++            return self._val_log_step
++        elif self.trainer.state.stage is RunningStage.TESTING:
++            return self._test_log_step
++
++    def increment_evaluation_log_step(self) -> None:
++        if self.trainer.state.stage is RunningStage.VALIDATING:
++            self._val_log_step += 1
++        elif self.trainer.state.stage is RunningStage.TESTING:
++            self._test_log_step += 1
++
++    def log_evaluation_step_metrics(self):
++        if self.trainer.sanity_checking:
++            return
++        _, batch_log_metrics = self.cached_results.update_logger_connector()
++
++        # logs user requested information to logger
++        if len(batch_log_metrics) > 0:
++            if "step" in batch_log_metrics:
++                self.log_metrics(batch_log_metrics, {})
++            else:
++                self.log_metrics(batch_log_metrics, {}, step=self.evaluation_log_step)
++
++        # increment the step even if nothing was logged
++        self.increment_evaluation_log_step()
+diff --git a/pytorch_lightning/trainer/evaluation_loop.py b/pytorch_lightning/trainer/evaluation_loop.py
+index 8201d700d39bd..95d4f44fea595 100644
+--- a/pytorch_lightning/trainer/evaluation_loop.py
++++ b/pytorch_lightning/trainer/evaluation_loop.py
+@@ -267,22 +267,3 @@ def on_evaluation_epoch_end(self, outputs: Union[List[List[Dict]], List[Dict]])
+         self.trainer._cache_logged_metrics()
+ 
+         self.trainer.call_hook('on_epoch_end')
+-
+-    def log_evaluation_step_metrics(self, batch_idx: int) -> None:
+-        if self.trainer.sanity_checking:
+-            return
+-
+-        cached_results = self.trainer.logger_connector.cached_results
+-        if cached_results is not None:
+-            cached_batch_pbar_metrics, cached_batch_log_metrics = cached_results.update_logger_connector()
+-
+-            if len(cached_batch_log_metrics) > 0:
+-                # make the metrics appear as a different line in the same graph
+-                metrics_by_epoch = {}
+-                for k, v in cached_batch_log_metrics.items():
+-                    metrics_by_epoch[f'{k}/epoch_{self.trainer.current_epoch}'] = v
+-
+-                self.trainer.logger_connector.log_metrics(metrics_by_epoch, {}, step=batch_idx)
+-
+-            if len(cached_batch_pbar_metrics) > 0:
+-                self.trainer.logger_connector.add_progress_bar_metrics(cached_batch_pbar_metrics)
+diff --git a/pytorch_lightning/trainer/trainer.py b/pytorch_lightning/trainer/trainer.py
+index 39085ff6ef73b..404bde1cbf763 100644
+--- a/pytorch_lightning/trainer/trainer.py
++++ b/pytorch_lightning/trainer/trainer.py
+@@ -966,7 +966,7 @@ def run_evaluation(self, on_epoch: bool = False) -> _EVALUATE_OUTPUT:
+                 self.evaluation_loop.on_evaluation_batch_end(output, batch, batch_idx, dataloader_idx)
+ 
+                 # log batch metrics
+-                self.evaluation_loop.log_evaluation_step_metrics(batch_idx)
++                self.logger_connector.log_evaluation_step_metrics()
+ 
+                 # track epoch level outputs
+                 dl_outputs = self.track_output_for_epoch_end(dl_outputs, output)
+diff --git a/tests/accelerators/test_multi_nodes_gpu.py b/tests/accelerators/test_multi_nodes_gpu.py
+index c086150a60528..42a9b1c064199 100644
+--- a/tests/accelerators/test_multi_nodes_gpu.py
++++ b/tests/accelerators/test_multi_nodes_gpu.py
+@@ -121,8 +121,7 @@ def backward(self, loss, optimizer, optimizer_idx):
+         'a2',
+         'a_step',
+         'a_epoch',
+-        'b_step/epoch_0',
+-        'b_step/epoch_1',
++        'b_step',
+         'b_epoch',
+         'epoch',
+     }
+diff --git a/tests/trainer/logging_/test_eval_loop_logging.py b/tests/trainer/logging_/test_eval_loop_logging.py
+index c91e8fec05cf7..331734aa9b412 100644
+--- a/tests/trainer/logging_/test_eval_loop_logging.py
++++ b/tests/trainer/logging_/test_eval_loop_logging.py
+@@ -76,8 +76,7 @@ def backward(self, loss, optimizer, optimizer_idx):
+         'a2',
+         'a_step',
+         'a_epoch',
+-        'b_step/epoch_0',
+-        'b_step/epoch_1',
++        'b_step',
+         'b_epoch',
+         'epoch',
+     }
+@@ -85,7 +84,7 @@ def backward(self, loss, optimizer, optimizer_idx):
+     assert expected_logged_metrics == logged_metrics
+ 
+     # we don't want to enable val metrics during steps because it is not something that users should do
+-    # on purpose DO NOT allow step_b... it's silly to monitor val step metrics
++    # on purpose DO NOT allow b_step... it's silly to monitor val step metrics
+     callback_metrics = set(trainer.callback_metrics.keys())
+     expected_cb_metrics = {'a', 'a2', 'b', 'a_epoch', 'b_epoch', 'a_step'}
+     assert expected_cb_metrics == callback_metrics
+@@ -145,8 +144,7 @@ def backward(self, loss, optimizer, optimizer_idx):
+         'b_step',
+         'b_epoch',
+         'c',
+-        'd_step/epoch_0',
+-        'd_step/epoch_1',
++        'd_step',
+         'd_epoch',
+         'g',
+     }
+@@ -294,15 +292,15 @@ def validation_epoch_end(self, outputs) -> None:
+ 
+     # make sure values are correct
+     assert trainer.logged_metrics['val_loss_epoch'] == manual_mean
+-    assert trainer.callback_metrics['val_loss'] == trainer.logged_metrics['val_loss_step/epoch_0']
++    assert trainer.callback_metrics['val_loss'] == trainer.logged_metrics['val_loss_step']
+ 
+     # make sure correct values were logged
+     logged_val = trainer.dev_debugger.logged_metrics
+ 
+     # 3 val batches
+-    assert logged_val[0]['val_loss_step/epoch_0'] == model.seen_vals[0]
+-    assert logged_val[1]['val_loss_step/epoch_0'] == model.seen_vals[1]
+-    assert logged_val[2]['val_loss_step/epoch_0'] == model.seen_vals[2]
++    assert logged_val[0]['val_loss_step'] == model.seen_vals[0]
++    assert logged_val[1]['val_loss_step'] == model.seen_vals[1]
++    assert logged_val[2]['val_loss_step'] == model.seen_vals[2]
+ 
+     # epoch mean
+     assert logged_val[3]['val_loss_epoch'] == model.manual_epoch_end_mean
+@@ -872,29 +870,29 @@ def get_metrics_at_idx(idx):
+         else:
+             return mock_calls[idx][2]["metrics"]
+ 
+-    expected = ['valid_loss_0_step/epoch_0', 'valid_loss_2/epoch_0', 'global_step']
++    expected = ['valid_loss_0_step', 'valid_loss_2', 'global_step']
+     assert sorted(get_metrics_at_idx(1)) == sorted(expected)
+     assert sorted(get_metrics_at_idx(2)) == sorted(expected)
+ 
+     expected = model.val_losses[2]
+-    assert get_metrics_at_idx(1)["valid_loss_0_step/epoch_0"] == expected
++    assert get_metrics_at_idx(1)["valid_loss_0_step"] == expected
+     expected = model.val_losses[3]
+-    assert get_metrics_at_idx(2)["valid_loss_0_step/epoch_0"] == expected
++    assert get_metrics_at_idx(2)["valid_loss_0_step"] == expected
+ 
+     expected = ['valid_loss_0_epoch', 'valid_loss_1', 'epoch', 'global_step']
+     assert sorted(get_metrics_at_idx(3)) == sorted(expected)
+ 
+     expected = torch.stack(model.val_losses[2:4]).mean()
+     assert get_metrics_at_idx(3)["valid_loss_1"] == expected
+-    expected = ['valid_loss_0_step/epoch_1', 'valid_loss_2/epoch_1', 'global_step']
++    expected = ['valid_loss_0_step', 'valid_loss_2', 'global_step']
+ 
+     assert sorted(get_metrics_at_idx(4)) == sorted(expected)
+     assert sorted(get_metrics_at_idx(5)) == sorted(expected)
+ 
+     expected = model.val_losses[4]
+-    assert get_metrics_at_idx(4)["valid_loss_0_step/epoch_1"] == expected
++    assert get_metrics_at_idx(4)["valid_loss_0_step"] == expected
+     expected = model.val_losses[5]
+-    assert get_metrics_at_idx(5)["valid_loss_0_step/epoch_1"] == expected
++    assert get_metrics_at_idx(5)["valid_loss_0_step"] == expected
+ 
+     expected = ['valid_loss_0_epoch', 'valid_loss_1', 'epoch', 'global_step']
+     assert sorted(get_metrics_at_idx(6)) == sorted(expected)
+diff --git a/tests/trainer/logging_/test_train_loop_logging.py b/tests/trainer/logging_/test_train_loop_logging.py
+index 04c8337cb5182..a24da2e412eb5 100644
+--- a/tests/trainer/logging_/test_train_loop_logging.py
++++ b/tests/trainer/logging_/test_train_loop_logging.py
+@@ -401,7 +401,7 @@ def val_dataloader(self):
+     trainer.fit(model)
+ 
+     generated = set(trainer.logger_connector.logged_metrics)
+-    expected = {'a_step', 'a_epoch', 'n_step/epoch_0', 'n_epoch', 'epoch'}
++    expected = {'a_step', 'a_epoch', 'n_step', 'n_epoch', 'epoch'}
+ 
+     assert generated == expected
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

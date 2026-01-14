@@ -1,0 +1,206 @@
+  Task-ID: sympy__sympy-16133@82bdbae
+  Please checkout to this commit first: d4c64e2b68e2873d32492afdf2942fe8e805de1a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  boolalg.SOPform() does not give the simplest form.
+Hi, developers of Sympy.
+
+@mpraiser and I were using `boolalg.SOPform()` to get the smallest sum of products. But it does not seem to give the *smallest* sum of products.
+
+```python
+In [136]: v
+Out[136]: [A, B, C, D, E, F, G, H]
+
+In [137]: q
+Out[137]: 
+(B ∧ D ∧ H ∧ ¬F) ∨ (B ∧ H ∧ ¬C ∧ ¬D) ∨ (B ∧ H ∧ ¬C ∧ ¬F) ∨ (B ∧ H ∧ ¬D ∧ ¬G) ∨
+ (B ∧ H ∧ ¬F ∧ ¬G) ∨ (C ∧ G ∧ ¬B ∧ ¬D) ∨ (C ∧ G ∧ ¬D ∧ ¬H) ∨ (C ∧ G ∧ ¬F ∧ ¬H)
+ ∨ (D ∧ F ∧ H ∧ ¬B) ∨ (D ∧ F ∧ ¬G ∧ ¬H) ∨ (B ∧ D ∧ F ∧ ¬C ∧ ¬H) ∨ (D ∧ E ∧ F ∧
+ ¬B ∧ ¬C) ∨ (D ∧ F ∧ ¬A ∧ ¬B ∧ ¬C) ∨ (D ∧ F ∧ ¬A ∧ ¬C ∧ ¬H) ∨ (A ∧ B ∧ D ∧ F ∧
+ ¬E ∧ ¬H)
+
+In [138]: qq
+Out[138]: 
+(B ∧ D ∧ H ∧ ¬F) ∨ (B ∧ H ∧ ¬C ∧ ¬D) ∨ (B ∧ H ∧ ¬D ∧ ¬G) ∨ (C ∧ G ∧ ¬B ∧ ¬D) ∨
+ (C ∧ G ∧ ¬D ∧ ¬H) ∨ (C ∧ G ∧ ¬F ∧ ¬H) ∨ (D ∧ F ∧ H ∧ ¬B) ∨ (D ∧ F ∧ ¬G ∧ ¬H) 
+∨ (B ∧ D ∧ F ∧ ¬C ∧ ¬H) ∨ (D ∧ E ∧ F ∧ ¬C ∧ ¬H) ∨ (D ∧ F ∧ ¬A ∧ ¬C ∧ ¬H) ∨ (A 
+∧ B ∧ C ∧ G ∧ ¬E ∧ ¬H)
+
+In [139]: list(boolalg.truth_table(q, v)) == list(boolalg.truth_table(qq, v))
+Out[139]: True
+
+In [140]: len(q.args)
+Out[140]: 15
+
+In [141]: len(qq.args)
+Out[141]: 12
+```
+
+`q` is the result `boolalg.SOPform()` gives me and it contains 15 product terms. `qq` is the result from another logic simplification program written by @mpraiser and it contains 12 product terms. They share the same truth table, but `qq` is obviously *simpler* than `q` since it contains less product terms than `qq`.
+
+And when `boolalg.simplify_logic()` is performed on `q` and `qq`, they yield the same result as `q` as if `q` is the *simplest* already.
+
+```python
+In [155]: boolalg.simplify_logic(q, "dnf") == q
+Out[155]: True
+
+In [156]: boolalg.simplify_logic(qq, "dnf") == q
+Out[156]: True
+```
+
+How can I solve this? Thanks:)
+  </issue>
+  
+  <patch>
+  diff --git a/sympy/logic/boolalg.py b/sympy/logic/boolalg.py
+index 8bbea2125c94..2633a5644c25 100644
+--- a/sympy/logic/boolalg.py
++++ b/sympy/logic/boolalg.py
+@@ -493,7 +493,7 @@ def diff(self, *symbols, **assumptions):
+         return Derivative(self, *symbols, **assumptions)
+ 
+     def _eval_derivative(self, x):
+-        from sympy.core.relational import Eq, Relational
++        from sympy.core.relational import Eq
+         from sympy.functions.elementary.piecewise import Piecewise
+         if x in self.binary_symbols:
+             return Piecewise(
+@@ -1869,6 +1869,12 @@ def _rem_redundancy(l1, terms):
+ 
+     return essential
+ 
++def _binary_from_list_or_number(lon, bits):
++        def tobin(n, bits):
++            return [(n >> k) & 1 for k in reversed(range(0, bits))]
++        if isinstance(lon, int):
++            return tobin(lon, bits)
++        return list(lon)
+ 
+ def SOPform(variables, minterms, dontcares=None):
+     """
+@@ -1897,6 +1903,20 @@ def SOPform(variables, minterms, dontcares=None):
+     >>> SOPform([w, x, y, z], minterms, dontcares)
+     (y & z) | (z & ~w)
+ 
++    The terms can also be represented as integers:
++
++    >>> minterms = [1, 3, 7, 11, 15]
++    >>> dontcares = [0, 2, 5]
++    >>> SOPform([w, x, y, z], minterms, dontcares)
++    (y & z) | (z & ~w)
++
++    Or a combination:
++
++    >>> minterms = [1, 3, 7, 11, [1, 1, 1, 1]]
++    >>> dontcares = [[0, 0, 0, 0], 2, 5]
++    >>> SOPform([w, x, y, z], minterms, dontcares)
++    (y & z) | (z & ~w)
++
+     References
+     ==========
+ 
+@@ -1907,8 +1927,9 @@ def SOPform(variables, minterms, dontcares=None):
+     if minterms == []:
+         return false
+ 
+-    minterms = [list(i) for i in minterms]
+-    dontcares = [list(i) for i in (dontcares or [])]
++    bits = len(variables)
++    minterms = [_binary_from_list_or_number(i, bits) for i in minterms]
++    dontcares = [_binary_from_list_or_number(i, bits) for i in (dontcares or [])]
+     for d in dontcares:
+         if d in minterms:
+             raise ValueError('%s in minterms is also in dontcares' % d)
+@@ -1949,6 +1970,20 @@ def POSform(variables, minterms, dontcares=None):
+     >>> POSform([w, x, y, z], minterms, dontcares)
+     z & (y | ~w)
+ 
++    The terms can also be represented as integers:
++
++    >>> minterms = [1, 3, 7, 11, 15]
++    >>> dontcares = [0, 2, 5]
++    >>> POSform([w, x, y, z], minterms, dontcares)
++    z & (y | ~w)
++
++    Or a combination:
++
++    >>> minterms = [1, 3, 7, 11, [1, 1, 1, 1]]
++    >>> dontcares = [[0, 0, 0, 0], 2, 5]
++    >>> POSform([w, x, y, z], minterms, dontcares)
++    z & (y | ~w)
++
+     References
+     ==========
+ 
+@@ -1959,8 +1994,9 @@ def POSform(variables, minterms, dontcares=None):
+     if minterms == []:
+         return false
+ 
+-    minterms = [list(i) for i in minterms]
+-    dontcares = [list(i) for i in (dontcares or [])]
++    bits = len(variables)
++    minterms = [_binary_from_list_or_number(i, bits) for i in minterms]
++    dontcares = [_binary_from_list_or_number(i, bits) for i in (dontcares or [])]
+     for d in dontcares:
+         if d in minterms:
+             raise ValueError('%s in minterms is also in dontcares' % d)
+diff --git a/sympy/logic/tests/test_boolalg.py b/sympy/logic/tests/test_boolalg.py
+index 6c737c3fcb6a..4631f9b84993 100644
+--- a/sympy/logic/tests/test_boolalg.py
++++ b/sympy/logic/tests/test_boolalg.py
+@@ -226,6 +226,21 @@ def test_simplification():
+         Or(And(Not(w), z), And(y, z)))
+     assert POSform([w, x, y, z], minterms, dontcares) == And(Or(Not(w), y), z)
+ 
++    minterms = [1, 3, 7, 11, 15]
++    dontcares = [0, 2, 5]
++    assert (
++        SOPform([w, x, y, z], minterms, dontcares) ==
++        Or(And(Not(w), z), And(y, z)))
++    assert POSform([w, x, y, z], minterms, dontcares) == And(Or(Not(w), y), z)
++
++    minterms = [1, [0, 0, 1, 1], 7, [1, 0, 1, 1],
++        [1, 1, 1, 1]]
++    dontcares = [0, [0, 0, 1, 0], 5]
++    assert (
++        SOPform([w, x, y, z], minterms, dontcares) ==
++        Or(And(Not(w), z), And(y, z)))
++    assert POSform([w, x, y, z], minterms, dontcares) == And(Or(Not(w), y), z)
++
+     # test simplification
+     ans = And(A, Or(B, C))
+     assert simplify_logic(A & (B | C)) == ans
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

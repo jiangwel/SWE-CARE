@@ -1,0 +1,265 @@
+  Task-ID: pandas-dev__pandas-19021@fd1e7a5
+  Please checkout to this commit first: bb095a6e96217f162544b10e9e7a46f04071fb37
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  df.append should retain columns type if same type
+Currently ``df.append`` loses columns index type, if the columns is a`` CategoricalIndex``:
+ 
+```python
+>>> idx = pd.CategoricalIndex('a b'.split())
+>>> df = pd.DataFrame([[1, 2]], columns=idx)
+>>> ser = pd.Series([3, 4], index=idx, name=1)
+>>> df.append(ser).columns
+Index(['a', 'b'], dtype='object')
+```
+
+``df.append(ser).columns`` should return a ``CategoricalIndex`` equal to ``idx``.
+
+pandas 0.21 has the new ``CategoricalDtype``, so it's now easy to compare ``CategoricalIndex`` instances for strict type equality. Hence this issue should be much easier to solve than previously.
+
+### Solution proposal
+
+In ``frame.py::DataFrame.append`` there is this line:
+
+```python
+combined_columns = self.columns.tolist() + self.columns.union(
+                    other.index).difference(self.columns).tolist()
+```
+This line converts CategoricalIndex columns to normal indexes. So by making some checks for types and dtypes it should be easy return the correct index. So if the above would be something like this instead:
+
+```python
+same_types = type(self.columns) == type(other.index)
+same_dtypes = self.columns.dtype == other.index.dtype
+if same_types and same_dtypes:
+    combined_columns = self.columns.union(other.index)
+else:
+    combined_columns = self.columns.tolist() + self.columns.union(
+        other.index).difference(self.columns).tolist()
+```
+
+and I think this issue can be solved (haven't checked yet all details, maybe some adjustments have to be made). I'd appreciate comments if this approach is ok.
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/core/frame.py b/pandas/core/frame.py
+index 9e57579ddfc05..ca20def643c2b 100644
+--- a/pandas/core/frame.py
++++ b/pandas/core/frame.py
+@@ -6113,8 +6113,11 @@ def append(self, other, ignore_index=False, verify_integrity=False):
+                 # index name will be reset
+                 index = Index([other.name], name=self.index.name)
+ 
+-            combined_columns = self.columns.tolist() + self.columns.union(
+-                other.index).difference(self.columns).tolist()
++            idx_diff = other.index.difference(self.columns)
++            try:
++                combined_columns = self.columns.append(idx_diff)
++            except TypeError:
++                combined_columns = self.columns.astype(object).append(idx_diff)
+             other = other.reindex(combined_columns, copy=False)
+             other = DataFrame(other.values.reshape((1, len(other))),
+                               index=index,
+diff --git a/pandas/tests/reshape/test_concat.py b/pandas/tests/reshape/test_concat.py
+index ffd37dc4b2f59..01e93095f7c43 100644
+--- a/pandas/tests/reshape/test_concat.py
++++ b/pandas/tests/reshape/test_concat.py
+@@ -1,5 +1,7 @@
+ from warnings import catch_warnings
++from itertools import combinations
+ 
++import datetime as dt
+ import dateutil
+ import numpy as np
+ from numpy.random import randn
+@@ -829,12 +831,113 @@ def test_append_preserve_index_name(self):
+         result = df1.append(df2)
+         assert result.index.name == 'A'
+ 
++    @pytest.mark.parametrize("df_columns", [
++        pd.RangeIndex(3),
++        pd.Index([1, 2, 3]),
++        pd.Index(list('abc')),
++        pd.CategoricalIndex('A B C'.split()),
++        pd.CategoricalIndex('A B C'.split(), ordered=True),
++        pd.MultiIndex.from_arrays(['A B C'.split(), 'D E F'.split()]),
++        pd.IntervalIndex.from_breaks([0, 1, 2, 3]),
++        pd.DatetimeIndex([dt.datetime(2013, 1, 3, 0, 0),
++                          dt.datetime(2013, 1, 3, 6, 10),
++                          dt.datetime(2013, 1, 3, 7, 12)]),
++    ], ids=lambda x: str(x.dtype))
++    def test_append_same_columns_type(self, df_columns):
++        # GH18359
++
++        # df wider than ser
++        df = pd.DataFrame([[1, 2, 3], [4, 5, 6]], columns=df_columns)
++        ser_index = df_columns[:2]
++        ser = pd.Series([7, 8], index=ser_index, name=2)
++        result = df.append(ser)
++        expected = pd.DataFrame([[1., 2., 3.], [4, 5, 6], [7, 8, np.nan]],
++                                index=[0, 1, 2],
++                                columns=df_columns)
++        assert_frame_equal(result, expected)
++
++        # ser wider than df
++        ser_index = df_columns
++        df_columns = df_columns[:2]
++        df = pd.DataFrame([[1, 2], [4, 5]], columns=df_columns)
++        ser = pd.Series([7, 8, 9], index=ser_index, name=2)
++        result = df.append(ser)
++        expected = pd.DataFrame([[1, 2, np.nan], [4, 5, np.nan], [7, 8, 9]],
++                                index=[0, 1, 2],
++                                columns=ser_index)
++        assert_frame_equal(result, expected)
++
++    @pytest.mark.parametrize("df_columns, series_index", combinations([
++        pd.RangeIndex(3),
++        pd.Index([4, 5, 6]),
++        pd.Index([7.5, 8.5, 9.5]),
++        pd.Index(list('abc')),
++        pd.CategoricalIndex('A B C'.split(), ordered=True),
++        # pd.CategoricalIndex('A B C'.split()),
++        pd.DatetimeIndex([dt.datetime(2013, 1, 3, 0, 0),
++                          dt.datetime(2013, 1, 3, 6, 10),
++                          dt.datetime(2013, 1, 3, 7, 12)]),
++    ], r=2), ids=lambda x: str(x.dtype))
++    def test_append_different_columns_types(self, df_columns, series_index):
++        # GH18359
++        # see also test 'test_append_different_columns_types_raises' below
++
++        df = pd.DataFrame([[1, 2, 3], [4, 5, 6]], columns=df_columns)
++        ser = pd.Series([7, 8, 9], index=series_index, name=2)
++
++        result = df.append(ser)
++        idx_diff = ser.index.difference(df_columns)
++        combined_columns = Index(df_columns.tolist()).append(idx_diff)
++        expected = pd.DataFrame([[1., 2., 3., np.nan, np.nan, np.nan],
++                                 [4, 5, 6, np.nan, np.nan, np.nan],
++                                 [np.nan, np.nan, np.nan, 7, 8, 9]],
++                                index=[0, 1, 2],
++                                columns=combined_columns)
++        assert_frame_equal(result, expected)
++
++    @pytest.mark.parametrize("this_type", [
++        pd.IntervalIndex.from_breaks([0, 1, 2, 3]),
++        pd.MultiIndex.from_arrays(['A B C'.split(), 'D E F'.split()]),
++    ])
++    @pytest.mark.parametrize("other_type", [
++        pd.RangeIndex(3),
++        pd.Index([4, 5, 6]),
++        pd.Index(list("abc")),
++        pd.CategoricalIndex('A B C'.split()),
++        pd.CategoricalIndex('A B C'.split(), ordered=True),
++        pd.IntervalIndex.from_breaks([0, 1, 2, 3]),
++        pd.MultiIndex.from_arrays(['A B C'.split(), 'D E F'.split()]),
++        pd.DatetimeIndex([dt.datetime(2013, 1, 3, 0, 0),
++                          dt.datetime(2013, 1, 3, 6, 10),
++                          dt.datetime(2013, 1, 3, 7, 12)]),
++    ], ids=lambda x: str(x.dtype))
++    def test_append_different_columns_types_raises(self,
++                                                   this_type, other_type):
++        # GH18359
++        # .append will raise if IntervalIndex/MultiIndex appends or is
++        # appended to a different index type
++        #
++        # see also test 'test_append_different_columns_types' above for
++        # appending without raising.
++
++        if type(this_type) is type(other_type):
++            # don't test same type
++            return
++
++        df = pd.DataFrame([[1, 2, 3], [4, 5, 6]], columns=this_type)
++        ser = pd.Series([7, 8, 9], index=other_type, name=2)
++        with pytest.raises(TypeError):
++            df.append(ser)
++
++        df = pd.DataFrame([[1, 2, 3], [4, 5, 6]], columns=other_type)
++        ser = pd.Series([7, 8, 9], index=this_type, name=2)
++        with pytest.raises(TypeError):
++            df.append(ser)
++
+     def test_append_dtype_coerce(self):
+ 
+         # GH 4993
+         # appending with datetime will incorrectly convert datetime64
+-        import datetime as dt
+-        from pandas import NaT
+ 
+         df1 = DataFrame(index=[1, 2], data=[dt.datetime(2013, 1, 1, 0, 0),
+                                             dt.datetime(2013, 1, 2, 0, 0)],
+@@ -845,7 +948,9 @@ def test_append_dtype_coerce(self):
+                                              dt.datetime(2013, 1, 4, 7, 10)]],
+                         columns=['start_time', 'end_time'])
+ 
+-        expected = concat([Series([NaT, NaT, dt.datetime(2013, 1, 3, 6, 10),
++        expected = concat([Series([pd.NaT,
++                                   pd.NaT,
++                                   dt.datetime(2013, 1, 3, 6, 10),
+                                    dt.datetime(2013, 1, 4, 7, 10)],
+                                   name='end_time'),
+                            Series([dt.datetime(2013, 1, 1, 0, 0),
+diff --git a/pandas/tests/reshape/test_pivot.py b/pandas/tests/reshape/test_pivot.py
+index 92bedbabdf2f1..1004b40bfb4c1 100644
+--- a/pandas/tests/reshape/test_pivot.py
++++ b/pandas/tests/reshape/test_pivot.py
+@@ -1540,12 +1540,14 @@ def test_crosstab_normalize(self):
+                                           index=pd.Index([1, 2, 'All'],
+                                                          name='a',
+                                                          dtype='object'),
+-                                          columns=pd.Index([3, 4], name='b'))
++                                          columns=pd.Index([3, 4], name='b',
++                                                           dtype='object'))
+         col_normal_margins = pd.DataFrame([[0.5, 0, 0.2], [0.5, 1.0, 0.8]],
+                                           index=pd.Index([1, 2], name='a',
+                                                          dtype='object'),
+                                           columns=pd.Index([3, 4, 'All'],
+-                                                           name='b'))
++                                                           name='b',
++                                                           dtype='object'))
+ 
+         all_normal_margins = pd.DataFrame([[0.2, 0, 0.2],
+                                            [0.2, 0.6, 0.8],
+@@ -1554,7 +1556,8 @@ def test_crosstab_normalize(self):
+                                                          name='a',
+                                                          dtype='object'),
+                                           columns=pd.Index([3, 4, 'All'],
+-                                                           name='b'))
++                                                           name='b',
++                                                           dtype='object'))
+         tm.assert_frame_equal(pd.crosstab(df.a, df.b, normalize='index',
+                                           margins=True), row_normal_margins)
+         tm.assert_frame_equal(pd.crosstab(df.a, df.b, normalize='columns',
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

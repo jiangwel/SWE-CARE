@@ -1,0 +1,235 @@
+  Task-ID: sympy__sympy-27352@b3187d6
+  Please checkout to this commit first: e53690af7e57eeef7e8c6dea1521a4dc0024cf95
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  GramSchmidt is really, really slow
+I tried applying Gram-Schmidt to construct an orthonormal basis of the following four vectors:
+
+$$
+\begin{bmatrix}  -1 + \frac{\sqrt{2}}{2} \\\\  \frac{1}{2} + \frac{\sqrt{2}}{2} \\\\  - \frac{\sqrt{2}}{2} - \frac{1}{2} \\\\  0 \end{bmatrix},
+\begin{bmatrix}  -1 - \frac{\sqrt{2}}{2} \\\\  0 \\\\  0 \\\\  0 \end{bmatrix},
+\begin{bmatrix}  \frac{\sqrt{2}}{2} \\\\  \frac{1}{2} \\\\  -\frac{1}{2} \\\\  \frac{1}{2} \end{bmatrix},
+\begin{bmatrix}  - \frac{\sqrt{2}}{2} \\\\  \frac{\sqrt{2}}{2} \\\\  - \frac{\sqrt{2}}{2} \\\\  -\frac{1}{2} \end{bmatrix}
+$$
+
+I've been waiting for _hours_ for a result and don't know why it should take so long.  Here's my code:
+```Python
+from sympy import *
+
+vecs = [
+    Matrix([
+        -1 + sqrt(2)/2,
+        1/2 + sqrt(2)/2,
+        -sqrt(2)/2 - 1/2,
+        0,
+    ]),
+    Matrix([
+        -1 - sqrt(2)/2,
+        0,
+        0,
+        0,
+    ]),
+    Matrix([
+        sqrt(2)/2,
+        1/2,
+        -1/2,
+        1/2]),
+    Matrix([
+        -sqrt(2)/2,
+        sqrt(2)/2,
+        -sqrt(2)/2,
+        -1/2,
+    ]),
+]
+gs = GramSchmidt(vecs, True)
+print(gs)
+```
+Am I doing something wrong, or is this slowness to be expected?  I'm running the SymPy 1.12 package that ships with Ubuntu Noble.
+  </issue>
+  
+  <patch>
+  diff --git a/sympy/polys/matrices/_dfm.py b/sympy/polys/matrices/_dfm.py
+index c2f6f16922e0..6a915f4fc61e 100644
+--- a/sympy/polys/matrices/_dfm.py
++++ b/sympy/polys/matrices/_dfm.py
+@@ -694,6 +694,11 @@ def lu(self):
+         L, U, swaps = self.to_ddm().lu()
+         return L.to_dfm(), U.to_dfm(), swaps
+ 
++    def qr(self):
++        """Return the QR decomposition of the matrix."""
++        Q, R = self.to_ddm().qr()
++        return Q.to_dfm(), R.to_dfm()
++
+     # XXX: The lu_solve function should be renamed to solve. Whether or not it
+     # uses an LU decomposition is an implementation detail. A method called
+     # lu_solve would make sense for a situation in which an LU decomposition is
+diff --git a/sympy/polys/matrices/ddm.py b/sympy/polys/matrices/ddm.py
+index 8f90a3305367..1d027f8a5e6f 100644
+--- a/sympy/polys/matrices/ddm.py
++++ b/sympy/polys/matrices/ddm.py
+@@ -958,6 +958,34 @@ def lu(a):
+ 
+         return L, U, swaps
+ 
++    def qr(self):
++        """
++        Fraction-free QR decomposition for DDM.
++        Returns:
++            - Q: Orthogonal matrix as a DDM.
++            - R: Upper triangular matrix as a DDM.
++        """
++        rows, cols = self.shape
++        Q = self.copy()
++        R = self.zeros((rows, cols), self.domain)
++
++        is_zero_col = lambda j: not any(Q[i][j] for i in range(rows))
++        dot_cols = lambda i, j: self.domain.sum(Q[k][i] * Q[k][j] for k in range(rows))
++
++        for j in range(cols):
++            for i in range(j):
++                if is_zero_col(i):
++                    continue
++
++                R[i][j] = dot_cols(i, j) // dot_cols(i, i)
++                for k in range(rows):
++                    Q[k][j] -= R[i][j] * Q[k][i]
++
++            if not is_zero_col(j):
++                R[j][j] = self.domain.one
++
++        return Q, R
++
+     def lu_solve(a, b):
+         """x where a*x = b"""
+         m, n = a.shape
+diff --git a/sympy/polys/matrices/domainmatrix.py b/sympy/polys/matrices/domainmatrix.py
+index b91bef314d16..ff0bc07248ae 100644
+--- a/sympy/polys/matrices/domainmatrix.py
++++ b/sympy/polys/matrices/domainmatrix.py
+@@ -3256,6 +3256,23 @@ def lu(self):
+         L, U, swaps = self.rep.lu()
+         return self.from_rep(L), self.from_rep(U), swaps
+ 
++    def qr(self):
++        """
++        QR decomposition for DomainMatrix.
++
++        Returns:
++            - Q: Orthogonal DomainMatrix.
++            - R: Upper triangular DomainMatrix.
++        """
++        if isinstance(self.rep, DFM):
++            ddm_q, ddm_r = self.rep.qr()
++        else:
++            ddm_q, ddm_r = self.rep.qr()
++
++        Q = DomainMatrix.from_rep(ddm_q)
++        R = DomainMatrix.from_rep(ddm_r)
++        return Q, R
++
+     def lu_solve(self, rhs):
+         r"""
+         Solver for DomainMatrix x in the A*x = B
+diff --git a/sympy/polys/matrices/sdm.py b/sympy/polys/matrices/sdm.py
+index 0e0685f5d6fb..02aba89e906b 100644
+--- a/sympy/polys/matrices/sdm.py
++++ b/sympy/polys/matrices/sdm.py
+@@ -1065,6 +1065,19 @@ def lu(A):
+         L, U, swaps = A.to_ddm().lu()
+         return A.from_ddm(L), A.from_ddm(U), swaps
+ 
++    def qr(self):
++        """
++        QR decomposition for SDM (Sparse Domain Matrix).
++
++        Returns:
++            - Q: Orthogonal matrix as a SDM.
++            - R: Upper triangular matrix as a SDM.
++        """
++        ddm_q, ddm_r = self.to_ddm().qr()
++        Q = ddm_q.to_sdm()
++        R = ddm_r.to_sdm()
++        return Q, R
++
+     def lu_solve(A, b):
+         """
+ 
+diff --git a/sympy/polys/matrices/tests/test_ddm.py b/sympy/polys/matrices/tests/test_ddm.py
+index 44c862461e85..5bb1ba920467 100644
+--- a/sympy/polys/matrices/tests/test_ddm.py
++++ b/sympy/polys/matrices/tests/test_ddm.py
+@@ -7,6 +7,7 @@
+ from sympy.polys.matrices.exceptions import (
+     DMShapeError, DMNonInvertibleMatrixError, DMDomainError,
+     DMBadInputError)
++from sympy.polys.matrices import DomainMatrix
+ 
+ 
+ def test_DDM_init():
+@@ -556,3 +557,15 @@ def test_DDM_is_lower():
+     ], (4, 3), QQ).transpose()
+     assert A.is_lower() is True
+     assert B.is_lower() is False
++
++
++def test_ddm_qr():
++    # Create a sample matrix in DomainMatrix
++    A = DomainMatrix([[ZZ(3), ZZ(1)], [ZZ(4), ZZ(3)]], (2, 2), ZZ)
++    # Perform QR decomposition
++    Q, R = A.qr()
++    # Check that the shapes are correct
++    assert Q.shape == (2, 2)
++    assert R.shape == (2, 2)
++    # Check that A = Q * R (within the domain of integers)
++    assert Q * R == A
+diff --git a/sympy/polys/matrices/tests/test_domainmatrix.py b/sympy/polys/matrices/tests/test_domainmatrix.py
+index 2b59d76a9d46..cd305f492eb8 100644
+--- a/sympy/polys/matrices/tests/test_domainmatrix.py
++++ b/sympy/polys/matrices/tests/test_domainmatrix.py
+@@ -1360,3 +1360,11 @@ def test_DomainMatrix_pickling():
+     assert pickle.loads(pickle.dumps(dM)) == dM
+     dM = DomainMatrix([[ZZ(1), ZZ(2)], [ZZ(3), ZZ(4)]], (2, 2), ZZ)
+     assert pickle.loads(pickle.dumps(dM)) == dM
++
++
++def test_qr():
++    A = DomainMatrix([[ZZ(3), ZZ(1)], [ZZ(4), ZZ(3)]], (2, 2), ZZ)
++    Q, R = A.qr()
++    assert Q.shape == (2, 2)
++    assert R.shape == (2, 2)
++    assert Q * R == A
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,262 @@
+  Task-ID: conan-io__conan-8353@b442e5a
+  Please checkout to this commit first: 80f344c101f892a18104fa12fedc2feeb993fdd1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [bug] MesonToolchain does not pick up CC/CXX from build requirements (in build profile)
+The compiler paths of a build requirement with a cross compiler that sets the CC/CXX environment variables
+are not available in `conan_meson_cross.ini`.
+
+I have a build requirement that sets some compiler variables:
+```
+def package_info(self):
+    self.env_info.CC = os.path.join(self.package_folder, "bin", "aarch64-none-elf-gcc")
+    self.env_info.CC_LD = os.path.join(self.package_folder, "bin", "aarch64-none-elf-gcc")
+    self.env_info.CXX = os.path.join(self.package_folder, "bin", "aarch64-none-elf-g++")
+    self.env_info.CXX_LD = os.path.join(self.package_folder, "bin", "aarch64-none-elf-g++")
+    self.env_info.AR = os.path.join(self.package_folder, "bin", "aarch64-none-elf-ar")
+```
+
+But the `[binaries]` section of the cross file remains empty.
+
+When I run conan with `CC=abc conan create .... -pr:h ... -pr:b ...`, then `c = 'abc' is present in the `binaries` section.
+
+`CFLAGS/CXXFLAGS` from a build requirement are also not propagated.
+
+
+### Environment Details (include every applicable attribute)
+  * Operating System+version: Fedora Linux 30
+  * Compiler+version: native: gcc 9.3, cross: gcc 10.2
+  * Conan version: 1.32.1
+  * Python version: 3.7.7
+
+### Steps to reproduce (Include if Applicable)
+
+1. Create a conan recipe that packages a compiler (sets `C`/`CXX`/...). Let's name it `crosscompiler/0.1`.
+2. Create a host profile that adds the package created in step 1 as a build requirement, let's name the profile: `cross`.
+3. Create a build profile for your native compiler. Let's name it `native`.
+4. Cross build a meson project (using `MesonToolchain` like: `conan create . meson-project/0.1@ -pr:h cross -pr:b native`
+
+The generated `conan_meson_cross.ini` won't contain the `properties.c` values, set by `crosscompiler/0.1`.
+If you'd run `CC=abc conan create . meson-project/0.1@ -pr:h cross -pr:b native`, then it would.
+
+
+CC'ing @SSE4 for being the author of `MesonToolchain`.
+  </issue>
+  
+  <patch>
+  diff --git a/conan/tools/meson/toolchain.py b/conan/tools/meson/toolchain.py
+index 40c7bd8203a..0e0800d6fa6 100644
+--- a/conan/tools/meson/toolchain.py
++++ b/conan/tools/meson/toolchain.py
+@@ -28,6 +28,8 @@ class MesonToolchain(object):
+     {% if pkgconfig %}pkgconfig = {{pkgconfig}}{% endif %}
+ 
+     [built-in options]
++    preprocessor_definitions = [{% for it, value in preprocessor_definitions.items() -%}
++    '-D{{ it }}="{{ value}}"'{%- if not loop.last %}, {% endif %}{% endfor %}]
+     {% if buildtype %}buildtype = {{buildtype}}{% endif %}
+     {% if debug %}debug = {{debug}}{% endif %}
+     {% if default_library %}default_library = {{default_library}}{% endif %}
+@@ -35,10 +37,10 @@ class MesonToolchain(object):
+     {% if b_ndebug %}b_ndebug = {{b_ndebug}}{% endif %}
+     {% if b_staticpic %}b_staticpic = {{b_staticpic}}{% endif %}
+     {% if cpp_std %}cpp_std = {{cpp_std}}{% endif %}
+-    {% if c_args %}c_args = {{c_args}}{% endif %}
+-    {% if c_link_args %}c_link_args = {{c_link_args}}{% endif %}
+-    {% if cpp_args %}cpp_args = {{cpp_args}}{% endif %}
+-    {% if cpp_link_args %}cpp_link_args = {{cpp_link_args}}{% endif %}
++    c_args = {{c_args}} + preprocessor_definitions
++    c_link_args = {{c_link_args}}
++    cpp_args = {{cpp_args}} + preprocessor_definitions
++    cpp_link_args = {{cpp_link_args}}
+     {% if pkg_config_path %}pkg_config_path = {{pkg_config_path}}{% endif %}
+     """)
+ 
+@@ -71,7 +73,9 @@ def __init__(self, conanfile, env=os.environ):
+         self._shared = self._conanfile.options.get_safe("shared")
+         self._fpic = self._conanfile.options.get_safe("fPIC")
+         self.definitions = dict()
+-        self._env = env
++        self.preprocessor_definitions = dict()
++        self._env = env.copy()
++        self._env.update(self._conanfile.env)
+ 
+     @staticmethod
+     def _to_meson_value(value):
+@@ -137,6 +141,10 @@ def _to_meson_cppstd(self, cppstd):
+     def _none_if_empty(value):
+         return "'%s'" % value if value.strip() else None
+ 
++    def _env_array(self, name):
++        import shlex
++        return shlex.split(self._env.get(name, ''))
++
+     @property
+     def _context(self):
+         project_options = []
+@@ -171,13 +179,12 @@ def _context(self):
+             "b_ndebug": self._to_meson_value(self._ndebug) if self._build_type else None,
+             # https://mesonbuild.com/Builtin-options.html#compiler-options
+             "cpp_std": self._to_meson_cppstd(self._cppstd) if self._cppstd else None,
+-            "c_args": self._none_if_empty(self._env.get("CPPFLAGS", '') +
+-                                          self._env.get("CFLAGS", '')),
+-            "c_link_args": self._env.get("LDFLAGS", None),
+-            "cpp_args": self._none_if_empty(self._env.get("CPPFLAGS", '') +
+-                                            self._env.get("CXXFLAGS", '')),
+-            "cpp_link_args": self._env.get("LDFLAGS", None),
+-            "pkg_config_path": "'%s'" % os.getcwd()
++            "c_args": self._to_meson_value(self._env_array('CPPFLAGS') + self._env_array('CFLAGS')),
++            "c_link_args": self._to_meson_value(self._env_array('LDFLAGS')),
++            "cpp_args": self._to_meson_value(self._env_array('CPPFLAGS') + self._env_array('CXXFLAGS')),
++            "cpp_link_args": self._to_meson_value(self._env_array('LDFLAGS')),
++            "pkg_config_path": "'%s'" % os.getcwd(),
++            "preprocessor_definitions": self.preprocessor_definitions
+         }
+         return context
+ 
+diff --git a/conans/test/functional/toolchains/meson/test_android.py b/conans/test/functional/toolchains/meson/test_android.py
+index a4fbd549728..9b38188f8b2 100644
+--- a/conans/test/functional/toolchains/meson/test_android.py
++++ b/conans/test/functional/toolchains/meson/test_android.py
+@@ -101,12 +101,14 @@ def env(self):
+         ar = self._tool('ar')
+         cflags = '--target=%s' % self._target
+         cxxflags = '--target=%s' % self._target
++        ldflags = '--target=%s' % self._target
+ 
+         return {'CC': cc,
+                 'CXX': cxx,
+                 'AR': ar,
+                 'CFLAGS': cflags,
+-                'CXXFLAGS': cxxflags}
++                'CXXFLAGS': cxxflags,
++                'LDFLAGS': ldflags}
+ 
+     def profile(self):
+         template = textwrap.dedent("""
+diff --git a/conans/test/functional/toolchains/meson/test_ios.py b/conans/test/functional/toolchains/meson/test_ios.py
+index a2fcf3fe5fc..5f1bd010fbe 100644
+--- a/conans/test/functional/toolchains/meson/test_ios.py
++++ b/conans/test/functional/toolchains/meson/test_ios.py
+@@ -71,11 +71,13 @@ def env(self):
+         cflags += " -isysroot " + self.xcrun.sdk_path
+         cflags += " -arch " + to_apple_arch(self.arch)
+         cxxflags = cflags
++        ldflags = cflags
+ 
+         return {'CC': cc,
+                 'CXX': cxx,
+                 'CFLAGS': cflags,
+-                'CXXFLAGS': cxxflags}
++                'CXXFLAGS': cxxflags,
++                'LDFLAGS': ldflags}
+ 
+     def profile(self):
+         template = textwrap.dedent("""
+diff --git a/conans/test/functional/toolchains/meson/test_preprocessor_definitions.py b/conans/test/functional/toolchains/meson/test_preprocessor_definitions.py
+new file mode 100644
+index 00000000000..d90f1e0303f
+--- /dev/null
++++ b/conans/test/functional/toolchains/meson/test_preprocessor_definitions.py
+@@ -0,0 +1,67 @@
++import os
++import textwrap
++
++from conans.test.assets.sources import gen_function_cpp, gen_function_h
++from conans.test.functional.toolchains.meson._base import TestMesonBase
++
++
++class MesonPreprocessorDefinitionsTest(TestMesonBase):
++    _conanfile_py = textwrap.dedent("""
++    from conans import ConanFile, tools
++    from conan.tools.meson import Meson, MesonToolchain
++
++
++    class App(ConanFile):
++        settings = "os", "arch", "compiler", "build_type"
++        options = {"shared": [True, False], "fPIC": [True, False]}
++        default_options = {"shared": False, "fPIC": True}
++
++        def config_options(self):
++            if self.settings.os == "Windows":
++                del self.options.fPIC
++
++        def generate(self):
++            tc = MesonToolchain(self)
++            tc.preprocessor_definitions["TEST_DEFINITION1"] = "TestPpdValue1"
++            tc.preprocessor_definitions["TEST_DEFINITION2"] = "TestPpdValue2"
++            tc.generate()
++
++        def build(self):
++            meson = Meson(self)
++            meson.configure()
++            meson.build()
++    """)
++
++    _meson_build = textwrap.dedent("""
++    project('tutorial', 'cpp')
++    hello = library('hello', 'hello.cpp')
++    executable('demo', 'main.cpp', link_with: hello)
++    """)
++
++    def test_build(self):
++        hello_h = gen_function_h(name="hello")
++        hello_cpp = gen_function_cpp(name="hello",
++                                     preprocessor=["TEST_DEFINITION1", "TEST_DEFINITION2"])
++        app = gen_function_cpp(name="main", includes=["hello"], calls=["hello"])
++
++        self.t.save({"conanfile.py": self._conanfile_py,
++                     "meson.build": self._meson_build,
++                     "hello.h": hello_h,
++                     "hello.cpp": hello_cpp,
++                     "main.cpp": app})
++
++        self.t.run("install . %s" % self._settings_str)
++
++        content = self.t.load("conan_meson_native.ini")
++
++        self.assertIn("[built-in options]", content)
++        self.assertIn("buildtype = 'release'", content)
++
++        self.t.run("build .")
++        self.t.run_command(os.path.join("build", "demo"))
++
++        self.assertIn("hello: Release!", self.t.out)
++        self.assertIn("TEST_DEFINITION1: TestPpdValue1", self.t.out)
++        self.assertIn("TEST_DEFINITION2: TestPpdValue2", self.t.out)
++
++        self._check_binary()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

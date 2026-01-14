@@ -1,0 +1,178 @@
+  Task-ID: saltstack__salt-61329@8e96acf
+  Please checkout to this commit first: fdfc7c58c347d106cf688c693f8fcff01540700d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [BUG] regressions in mysql_cache module
+Two recent regressions in the mysql_cache module have broken it fairly significantly.  One is a generic function argument ordering bug which breaks the module globally, while the other only manifests when using PyMySQL (instead of MySQLdb) as the db connector.
+
+I can't seem to push PRs anymore, so here's a tiny patch instead :)
+```
+index 87ad78eade..7f01cc2473 100644
+--- a/salt/cache/mysql_cache.py
++++ b/salt/cache/mysql_cache.py
+@@ -90,7 +90,7 @@ def __virtual__():
+     return bool(MySQLdb), "No python mysql client installed." if MySQLdb is None else ""
+
+
+-def run_query(conn, query, retries=3, args=None):
++def run_query(conn, query, args=None, retries=3):
+     """
+     Get a cursor and run a query. Reconnect up to `retries` times if
+     needed.
+@@ -203,7 +203,6 @@ def store(bank, key, data):
+     query = "REPLACE INTO {} (bank, etcd_key, data) values(%s,%s,%s)".format(
+         __context__["mysql_table_name"]
+     )
+-    query = salt.utils.stringutils.to_bytes(query)
+     args = (bank, key, data)
+
+     cur, cnt = run_query(__context__.get("mysql_client"), query, args)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/salt/cache/mysql_cache.py b/salt/cache/mysql_cache.py
+index 87ad78eade0b..f512cb5677e6 100644
+--- a/salt/cache/mysql_cache.py
++++ b/salt/cache/mysql_cache.py
+@@ -90,7 +90,7 @@ def __virtual__():
+     return bool(MySQLdb), "No python mysql client installed." if MySQLdb is None else ""
+ 
+ 
+-def run_query(conn, query, retries=3, args=None):
++def run_query(conn, query, args=None, retries=3):
+     """
+     Get a cursor and run a query. Reconnect up to `retries` times if
+     needed.
+@@ -118,7 +118,8 @@ def run_query(conn, query, retries=3, args=None):
+         else:
+             log.info("mysql_cache: recreating db connection due to: %r", e)
+         __context__["mysql_client"] = MySQLdb.connect(**__context__["mysql_kwargs"])
+-        return run_query(__context__["mysql_client"], query, args, retries - 1)
++        return run_query(conn=__context__.get("mysql_client"),
++                query=query, args=args, retries=(retries - 1))
+     except Exception as e:  # pylint: disable=broad-except
+         if len(query) > 150:
+             query = query[:150] + "<...>"
+@@ -136,7 +137,7 @@ def _create_table():
+         __context__["mysql_kwargs"]["db"],
+         __context__["mysql_table_name"],
+     )
+-    cur, _ = run_query(__context__.get("mysql_client"), query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     r = cur.fetchone()
+     cur.close()
+     if r[0] == 1:
+@@ -151,7 +152,7 @@ def _create_table():
+         __context__["mysql_table_name"]
+     )
+     log.info("mysql_cache: creating table %s", __context__["mysql_table_name"])
+-    cur, _ = run_query(__context__["mysql_client"], query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     cur.close()
+ 
+ 
+@@ -203,10 +204,9 @@ def store(bank, key, data):
+     query = "REPLACE INTO {} (bank, etcd_key, data) values(%s,%s,%s)".format(
+         __context__["mysql_table_name"]
+     )
+-    query = salt.utils.stringutils.to_bytes(query)
+     args = (bank, key, data)
+ 
+-    cur, cnt = run_query(__context__.get("mysql_client"), query, args)
++    cur, cnt = run_query(conn=__context__.get("mysql_client"), query=query, args=args)
+     cur.close()
+     if cnt not in (1, 2):
+         raise SaltCacheError("Error storing {} {} returned {}".format(bank, key, cnt))
+@@ -220,7 +220,7 @@ def fetch(bank, key):
+     query = "SELECT data FROM {} WHERE bank='{}' AND etcd_key='{}'".format(
+         __context__["mysql_table_name"], bank, key
+     )
+-    cur, _ = run_query(__context__.get("mysql_client"), query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     r = cur.fetchone()
+     cur.close()
+     if r is None:
+@@ -239,7 +239,7 @@ def flush(bank, key=None):
+     if key is not None:
+         query += " AND etcd_key='{}'".format(key)
+ 
+-    cur, _ = run_query(__context__.get("mysql_client"), query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     cur.close()
+ 
+ 
+@@ -252,7 +252,7 @@ def ls(bank):
+     query = "SELECT etcd_key FROM {} WHERE bank='{}'".format(
+         __context__["mysql_table_name"], bank
+     )
+-    cur, _ = run_query(__context__.get("mysql_client"), query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     out = [row[0] for row in cur.fetchall()]
+     cur.close()
+     return out
+@@ -266,7 +266,7 @@ def contains(bank, key):
+     query = "SELECT COUNT(data) FROM {} WHERE bank='{}' AND etcd_key='{}'".format(
+         __context__["mysql_table_name"], bank, key
+     )
+-    cur, _ = run_query(__context__.get("mysql_client"), query)
++    cur, _ = run_query(conn=__context__.get("mysql_client"), query=query)
+     r = cur.fetchone()
+     cur.close()
+     return r[0] == 1
+diff --git a/tests/pytests/unit/cache/test_mysql_cache.py b/tests/pytests/unit/cache/test_mysql_cache.py
+index 29047f5cbb32..7944b22a280f 100644
+--- a/tests/pytests/unit/cache/test_mysql_cache.py
++++ b/tests/pytests/unit/cache/test_mysql_cache.py
+@@ -64,7 +64,7 @@ def test_store(master_config):
+                 expected_calls = [
+                     call(
+                         mock_connect_client,
+-                        b"REPLACE INTO salt (bank, etcd_key, data) values(%s,%s,%s)",
++                        "REPLACE INTO salt (bank, etcd_key, data) values(%s,%s,%s)",
+                         ("minions/minion", "key1", b"\xa4data"),
+                     )
+                 ]
+@@ -81,7 +81,7 @@ def test_store(master_config):
+                 expected_calls = [
+                     call(
+                         mock_connect_client,
+-                        b"REPLACE INTO salt (bank, etcd_key, data) values(%s,%s,%s)",
++                        "REPLACE INTO salt (bank, etcd_key, data) values(%s,%s,%s)",
+                         ("minions/minion", "key2", b"\xa4data"),
+                     )
+                 ]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,102 @@
+  Task-ID: getsentry__sentry-71711@d1652c4
+  Please checkout to this commit first: baaf8456ddb2402c5a898511777ed5cc45e79a01
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Custom Views: Augment the `organizations/.../pinned-searches/` endpoint to save to/update new custom views database
+We will need to update the `organizations/.../pinned-searches/` endpoint to also save and update entries in the new database for custom views. This is because pinned searches are being replaced by custom views, so before we migrate existing pinned searches to the custom views database, we will need to update the endpoint that currently saves pinned searches to double save to the new database as well.
+  </issue>
+  
+  <patch>
+  diff --git a/src/sentry/api/endpoints/organization_pinned_searches.py b/src/sentry/api/endpoints/organization_pinned_searches.py
+index 637d6f9273e909..11d2b981579349 100644
+--- a/src/sentry/api/endpoints/organization_pinned_searches.py
++++ b/src/sentry/api/endpoints/organization_pinned_searches.py
+@@ -7,6 +7,7 @@
+ from sentry.api.base import region_silo_endpoint
+ from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPinnedSearchPermission
+ from sentry.api.serializers import serialize
++from sentry.models.groupsearchview import GroupSearchView
+ from sentry.models.savedsearch import SavedSearch, SortOptions, Visibility
+ from sentry.models.search_common import SearchType
+ 
+@@ -52,6 +53,17 @@ def put(self, request: Request, organization) -> Response:
+             visibility=Visibility.OWNER_PINNED,
+             values={"query": result["query"], "sort": result["sort"]},
+         )
++
++        GroupSearchView.objects.create_or_update(
++            organizaiton=organization,
++            user_id=request.user.id,
++            values={
++                "name": "Default Search",
++                "query": result["query"],
++                "query_sort": result["sort"],
++                "position": 0,  # 0 position indicates default view
++            },
++        )
+         pinned_search = SavedSearch.objects.get(
+             organization=organization,
+             owner_id=request.user.id,
+diff --git a/tests/sentry/api/endpoints/test_organization_pinned_searches.py b/tests/sentry/api/endpoints/test_organization_pinned_searches.py
+index 0f88c56b029dca..66445f76c5186b 100644
+--- a/tests/sentry/api/endpoints/test_organization_pinned_searches.py
++++ b/tests/sentry/api/endpoints/test_organization_pinned_searches.py
+@@ -1,6 +1,7 @@
+ from functools import cached_property
+ 
+ from sentry.api.endpoints.organization_pinned_searches import PINNED_SEARCH_NAME
++from sentry.models.groupsearchview import GroupSearchView
+ from sentry.models.savedsearch import SavedSearch, SortOptions, Visibility
+ from sentry.models.search_common import SearchType
+ from sentry.testutils.cases import APITestCase
+@@ -35,6 +36,16 @@ def test(self):
+             visibility=Visibility.OWNER_PINNED,
+         ).exists()
+ 
++        # TODO(msun): Remove this when custom views are GA'd
++        assert GroupSearchView.objects.filter(
++            organization=self.organization,
++            name="Default Search",
++            user_id=self.member.id,
++            query=query,
++            query_sort=sort,
++            position=0,
++        ).exists()
++
+         query = "test_2"
+         self.get_success_response(type=search_type, query=query, sort=sort, status_code=201)
+         assert SavedSearch.objects.filter(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

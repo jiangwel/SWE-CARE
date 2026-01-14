@@ -1,0 +1,95 @@
+  Task-ID: pandas-dev__pandas-18883@5a469d2
+  Please checkout to this commit first: cdebcf374598e9141df7dc23bc75c9528e92c004
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: insert NaT into tz-aware DTI.
+this should work (also should test for other index reshaping ops) & for TDI and PI
+```
+In [7]: pd.DatetimeIndex(['2017-01-01']).insert(0, pd.NaT)
+Out[7]: DatetimeIndex(['NaT', '2017-01-01'], dtype='datetime64[ns]', freq=None)
+
+In [8]: pd.DatetimeIndex(['2017-01-01'], tz='UTC').insert(0, pd.NaT)
+ValueError: Passed item and index have different timezone
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.22.0.txt b/doc/source/whatsnew/v0.22.0.txt
+index 0579a80aad28e..8933c2de0f169 100644
+--- a/doc/source/whatsnew/v0.22.0.txt
++++ b/doc/source/whatsnew/v0.22.0.txt
+@@ -294,6 +294,7 @@ Indexing
+ - Bug in tz-aware :class:`DatetimeIndex` where addition/subtraction with a :class:`TimedeltaIndex` or array with ``dtype='timedelta64[ns]'`` was incorrect (:issue:`17558`)
+ - :func:`Index.to_series` now accepts ``index`` and ``name`` kwargs (:issue:`18699`)
+ - :func:`DatetimeIndex.to_series` now accepts ``index`` and ``name`` kwargs (:issue:`18699`)
++- Bug in :class:`DatetimeIndex.insert` where inserting ``pd.NaT`` into a timezone-aware index incorrectly raised (:issue:`16357`)
+ 
+ I/O
+ ^^^
+diff --git a/pandas/core/indexes/datetimes.py b/pandas/core/indexes/datetimes.py
+index ec5c20d341b50..a6061cf0f1a48 100644
+--- a/pandas/core/indexes/datetimes.py
++++ b/pandas/core/indexes/datetimes.py
+@@ -1776,7 +1776,8 @@ def insert(self, loc, item):
+ 
+         if isinstance(item, (datetime, np.datetime64)):
+             self._assert_can_do_op(item)
+-            if not self._has_same_tz(item):
++            if not self._has_same_tz(item) and item is not self._na_value:
++                # GH#16537 allow pd.NaT through
+                 raise ValueError(
+                     'Passed item and index have different timezone')
+             # check freq can be preserved on edge cases
+diff --git a/pandas/tests/indexes/datetimes/test_indexing.py b/pandas/tests/indexes/datetimes/test_indexing.py
+index b3ce22962d5d4..485abf85003fc 100644
+--- a/pandas/tests/indexes/datetimes/test_indexing.py
++++ b/pandas/tests/indexes/datetimes/test_indexing.py
+@@ -46,6 +46,14 @@ def test_where_tz(self):
+         expected = i2
+         tm.assert_index_equal(result, expected)
+ 
++    @pytest.mark.parametrize('tz', [None, 'UTC', 'US/Eastern'])
++    def test_insert_nat(self, tz):
++        # GH#16537
++        idx = pd.DatetimeIndex(['2017-01-01'], tz=tz)
++        res = idx.insert(0, pd.NaT)
++        expected = pd.DatetimeIndex(['NaT', '2017-01-01'], tz=tz)
++        tm.assert_index_equal(res, expected)
++
+     def test_insert(self):
+         idx = DatetimeIndex(
+             ['2000-01-04', '2000-01-01', '2000-01-02'], name='idx')
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

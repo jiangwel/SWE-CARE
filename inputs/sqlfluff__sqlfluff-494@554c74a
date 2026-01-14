@@ -1,0 +1,423 @@
+  Task-ID: sqlfluff__sqlfluff-494@554c74a
+  Please checkout to this commit first: b6c993ca124189976b61d5396cb8dc7b1e8f96a2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Crash on fixing reported errors about "Inconsistent Capitalisation of Unquoted Identifiers" L014
+I have a SQL file which doesn't have consistent capitalization of unquoted identifiers. sqlfluff reports 213 violations of this. But when I run this command `sqlfluff fix fact_daily_moving_forecast.sql --rules L014` I get this error message:
+
+==== fixing violations ====
+213 fixable linting violations found
+Are you sure you wish to attempt to fix these? [Y/n] ...
+Attempting fixes...
+Persisting Changes...
+UMMMMMM!
+111
+('replace', 109, 113, 109, 113)
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.7/bin/sqlfluff", line 8, in <module>
+    sys.exit(cli())
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/click/core.py", line 829, in __call__
+    return self.main(*args, **kwargs)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/click/core.py", line 782, in main
+    rv = self.invoke(ctx)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/click/core.py", line 1259, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/click/core.py", line 1066, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/click/core.py", line 610, in invoke
+    return callback(*args, **kwargs)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/cli/commands.py", line 253, in fix
+    success = do_fixes(lnt, result, verbosity=verbose, types=SQLLintError)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/cli/commands.py", line 183, in do_fixes
+    res = result.persist_changes(output_func=lnt.output_func, **kwargs)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/linter.py", line 505, in persist_changes
+    for path in self.paths
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/linter.py", line 505, in <listcomp>
+    for path in self.paths
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/linter.py", line 388, in persist_changes
+    buffer[file.path] = file.persist_tree(verbosity=verbosity)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/linter.py", line 318, in persist_tree
+    write_buff, success = self.fix_string(verbosity=verbosity)
+  File "/Library/Frameworks/Python.framework/Versions/3.7/lib/python3.7/site-packages/sqlfluff/linter.py", line 252, in fix_string
+    raise NotImplementedError("ABC")
+NotImplementedError: ABC
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d8ee53c0ec4..942ead694e6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ ### Added
+ 
+ - Support for modulo (`%`) operator.
++- A limit in the internal fix routines to catch any infinite loops.
+ 
+ ### Changed
+ 
+@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+   own expressions. Any dependencies on this structure downstream
+   will be broken. This also fixes the linting of both kinds of expressions
+   with regard to L013 and L025.
++- Refactor of L022 to handle poorly formatted CTEs better.
+ 
+ ## [0.3.6] - 2020-09-24
+ 
+diff --git a/src/sqlfluff/linter.py b/src/sqlfluff/linter.py
+index 9acd6f2e3ec..986f1c7dee7 100644
+--- a/src/sqlfluff/linter.py
++++ b/src/sqlfluff/linter.py
+@@ -700,7 +700,15 @@ def lint_string(self, s, fname='<string input>', fix=False, config=None):
+                 previous_versions = {working.raw}
+                 linting_errors = []
+                 last_fixes = None
++                fix_loop_idx = 0
++                loop_limit = 20
+                 while True:
++                    fix_loop_idx += 1
++                    if fix_loop_idx > loop_limit:
++                        linter_logger.warning(
++                            "Loop limit on fixes reached [%s]. Some fixes may be overdone.",
++                            loop_limit)
++                        break
+                     changed = False
+                     for crawler in self.get_ruleset(config=config):
+                         # fixes should be a dict {} with keys edit, delete, create
+diff --git a/src/sqlfluff/rules/std.py b/src/sqlfluff/rules/std.py
+index 5c49f31a4e6..6447f814188 100644
+--- a/src/sqlfluff/rules/std.py
++++ b/src/sqlfluff/rules/std.py
+@@ -2220,41 +2220,139 @@ def _eval(self, segment, **kwargs):
+         """Blank line expected but not found after CTE definition."""
+         error_buffer = []
+         if segment.type == 'with_compound_statement':
+-            expecting_blank_line = False
+-            blank_line_found = False
+-            blank_line_started = False
+-            fix_point = None
+-            cte_end_segments = ('end_bracket', 'comma') if self.comma_style == "trailing" else ('end_bracket')
+-            for seg in segment.segments:
+-                if seg.type in cte_end_segments:
+-                    expecting_blank_line = True
+-                    blank_line_found = False
+-                    blank_line_started = False
+-                elif seg.is_code:
+-                    if expecting_blank_line:
+-                        if not blank_line_found:
+-                            fix_point = fix_point or seg
+-                            fixes = [LintFix(
+-                                'create', fix_point,
+-                                [self.make_newline(pos_marker=fix_point.pos_marker)]
+-                                # Two newlines if there isn't one at all, otherwise one.
+-                                * (1 if blank_line_started else 2)
+-                            )]
+-                            error_buffer.append(
+-                                LintResult(anchor=seg, fixes=fixes)
+-                            )
+-                        expecting_blank_line = False
+-                        blank_line_found = False
+-                        blank_line_started = False
+-                        fix_point = None
+-                elif seg.type == 'newline':
+-                    if not blank_line_found:
+-                        if blank_line_started:
+-                            blank_line_found = True
++            # First we need to find all the commas, the end brackets, the
++            # things that come after that and the blank lines in between.
++
++            # Find all the closing brackets. They are our anchor points.
++            bracket_indices = []
++            for idx, seg in enumerate(segment.segments):
++                if seg.type == 'end_bracket':
++                    bracket_indices.append(idx)
++
++            # Work through each point and deal with it individually
++            for bracket_idx in bracket_indices:
++                forward_slice = segment.segments[bracket_idx:]
++                seg_idx = 1
++                line_idx = 0
++                comma_seg_idx = None
++                blank_lines = 0
++                comma_line_idx = None
++                line_blank = False
++                comma_style = None
++                line_starts = {}
++                comment_lines = []
++
++                self.logger.info(
++                    "## CTE closing bracket found at %s, idx: %s. Forward slice: %.20r",
++                    forward_slice[0].pos_marker,
++                    bracket_idx,
++                    ''.join(elem.raw for elem in forward_slice)
++                )
++
++                # Work forward to map out the following segments.
++                while True:
++                    if forward_slice[seg_idx].type == 'newline':
++                        if line_blank:
++                            # It's a blank line!
++                            blank_lines += 1
++                        line_blank = True
++                        line_idx += 1
++                        line_starts[line_idx] = seg_idx + 1
++                    elif forward_slice[seg_idx].type == 'comment':
++                        # Lines with comments aren't blank
++                        line_blank = False
++                        comment_lines.append(line_idx)
++                    elif forward_slice[seg_idx].type == 'comma':
++                        # Keep track of where the comma is.
++                        # We'll evaluate it later.
++                        comma_line_idx = line_idx
++                        comma_seg_idx = seg_idx
++                    elif forward_slice[seg_idx].is_code:
++                        break
++                    seg_idx += 1
++
++                # Infer the comma style (NB this could be different for each case!)
++                if comma_line_idx is None:
++                    comma_style = 'final'
++                elif line_idx == 0:
++                    comma_style = 'oneline'
++                elif comma_line_idx == 0:
++                    comma_style = 'trailing'
++                elif comma_line_idx == line_idx:
++                    comma_style = 'leading'
++                else:
++                    comma_style = 'floating'
++
++                # Readout of findings
++                self.logger.info(
++                    "blank_lines: %s, comma_line_idx: %s. final_line_idx: %s, final_seg_idx: %s",
++                    blank_lines, comma_line_idx, line_idx, seg_idx
++                )
++                self.logger.info(
++                    "comma_style: %r, line_starts: %r, comment_lines: %r",
++                    comma_style, line_starts, comment_lines
++                )
++
++                if blank_lines < 1:
++                    # We've got an issue
++                    self.logger.info(
++                        "!! Found CTE without enough blank lines.",
++                    )
++
++                    # Based on the current location of the comma we insert newlines
++                    # to correct the issue.
++                    fix_type = 'create'  # In most cases we just insert newlines.
++                    if comma_style == 'oneline':
++                        # Here we respect the target comma style to insert at the relevant point.
++                        if self.comma_style == 'trailing':
++                            # Add a blank line after the comma
++                            fix_point = forward_slice[comma_seg_idx + 1]
++                            # Optionally here, if the segment we've landed on is
++                            # whitespace then we REPLACE it rather than inserting.
++                            if forward_slice[comma_seg_idx + 1].type == 'whitespace':
++                                fix_type = 'edit'
++                        elif self.comma_style == 'leading':
++                            # Add a blank line before the comma
++                            fix_point = forward_slice[comma_seg_idx]
++                        # In both cases it's a double newline.
++                        num_newlines = 2
++                    else:
++                        # In the following cases we only care which one we're in
++                        # when comments don't get in the way. If they *do*, then
++                        # we just work around them.
++                        if not comment_lines or line_idx - 1 not in comment_lines:
++                            self.logger.info("Comment routines not applicable")
++                            if comma_style in ('trailing', 'final', 'floating'):
++                                # Detected an existing trailing comma or it's a final CTE,
++                                # OR the comma isn't leading or trailing.
++                                # If the preceeding segment is whitespace, replace it
++                                if forward_slice[seg_idx - 1].type == 'whitespace':
++                                    fix_point = forward_slice[seg_idx - 1]
++                                    fix_type = 'edit'
++                                else:
++                                    # Otherwise add a single newline before the end content.
++                                    fix_point = forward_slice[seg_idx]
++                            elif comma_style == 'leading':
++                                # Detected an existing leading comma.
++                                fix_point = forward_slice[comma_seg_idx]
+                         else:
+-                            blank_line_started = True
+-                            blank_line_found = False
+-                            fix_point = seg
++                            self.logger.info("Handling preceeding comments")
++                            offset = 1
++                            while line_idx - offset in comment_lines:
++                                offset += 1
++                            fix_point = forward_slice[line_starts[line_idx - (offset - 1)]]
++                        # Note: There is an edge case where this isn't enough, if
++                        # comments are in strange places, but we'll catch them on
++                        # the next iteration.
++                        num_newlines = 1
++
++                    fixes = [LintFix(
++                        fix_type, fix_point,
++                        [self.make_newline(pos_marker=fix_point.pos_marker)] * num_newlines
++                    )]
++                    # Create a result, anchored on the start of the next content.
++                    error_buffer.append(LintResult(anchor=forward_slice[seg_idx], fixes=fixes))
++        # Return the buffer if we have one.
+         return error_buffer or None
+ 
+ 
+diff --git a/test/fixtures/linter/autofix/ansi/008_L022L023L024_with_clause/after.sql b/test/fixtures/linter/autofix/ansi/008_L022L023L024_with_clause/after.sql
+index 336f35761ba..fc67d30937c 100644
+--- a/test/fixtures/linter/autofix/ansi/008_L022L023L024_with_clause/after.sql
++++ b/test/fixtures/linter/autofix/ansi/008_L022L023L024_with_clause/after.sql
+@@ -1,5 +1,5 @@
+-with a as (select 1), 
++with a as (select 1),
+ 
+-b as (select 2) 
++b as (select 2)
+ 
+ select * from a join b using (z)
+\ No newline at end of file
+diff --git a/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/after.sql b/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/after.sql
+new file mode 100644
+index 00000000000..9b28954ac8b
+--- /dev/null
++++ b/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/after.sql
+@@ -0,0 +1,20 @@
++with my_cte as (
++    select 1
++)
++
++, that_cte as (
++    select 1
++),
++
++-- This Comment should stick to the CTE
++other_cte as (
++    select 1
++),
++
++this_cte as (select 1),
++
++final_cte as (
++    select 1
++)
++
++select * from my_cte cross join other_cte
+diff --git a/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/before.sql b/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/before.sql
+new file mode 100644
+index 00000000000..76bbf64409a
+--- /dev/null
++++ b/test/fixtures/linter/autofix/ansi/010_L022_CTEs_and_newlines/before.sql
+@@ -0,0 +1,13 @@
++with my_cte as (
++    select 1
++)
++, that_cte as (
++    select 1
++),
++-- This Comment should stick to the CTE
++other_cte as (
++    select 1
++),
++this_cte as (select 1), final_cte as (
++    select 1
++) select * from my_cte cross join other_cte
+diff --git a/test/rules_std_test.py b/test/rules_std_test.py
+index 5e9a622e06f..f48888d3c5f 100644
+--- a/test/rules_std_test.py
++++ b/test/rules_std_test.py
+@@ -16,7 +16,7 @@ def get_rule_from_set(code, config):
+     raise ValueError("{0!r} not in {1!r}".format(code, std_rule_set))
+ 
+ 
+-def assert_rule_fail_in_sql(code, sql, configs=None):
++def assert_rule_fail_in_sql(code, sql, configs=None, runaway_limit=20):
+     """Assert that a given rule does fail on the given sql."""
+     # Configs allows overrides if we want to use them.
+     cfg = FluffConfig(configs=configs)
+@@ -30,7 +30,8 @@ def assert_rule_fail_in_sql(code, sql, configs=None):
+             "No {0} failures found in query which should fail.".format(code),
+             pytrace=False)
+     fixed = parsed  # use this as our buffer (yes it's a bit of misnomer right here)
+-    while True:
++    loop_idx = 0
++    while loop_idx < runaway_limit:
+         # We get the errors again, but this time skip the assertion
+         # because we're in the loop. If we asserted on every loop then
+         # we're stuffed.
+@@ -50,6 +51,9 @@ def assert_rule_fail_in_sql(code, sql, configs=None):
+             if fixes == l_fixes:
+                 raise RuntimeError(
+                     "Fixes aren't being applied: {0!r}".format(fixes))
++        loop_idx += 1
++    else:
++        raise ValueError("Runaway loop limit reached for rule! This example never stabilises.")
+     return fixed.raw
+ 
+ 
+@@ -225,6 +229,33 @@ def assert_rule_pass_in_sql(code, sql, configs=None):
+     ('L032', 'pass', 'select x.a from x inner join y on x.id = y.id', None, None),
+     ('L032', 'fail', 'select x.a from x inner join y using (id)', None, None),
+     ('L032', 'fail', 'select x.a from x inner join y on x.id = y.id inner join z using (id)', None, None),
++    # Test cases for L022, both leading and trailing commas.
++    ('L022', 'pass', 'with my_cte as (\n    select 1\n),\n\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte', None, None),
++    ('L022', 'pass', 'with my_cte as (\n    select 1\n)\n\n, other_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte', None, None),
++    (
++        'L022', 'fail',
++        'with my_cte as (\n    select 1\n),\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        'with my_cte as (\n    select 1\n),\n\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        None
++    ),
++    (
++        'L022', 'fail',
++        'with my_cte as (\n    select 1\n),\n-- Comment\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        'with my_cte as (\n    select 1\n),\n\n-- Comment\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        None
++    ),
++    (
++        'L022', 'fail',
++        'with my_cte as (\n    select 1\n),\n\nother_cte as (\n    select 1\n)\nselect * from my_cte cross join other_cte',
++        'with my_cte as (\n    select 1\n),\n\nother_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        None
++    ),
++    (
++        'L022', 'fail',
++        'with my_cte as (\n    select 1\n)\n, other_cte as (\n    select 1\n)\nselect * from my_cte cross join other_cte',
++        'with my_cte as (\n    select 1\n)\n\n, other_cte as (\n    select 1\n)\n\nselect * from my_cte cross join other_cte',
++        None
++    ),
+ ])
+ def test__rules__std_string(rule, pass_fail, qry, fixed, configs):
+     """Test that a rule passes/fails on a given string.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

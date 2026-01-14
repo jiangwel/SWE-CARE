@@ -1,0 +1,296 @@
+  Task-ID: run-llama__llama_index-19234@e7810e8
+  Please checkout to this commit first: 8897963dd08257f91f3859d6f0e2acc806a9e997
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Bug]: Context serialization fails when using Mem0Memory: "Can't instantiate abstract class BaseMemory"
+### Bug Description
+
+  ## Bug Description
+
+  When using `Mem0Memory` with `AgentWorkflow` and attempting to save/restore workflow context using `Context.to_dict()` and `Context.from_dict()`, the
+  deserialization fails with an error about instantiating abstract class `BaseMemory`.
+
+  The issue occurs because `Mem0Memory` objects get serialized into the workflow context's `globals` section, but during deserialization, the system
+  attempts to instantiate the abstract `BaseMemory` class instead of the concrete `Mem0Memory` implementation.
+
+  ## Error Message
+  WARNING: Failed to restore context, starting fresh: Failed to deserialize value for key memory: Can't instantiate abstract class BaseMemory with
+  abstract methods from_defaults, get, get_all, put, reset, set
+
+### Version
+
+ - **LlamaIndex Core**: 0.12.31   - **LlamaIndex Memory Mem0**: 0.3.1   - **Python Version**: 3.11.12
+
+### Steps to Reproduce
+
+. Create an `AgentWorkflow` with `Mem0Memory`:
+
+  ```python
+  from llama_index.core.workflow import Context, JsonSerializer
+  from llama_index.memory.mem0 import Mem0Memory
+  from llama_index.core.agent.workflow import AgentWorkflow, FunctionAgent
+  from pathlib import Path
+  import json
+
+  # Create Mem0Memory instance
+  mem0_memory = Mem0Memory.from_client(
+      context={"user_id": "test_user", "conversation_id": "test_conv"},
+      search_msg_limit=10
+  )
+
+  # Create simple workflow
+  agent = FunctionAgent(
+      name="TestAgent",
+      description="Test agent",
+      system_prompt="You are a test agent",
+      llm=your_llm,  # Your LLM instance
+      tools=[],
+  )
+
+  workflow = AgentWorkflow(
+      agents=[agent],
+      root_agent=agent.name,
+  )
+
+  # First run - works fine
+  ctx = Context(workflow)
+  response = await workflow.run(user_msg="Hello", ctx=ctx, memory=mem0_memory)
+
+  # Save context - this works
+  serializer = JsonSerializer()
+  context_data = ctx.to_dict(serializer=serializer)
+  with open("test_context.json", "w") as f:
+      json.dump(context_data, f)
+
+  # Load context - this fails
+  with open("test_context.json", "r") as f:
+      context_data = json.load(f)
+
+  # This line throws the error
+  ctx_restored = Context.from_dict(workflow, context_data, serializer=serializer)
+```
+  2. Run the workflow once with memory
+  3. Save the context using ctx.to_dict()
+  4. Try to restore the context using Context.from_dict() - this fails
+
+  Expected Behavior
+
+  Context should serialize and deserialize correctly when using Mem0Memory objects, allowing for persistent workflow state across sessions.
+
+  Actual Behavior
+
+  Deserialization fails because the serialized Mem0Memory object in the context cannot be properly reconstructed, causing the system to attempt
+  instantiation of the abstract BaseMemory class.
+
+  Workaround
+
+  Currently using context filtering to remove memory objects before serialization:
+
+  # Before saving context
+  context_data = ctx.to_dict(serializer=serializer)
+  if "globals" in context_data and "memory" in context_data["globals"]:
+      context_data["globals"].pop("memory", None)
+
+  Additional Context
+
+  - This issue appears to be specific to Mem0Memory - other memory implementations may not have the same serialization issues
+  - The memory object gets embedded in the workflow context's globals section
+  - Both JsonSerializer and JsonPickleSerializer exhibit the same behavior
+  - The issue prevents proper stateful agent workflows that persist across sessions
+
+
+### Relevant Logs/Tracbacks
+
+```shell
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/llama-index-integrations/memory/llama-index-memory-mem0/llama_index/memory/mem0/base.py b/llama-index-integrations/memory/llama-index-memory-mem0/llama_index/memory/mem0/base.py
+index a774197efc..a4f95093d2 100644
+--- a/llama-index-integrations/memory/llama-index-memory-mem0/llama_index/memory/mem0/base.py
++++ b/llama-index-integrations/memory/llama-index-memory-mem0/llama_index/memory/mem0/base.py
+@@ -1,6 +1,5 @@
+ from typing import Dict, List, Optional, Union, Any
+-from llama_index.core.memory.chat_memory_buffer import ChatMemoryBuffer
+-from llama_index.core.memory.types import BaseMemory
++from llama_index.core.memory import BaseMemory, Memory as LlamaIndexMemory
+ from llama_index.memory.mem0.utils import (
+     convert_memory_to_system_message,
+     convert_chat_history_to_dict,
+@@ -14,6 +13,8 @@
+     model_validator,
+     SerializeAsAny,
+     PrivateAttr,
++    ConfigDict,
++    model_serializer,
+ )
+ from llama_index.core.base.llms.types import ChatMessage, MessageRole
+ 
+@@ -65,7 +66,8 @@ def get_context(self) -> Dict[str, Optional[str]]:
+ 
+ 
+ class Mem0Memory(BaseMem0):
+-    primary_memory: SerializeAsAny[BaseMemory] = Field(
++    model_config = ConfigDict(arbitrary_types_allowed=True)
++    primary_memory: SerializeAsAny[LlamaIndexMemory] = Field(
+         description="Primary memory source for chat agent."
+     )
+     context: Optional[Mem0Context] = None
+@@ -79,6 +81,20 @@ def __init__(self, context: Optional[Mem0Context] = None, **kwargs) -> None:
+         if context is not None:
+             self.context = context
+ 
++    @model_serializer
++    def serialize_memory(self) -> Dict[str, Any]:
++        # leaving out the two keys since they are causing serialization/deserialization problems
++        return {
++            "primary_memory": self.primary_memory.model_dump(
++                exclude={
++                    "memory_blocks_template",
++                    "insert_method",
++                }
++            ),
++            "search_msg_limit": self.search_msg_limit,
++            "context": self.context.model_dump(),
++        }
++
+     @classmethod
+     def class_name(cls) -> str:
+         """Class name."""
+@@ -99,7 +115,7 @@ def from_client(
+         search_msg_limit: int = 5,
+         **kwargs: Any,
+     ):
+-        primary_memory = ChatMemoryBuffer.from_defaults()
++        primary_memory = LlamaIndexMemory.from_defaults()
+ 
+         try:
+             context = Mem0Context(**context)
+@@ -124,7 +140,7 @@ def from_config(
+         search_msg_limit: int = 5,
+         **kwargs: Any,
+     ):
+-        primary_memory = ChatMemoryBuffer.from_defaults()
++        primary_memory = LlamaIndexMemory.from_defaults()
+ 
+         try:
+             context = Mem0Context(**context)
+diff --git a/llama-index-integrations/memory/llama-index-memory-mem0/pyproject.toml b/llama-index-integrations/memory/llama-index-memory-mem0/pyproject.toml
+index 298b579462..a58f4a6dcd 100644
+--- a/llama-index-integrations/memory/llama-index-memory-mem0/pyproject.toml
++++ b/llama-index-integrations/memory/llama-index-memory-mem0/pyproject.toml
+@@ -26,7 +26,7 @@ dev = [
+ 
+ [project]
+ name = "llama-index-memory-mem0"
+-version = "0.3.1"
++version = "0.3.2"
+ description = "llama-index memory mem0 integration"
+ authors = [{name = "Your Name", email = "you@example.com"}]
+ requires-python = "<4.0,>=3.9"
+diff --git a/llama-index-integrations/memory/llama-index-memory-mem0/tests/test_mem0.py b/llama-index-integrations/memory/llama-index-memory-mem0/tests/test_mem0.py
+index ddc51c9054..1733e77cf9 100644
+--- a/llama-index-integrations/memory/llama-index-memory-mem0/tests/test_mem0.py
++++ b/llama-index-integrations/memory/llama-index-memory-mem0/tests/test_mem0.py
+@@ -1,6 +1,8 @@
+ from unittest.mock import patch, MagicMock
++import json
+ 
+ from llama_index.memory.mem0.base import Mem0Memory, Mem0Context
++from workflows.context.serializers import JsonSerializer
+ from llama_index.core.memory.chat_memory_buffer import ChatMessage, MessageRole
+ from llama_index.memory.mem0.utils import (
+     convert_chat_history_to_dict,
+@@ -53,6 +55,56 @@ def test_mem0_memory_from_client():
+         assert mem0_memory.search_msg_limit == search_msg_limit  # Add this line
+ 
+ 
++def test_ser_deser_memory():
++    # Mock context
++    context = {"user_id": "test_user"}
++
++    # Mock arguments for MemoryClient
++    api_key = "test_api_key"
++    host = "test_host"
++    org_id = "test_org"
++    project_id = "test_project"
++    search_msg_limit = 10  # Add this line
++
++    # Patch MemoryClient
++    with patch("llama_index.memory.mem0.base.MemoryClient") as MockMemoryClient:
++        mock_client = MagicMock()
++        MockMemoryClient.return_value = mock_client
++
++        # Call from_client method
++        mem0_memory = Mem0Memory.from_client(
++            context=context,
++            api_key=api_key,
++            host=host,
++            org_id=org_id,
++            project_id=project_id,
++            search_msg_limit=search_msg_limit,  # Add this line
++        )
++
++        # Assert that MemoryClient was called with the correct arguments
++        MockMemoryClient.assert_called_once_with(
++            api_key=api_key, host=host, org_id=org_id, project_id=project_id
++        )
++        element = mem0_memory.model_dump()
++        assert "primary_memory" in element
++        assert "insert_method" not in element["primary_memory"]
++        assert "memory_blocks_template" not in element["primary_memory"]
++        assert "search_msg_limit" in element
++        assert "context" in element
++        try:
++            k = JsonSerializer().serialize(element)
++        except Exception:
++            k = None
++        assert k is not None
++        assert k == json.dumps(element)
++        try:
++            v = JsonSerializer().deserialize(k)
++        except Exception:
++            v = None
++        assert k is not None
++        assert element == v
++
++
+ def test_mem0_memory_from_config():
+     # Mock context
+     context = {"user_id": "test_user"}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

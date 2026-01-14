@@ -1,0 +1,410 @@
+  Task-ID: ccxt__ccxt-21513@c661f32
+  Please checkout to this commit first: 63c6c0b80cd28cb80938c82adbb830b8c53a44dc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Bitget fetchOHLCV 1d issue after updated from 4.2.31 to 4.2.40
+### Operating System
+
+_No response_
+
+### Programming Languages
+
+Typescript
+
+### CCXT Version
+
+_No response_
+
+### Description
+
+Bitget returns ExchangeError when fetchOHLCV futures with '1d' interval.
+
+### Code
+
+```
+  bitget.fetchOHLCV(symbol, '1d', timestamp)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/ts/src/bitget.ts b/ts/src/bitget.ts
+index 48875aa5f8ba7..7074e39fd647a 100644
+--- a/ts/src/bitget.ts
++++ b/ts/src/bitget.ts
+@@ -3278,10 +3278,11 @@ export default class bitget extends Exchange {
+          * @returns {int[][]} A list of candles ordered as timestamp, open, high, low, close, volume
+          */
+         await this.loadMarkets ();
++        const maxLimit = 1000; // max 1000
+         let paginate = false;
+         [ paginate, params ] = this.handleOptionAndParams (params, 'fetchOHLCV', 'paginate');
+         if (paginate) {
+-            return await this.fetchPaginatedCallDeterministic ('fetchOHLCV', symbol, since, limit, timeframe, params, 1000) as OHLCV[];
++            return await this.fetchPaginatedCallDeterministic ('fetchOHLCV', symbol, since, limit, timeframe, params, maxLimit) as OHLCV[];
+         }
+         const sandboxMode = this.safeBool (this.options, 'sandboxMode', false);
+         let market = undefined;
+@@ -3294,51 +3295,96 @@ export default class bitget extends Exchange {
+         const marketType = market['spot'] ? 'spot' : 'swap';
+         const timeframes = this.options['timeframes'][marketType];
+         const selectedTimeframe = this.safeString (timeframes, timeframe, timeframe);
++        const duration = this.parseTimeframe (timeframe) * 1000;
+         const request = {
+             'symbol': market['id'],
+             'granularity': selectedTimeframe,
+         };
+-        const until = this.safeInteger2 (params, 'until', 'till');
+-        params = this.omit (params, [ 'until', 'till' ]);
++        const defaultLimit = 100; // by default, exchange returns 100 items
++        const msInDay = 1000 * 60 * 60 * 24;
+         if (limit !== undefined) {
++            limit = Math.min (limit, maxLimit);
+             request['limit'] = limit;
+         }
+-        if (since !== undefined) {
+-            request['startTime'] = since;
++        const until = this.safeInteger2 (params, 'until', 'till');
++        params = this.omit (params, [ 'until', 'till' ]);
++        if (until !== undefined) {
++            request['endTime'] = until;
+         }
+         if (since !== undefined) {
+-            if (limit === undefined) {
+-                limit = 100; // exchange default
++            request['startTime'] = since;
++            if (market['spot'] && (until === undefined)) {
++                // for spot we need to send "entTime" too
++                const limitForEnd = (limit !== undefined) ? limit : defaultLimit;
++                const calculatedEnd = this.sum (since, duration * limitForEnd);
++                request['endTime'] = calculatedEnd;
+             }
+-            const duration = this.parseTimeframe (timeframe) * 1000;
+-            request['endTime'] = this.sum (since, duration * (limit + 1)) - 1;  // limit + 1)) - 1 is needed for when since is not the exact timestamp of a candle
+-        } else if (until !== undefined) {
+-            request['endTime'] = until;
+-        } else {
+-            request['endTime'] = this.milliseconds ();
+         }
+         let response = undefined;
+-        const thirtyOneDaysAgo = this.milliseconds () - 2678400000;
++        const now = this.milliseconds ();
++        // retrievable periods listed here:
++        // - https://www.bitget.com/api-doc/spot/market/Get-Candle-Data#request-parameters
++        // - https://www.bitget.com/api-doc/contract/market/Get-Candle-Data#description
++        const retrievableDaysMapForSpot = {
++            '1m': 30,
++            '3m': 30,
++            '5m': 30,
++            '10m': 52,
++            '15m': 52,
++            '30m': 52,
++            '1h': 83,
++            '2h': 120,
++            '4h': 240,
++            '6h': 360,
++            '12h': 360,
++            '1d': 360,
++            '3d': 1000,
++            '1w': 1000,
++            '1M': 1000,
++        };
++        const maxRetrievableDaysForNonHistory = this.safeInteger (retrievableDaysMapForSpot, timeframe, 30); // default to safe minimum
++        const endpointTsBoundary = now - maxRetrievableDaysForNonHistory * msInDay;
++        // checks if we need history endpoint
++        let needsHistoryEndpoint = false;
++        if (since !== undefined && since < endpointTsBoundary) {
++            needsHistoryEndpoint = true;
++        } else if (until !== undefined && ((limit === undefined && until < endpointTsBoundary) || (limit !== undefined && until - limit * duration < endpointTsBoundary))) {
++            needsHistoryEndpoint = true;
++        }
+         if (market['spot']) {
+-            if ((since !== undefined) && (since < thirtyOneDaysAgo)) {
++            if (needsHistoryEndpoint) {
+                 response = await this.publicSpotGetV2SpotMarketHistoryCandles (this.extend (request, params));
+             } else {
+                 response = await this.publicSpotGetV2SpotMarketCandles (this.extend (request, params));
+             }
+         } else {
++            const maxDistanceDaysForContracts = 90; // maximum 90 days allowed between start-end times
++            let distanceError = false;
++            if (limit !== undefined && limit * duration > maxDistanceDaysForContracts * msInDay) {
++                distanceError = true;
++            } else if (since !== undefined && until !== undefined && until - since > maxDistanceDaysForContracts * msInDay) {
++                distanceError = true;
++            }
++            if (distanceError) {
++                throw new BadRequest (this.id + ' fetchOHLCV() between start and end must be less than ' + maxDistanceDaysForContracts.toString () + ' days');
++            }
+             const priceType = this.safeString (params, 'price');
+             params = this.omit (params, [ 'price' ]);
+             let productType = undefined;
+             [ productType, params ] = this.handleProductTypeAndParams (market, params);
+             request['productType'] = productType;
++            const extended = this.extend (request, params);
++            // todo: mark & index also have their "recent" endpoints, but not priority now.
+             if (priceType === 'mark') {
+-                response = await this.publicMixGetV2MixMarketHistoryMarkCandles (this.extend (request, params));
++                response = await this.publicMixGetV2MixMarketHistoryMarkCandles (extended);
+             } else if (priceType === 'index') {
+-                response = await this.publicMixGetV2MixMarketHistoryIndexCandles (this.extend (request, params));
+-            } else if ((since !== undefined) && (since < thirtyOneDaysAgo)) {
+-                response = await this.publicMixGetV2MixMarketHistoryCandles (this.extend (request, params));
++                response = await this.publicMixGetV2MixMarketHistoryIndexCandles (extended);
+             } else {
+-                response = await this.publicMixGetV2MixMarketCandles (this.extend (request, params));
++                if (needsHistoryEndpoint) {
++                    response = await this.publicMixGetV2MixMarketHistoryCandles (extended);
++                } else {
++                    response = await this.publicMixGetV2MixMarketCandles (extended);
++                }
+             }
+         }
+         if (response === '') {
+diff --git a/ts/src/test/static/request/bitget.json b/ts/src/test/static/request/bitget.json
+index 960a4a687609d..60210dba02dc9 100644
+--- a/ts/src/test/static/request/bitget.json
++++ b/ts/src/test/static/request/bitget.json
+@@ -1020,69 +1020,182 @@
+         ],
+         "fetchOHLCV": [
+           {
+-            "description": "Spot ohlcv with historical endpoint and until parameter",
++            "description": "spot without args",
+             "method": "fetchOHLCV",
+-            "url": "https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=1h&limit=1&endTime=1704969352000",
++            "url": "https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=1min",
++            "input": [
++              "BTC/USDT"
++            ]
++          },
++          {
++            "description": "spot 1d",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/candles?symbol=BTCUSDT&granularity=1Dutc",
++            "input": [
++              "BTC/USDT",
++              "1d"
++            ]
++          },
++          {
++            "description": "spot 1d +since",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&startTime=1614859706000&endTime=1623586105999",
++            "input": [
++              "BTC/USDT",
++              "1d",
++              1614859706000
++            ]
++          },
++          {
++            "description": "spot 1d +since +limit",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&limit=10&startTime=1614859706000&endTime=1615810105999",
++            "input": [
++              "BTC/USDT",
++              "1d",
++              1614859706000,
++              10
++            ]
++          },
++          {
++            "description": "spot 1d +since +limit +until",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&limit=10&startTime=1614859706000&endTime=1615810105999",
++            "input": [
++              "BTC/USDT",
++              "1d",
++              1614859706000,
++              10,
++              {
++                "until": 1615550906000
++              }
++            ]
++          },
++          {
++            "description": "spot 1d +limit +until",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&limit=10&endTime=1639550906000",
++            "input": [
++              "BTC/USDT",
++              "1d",
++              null,
++              10,
++              {
++                "until": 1639550906000
++              }
++            ]
++          },
++          {
++            "description": "spot 1d +until",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&endTime=1639550906000",   
+             "input": [
+               "BTC/USDT",
+-              "1h",
++              "1d",
++              null,
+               null,
+-              1,
+               {
+-                "until": 1704969352000
++                "until": 1639550906000
+               }
+             ]
+           },
+           {
+-            "description": "Spot ohlcv with since and until",
++            "description": "spot 1d +since +until",
+             "method": "fetchOHLCV",
+-            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1h&limit=1&startTime=1704067200000&endTime=1704070800000",
++            "url": "https://api.bitget.com/api/v2/spot/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&startTime=1614859706000&endTime=1623586105999",
+             "input": [
+               "BTC/USDT",
+-              "1h",
+-              1704067200000,
+-              1,
++              "1d",
++              1614859706000,
++              null,
+               {
+-                "until": 1704070800000
++                "until": 1615550906000
+               }
+             ]
+           },
+           {
+-            "description": "Swap ohlcv with until",
++            "description": "swap 1d",
+             "method": "fetchOHLCV",
+-            "url": "https://api.bitget.com/api/v2/mix/market/candles?symbol=BTCUSDT&granularity=1H&limit=1&endTime=1704969352000&productType=USDT-FUTURES",
++            "url": "https://api.bitget.com/api/v2/mix/market/candles?symbol=BTCUSDT&granularity=1Dutc&productType=USDT-FUTURES",
+             "input": [
+               "BTC/USDT:USDT",
+-              "1h",
++              "1d"
++            ]
++          },
++          {
++            "description": "swap 1d +since",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&startTime=1614859706000&productType=USDT-FUTURES",
++            "input": [
++              "BTC/USDT:USDT",
++              "1d",
++              1614859706000
++            ]
++          },
++          {
++            "description": "swap 1d +since +limit",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&limit=2&startTime=1614859706000&productType=USDT-FUTURES",
++            "input": [
++              "BTC/USDT:USDT",
++              "1d",
++              1614859706000,
++              2
++            ]
++          },
++          {
++            "description": "swap 1d +since +limit +until",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&limit=10&startTime=1614859706000&endTime=1615810105999&productType=USDT-FUTURES",
++            "input": [
++              "BTC/USDT:USDT",
++              "1d",
++              1614859706000,
++              10,
++              {
++                "until": 1615550906000
++              }
++            ]
++          },
++          {
++            "description": "swap 1d +since +until",
++            "method": "fetchOHLCV",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&endTime=1615550906000&startTime=1614859706000&productType=USDT-FUTURES",
++            "input": [
++              "BTC/USDT:USDT",
++              "1d",
++              1614859706000,
+               null,
+-              1,
+               {
+-                "until": 1704969352000
++                "until": 1615550906000
+               }
+             ]
+           },
+           {
+-            "description": "Swap ohlcv with since",
++            "description": "swap 1d +limit +until",
+             "method": "fetchOHLCV",
+-            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1H&limit=1&startTime=1704067200000&endTime=1704070800000&productType=USDT-FUTURES",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&endTime=1615550906000&limit=10&productType=USDT-FUTURES",
+             "input": [
+               "BTC/USDT:USDT",
+-              "1h",
+-              1704067200000,
+-              1
++              "1d",
++              null,
++              10,
++              {
++                "until": 1615550906000
++              }
+             ]
+           },
+           {
+-            "description": "Swap ohlcv with since and until",
++            "description": "swap 1d +until",
+             "method": "fetchOHLCV",
+-            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1H&limit=1&startTime=1704067200000&endTime=1704153600000&productType=USDT-FUTURES",
++            "url": "https://api.bitget.com/api/v2/mix/market/history-candles?symbol=BTCUSDT&granularity=1Dutc&endTime=1615550906000&productType=USDT-FUTURES",
+             "input": [
+               "BTC/USDT:USDT",
+-              "1h",
+-              1704067200000,
+-              1,
++              "1d",
++              null,
++              null,
+               {
+-                "until": 1704153600000
++                "until": 1615550906000
+               }
+             ]
+           }
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

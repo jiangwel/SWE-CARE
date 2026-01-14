@@ -1,0 +1,172 @@
+  Task-ID: ansible__ansible-56567@ce2e515
+  Please checkout to this commit first: c6b40f4d40448ac01ce366688c34dbf160ee5b79
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  win_iis_website  site_id parameter does not work when there is no site in IIS
+SUMMARY
+When there is no site created in IIS, the site_id parameter is ignored and the new site is created with ID 1
+
+ISSUE TYPE
+ Bug Report
+
+COMPONENT NAME
+
+win_iis_website
+
+ANSIBLE VERSION
+
+ansible 2.5.2
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/lib/python2.7/site-packages/ansible
+  executable location = /bin/ansible
+  python version = 2.7.5 (default, May 31 2018, 09:41:32) [GCC 4.8.5 20150623 (Red Hat 4.8.5-28)]
+
+CONFIGURATION
+
+DEFAULT_ROLES_PATH(/etc/ansible/ansible.cfg) = [u'/etc/ansible/roles', u'/usr/share/ansible/roles']
+
+ OS / ENVIRONMENT
+
+Red Hat Enterprise Linux Server release 7.5
+Windows Server 2008 R2 - IIS 7.5
+Windows Server 2012 R2 - IIS 8.5
+
+##### STEPS TO REPRODUCE
+
+Windows Server delete sites in IIS
+Execute script with module win_iis_website and define parameter site_id =100
+New Site created site_id = 1
+
+
+- name: Acme IIS site
+  win_iis_website:
+    name: Acme
+    state: started
+    port: 80
+    ip: 127.0.0.1
+    site_id: 100
+    application_pool: acme
+    physical_path: C:\sites\acme
+
+EXPECTED RESULTS
+
+Created Site with Site_ID = 100
+
+
+##### ACTUAL RESULTS
+
+ansible-playbook 2.5.2
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/lib/python2.7/site-packages/ansible
+  executable location = /bin/ansible-playbook
+  python version = 2.7.5 (default, May 31 2018, 09:41:32) [GCC 4.8.5 20150623 (Red Hat 4.8.5-28)]
+Using /etc/ansible/ansible.cfg as config file
+setting up inventory plugins
+Parsed /home/XXX/XXX/inventario_windows inventory source with ini plugin
+Loading callback plugin default of type stdout, v2.0 from /usr/lib/python2.7/site-packages/ansible/plugins/callback/default.pyc
+
+PLAYBOOK: iis_siteinicial.yml ***********************************************************************************************************************************************************************
+1 plays in iis_siteinicial.yml
+
+PLAY [SERVIDOR] *******************************************************************************************************************************************************************************
+
+TASK [Gathering Facts] ******************************************************************************************************************************************************************************
+task path: /home/XXX/XXX/iis_siteinicial.yml:2
+Using module file /usr/lib/python2.7/site-packages/ansible/modules/windows/setup.ps1
+<SERVIDOR> ESTABLISH WINRM CONNECTION FOR USER: None on PORT 5986 TO <SERVIDOR> 
+checking if winrm_host <SERVIDOR> is an IPv6 address
+EXEC (via pipeline wrapper)
+ok: <SERVIDOR> 
+META: ran handlers
+
+TASK [iis_siteinicial : Acme IIS site] **************************************************************************************************************************************************************
+task path: /home/XXX/XXX/roles/iis_siteinicial/tasks/main.yml:2
+Using module file /usr/lib/python2.7/site-packages/ansible/modules/windows/win_iis_website.ps1
+<SERVIDOR> ESTABLISH WINRM CONNECTION FOR USER: None on PORT 5986 TO <SERVIDOR> 
+checking if winrm_host <SERVIDOR> is an IPv6 address
+EXEC (via pipeline wrapper)
+changed: <SERVIDOR> => {
+    "changed": true,
+    "site": {
+        "ApplicationPool": "teste",
+        "Bindings": [
+            "127.0.0.1:80:"
+        ],
+        "ID": 1,
+        "Name": "Teste",
+        "PhysicalPath": "C:\\sites\\teste",
+        "State": "Started"
+    }
+}
+META: ran handlers
+META: ran handlers
+
+PLAY RECAP ******************************************************************************************************************************************************************************************
+<SERVIDOR> : ok=2    changed=1    unreachable=0    failed=0
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/56567-Fix-win_iis_website-id assignment-for-first-new-site.yml b/changelogs/fragments/56567-Fix-win_iis_website-id assignment-for-first-new-site.yml
+new file mode 100644
+index 00000000000000..0dc2faa9a76988
+--- /dev/null
++++ b/changelogs/fragments/56567-Fix-win_iis_website-id assignment-for-first-new-site.yml	
+@@ -0,0 +1,2 @@
++bugfixes:
++  - win_iis_website - "Fixed #47057 , site_id not used if no sites exist already and creating a new site"
+\ No newline at end of file
+diff --git a/lib/ansible/modules/windows/win_iis_website.ps1 b/lib/ansible/modules/windows/win_iis_website.ps1
+index c60937218985f5..7851192fd388b0 100644
+--- a/lib/ansible/modules/windows/win_iis_website.ps1
++++ b/lib/ansible/modules/windows/win_iis_website.ps1
+@@ -84,7 +84,13 @@ Try {
+     # This is a bug in the New-WebSite commandlet. Apparently there must be at least one site configured in IIS otherwise New-WebSite crashes.
+     # For more details, see http://stackoverflow.com/questions/3573889/ps-c-new-website-blah-throws-index-was-outside-the-bounds-of-the-array
+     $sites_list = get-childitem -Path IIS:\sites
+-    if ($null -eq $sites_list) { $site_parameters.ID = 1 }
++    if ($null -eq $sites_list) {
++      if ($site_id) {
++        $site_parameters.ID = $site_id
++      } else {
++        $site_parameters.ID = 1
++      }
++    }
+ 
+     $site = New-Website @site_parameters -Force
+     $result.changed = $true
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

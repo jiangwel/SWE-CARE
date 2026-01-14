@@ -1,0 +1,246 @@
+  Task-ID: scipy__scipy-13918@c98fbe5
+  Please checkout to this commit first: 8627df31ab07d66b438c7e5d5880e3f4d435f248
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Adding Poisson Disc sampling to QMC
+Hi @tupui,
+
+I have looked at the class definition for QMC engines, and I'm having some trouble adapting Bridson's algorithm for PD to these definitions.
+
+As far as I see, I should be able to produce an arbitrary number of samples when `random (n)` is called. There are two issues there due to the nature of the distribution:
+
+1. Since every new sample excludes a sphere around itself from any further sampling, there is a finite number of samples that can be drawn from a region of space for a given minimum distance between points _r_. What should the function do if it can produce no more samples?
+2. Bridson's algorithm exploits the properties of a maximum PD distribution to produce new points efficiently. Specifically, it draws new points only in an annulus _[r, 2r]_ away from an existing point. This means, that if we draw PD points sequentially, we will densely fill one region of space first, instead of drawing uniformly in the [0; 1) interval. One way that I see to circumvent this is to generate the entire distribution on `__init__`, and then to return random samples from this distribution each time `random(n)` is called. Is this approach acceptable for the library?
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/stats/_qmc.py b/scipy/stats/_qmc.py
+index fcc11dd92347..41d1d340711a 100644
+--- a/scipy/stats/_qmc.py
++++ b/scipy/stats/_qmc.py
+@@ -30,6 +30,7 @@
+ import scipy.stats as stats
+ from scipy._lib._util import rng_integers
+ from scipy.spatial import distance, Voronoi
++from scipy.special.cython_special import gammainc
+ from ._sobol import (
+     _initialize_v, _cscramble, _fill_p_cumulative, _draw, _fast_forward,
+     _categorize, _MAXDIM
+@@ -1595,6 +1596,183 @@ def fast_forward(self, n: IntNumber) -> Sobol:
+         return self
+ 
+ 
++class PoissonDisc(QMCEngine):
++    """Poisson disk sampling.
++
++    Parameters
++    ----------
++    d : int
++        Dimension of the parameter space.
++    hypersphere : {"volume", "surface"}, optional
++        Sampling strategy to generate potential candidates to be added in the
++        final sample. Default is "volume".
++
++        * ``volume``: original Bridson algorithm as described in [1]_.
++          new candidates are sampled within the hypersphere.
++        * ``surface``: only sample the surface of the hypersphere.
++
++    seed : {None, int, `numpy.random.Generator`}, optional
++        If `seed` is None the `numpy.random.Generator` singleton is used.
++        If `seed` is an int, a new ``Generator`` instance is used,
++        seeded with `seed`.
++        If `seed` is already a ``Generator`` instance then that instance is
++        used.
++
++    Notes
++    -----
++
++    Taken from [2]_ by P. Zun, written consent given on 31.03.2021
++    by the original author, Shamis, for free use in SciPy under
++    the 3-clause BSD.
++
++    References
++    ----------
++    .. [1] Robert Bridson, "Fast Poisson Disk Sampling in Arbitrary
++       Dimensions." SIGGRAPH, 2007.
++    .. [2] `StackOverflow <https://stackoverflow.com/questions/66047540>`_.
++
++    """
++
++    def __init__(
++        self,
++        d: IntNumber,
++        hypersphere: Literal["volume", "surface"] = "volume",
++        seed: SeedType = None
++    ) -> None:
++        super().__init__(d=d, seed=seed)
++
++        hypersphere_sample = {
++            "volume": self._hypersphere_volume_sample,
++            "surface": self._hypersphere_surface_sample
++        }
++
++        try:
++            self.hypersphere_method = hypersphere_sample[hypersphere]
++        except KeyError as exc:
++            message = (
++                f"{hypersphere!r} is not a valid hypersphere sampling"
++                f" method. It must be one of {set(hypersphere_sample)!r}")
++            raise ValueError(message) from exc
++
++        # size of the sphere from which the samples are drawn relative to the
++        # size of a disc (radius)
++        # for the surface sampler, all new points are almost exactly 1 radius
++        # away from at least one existing sample
++        # eps to avoid rejection
++        self.radius_factor = 2 if hypersphere == "volume" else 1.001
++        self.radius = 0.05
++        self.squared_radius = self.radius**2
++
++        # sample to generate per iteration in the hypersphere around center
++        self.k = 30
++
++        self.cell_size = self.radius / np.sqrt(self.d)
++        self.grid_size = (np.ceil(np.ones(self.d)/self.cell_size)).astype(int)
++
++    def random(self, n: IntNumber = 1) -> np.ndarray:
++        """Draw `n` in the interval ``[0, 1]``.
++
++        Parameters
++        ----------
++        n : int, optional
++            Number of samples to generate in the parameter space. Default is 1.
++
++        Returns
++        -------
++        sample : array_like (n, d)
++            QMC sample.
++
++        """
++
++        def in_limits(sample: np.ndarray) -> bool:
++            return (sample.max() <= 1.) and (sample.min() >= 0.)
++
++        def in_neighborhood(sample: np.ndarray, n: int = 2) -> bool:
++            """
++            Check if there are samples closer than ``squared_radius`` to the
++            candidate `sample`.
++            """
++            indices = (sample / self.cell_size).astype(int)
++            ind_min = np.maximum(indices - n, np.zeros(self.d, dtype=int))
++            ind_max = np.minimum(indices + n + 1, self.grid_size)
++
++            # Check if the center cell is empty
++            if not np.isnan(sample[tuple(indices)][0]):
++                return True
++
++            a = [[slice(ind_min[i], ind_max[i])] for i in range(self.d)]
++
++            with np.errstate(invalid='ignore'):
++                if np.any(
++                    np.sum(
++                        np.square(sample - sample[tuple(a)]), axis=self.d
++                    ) < self.squared_radius
++                ):
++                    return True
++
++            return False
++
++        def add_sample(sample: np.ndarray) -> None:
++            sample_pool.append(sample)
++            indices = (sample / self.cell_size).astype(int)
++            sample[tuple(indices)] = sample
++
++        # Positions of cells
++        # n-dim value for each grid cell
++        sample = np.empty(np.append(self.grid_size, self.d), dtype=np.float32)
++        # Initialise empty cells with NaNs
++        sample.fill(np.nan)
++
++        # the pool is being initialized with a single random sample
++        sample_pool = []
++        add_sample(self.rng.random((1, self.d)))
++        num_drawn = 1
++
++        # exhaust sample pool to have up to n sample
++        while len(sample_pool) and num_drawn < n:
++            # select a sample from the available pool
++            idx_center = self.rng.integers(len(sample_pool))
++            center = sample_pool[idx_center]
++            del sample_pool[idx_center]
++
++            # generate candidates around the center sample
++            candidates = self.hypersphere_method(
++                center, self.radius * self.radius_factor, self.k
++            )
++
++            # keep candidates that satisfy some conditions
++            for candidate in candidates:
++                if in_limits(candidate) and not in_neighborhood(candidate):
++                    add_sample(candidate)
++                    num_drawn = num_drawn + 1
++
++        # filter out NaN from grid
++        sample = sample[~np.isnan(sample).any(axis=self.d)]
++        self.num_generated = num_drawn
++        return sample
++
++    def _hypersphere_volume_sample(
++        self, center: np.ndarray, radius: float, k: int = 1
++    ) -> np.ndarray:
++        """Uniform sampling within hypersphere."""
++        # should remove samples within r/2
++        x = self.rng.standard_normal(size=(k, self.d))
++        ssq = np.sum(x**2, axis=1)
++        fr = radius * gammainc(self.d/2, ssq/2)**(1/self.d) / np.sqrt(ssq)
++        fr_tiled = np.tile(fr.reshape(k, 1), (1, self.d))
++        p = center + np.multiply(x, fr_tiled)
++        return p
++
++    def _hypersphere_surface_sample(
++        self, center: np.ndarray, radius: float, k: int = 1
++    ) -> np.ndarray:
++        """Uniform sampling on the hypersphere's surface."""
++        vec = self.rng.standard_normal(size=(k, self.d))
++        vec /= np.linalg.norm(vec, axis=1)[:, None]
++        p = center + np.multiply(vec, radius)
++        return p
++
++
+ class MultivariateNormalQMC:
+     r"""QMC sampling from a multivariate Normal :math:`N(\mu, \Sigma)`.
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

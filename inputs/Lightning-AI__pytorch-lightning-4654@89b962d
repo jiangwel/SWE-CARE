@@ -1,0 +1,151 @@
+  Task-ID: Lightning-AI__pytorch-lightning-4654@89b962d
+  Please checkout to this commit first: c586e5db77614519c8c99871d0250c5a5790e3a2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  automatically override progress_bar_refresh_rate in google colab
+## 🚀 Feature
+<!-- A clear and concise description of the feature proposal -->
+
+If running on google colab, automatically assign `progress_bar_refresh_rate=20` if the user didn't override the default of 1.
+
+### Motivation
+
+Google colab is notorious for crashing because of the tqdm progress bar while training. We usually solve that by assigning a larger number to `progress_bar_refresh_rate` flag of Trainer. However, this is super annoying since you have to do it all the time.
+
+Also, when writing up examples for beginners, it would be nice to just say `pl.Trainer()` instead of having to pass the refresh rate flag, as that may confuse newcomers. 
+
+<!-- Please outline the motivation for the proposal. Is your feature request related to a problem? e.g., I'm always frustrated when [...]. If this is related to another GitHub issue, please link here too -->
+
+### Pitch
+
+<!-- A clear and concise description of what you want to happen. -->
+
+Put this logic in `CallbackConnector`, or `ProgressBarBase`. I'm not sure which makes more sense.
+
+```python
+import sys
+
+
+def check_if_on_google_colab():
+    return 'google.colab' in sys.modules
+
+```
+
+### Alternatives
+
+<!-- A clear and concise description of any alternative solutions or features you've considered, if any. -->
+
+### Additional context
+
+<!-- Add any other context or screenshots about the feature request here. -->
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 236784afec84e..47205edb0ea3c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
+     [#4495](https://github.com/PyTorchLightning/pytorch-lightning/pull/4495),
+     [#4439](https://github.com/PyTorchLightning/pytorch-lightning/pull/4439))
+ 
++- Added warning when progress bar refresh rate is less than 20 on Google Colab to prevent crashing ([#4654](https://github.com/PyTorchLightning/pytorch-lightning/pull/4654))
++
+ 
+ ### Changed
+ 
+diff --git a/pytorch_lightning/trainer/connectors/callback_connector.py b/pytorch_lightning/trainer/connectors/callback_connector.py
+index c9ef4ae32be77..16e7d65d0bbb7 100644
+--- a/pytorch_lightning/trainer/connectors/callback_connector.py
++++ b/pytorch_lightning/trainer/connectors/callback_connector.py
+@@ -12,11 +12,10 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import os
++from typing import Optional, Union
+ 
+-from typing import Union, Optional
+-
+-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, ProgressBarBase, ProgressBar
+-from pytorch_lightning.utilities import rank_zero_warn
++from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, ProgressBar, ProgressBarBase
++from pytorch_lightning.utilities import IS_COLAB, rank_zero_warn
+ from pytorch_lightning.utilities.exceptions import MisconfigurationException
+ 
+ 
+@@ -74,6 +73,14 @@ def configure_checkpoint_callbacks(self, checkpoint_callback: Union[ModelCheckpo
+             self.trainer.callbacks.append(ModelCheckpoint(dirpath=None, filename=None))
+ 
+     def configure_progress_bar(self, refresh_rate=1, process_position=0):
++        # smaller refresh rate on colab causes crashes, warn user about this
++        if IS_COLAB and refresh_rate < 20:
++            rank_zero_warn(
++                "You have set progress_bar_refresh_rate < 20 on Google Colab. This"
++                " may crash. Consider using progress_bar_refresh_rate>=20 in Trainer.",
++                UserWarning
++            )
++
+         progress_bars = [c for c in self.trainer.callbacks if isinstance(c, ProgressBarBase)]
+         if len(progress_bars) > 1:
+             raise MisconfigurationException(
+diff --git a/pytorch_lightning/utilities/__init__.py b/pytorch_lightning/utilities/__init__.py
+index 7075c790c60d9..d5da9063fdc8e 100644
+--- a/pytorch_lightning/utilities/__init__.py
++++ b/pytorch_lightning/utilities/__init__.py
+@@ -12,13 +12,14 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ """General utilities"""
++import sys
+ from enum import Enum
+ 
+ import numpy
+ import torch
+ 
+ from pytorch_lightning.utilities.apply_func import move_data_to_device
+-from pytorch_lightning.utilities.distributed import rank_zero_only, rank_zero_warn, rank_zero_info
++from pytorch_lightning.utilities.distributed import rank_zero_info, rank_zero_only, rank_zero_warn
+ from pytorch_lightning.utilities.parsing import AttributeDict, flatten_dict, is_picklable
+ 
+ try:
+@@ -38,3 +39,6 @@
+ class AMPType(Enum):
+     APEX = 'apex'
+     NATIVE = 'native'
++
++
++IS_COLAB = 'google.colab' in sys.modules
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

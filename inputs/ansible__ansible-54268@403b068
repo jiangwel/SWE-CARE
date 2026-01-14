@@ -1,0 +1,168 @@
+  Task-ID: ansible__ansible-54268@403b068
+  Please checkout to this commit first: 919e310b993e65fa671bf8b83951144afc5472f2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  redfish_facts - Update - GetSupportedFirmwareUpdateMethods
+<!--- Verify first that your feature was not already discussed on GitHub -->
+<!--- Complete *all* sections as described, this form is processed automatically -->
+
+##### SUMMARY
+<!--- Describe the new feature/improvement briefly below -->
+This feature would implement a GetSupportedFirmwareUpdateMethods (or something less verbose) command for the Update category of redfish_facts, and would retrieve a list of the methods by which the system supports performing firmware updates.
+
+##### ISSUE TYPE
+- Feature Idea
+
+##### COMPONENT NAME
+<!--- Write the short name of the module, plugin, task or feature below, use your best guess if unsure -->
+redfish_facts
+
+##### ADDITIONAL INFORMATION
+<!--- Describe how the feature would be used, why it is needed and what it would solve -->
+
+<!--- Paste example playbooks or commands between quotes below -->
+```yaml
+
+```
+
+<!--- HINT: You can also paste gist.github.com links for larger files -->
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/module_utils/redfish_utils.py b/lib/ansible/module_utils/redfish_utils.py
+index c32b57bb4c6f7f..cce4a191250c29 100644
+--- a/lib/ansible/module_utils/redfish_utils.py
++++ b/lib/ansible/module_utils/redfish_utils.py
+@@ -511,6 +511,42 @@ def update_user_password(self, user):
+             return response
+         return {'ret': True}
+ 
++    def get_firmware_update_capabilities(self):
++        result = {}
++        response = self.get_request(self.root_uri + "/redfish/v1")
++        if response['ret'] is False:
++            return response
++
++        result['ret'] = True
++
++        result['entries'] = {}
++
++        data = response['data']
++        if "UpdateService" in data:
++            updateservce_uri = data['UpdateService']["@odata.id"]
++            response = self.get_request(self.root_uri + updateservce_uri)
++
++            data = response['data']
++
++            if "Actions" in data:
++                actions = data['Actions']
++                if len(actions) > 0:
++                    for key in actions.keys():
++                        action = actions.get(key)
++                        if 'title' in action:
++                            title = action['title']
++                        else:
++                            title = key
++                        result['entries'][title] = action.get('TransferProtocol@Redfish.AllowableValues',
++                                                              ["Key TransferProtocol@Redfish.AllowableValues not found"])
++                else:
++                    return {'ret': "False", 'msg': "Actions list is empty."}
++            else:
++                return {'ret': "False", 'msg': "Key Actions not found."}
++        else:
++            return {'ret': "False", 'msg': "Key UpdateService not found."}
++        return result
++
+     def get_firmware_inventory(self):
+         result = {}
+         response = self.get_request(self.root_uri + self.firmware_uri)
+@@ -605,16 +641,14 @@ def get_boot_order(self):
+         boot_options_dict = {}
+         for member in members:
+             if '@odata.id' not in member:
+-                return {'ret': False,
+-                        'msg': "@odata.id not found in BootOptions"}
++                return {'ret': False, 'msg': "@odata.id not found in BootOptions"}
+             boot_option_uri = member['@odata.id']
+             response = self.get_request(self.root_uri + boot_option_uri)
+             if response['ret'] is False:
+                 return response
+             data = response['data']
+             if 'BootOptionReference' not in data:
+-                return {'ret': False,
+-                        'msg': "BootOptionReference not found in BootOption"}
++                return {'ret': False, 'msg': "BootOptionReference not found in BootOption"}
+             boot_option_ref = data['BootOptionReference']
+ 
+             # fetch the props to display for this boot device
+diff --git a/lib/ansible/modules/remote_management/redfish/redfish_facts.py b/lib/ansible/modules/remote_management/redfish/redfish_facts.py
+index d37e1e566a2737..c4f9807e98888e 100644
+--- a/lib/ansible/modules/remote_management/redfish/redfish_facts.py
++++ b/lib/ansible/modules/remote_management/redfish/redfish_facts.py
+@@ -108,6 +108,14 @@
+       username: "{{ username }}"
+       password: "{{ password }}"
+ 
++  - name: Get firmware update capability information
++    redfish_facts:
++      category: Update
++      command: GetFirmwareUpdateCapabilities
++      baseuri: "{{ baseuri }}"
++      username: "{{ username }}"
++      password: "{{ password }}"
++
+   - name: Get all information available in all categories
+     redfish_facts:
+       category: all
+@@ -134,7 +142,7 @@
+                 "GetDiskInventory", "GetBiosAttributes", "GetBootOrder"],
+     "Chassis": ["GetFanInventory"],
+     "Accounts": ["ListUsers"],
+-    "Update": ["GetFirmwareInventory"],
++    "Update": ["GetFirmwareInventory", "GetFirmwareUpdateCapabilities"],
+     "Manager": ["GetManagerNicInventory", "GetLogs"],
+ }
+ 
+@@ -255,6 +263,8 @@ def main():
+             for command in command_list:
+                 if command == "GetFirmwareInventory":
+                     result["firmware"] = rf_utils.get_firmware_inventory()
++                elif command == "GetFirmwareUpdateCapabilities":
++                    result["firmware_update_capabilities"] = rf_utils.get_firmware_update_capabilities()
+ 
+         elif category == "Manager":
+             # execute only if we find a Manager service resource
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

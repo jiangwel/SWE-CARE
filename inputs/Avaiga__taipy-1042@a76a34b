@@ -1,0 +1,266 @@
+  Task-ID: Avaiga__taipy-1042@a76a34b
+  Please checkout to this commit first: 48b4f24b0a7de7764d85e5146369f5cffc77b4ac
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Sort mechanism for get_all_scenarios and get_primaries functions
+### Description
+
+When calling `tp.get_scenarios()` or `tp.get_primary_scenarios()`, the user should be able to provide an optional field for sorting the scenarios.
+The sort should be increasing or decreasing.
+The sort could be on the name (default), id, creation_date, or tag.
+  </issue>
+  
+  <patch>
+  diff --git a/contributors.txt b/contributors.txt
+index 600daf7485..0c6fbdd083 100644
+--- a/contributors.txt
++++ b/contributors.txt
+@@ -14,3 +14,4 @@ enarroied
+ bobbyshermi
+ Forchapeatl
+ yarikoptic
++Luke-0162
+diff --git a/taipy/core/scenario/_scenario_manager.py b/taipy/core/scenario/_scenario_manager.py
+index 515fa5bbb5..69b4ab1324 100644
+--- a/taipy/core/scenario/_scenario_manager.py
++++ b/taipy/core/scenario/_scenario_manager.py
+@@ -11,7 +11,7 @@
+ 
+ import datetime
+ from functools import partial
+-from typing import Any, Callable, List, Optional, Union
++from typing import Any, Callable, List, Literal, Optional, Union
+ 
+ from taipy.config import Config
+ 
+@@ -267,8 +267,16 @@ def _get_all_by_cycle(cls, cycle: Cycle) -> List[Scenario]:
+         return cls._get_all_by(filters)
+ 
+     @classmethod
+-    def _get_primary_scenarios(cls) -> List[Scenario]:
+-        return [scenario for scenario in cls._get_all() if scenario.is_primary]
++    def _get_primary_scenarios(
++        cls, sorted: Optional[bool] = False, sort_key: Optional[Literal["name", "id", "creation_date", "tags"]] = "name"
++    ) -> List[Scenario]:
++        scenarios = [scenario for scenario in cls._get_all() if scenario.is_primary]
++        if sorted:
++            if sort_key in ["name", "id", "creation_date", "tags"]:
++                scenarios.sort(key=lambda x: getattr(x, sort_key))
++            else:
++                scenarios.sort(key=lambda x: x.name)
++        return scenarios
+ 
+     @classmethod
+     def _is_promotable_to_primary(cls, scenario: Union[Scenario, ScenarioId]) -> bool:
+diff --git a/taipy/core/taipy.py b/taipy/core/taipy.py
+index d21fdbc87e..76c559cf41 100644
+--- a/taipy/core/taipy.py
++++ b/taipy/core/taipy.py
+@@ -12,7 +12,7 @@
+ import pathlib
+ import shutil
+ from datetime import datetime
+-from typing import Any, Callable, Dict, List, Optional, Set, Union, overload
++from typing import Any, Callable, Dict, List, Literal, Optional, Set, Union, overload
+ 
+ from taipy.config.common.scope import Scope
+ from taipy.logger._taipy_logger import _TaipyLogger
+@@ -505,7 +505,12 @@ def delete(entity_id: Union[TaskId, DataNodeId, SequenceId, ScenarioId, JobId, C
+     raise ModelNotFound("NOT_DETERMINED", entity_id)
+ 
+ 
+-def get_scenarios(cycle: Optional[Cycle] = None, tag: Optional[str] = None) -> List[Scenario]:
++def get_scenarios(
++    cycle: Optional[Cycle] = None,
++    tag: Optional[str] = None,
++    sorted: Optional[bool] = False,
++    sort_key: Optional[Literal["name", "id", "creation_date", "tags"]] = "name",
++) -> List[Scenario]:
+     """Retrieve a list of existing scenarios filtered by cycle or tag.
+ 
+     This function allows you to retrieve a list of scenarios based on optional
+@@ -516,22 +521,38 @@ def get_scenarios(cycle: Optional[Cycle] = None, tag: Optional[str] = None) -> L
+     Parameters:
+          cycle (Optional[Cycle^]): The optional `Cycle^` to filter scenarios by.
+          tag (Optional[str]): The optional tag to filter scenarios by.
++         sorted (Optional[bool]): If True, the returned list of scenarios is sorted by the sorting key.
++         The default value is False.
++         sort_key (Optional[Literal["name", "id", "creation_date", "tags"]]): The optional sort_key to decide upon
++         what key scenarios are sorted. The default sorting key is "name".
+ 
+     Returns:
+-        The list of scenarios filtered by cycle or tag. If no filtering criteria
+-            are provided, this method returns all existing scenarios.
++        The list of scenarios filtered by cycle or tag and optionally sorted by name, id, creation_date or tags.
++        The sorting is in increasing order for dates, in alphabetical order for name and id
++        and in lexographical order for tags.
++        If no filtering criteria are provided, this method returns all existing scenarios.
++        If sorted is set to true, but an incorrect or no sort_key is provided, then the scenarios are sorted by name.
+     """
+     scenario_manager = _ScenarioManagerFactory._build_manager()
+     if not cycle and not tag:
+-        return scenario_manager._get_all()
+-    if cycle and not tag:
+-        return scenario_manager._get_all_by_cycle(cycle)
+-    if not cycle and tag:
+-        return scenario_manager._get_all_by_tag(tag)
+-    if cycle and tag:
++        scenarios = scenario_manager._get_all()
++    elif cycle and not tag:
++        scenarios = scenario_manager._get_all_by_cycle(cycle)
++    elif not cycle and tag:
++        scenarios = scenario_manager._get_all_by_tag(tag)
++    elif cycle and tag:
+         cycles_scenarios = scenario_manager._get_all_by_cycle(cycle)
+-        return [scenario for scenario in cycles_scenarios if scenario.has_tag(tag)]
+-    return []
++        scenarios = [scenario for scenario in cycles_scenarios if scenario.has_tag(tag)]
++    else:
++        scenarios = []
++
++    if sorted:
++        if sort_key in ["name", "id", "creation_date", "tags"]:
++            scenarios.sort(key=lambda x: getattr(x, sort_key))
++        else:
++            scenarios.sort(key=lambda x: x.name)
++
++    return scenarios
+ 
+ 
+ def get_primary(cycle: Cycle) -> Optional[Scenario]:
+@@ -547,13 +568,23 @@ def get_primary(cycle: Cycle) -> Optional[Scenario]:
+     return _ScenarioManagerFactory._build_manager()._get_primary(cycle)
+ 
+ 
+-def get_primary_scenarios() -> List[Scenario]:
++def get_primary_scenarios(
++    sorted: Optional[bool] = False, sort_key: Optional[Literal["name", "id", "creation_date", "tags"]] = "name"
++) -> List[Scenario]:
+     """Retrieve a list of all primary scenarios.
+ 
++    Parameters:
++         sorted (Optional[bool]): The option to sort scenarios. The default sorting key is name.
++         sort_key (Optional[Literal["name", "id", "creation_date", "tags"]]): The optiononal sort_key to decide
++         upon what key scenarios are sorted.
++
+     Returns:
+-        A list containing all primary scenarios.
++        The list containing all primary scenarios, optionally sorted by name, id, creation_date or tags.
++        The sorting is in increasing order for dates, in alphabetical order for name and id
++        and in lexographical order for tags.
++        If sorted is set to true, but an incorrect or no sort_key is provided, then the scenarios are sorted by name.
+     """
+-    return _ScenarioManagerFactory._build_manager()._get_primary_scenarios()
++    return _ScenarioManagerFactory._build_manager()._get_primary_scenarios(sorted, sort_key)
+ 
+ 
+ def is_promotable(scenario: Union[Scenario, ScenarioId]) -> bool:
+diff --git a/tests/core/scenario/test_scenario_manager.py b/tests/core/scenario/test_scenario_manager.py
+index 01ecdd8b1b..7e5ee8a56b 100644
+--- a/tests/core/scenario/test_scenario_manager.py
++++ b/tests/core/scenario/test_scenario_manager.py
+@@ -813,6 +813,37 @@ def test_get_set_primary_scenario():
+     assert _ScenarioManager._get_primary(cycle_1) == scenario_2
+ 
+ 
++def test_get_primary_scenarios_sorted():
++    cycle_1 = _CycleManager._create(Frequency.DAILY, name="foo1")
++    cycle_2 = _CycleManager._create(Frequency.DAILY, name="foo2")
++
++    scenario_1_cfg = Config.configure_scenario(name="C_scenario", id="scenario_3", tags=["banana", "kiwi"])
++    scenario_2_cfg = Config.configure_scenario(name="B_scenario", id="scenario_1", tags=["apple", "banana"])
++
++    scenario_1 = _ScenarioManager._create(scenario_1_cfg)
++    scenario_2 = _ScenarioManager._create(scenario_2_cfg)
++
++    scenario_1.cycle = cycle_1
++    scenario_2.cycle = cycle_2
++
++    _ScenarioManager._set_primary(scenario_1)
++    _ScenarioManager._set_primary(scenario_2)
++
++    primary_scenarios_sorted_by_name = [scenario_2, scenario_1]
++    assert primary_scenarios_sorted_by_name == _ScenarioManager._get_primary_scenarios(sorted=True, sort_key="name")
++
++    primary_scenarios_sorted_by_id = [scenario_2, scenario_1]
++    assert primary_scenarios_sorted_by_id == _ScenarioManager._get_primary_scenarios(sorted=True, sort_key="id")
++
++    primary_scenarios_sorted_by_creation_date = [scenario_1, scenario_2]
++    assert primary_scenarios_sorted_by_creation_date == _ScenarioManager._get_primary_scenarios(
++        sorted=True, sort_key="creation_date"
++    )
++
++    primary_scenarios_sorted_by_tag = [scenario_2, scenario_1]
++    assert primary_scenarios_sorted_by_tag == _ScenarioManager._get_primary_scenarios(sorted=True, sort_key="tags")
++
++
+ def test_hard_delete_one_single_scenario_with_scenario_data_nodes():
+     dn_input_config = Config.configure_data_node("my_input", "in_memory", scope=Scope.SCENARIO, default_data="testing")
+     dn_output_config = Config.configure_data_node("my_output", "in_memory", scope=Scope.SCENARIO)
+diff --git a/tests/core/test_taipy.py b/tests/core/test_taipy.py
+index b4e92238cc..b2b43e1a65 100644
+--- a/tests/core/test_taipy.py
++++ b/tests/core/test_taipy.py
+@@ -435,6 +435,28 @@ def test_get_scenarios(self, cycle):
+             tp.get_scenarios(tag="tag")
+             mck.assert_called_once_with("tag")
+ 
++    def test_get_scenarios_sorted(self):
++        scenario_1_cfg = Config.configure_scenario(name="B_scenario", id="scenario_3", tags=["banana", "kiwi"])
++        scenario_2_cfg = Config.configure_scenario(name="C_scenario", id="scenario_1", tags=["apple", "banana"])
++        scenario_3_cfg = Config.configure_scenario(name="A_scenario", id="scenario_2", tags=["apple", "kiwi"])
++
++        scenario_1 = _ScenarioManager._create(scenario_1_cfg)
++        scenario_2 = _ScenarioManager._create(scenario_2_cfg)
++        scenario_3 = _ScenarioManager._create(scenario_3_cfg)
++
++        scenarios_sorted_by_name = [scenario_3, scenario_1, scenario_2]
++        assert scenarios_sorted_by_name == tp.get_scenarios(sorted=True, sort_key="name")
++        assert scenarios_sorted_by_name == tp.get_scenarios(sorted=True, sort_key="wrong_sort_key")
++
++        scenarios_sorted_by_id = [scenario_2, scenario_3, scenario_1]
++        assert scenarios_sorted_by_id == tp.get_scenarios(sorted=True, sort_key="id")
++
++        scenarios_sorted_by_creation_date = [scenario_1, scenario_2, scenario_3]
++        assert scenarios_sorted_by_creation_date == tp.get_scenarios(sorted=True, sort_key="creation_date")
++
++        scenarios_sorted_by_tag = [scenario_2, scenario_3, scenario_1]
++        assert scenarios_sorted_by_tag == tp.get_scenarios(sorted=True, sort_key="tags")
++
+     def test_get_scenario(self, scenario):
+         with mock.patch("taipy.core.scenario._scenario_manager._ScenarioManager._get") as mck:
+             scenario_id = ScenarioId("SCENARIO_id")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

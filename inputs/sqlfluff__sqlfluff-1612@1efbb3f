@@ -1,0 +1,1820 @@
+  Task-ID: sqlfluff__sqlfluff-1612@1efbb3f
+  Please checkout to this commit first: 853ceef4094a6eeecb4d75611d7df90941572310
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  TSQL: Incorrect indent in if block
+Example code:
+```sql
+if @debug = 1
+  begin
+    print '<something>';
+    print '<something else>';
+    return
+  end
+```
+
+## Expected Behaviour
+The indentation is correct like this.
+
+## Observed Behaviour
+The third line (`print '<something else>';`) is de-indented to the same level as line 1.
+
+## Steps to Reproduce
+see above
+
+## Dialect
+tsql
+
+## Version
+sqlfluff version 0.6.8, Python 3.10.0
+
+## Configuration
+none
+
+
+TSQL: BatchSegment doesn't know where to END without semicolon
+The following code does not parse.  The BatchSegment attempts to split the inner code using the semicolon delimiter; since there is no semicolon, it includes the END statement within the inner StatementSegment instead of the outer BeginEndSegment, breaking both.
+
+```
+BEGIN
+		SELECT 1
+END
+
+```
+
+
+## Expected Behaviour
+
+Code parses similarly to 
+
+```
+BEGIN
+		SELECT 1;
+END
+
+```
+
+
+## Observed Behaviour
+
+Code does not parse.
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/core/parser/segments/meta.py b/src/sqlfluff/core/parser/segments/meta.py
+index 86a0c7f8fd7..8674fe6e4ff 100644
+--- a/src/sqlfluff/core/parser/segments/meta.py
++++ b/src/sqlfluff/core/parser/segments/meta.py
+@@ -2,6 +2,8 @@
+ 
+ from sqlfluff.core.parser.match_wrapper import match_wrapper
+ from sqlfluff.core.parser.segments.raw import RawSegment
++from sqlfluff.core.parser.context import ParseContext
++from typing import Optional, List
+ 
+ 
+ class MetaSegment(RawSegment):
+@@ -31,6 +33,16 @@ def match(cls, segments, parse_context):  # pragma: no cover
+             )
+         )
+ 
++    @classmethod
++    def simple(cls, parse_context: ParseContext) -> Optional[List[str]]:
++        """Does this matcher support an uppercase hash matching route?
++
++        This should be true if the MATCH grammar is simple. Most more
++        complicated segments will be assumed to overwrite this method
++        if they wish to be considered simple.
++        """
++        return None
++
+ 
+ class Indent(MetaSegment):
+     """A segment which is empty but indicates where an indent should be.
+diff --git a/src/sqlfluff/dialects/dialect_tsql.py b/src/sqlfluff/dialects/dialect_tsql.py
+index 61d4a346fb0..72293428124 100644
+--- a/src/sqlfluff/dialects/dialect_tsql.py
++++ b/src/sqlfluff/dialects/dialect_tsql.py
+@@ -3,6 +3,9 @@
+ https://docs.microsoft.com/en-us/sql/t-sql/language-elements/language-elements-transact-sql
+ """
+ 
++from typing import List, Tuple
++
++
+ from sqlfluff.core.parser import (
+     BaseSegment,
+     Sequence,
+@@ -27,6 +30,8 @@
+ )
+ 
+ from sqlfluff.core.dialects import load_raw_dialect
++from sqlfluff.core.dialects.common import AliasInfo
++
+ from sqlfluff.dialects.dialect_tsql_keywords import (
+     RESERVED_KEYWORDS,
+     UNRESERVED_KEYWORDS,
+@@ -120,6 +125,22 @@
+     PrimaryKeyGrammar=Sequence(
+         "PRIMARY", "KEY", OneOf("CLUSTERED", "NONCLUSTERED", optional=True)
+     ),
++    # Overriding SelectClauseSegmentGrammar to remove Delimited logic which assumes statements have been delimited
++    SelectClauseSegmentGrammar=Sequence(
++        "SELECT",
++        Ref("SelectClauseModifierSegment", optional=True),
++        Indent,
++        AnyNumberOf(
++            Sequence(
++                Ref("SelectClauseElementSegment"),
++                Ref("CommaSegment"),
++            ),
++        ),
++        Ref("SelectClauseElementSegment"),
++        # NB: The Dedent for the indent above lives in the
++        # SelectStatementSegment so that it sits in the right
++        # place corresponding to the whitespace.
++    ),
+     FromClauseTerminatorGrammar=OneOf(
+         "WHERE",
+         "LIMIT",
+@@ -155,6 +176,25 @@ class StatementSegment(ansi_dialect.get_segment("StatementSegment")):  # type: i
+     parse_grammar = match_grammar
+ 
+ 
++@tsql_dialect.segment(replace=True)
++class SelectClauseElementSegment(BaseSegment):
++    """An element in the targets of a select statement.
++
++    Overriding ANSI to remove GreedyUntil logic which assumes statements have been delimited
++    """
++
++    type = "select_clause_element"
++    # Important to split elements before parsing, otherwise debugging is really hard.
++    match_grammar = OneOf(
++        # *, blah.*, blah.blah.*, etc.
++        Ref("WildcardExpressionSegment"),
++        Sequence(
++            Ref("BaseExpressionElementGrammar"),
++            Ref("AliasExpressionSegment", optional=True),
++        ),
++    )
++
++
+ @tsql_dialect.segment(replace=True)
+ class SelectClauseModifierSegment(BaseSegment):
+     """Things that come after SELECT but before the columns."""
+@@ -172,6 +212,17 @@ class SelectClauseModifierSegment(BaseSegment):
+     )
+ 
+ 
++@tsql_dialect.segment(replace=True)
++class SelectClauseSegment(BaseSegment):
++    """A group of elements in a select target statement.
++
++    Overriding ANSI to remove StartsWith logic which assumes statements have been delimited
++    """
++
++    type = "select_clause"
++    match_grammar = Ref("SelectClauseSegmentGrammar")
++
++
+ @tsql_dialect.segment(replace=True)
+ class UnorderedSelectStatementSegment(BaseSegment):
+     """A `SELECT` statement without any ORDER clauses or later.
+@@ -215,6 +266,7 @@ class SelectStatementSegment(BaseSegment):
+     match_grammar = UnorderedSelectStatementSegment.match_grammar.copy(
+         insert=[
+             Ref("OrderByClauseSegment", optional=True),
++            Ref("DelimiterSegment", optional=True),
+         ]
+     )
+ 
+@@ -273,6 +325,7 @@ class CreateIndexStatementSegment(BaseSegment):
+             ),
+             optional=True,
+         ),
++        Ref("DelimiterSegment", optional=True),
+     )
+ 
+ 
+@@ -310,12 +363,7 @@ class PivotUnpivotStatementSegment(BaseSegment):
+     """
+ 
+     type = "from_pivot_expression"
+-    match_grammar = StartsWith(
+-        OneOf("PIVOT", "UNPIVOT"),
+-        terminator=Ref("FromClauseTerminatorGrammar"),
+-        enforce_whitespace_preceding_terminator=True,
+-    )
+-    parse_grammar = Sequence(
++    match_grammar = Sequence(
+         OneOf(
+             Sequence(
+                 "PIVOT",
+@@ -655,12 +703,7 @@ class CreateProcedureStatementSegment(BaseSegment):
+ 
+     type = "create_procedure_statement"
+ 
+-    match_grammar = StartsWith(
+-        Sequence(
+-            "CREATE", Sequence("OR", "ALTER", optional=True), OneOf("PROCEDURE", "PROC")
+-        )
+-    )
+-    parse_grammar = Sequence(
++    match_grammar = Sequence(
+         "CREATE",
+         Sequence("OR", "ALTER", optional=True),
+         OneOf("PROCEDURE", "PROC"),
+@@ -700,6 +743,7 @@ class CreateViewStatementSegment(BaseSegment):
+         Ref("ObjectReferenceSegment"),
+         "AS",
+         Ref("SelectableGrammar"),
++        Ref("DelimiterSegment", optional=True),
+     )
+ 
+ 
+@@ -949,6 +993,7 @@ class CreateTableStatementSegment(BaseSegment):
+         Ref(
+             "TableDistributionIndexClause", optional=True
+         ),  # Azure Synapse Analytics specific
++        Ref("DelimiterSegment", optional=True),
+     )
+ 
+     parse_grammar = match_grammar
+@@ -1048,6 +1093,7 @@ class AlterTableSwitchStatementSegment(BaseSegment):
+             Bracketed("TRUNCATE_TARGET", Ref("EqualsSegment"), OneOf("ON", "OFF")),
+             optional=True,
+         ),
++        Ref("DelimiterSegment", optional=True),
+     )
+ 
+ 
+@@ -1131,11 +1177,14 @@ class TransactionStatementSegment(BaseSegment):
+             "TRANSACTION",
+             Ref("SingleIdentifierGrammar", optional=True),
+             Sequence("WITH", "MARK", Ref("QuotedIdentifierSegment"), optional=True),
++            Ref("DelimiterSegment", optional=True),
+         ),
+         Sequence(
+-            OneOf("COMMIT", "ROLLBACK"), OneOf("TRANSACTION", "WORK", optional=True)
++            OneOf("COMMIT", "ROLLBACK"),
++            OneOf("TRANSACTION", "WORK", optional=True),
++            Ref("DelimiterSegment", optional=True),
+         ),
+-        Sequence("SAVE", "TRANSACTION"),
++        Sequence("SAVE", "TRANSACTION", Ref("DelimiterSegment", optional=True)),
+     )
+ 
+ 
+@@ -1151,7 +1200,13 @@ class BeginEndSegment(BaseSegment):
+     match_grammar = Sequence(
+         "BEGIN",
+         Indent,
+-        Ref("BatchSegment"),
++        AnyNumberOf(
++            OneOf(
++                Ref("BeginEndSegment"),
++                Ref("StatementSegment"),
++            ),
++            min_times=1,
++        ),
+         Dedent,
+         "END",
+     )
+@@ -1163,18 +1218,16 @@ class BatchSegment(BaseSegment):
+ 
+     type = "batch"
+     match_grammar = OneOf(
++        # Things that can be bundled
+         AnyNumberOf(
+-            Ref("BeginEndSegment"),
++            OneOf(
++                Ref("BeginEndSegment"),
++                Ref("StatementSegment"),
++            ),
+             min_times=1,
+         ),
++        # Things that can't be bundled
+         Ref("CreateProcedureStatementSegment"),
+-        Ref("IfExpressionStatement"),
+-        Delimited(
+-            Ref("StatementSegment"),
+-            delimiter=Ref("DelimiterSegment"),
+-            allow_gaps=True,
+-            allow_trailing=True,
+-        ),
+     )
+ 
+ 
+@@ -1199,3 +1252,122 @@ class FileSegment(BaseFileSegment):
+         allow_gaps=True,
+         allow_trailing=True,
+     )
++
++
++@tsql_dialect.segment(replace=True)
++class DeleteStatementSegment(BaseSegment):
++    """A `DELETE` statement.
++
++    DELETE FROM <table name> [ WHERE <search condition> ]
++    Overriding ANSI to remove StartsWith logic which assumes statements have been delimited
++    """
++
++    type = "delete_statement"
++    # match grammar. This one makes sense in the context of knowing that it's
++    # definitely a statement, we just don't know what type yet.
++    match_grammar = Sequence(
++        "DELETE",
++        Ref("FromClauseSegment"),
++        Ref("WhereClauseSegment", optional=True),
++        Ref("DelimiterSegment", optional=True),
++    )
++
++
++@tsql_dialect.segment(replace=True)
++class FromClauseSegment(BaseSegment):
++    """A `FROM` clause like in `SELECT`.
++
++    NOTE: this is a delimited set of table expressions, with a variable
++    number of optional join clauses with those table expressions. The
++    delmited aspect is the higher of the two such that the following is
++    valid (albeit unusual):
++
++    ```
++    SELECT *
++    FROM a JOIN b, c JOIN d
++    ```
++
++    Overriding ANSI to remove Delimited logic which assumes statements have been delimited
++    """
++
++    type = "from_clause"
++    match_grammar = Sequence(
++        "FROM",
++        AnyNumberOf(
++            Sequence(
++                Ref("FromExpressionSegment"),
++                Ref("CommaSegment"),
++            ),
++        ),
++        Ref("FromExpressionSegment"),
++        Ref("DelimiterSegment", optional=True),
++    )
++
++    def get_eventual_aliases(self) -> List[Tuple[BaseSegment, AliasInfo]]:
++        """List the eventual aliases of this from clause.
++
++        Comes as a list of tuples (table expr, tuple (string, segment, bool)).
++        """
++        buff = []
++        direct_table_children = []
++        join_clauses = []
++
++        for from_expression in self.get_children("from_expression"):
++            direct_table_children += from_expression.get_children(
++                "from_expression_element"
++            )
++            join_clauses += from_expression.get_children("join_clause")
++
++        # Iterate through the potential sources of aliases
++        for clause in (*direct_table_children, *join_clauses):
++            ref: AliasInfo = clause.get_eventual_alias()
++            # Only append if non null. A None reference, may
++            # indicate a generator expression or similar.
++            table_expr = (
++                clause
++                if clause in direct_table_children
++                else clause.get_child("from_expression_element")
++            )
++            if ref:
++                buff.append((table_expr, ref))
++        return buff
++
++
++@tsql_dialect.segment(replace=True)
++class OrderByClauseSegment(BaseSegment):
++    """A `ORDER BY` clause like in `SELECT`.
++
++    Overriding ANSI to remove StartsWith logic which assumes statements have been delimited
++    """
++
++    type = "orderby_clause"
++    match_grammar = Sequence(
++        "ORDER",
++        "BY",
++        Indent,
++        Sequence(
++            OneOf(
++                Ref("ColumnReferenceSegment"),
++                # Can `ORDER BY 1`
++                Ref("NumericLiteralSegment"),
++                # Can order by an expression
++                Ref("ExpressionSegment"),
++            ),
++            OneOf("ASC", "DESC", optional=True),
++        ),
++        AnyNumberOf(
++            Ref("CommaSegment"),
++            Sequence(
++                OneOf(
++                    Ref("ColumnReferenceSegment"),
++                    # Can `ORDER BY 1`
++                    Ref("NumericLiteralSegment"),
++                    # Can order by an expression
++                    Ref("ExpressionSegment"),
++                ),
++                OneOf("ASC", "DESC", optional=True),
++            ),
++        ),
++        Dedent,
++        Ref("DelimiterSegment", optional=True),
++    )
+diff --git a/test/fixtures/dialects/tsql/add_index.yml b/test/fixtures/dialects/tsql/add_index.yml
+index 8522e3b9eab..e7bd7dd6cab 100644
+--- a/test/fixtures/dialects/tsql/add_index.yml
++++ b/test/fixtures/dialects/tsql/add_index.yml
+@@ -3,163 +3,166 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: bd2ee2825d1484a81fc06269c8b99d3cca70efc1e749a394d789cc22675a6321
++_hash: 2122ec7aca5f6835c66088ad5d48be7e9bda62f0ec75767628621cb82f94e0a9
+ file:
+ - batch:
+-    if_then_statement:
+-      keyword: IF
+-      expression:
+-      - keyword: NOT
+-      - keyword: EXISTS
+-      - bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  wildcard_expression:
+-                    wildcard_identifier:
+-                      star: '*'
+-              from_clause:
+-                keyword: FROM
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                      - identifier: sys
+-                      - dot: .
+-                      - identifier: indexes
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                  column_reference:
+-                    identifier: NAME
+-                  comparison_operator: '='
+-                  literal: "'IX_INTER_VIMR_INFECTIOUS_PEOPLE'"
+-          end_bracket: )
+-      statement:
+-        create_index_statement:
+-        - keyword: CREATE
+-        - keyword: NONCLUSTERED
+-        - keyword: INDEX
+-        - index_reference:
+-            identifier: IX_INTER_VIMR_INFECTIOUS_PEOPLE
+-        - keyword: 'ON'
+-        - table_reference:
+-          - identifier: dbo
+-          - dot: .
+-          - identifier: VIMR_INFECTIOUS_PEOPLE
++    statement:
++      if_then_statement:
++        keyword: IF
++        expression:
++        - keyword: NOT
++        - keyword: EXISTS
+         - bracketed:
+             start_bracket: (
+-            index_column_definition:
+-              identifier: DATE_LAST_INSERTED
++            expression:
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    wildcard_expression:
++                      wildcard_identifier:
++                        star: '*'
++                from_clause:
++                  keyword: FROM
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                        - identifier: sys
++                        - dot: .
++                        - identifier: indexes
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                    column_reference:
++                      identifier: NAME
++                    comparison_operator: '='
++                    literal: "'IX_INTER_VIMR_INFECTIOUS_PEOPLE'"
+             end_bracket: )
+-      statement_terminator: ;
++        statement:
++          create_index_statement:
++          - keyword: CREATE
++          - keyword: NONCLUSTERED
++          - keyword: INDEX
++          - index_reference:
++              identifier: IX_INTER_VIMR_INFECTIOUS_PEOPLE
++          - keyword: 'ON'
++          - table_reference:
++            - identifier: dbo
++            - dot: .
++            - identifier: VIMR_INFECTIOUS_PEOPLE
++          - bracketed:
++              start_bracket: (
++              index_column_definition:
++                identifier: DATE_LAST_INSERTED
++              end_bracket: )
++          - statement_terminator: ;
+ - go_statement:
+     keyword: GO
+ - batch:
+-    if_then_statement:
+-      keyword: IF
+-      expression:
+-      - keyword: NOT
+-      - keyword: EXISTS
+-      - bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  wildcard_expression:
+-                    wildcard_identifier:
+-                      star: '*'
+-              from_clause:
+-                keyword: FROM
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                      - identifier: sys
+-                      - dot: .
+-                      - identifier: indexes
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                  column_reference:
+-                    identifier: NAME
+-                  comparison_operator: '='
+-                  literal: "'IX_INTER_FOUNDATION_NICE_IC_INTAKE_COUNT'"
+-          end_bracket: )
+-      statement:
+-        create_index_statement:
+-        - keyword: CREATE
+-        - keyword: NONCLUSTERED
+-        - keyword: INDEX
+-        - index_reference:
+-            identifier: IX_INTER_FOUNDATION_NICE_IC_INTAKE_COUNT
+-        - keyword: 'ON'
+-        - table_reference:
+-          - identifier: dbo
+-          - dot: .
+-          - identifier: FOUNDATION_NICE_IC_INTAKE_COUNT
++    statement:
++      if_then_statement:
++        keyword: IF
++        expression:
++        - keyword: NOT
++        - keyword: EXISTS
+         - bracketed:
+             start_bracket: (
+-            index_column_definition:
+-              identifier: DATE_LAST_INSERTED
++            expression:
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    wildcard_expression:
++                      wildcard_identifier:
++                        star: '*'
++                from_clause:
++                  keyword: FROM
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                        - identifier: sys
++                        - dot: .
++                        - identifier: indexes
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                    column_reference:
++                      identifier: NAME
++                    comparison_operator: '='
++                    literal: "'IX_INTER_FOUNDATION_NICE_IC_INTAKE_COUNT'"
+             end_bracket: )
+-      statement_terminator: ;
++        statement:
++          create_index_statement:
++          - keyword: CREATE
++          - keyword: NONCLUSTERED
++          - keyword: INDEX
++          - index_reference:
++              identifier: IX_INTER_FOUNDATION_NICE_IC_INTAKE_COUNT
++          - keyword: 'ON'
++          - table_reference:
++            - identifier: dbo
++            - dot: .
++            - identifier: FOUNDATION_NICE_IC_INTAKE_COUNT
++          - bracketed:
++              start_bracket: (
++              index_column_definition:
++                identifier: DATE_LAST_INSERTED
++              end_bracket: )
++          - statement_terminator: ;
+ - go_statement:
+     keyword: GO
+ - batch:
+-    if_then_statement:
+-      keyword: IF
+-      expression:
+-        keyword: EXISTS
+-        bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  wildcard_expression:
+-                    wildcard_identifier:
+-                      star: '*'
+-              from_clause:
+-                keyword: FROM
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                      - identifier: sys
+-                      - dot: .
+-                      - identifier: indexes
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                  column_reference:
+-                    identifier: NAME
+-                  comparison_operator: '='
+-                  literal: "'IX_INTER_VIMR_REPRODUCTION_NUMBER'"
+-          end_bracket: )
+-      statement:
+-        create_index_statement:
+-        - keyword: CREATE
+-        - keyword: CLUSTERED
+-        - keyword: INDEX
+-        - index_reference:
+-            identifier: IX_INTER_VIMR_REPRODUCTION_NUMBER
+-        - keyword: 'ON'
+-        - table_reference:
+-          - identifier: dbo
+-          - dot: .
+-          - identifier: VIMR_INFECTIOUS_PEOPLE
+-        - bracketed:
++    statement:
++      if_then_statement:
++        keyword: IF
++        expression:
++          keyword: EXISTS
++          bracketed:
+             start_bracket: (
+-            index_column_definition:
+-              identifier: DATE_LAST_INSERTED
++            expression:
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    wildcard_expression:
++                      wildcard_identifier:
++                        star: '*'
++                from_clause:
++                  keyword: FROM
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                        - identifier: sys
++                        - dot: .
++                        - identifier: indexes
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                    column_reference:
++                      identifier: NAME
++                    comparison_operator: '='
++                    literal: "'IX_INTER_VIMR_REPRODUCTION_NUMBER'"
+             end_bracket: )
+-      statement_terminator: ;
++        statement:
++          create_index_statement:
++          - keyword: CREATE
++          - keyword: CLUSTERED
++          - keyword: INDEX
++          - index_reference:
++              identifier: IX_INTER_VIMR_REPRODUCTION_NUMBER
++          - keyword: 'ON'
++          - table_reference:
++            - identifier: dbo
++            - dot: .
++            - identifier: VIMR_INFECTIOUS_PEOPLE
++          - bracketed:
++              start_bracket: (
++              index_column_definition:
++                identifier: DATE_LAST_INSERTED
++              end_bracket: )
++          - statement_terminator: ;
+ - go_statement:
+     keyword: GO
+diff --git a/test/fixtures/dialects/tsql/alter_table_switch.yml b/test/fixtures/dialects/tsql/alter_table_switch.yml
+index 9358605a820..7fe287a5286 100644
+--- a/test/fixtures/dialects/tsql/alter_table_switch.yml
++++ b/test/fixtures/dialects/tsql/alter_table_switch.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: d8f58ac5175eef5f909d671ebf6e7e66b7215fe034962a644eb8e68d56359ebd
++_hash: a1639b23caae2ef929b84a2aca006d612e9a1921c7f09ade149572641813c75b
+ file:
+   batch:
+     statement:
+@@ -27,4 +27,4 @@ file:
+         - comparison_operator: '='
+         - keyword: 'ON'
+         - end_bracket: )
+-    statement_terminator: ;
++      - statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/begin_end_nested.yml b/test/fixtures/dialects/tsql/begin_end_nested.yml
+index 35c9e20e2f4..d1bb6279a66 100644
+--- a/test/fixtures/dialects/tsql/begin_end_nested.yml
++++ b/test/fixtures/dialects/tsql/begin_end_nested.yml
+@@ -3,21 +3,19 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: e461d59020dc2523ffd449438d7d8f7b7e808cb8bf84c3806d064ea3f72ffb5c
++_hash: 058daccf2c3f7800ef29a6e721f237159c6531c6d000ddea4f6432544b243e1a
+ file:
+   batch:
+     begin_end_block:
+     - keyword: BEGIN
+-    - batch:
+-        begin_end_block:
+-        - keyword: BEGIN
+-        - batch:
+-            statement:
+-              select_statement:
+-                select_clause:
+-                  keyword: SELECT
+-                  select_clause_element:
+-                    literal: "'Weekend'"
++    - begin_end_block:
++      - keyword: BEGIN
++      - statement:
++          select_statement:
++            select_clause:
++              keyword: SELECT
++              select_clause_element:
++                literal: "'Weekend'"
+             statement_terminator: ;
+-        - keyword: END
++      - keyword: END
+     - keyword: END
+diff --git a/test/fixtures/dialects/tsql/begin_end_no_semicolon.sql b/test/fixtures/dialects/tsql/begin_end_no_semicolon.sql
+new file mode 100644
+index 00000000000..b055205461d
+--- /dev/null
++++ b/test/fixtures/dialects/tsql/begin_end_no_semicolon.sql
+@@ -0,0 +1,3 @@
++BEGIN
++		SELECT 1
++END
+diff --git a/test/fixtures/dialects/tsql/begin_end_no_semicolon.yml b/test/fixtures/dialects/tsql/begin_end_no_semicolon.yml
+new file mode 100644
+index 00000000000..dc19f5def58
+--- /dev/null
++++ b/test/fixtures/dialects/tsql/begin_end_no_semicolon.yml
+@@ -0,0 +1,17 @@
++# YML test files are auto-generated from SQL files and should not be edited by
++# hand. To help enforce this, the "hash" field in the file must match a hash
++# computed by SQLFluff when running the tests. Please run
++# `python test/generate_parse_fixture_yml.py`  to generate them after adding or
++# altering SQL files.
++_hash: a4a76de010b4b5b8a94ce85900bd8bf38f726745a68d60493848653f8f281769
++file:
++  batch:
++    begin_end_block:
++    - keyword: BEGIN
++    - statement:
++        select_statement:
++          select_clause:
++            keyword: SELECT
++            select_clause_element:
++              literal: '1'
++    - keyword: END
+diff --git a/test/fixtures/dialects/tsql/create_table_with_distribution.yml b/test/fixtures/dialects/tsql/create_table_with_distribution.yml
+index dfbcefb1486..191428ece64 100644
+--- a/test/fixtures/dialects/tsql/create_table_with_distribution.yml
++++ b/test/fixtures/dialects/tsql/create_table_with_distribution.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: dabc675120c9e5d0aa097e090ed36987987ceb72f82c8d5b2e102c294e4c5f3e
++_hash: f1e9e4393904366d3600e7ac13f516331a7d5549cccd7a5372a75b9b71781fbe
+ file:
+   batch:
+     statement:
+@@ -63,4 +63,4 @@ file:
+             - comparison_operator: '='
+             - keyword: ROUND_ROBIN
+             end_bracket: )
+-    statement_terminator: ;
++      - statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/create_table_with_sequence.yml b/test/fixtures/dialects/tsql/create_table_with_sequence.yml
+index 27b0ce45462..3357fada552 100644
+--- a/test/fixtures/dialects/tsql/create_table_with_sequence.yml
++++ b/test/fixtures/dialects/tsql/create_table_with_sequence.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 9d5c74baf73423683a79124863529787475d326af6aa4fec49e9843efa603dce
++_hash: 30c51a84e37fb29765e95720842f3376aa80a94548d01d41085519295e7afbf6
+ file:
+   batch:
+     statement:
+@@ -71,4 +71,4 @@ file:
+                   start_bracket: (
+                   end_bracket: )
+         - end_bracket: )
+-    statement_terminator: ;
++      - statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/create_table_with_sequence_bracketed.yml b/test/fixtures/dialects/tsql/create_table_with_sequence_bracketed.yml
+index 16a35b03995..3a476d8cc59 100644
+--- a/test/fixtures/dialects/tsql/create_table_with_sequence_bracketed.yml
++++ b/test/fixtures/dialects/tsql/create_table_with_sequence_bracketed.yml
+@@ -3,68 +3,69 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 735fdda0125c608988734d064d2b5d2b2b300c62e865fa73cfc369cce08474da
++_hash: 6a5466882f1e7f393f438ac173939d68c75ebb24bcb35b603fc1e2586bc09c83
+ file:
+ - batch:
+-    if_then_statement:
+-      keyword: IF
+-      expression:
+-      - keyword: NOT
+-      - keyword: EXISTS
+-      - bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  wildcard_expression:
+-                    wildcard_identifier:
+-                      star: '*'
+-              from_clause:
+-                keyword: FROM
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                      - identifier: sys
+-                      - dot: .
+-                      - identifier: sequences
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                - column_reference:
+-                    identifier: object_id
+-                - comparison_operator: '='
+-                - function:
+-                    function_name:
+-                      function_name_identifier: OBJECT_ID
+-                    bracketed:
+-                      start_bracket: (
+-                      expression:
+-                        literal: "N'[dbo].[SEQ_SCHEMA_NAME_TABLE_NAME]'"
+-                      end_bracket: )
+-                - binary_operator: AND
+-                - column_reference:
+-                    identifier: type
+-                - comparison_operator: '='
+-                - literal: "'SO'"
+-          end_bracket: )
+-      statement:
+-        create_sequence_statement:
+-        - keyword: CREATE
+-        - keyword: SEQUENCE
+-        - sequence_reference:
+-            identifier: SEQ_SCHEMA_NAME_TABLE_NAME
+-        - create_sequence_options_segment:
+-          - keyword: START
+-          - keyword: WITH
+-          - literal: '1'
+-        - create_sequence_options_segment:
+-          - keyword: INCREMENT
+-          - keyword: BY
+-          - literal: '1'
+-      statement_terminator: ;
++    statement:
++      if_then_statement:
++        keyword: IF
++        expression:
++        - keyword: NOT
++        - keyword: EXISTS
++        - bracketed:
++            start_bracket: (
++            expression:
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    wildcard_expression:
++                      wildcard_identifier:
++                        star: '*'
++                from_clause:
++                  keyword: FROM
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                        - identifier: sys
++                        - dot: .
++                        - identifier: sequences
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                  - column_reference:
++                      identifier: object_id
++                  - comparison_operator: '='
++                  - function:
++                      function_name:
++                        function_name_identifier: OBJECT_ID
++                      bracketed:
++                        start_bracket: (
++                        expression:
++                          literal: "N'[dbo].[SEQ_SCHEMA_NAME_TABLE_NAME]'"
++                        end_bracket: )
++                  - binary_operator: AND
++                  - column_reference:
++                      identifier: type
++                  - comparison_operator: '='
++                  - literal: "'SO'"
++            end_bracket: )
++        statement:
++          create_sequence_statement:
++          - keyword: CREATE
++          - keyword: SEQUENCE
++          - sequence_reference:
++              identifier: SEQ_SCHEMA_NAME_TABLE_NAME
++          - create_sequence_options_segment:
++            - keyword: START
++            - keyword: WITH
++            - literal: '1'
++          - create_sequence_options_segment:
++            - keyword: INCREMENT
++            - keyword: BY
++            - literal: '1'
++        statement_terminator: ;
+ - go_statement:
+     keyword: GO
+ - batch:
+@@ -166,7 +167,7 @@ file:
+                   start_bracket: (
+                   end_bracket: )
+         - end_bracket: )
+-  - statement_terminator: ;
++      - statement_terminator: ;
+   - statement:
+       if_then_statement:
+         keyword: IF
+@@ -226,7 +227,7 @@ file:
+             - keyword: INCREMENT
+             - keyword: BY
+             - literal: '1'
+-  - statement_terminator: ;
++        statement_terminator: ;
+ - go_statement:
+     keyword: GO
+ - batch:
+@@ -422,7 +423,7 @@ file:
+                   start_bracket: (
+                   end_bracket: )
+         - end_bracket: )
+-    statement_terminator: ;
++      - statement_terminator: ;
+ - go_statement:
+     keyword: GO
+ - batch:
+@@ -499,7 +500,7 @@ file:
+         - index_column_definition:
+             identifier: GGD_NAAM
+         - end_bracket: )
+-  - statement_terminator: ;
++      - statement_terminator: ;
+   - statement:
+       create_table_statement:
+       - keyword: CREATE
+@@ -637,4 +638,4 @@ file:
+                   literal: '2'
+               - end_bracket: )
+         - end_bracket: )
+-  - statement_terminator: ;
++      - statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/create_view.yml b/test/fixtures/dialects/tsql/create_view.yml
+index e0a7fb32002..3f82270135f 100644
+--- a/test/fixtures/dialects/tsql/create_view.yml
++++ b/test/fixtures/dialects/tsql/create_view.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: dd5bc831bfcf59b4eac75c4b19aaf1d7296fc810db987496b68404da34785c39
++_hash: 5241097a37393d8a516cd76083d0cb81c933d61c463d44aefd938bb31ece2dd9
+ file:
+   batch:
+     statement:
+@@ -22,11 +22,12 @@ file:
+           - keyword: SELECT
+           - select_clause_modifier:
+               keyword: TOP
+-              bracketed:
+-                start_bracket: (
+-                expression:
+-                  literal: '100'
+-                end_bracket: )
++              expression:
++                bracketed:
++                  start_bracket: (
++                  expression:
++                    literal: '100'
++                  end_bracket: )
+           - select_clause_element:
+               column_reference:
+                 identifier: SalesPersonID
+diff --git a/test/fixtures/dialects/tsql/create_view_with_pivot.yml b/test/fixtures/dialects/tsql/create_view_with_pivot.yml
+index 8601b5c8585..e24079a762a 100644
+--- a/test/fixtures/dialects/tsql/create_view_with_pivot.yml
++++ b/test/fixtures/dialects/tsql/create_view_with_pivot.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 8c02685f71bf219bc9a7427b2c89111c6fbb6de2d7910b95856a47c2c05b799c
++_hash: 4f394efeb23b6f838b5fd9f7278f98b49696440e7372e563c1c8810ed73771ae
+ file:
+   batch:
+     statement:
+@@ -113,4 +113,4 @@ file:
+           - keyword: AS
+           - table_reference:
+               identifier: PivotTable
+-    statement_terminator: ;
++          statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/create_view_with_set_statements.yml b/test/fixtures/dialects/tsql/create_view_with_set_statements.yml
+index c18957c7057..6fce7725762 100644
+--- a/test/fixtures/dialects/tsql/create_view_with_set_statements.yml
++++ b/test/fixtures/dialects/tsql/create_view_with_set_statements.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 615826a0bb6f437bb9a9660b2717a7a573c6ac7baac9538e84598293dfa7762b
++_hash: d57c42a6c870bce875207572c2c6ce44dd2ba35e693e8f12252a06f2e2ee15bb
+ file:
+ - batch:
+     statement:
+@@ -141,6 +141,6 @@ file:
+             - comparison_operator: '='
+             - column_reference:
+                 identifier: LAST_DATE_OF_REPORT
+-    statement_terminator: ;
++          statement_terminator: ;
+ - go_statement:
+     keyword: GO
+diff --git a/test/fixtures/dialects/tsql/create_view_with_unpivot.yml b/test/fixtures/dialects/tsql/create_view_with_unpivot.yml
+index 9ca0cd8dc2d..6c28de7e414 100644
+--- a/test/fixtures/dialects/tsql/create_view_with_unpivot.yml
++++ b/test/fixtures/dialects/tsql/create_view_with_unpivot.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: ce096098b5a75599fab12135126689dc932552655af5d99c181b38c25652b0ee
++_hash: 484b70bfb2806f0ad9abded5077f111aeb6484ed8c1c40b9ac6d99aaadb8fce9
+ file:
+   batch:
+     statement:
+@@ -101,4 +101,4 @@ file:
+           - keyword: AS
+           - table_reference:
+               identifier: unpvt
+-    statement_terminator: ;
++          statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/cte_s.yml b/test/fixtures/dialects/tsql/cte_s.yml
+index 0d82fc148f4..485f9b233d5 100644
+--- a/test/fixtures/dialects/tsql/cte_s.yml
++++ b/test/fixtures/dialects/tsql/cte_s.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 1281cc966ce84538a5bee498fda3df69087f70a51e8297cc2fcc854d76cb7d97
++_hash: 71c37fda083d9cb57258a02461686c2d84ec45670d26eaadcb91c9850a113ed3
+ file:
+   batch:
+     statement:
+@@ -82,4 +82,4 @@ file:
+                 table_expression:
+                   table_reference:
+                     identifier: Sales_CTE
+-    statement_terminator: ;
++            statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/if_else.yml b/test/fixtures/dialects/tsql/if_else.yml
+index d4da21fb11d..7fed975b75e 100644
+--- a/test/fixtures/dialects/tsql/if_else.yml
++++ b/test/fixtures/dialects/tsql/if_else.yml
+@@ -3,107 +3,108 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: eefd69da6bc95727bbc5900d2af1b35925fc181801aea362a5a8793b7451dc71
++_hash: 39cb26283b2b0a6c616e448985191047bdbe96083d2ae4c209013f4acb77d9f6
+ file:
+   batch:
+-    if_then_statement:
+-    - keyword: IF
+-    - expression:
+-        literal: '1'
+-        comparison_operator: <=
+-        bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  column_reference:
+-                    identifier: Weight
+-              from_clause:
+-                keyword: from
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                        identifier: DimProduct
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                  column_reference:
+-                    identifier: ProductKey
+-                  comparison_operator: '='
+-                  literal: '1'
+-          end_bracket: )
+-    - statement:
+-        select_statement:
+-          select_clause:
+-          - keyword: SELECT
+-          - select_clause_element:
+-              column_reference:
+-                identifier: ProductKey
+-          - comma: ','
+-          - select_clause_element:
+-              column_reference:
+-                identifier: EnglishDescription
+-          - comma: ','
+-          - select_clause_element:
+-              column_reference:
+-                identifier: Weight
+-          - comma: ','
+-          - select_clause_element:
+-              literal: "'This product is too heavy to ship and is only available for\
+-                \ pickup.'"
+-              alias_expression:
+-                keyword: AS
+-                identifier: ShippingStatus
+-          from_clause:
+-            keyword: FROM
+-            from_expression:
+-              from_expression_element:
+-                table_expression:
+-                  table_reference:
+-                    identifier: DimProduct
+-          where_clause:
+-            keyword: WHERE
++    statement:
++      if_then_statement:
++      - keyword: IF
++      - expression:
++          literal: '1'
++          comparison_operator: <=
++          bracketed:
++            start_bracket: (
+             expression:
+-              column_reference:
+-                identifier: ProductKey
+-              comparison_operator: '='
+-              literal: '1'
+-    - keyword: ELSE
+-    - statement:
+-        select_statement:
+-          select_clause:
+-          - keyword: SELECT
+-          - select_clause_element:
+-              column_reference:
+-                identifier: ProductKey
+-          - comma: ','
+-          - select_clause_element:
+-              column_reference:
+-                identifier: EnglishDescription
+-          - comma: ','
+-          - select_clause_element:
+-              column_reference:
+-                identifier: Weight
+-          - comma: ','
+-          - select_clause_element:
+-              literal: "'This product is available for shipping or pickup.'"
+-              alias_expression:
+-                keyword: AS
+-                identifier: ShippingStatus
+-          from_clause:
+-            keyword: FROM
+-            from_expression:
+-              from_expression_element:
+-                table_expression:
+-                  table_reference:
+-                    identifier: DimProduct
+-          where_clause:
+-            keyword: WHERE
+-            expression:
+-              column_reference:
+-                identifier: ProductKey
+-              comparison_operator: '='
+-              literal: '1'
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    column_reference:
++                      identifier: Weight
++                from_clause:
++                  keyword: from
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                          identifier: DimProduct
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                    column_reference:
++                      identifier: ProductKey
++                    comparison_operator: '='
++                    literal: '1'
++            end_bracket: )
++      - statement:
++          select_statement:
++            select_clause:
++            - keyword: SELECT
++            - select_clause_element:
++                column_reference:
++                  identifier: ProductKey
++            - comma: ','
++            - select_clause_element:
++                column_reference:
++                  identifier: EnglishDescription
++            - comma: ','
++            - select_clause_element:
++                column_reference:
++                  identifier: Weight
++            - comma: ','
++            - select_clause_element:
++                literal: "'This product is too heavy to ship and is only available\
++                  \ for pickup.'"
++                alias_expression:
++                  keyword: AS
++                  identifier: ShippingStatus
++            from_clause:
++              keyword: FROM
++              from_expression:
++                from_expression_element:
++                  table_expression:
++                    table_reference:
++                      identifier: DimProduct
++            where_clause:
++              keyword: WHERE
++              expression:
++                column_reference:
++                  identifier: ProductKey
++                comparison_operator: '='
++                literal: '1'
++      - keyword: ELSE
++      - statement:
++          select_statement:
++            select_clause:
++            - keyword: SELECT
++            - select_clause_element:
++                column_reference:
++                  identifier: ProductKey
++            - comma: ','
++            - select_clause_element:
++                column_reference:
++                  identifier: EnglishDescription
++            - comma: ','
++            - select_clause_element:
++                column_reference:
++                  identifier: Weight
++            - comma: ','
++            - select_clause_element:
++                literal: "'This product is available for shipping or pickup.'"
++                alias_expression:
++                  keyword: AS
++                  identifier: ShippingStatus
++            from_clause:
++              keyword: FROM
++              from_expression:
++                from_expression_element:
++                  table_expression:
++                    table_reference:
++                      identifier: DimProduct
++            where_clause:
++              keyword: WHERE
++              expression:
++                column_reference:
++                  identifier: ProductKey
++                comparison_operator: '='
++                literal: '1'
+diff --git a/test/fixtures/dialects/tsql/if_else_begin_end.yml b/test/fixtures/dialects/tsql/if_else_begin_end.yml
+index e805272c12c..572856dcb54 100644
+--- a/test/fixtures/dialects/tsql/if_else_begin_end.yml
++++ b/test/fixtures/dialects/tsql/if_else_begin_end.yml
+@@ -3,42 +3,42 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: ac147308a8df8aa6a9a3647d6dde70bcd4eca96f39dcdcf187f3f4bcb0fe689b
++_hash: a17e3b89c102672383b4474f75262d0001401fb61bbe351de9b694b3d6f02952
+ file:
+   batch:
+-    if_then_statement:
+-    - keyword: IF
+-    - expression:
+-        literal: '1'
+-        comparison_operator: <=
+-        bracketed:
+-          start_bracket: (
+-          expression:
+-            select_statement:
+-              select_clause:
+-                keyword: SELECT
+-                select_clause_element:
+-                  column_reference:
+-                    identifier: Weight
+-              from_clause:
+-                keyword: from
+-                from_expression:
+-                  from_expression_element:
+-                    table_expression:
+-                      table_reference:
+-                        identifier: DimProduct
+-              where_clause:
+-                keyword: WHERE
+-                expression:
+-                  column_reference:
+-                    identifier: ProductKey
+-                  comparison_operator: '='
+-                  literal: '1'
+-          end_bracket: )
+-    - begin_end_block:
+-      - keyword: BEGIN
+-      - batch:
+-          statement:
++    statement:
++      if_then_statement:
++      - keyword: IF
++      - expression:
++          literal: '1'
++          comparison_operator: <=
++          bracketed:
++            start_bracket: (
++            expression:
++              select_statement:
++                select_clause:
++                  keyword: SELECT
++                  select_clause_element:
++                    column_reference:
++                      identifier: Weight
++                from_clause:
++                  keyword: from
++                  from_expression:
++                    from_expression_element:
++                      table_expression:
++                        table_reference:
++                          identifier: DimProduct
++                where_clause:
++                  keyword: WHERE
++                  expression:
++                    column_reference:
++                      identifier: ProductKey
++                    comparison_operator: '='
++                    literal: '1'
++            end_bracket: )
++      - begin_end_block:
++        - keyword: BEGIN
++        - statement:
+             select_statement:
+               select_clause:
+               - keyword: SELECT
+@@ -74,12 +74,11 @@ file:
+                     identifier: ProductKey
+                   comparison_operator: '='
+                   literal: '1'
+-      - keyword: END
+-    - keyword: ELSE
+-    - begin_end_block:
+-      - keyword: BEGIN
+-      - batch:
+-          statement:
++        - keyword: END
++      - keyword: ELSE
++      - begin_end_block:
++        - keyword: BEGIN
++        - statement:
+             select_statement:
+               select_clause:
+               - keyword: SELECT
+@@ -114,4 +113,4 @@ file:
+                     identifier: ProductKey
+                   comparison_operator: '='
+                   literal: '1'
+-      - keyword: END
++        - keyword: END
+diff --git a/test/fixtures/dialects/tsql/select_cross_apply.yml b/test/fixtures/dialects/tsql/select_cross_apply.yml
+index a8e16e1853c..ea2f9d6d911 100644
+--- a/test/fixtures/dialects/tsql/select_cross_apply.yml
++++ b/test/fixtures/dialects/tsql/select_cross_apply.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 73aa8578d5053d367ebde5ddaca73333a6ef80897367a32be4828fea911396ed
++_hash: 0bc4b039ebf0a388fe704b591548f408c116472b58410b75ba40edab65c65aa8
+ file:
+   batch:
+   - statement:
+@@ -60,7 +60,7 @@ file:
+                         - dot: .
+                         - identifier: DeptMgrID
+                       end_bracket: )
+-  - statement_terminator: ;
++          statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+@@ -96,7 +96,7 @@ file:
+                         - dot: .
+                         - identifier: DepartmentID
+                       end_bracket: )
+-  - statement_terminator: ;
++          statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+@@ -157,4 +157,4 @@ file:
+                 alias_expression:
+                   keyword: as
+                   identifier: sp
+-  - statement_terminator: ;
++          statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/select_top.yml b/test/fixtures/dialects/tsql/select_top.yml
+index 44ba71278a6..2f00768c596 100644
+--- a/test/fixtures/dialects/tsql/select_top.yml
++++ b/test/fixtures/dialects/tsql/select_top.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 2fb2c3524a0d1e3aa0bb02f597f70213a2875c216b42f9460360c6b3892ec84f
++_hash: 9709be101bf56f190488880a44218c79a39e091a13d097089e1c95901fe1a324
+ file:
+   batch:
+   - statement:
+@@ -43,18 +43,19 @@ file:
+           - dot: .
+           - identifier: column1
+         - keyword: desc
+-  - statement_terminator: ;
++        - statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+         - keyword: SELECT
+         - select_clause_modifier:
+             keyword: TOP
+-            bracketed:
+-              start_bracket: (
+-              expression:
+-                literal: '10'
+-              end_bracket: )
++            expression:
++              bracketed:
++                start_bracket: (
++                expression:
++                  literal: '10'
++                end_bracket: )
+         - select_clause_element:
+             column_reference:
+               identifier: JobTitle
+@@ -71,18 +72,19 @@ file:
+                 - identifier: HumanResources
+                 - dot: .
+                 - identifier: Employee
+-  - statement_terminator: ;
++          statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+         - keyword: SELECT
+         - select_clause_modifier:
+             keyword: TOP
+-            bracketed:
+-              start_bracket: (
+-              expression:
+-                literal: '10'
+-              end_bracket: )
++            expression:
++              bracketed:
++                start_bracket: (
++                expression:
++                  literal: '10'
++                end_bracket: )
+         - select_clause_element:
+             column_reference:
+               identifier: JobTitle
+@@ -105,18 +107,19 @@ file:
+         - column_reference:
+             identifier: HireDate
+         - keyword: DESC
+-  - statement_terminator: ;
++        - statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+         - keyword: SELECT
+         - select_clause_modifier:
+           - keyword: TOP
+-          - bracketed:
+-              start_bracket: (
+-              expression:
+-                literal: '5'
+-              end_bracket: )
++          - expression:
++              bracketed:
++                start_bracket: (
++                expression:
++                  literal: '5'
++                end_bracket: )
+           - keyword: PERCENT
+         - select_clause_element:
+             column_reference:
+@@ -140,18 +143,19 @@ file:
+         - column_reference:
+             identifier: HireDate
+         - keyword: DESC
+-  - statement_terminator: ;
++        - statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+         - keyword: SELECT
+         - select_clause_modifier:
+           - keyword: TOP
+-          - bracketed:
+-              start_bracket: (
+-              expression:
+-                literal: '10'
+-              end_bracket: )
++          - expression:
++              bracketed:
++                start_bracket: (
++                expression:
++                  literal: '10'
++                end_bracket: )
+           - keyword: PERCENT
+           - keyword: WITH
+           - keyword: TIES
+@@ -250,4 +254,4 @@ file:
+         - column_reference:
+             identifier: Rate
+         - keyword: DESC
+-  - statement_terminator: ;
++        - statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/stored_procedure_begin_end.yml b/test/fixtures/dialects/tsql/stored_procedure_begin_end.yml
+index ab15ad4e871..b54c960d51e 100644
+--- a/test/fixtures/dialects/tsql/stored_procedure_begin_end.yml
++++ b/test/fixtures/dialects/tsql/stored_procedure_begin_end.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 07931a42221549599e8dc934a850c844e413378012ad5c9e33aae02458d9d97a
++_hash: 9187d81b1ed5bc9a79aae00206e2ae0bca51a4f8fb22189cc863e103eb5aa6e8
+ file:
+   batch:
+     create_procedure_statement:
+@@ -17,42 +17,41 @@ file:
+     - procedure_statement:
+         begin_end_block:
+         - keyword: BEGIN
+-        - batch:
+-          - statement:
+-              select_statement:
+-                select_clause:
+-                  keyword: SELECT
+-                  select_clause_element:
+-                    literal: "'Weekend'"
+-          - statement_terminator: ;
+-          - statement:
+-              select_statement:
+-                select_clause:
+-                  keyword: select
+-                  select_clause_element:
+-                    column_reference:
+-                      identifier: a
+-                from_clause:
+-                  keyword: from
+-                  from_expression:
+-                    from_expression_element:
+-                      table_expression:
+-                        table_reference:
+-                          identifier: tbl1
+-          - statement_terminator: ;
+-          - statement:
+-              select_statement:
+-                select_clause:
+-                  keyword: select
+-                  select_clause_element:
+-                    column_reference:
+-                      identifier: b
+-                from_clause:
+-                  keyword: from
+-                  from_expression:
+-                    from_expression_element:
+-                      table_expression:
+-                        table_reference:
+-                          identifier: tbl2
+-          - statement_terminator: ;
++        - statement:
++            select_statement:
++              select_clause:
++                keyword: SELECT
++                select_clause_element:
++                  literal: "'Weekend'"
++              statement_terminator: ;
++        - statement:
++            select_statement:
++              select_clause:
++                keyword: select
++                select_clause_element:
++                  column_reference:
++                    identifier: a
++              from_clause:
++                keyword: from
++                from_expression:
++                  from_expression_element:
++                    table_expression:
++                      table_reference:
++                        identifier: tbl1
++                statement_terminator: ;
++        - statement:
++            select_statement:
++              select_clause:
++                keyword: select
++                select_clause_element:
++                  column_reference:
++                    identifier: b
++              from_clause:
++                keyword: from
++                from_expression:
++                  from_expression_element:
++                    table_expression:
++                      table_reference:
++                        identifier: tbl2
++                statement_terminator: ;
+         - keyword: END
+diff --git a/test/fixtures/dialects/tsql/temp_tables.yml b/test/fixtures/dialects/tsql/temp_tables.yml
+index f12a66a6360..68dbd6b99c2 100644
+--- a/test/fixtures/dialects/tsql/temp_tables.yml
++++ b/test/fixtures/dialects/tsql/temp_tables.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 703e4f2adecf825f2059b2e2a4bf5c176acedc6ac378f659c9bbd7d14ca58585
++_hash: 72ea066eddd25c97d08b535aac5defbadeefcaf307e1866433f15c47a23ea8cf
+ file:
+   batch:
+   - statement:
+@@ -28,7 +28,7 @@ file:
+               table_expression:
+                 table_reference:
+                   identifier: '#UnionA'
+-  - statement_terminator: ;
++          statement_terminator: ;
+   - statement:
+       select_statement:
+         select_clause:
+@@ -51,4 +51,4 @@ file:
+               table_expression:
+                 table_reference:
+                   identifier: '##UnionB'
+-  - statement_terminator: ;
++          statement_terminator: ;
+diff --git a/test/fixtures/dialects/tsql/transaction.yml b/test/fixtures/dialects/tsql/transaction.yml
+index 283801b5aa4..791a4f2833b 100644
+--- a/test/fixtures/dialects/tsql/transaction.yml
++++ b/test/fixtures/dialects/tsql/transaction.yml
+@@ -3,14 +3,14 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 71ac6e34a041b0049eb86cdd0a2c765dd23e322db40a024789dd6e049b2067dd
++_hash: 455fbc87378f6996811989411cf92023c4ad93fa6e5518965a4e7c6831baae14
+ file:
+   batch:
+   - statement:
+       transaction_statement:
+       - keyword: BEGIN
+       - keyword: TRANSACTION
+-  - statement_terminator: ;
++      - statement_terminator: ;
+   - statement:
+       delete_statement:
+         keyword: DELETE
+@@ -30,8 +30,8 @@ file:
+               identifier: JobCandidateID
+             comparison_operator: '='
+             literal: '13'
+-  - statement_terminator: ;
++        statement_terminator: ;
+   - statement:
+       transaction_statement:
+         keyword: COMMIT
+-  - statement_terminator: ;
++        statement_terminator: ;
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,778 @@
+  Task-ID: Avaiga__taipy-833@24559da
+  Please checkout to this commit first: 8d19fc00e9cb96278d1b606417d93487f1f83aa4
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Make orchestrator mandatory in Dispatcher constructor signature.
+**Description**
+Today, the constructor of the JobDispatcher class has an optional `_Orchestrator` parameter.
+The parameter is used in the constructor and assumes it is not None. 
+The parameter should be turned into a mandatory parameter.
+
+**Acceptance Criteria**
+- [ ] The parameter is mandatory in JobDispatcher class and in all sub classes (standalone, , development, cluster, mocks...)
+- [ ] Ensure new code is unit tested, and check code coverage is at least 90%
+- [ ] Propagate any change on the demos and run all of them to ensure there is no breaking change
+- [ ] Ensure any change is well documented
+  </issue>
+  
+  <patch>
+  diff --git a/taipy/core/_orchestrator/_dispatcher/_development_job_dispatcher.py b/taipy/core/_orchestrator/_dispatcher/_development_job_dispatcher.py
+index fe42d59d05..a9cb05693e 100644
+--- a/taipy/core/_orchestrator/_dispatcher/_development_job_dispatcher.py
++++ b/taipy/core/_orchestrator/_dispatcher/_development_job_dispatcher.py
+@@ -8,8 +8,6 @@
+ # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ # an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ # specific language governing permissions and limitations under the License.
+-from typing import Optional
+-
+ from ...job.job import Job
+ from .._abstract_orchestrator import _AbstractOrchestrator
+ from ._job_dispatcher import _JobDispatcher
+@@ -19,7 +17,7 @@
+ class _DevelopmentJobDispatcher(_JobDispatcher):
+     """Manages job dispatching (instances of `Job^` class) in a synchronous way."""
+ 
+-    def __init__(self, orchestrator: Optional[_AbstractOrchestrator]):
++    def __init__(self, orchestrator: _AbstractOrchestrator):
+         super().__init__(orchestrator)
+ 
+     def start(self):
+diff --git a/taipy/core/_orchestrator/_dispatcher/_job_dispatcher.py b/taipy/core/_orchestrator/_dispatcher/_job_dispatcher.py
+index 78f168ca8b..4c3669a3e4 100644
+--- a/taipy/core/_orchestrator/_dispatcher/_job_dispatcher.py
++++ b/taipy/core/_orchestrator/_dispatcher/_job_dispatcher.py
+@@ -12,7 +12,7 @@
+ import threading
+ from abc import abstractmethod
+ from queue import Empty
+-from typing import Dict, Optional
++from typing import Dict
+ 
+ from taipy.config.config import Config
+ from taipy.logger._taipy_logger import _TaipyLogger
+@@ -32,7 +32,7 @@ class _JobDispatcher(threading.Thread):
+     _logger = _TaipyLogger._get_logger()
+     _nb_available_workers: int = 1
+ 
+-    def __init__(self, orchestrator: Optional[_AbstractOrchestrator]):
++    def __init__(self, orchestrator: _AbstractOrchestrator):
+         threading.Thread.__init__(self, name="Thread-Taipy-JobDispatcher")
+         self.daemon = True
+         self.orchestrator = orchestrator
+@@ -66,9 +66,7 @@ def run(self):
+             except Exception as e:
+                 _TaipyLogger._get_logger().exception(e)
+                 pass
+-
+-        # The dispatcher is now shutting down, let's shutdown its executor.
+-        self._executor.shutdown(wait=True)
++        self._logger.info("Job dispatcher stopped.")
+ 
+     def _can_execute(self) -> bool:
+         """Returns True if the dispatcher have resources to execute a new job."""
+diff --git a/taipy/core/_orchestrator/_dispatcher/_standalone_job_dispatcher.py b/taipy/core/_orchestrator/_dispatcher/_standalone_job_dispatcher.py
+index 8268454ece..afb5e2b872 100644
+--- a/taipy/core/_orchestrator/_dispatcher/_standalone_job_dispatcher.py
++++ b/taipy/core/_orchestrator/_dispatcher/_standalone_job_dispatcher.py
+@@ -24,20 +24,28 @@
+ class _StandaloneJobDispatcher(_JobDispatcher):
+     """Manages job dispatching (instances of `Job^` class) in an asynchronous way using a ProcessPoolExecutor."""
+ 
+-    def __init__(self, orchestrator: Optional[_AbstractOrchestrator], subproc_initializer: Optional[Callable] = None):
++    def __init__(self, orchestrator: _AbstractOrchestrator, subproc_initializer: Optional[Callable] = None):
+         super().__init__(orchestrator)
+         max_workers = Config.job_config.max_nb_of_workers or 1
+-        self._executor: Executor = ProcessPoolExecutor(max_workers=max_workers, initializer=subproc_initializer)  # type: ignore
++        self._executor: Executor = ProcessPoolExecutor(
++            max_workers=max_workers,
++            initializer=subproc_initializer
++        )  # type: ignore
+         self._nb_available_workers = self._executor._max_workers  # type: ignore
+ 
++    def run(self):
++        with self._executor:
++            super().run()
++        self._logger.info("Standalone job dispatcher: Pool executor shut down")
++
+     def _dispatch(self, job: Job):
+         """Dispatches the given `Job^` on an available worker for execution.
+ 
+         Parameters:
+             job (Job^): The job to submit on an executor with an available worker.
+         """
+-        self._nb_available_workers -= 1
+ 
++        self._nb_available_workers -= 1
+         config_as_string = _TomlSerializer()._serialize(Config._applied_config)  # type: ignore[attr-defined]
+         future = self._executor.submit(_TaskFunctionWrapper(job.id, job.task), config_as_string=config_as_string)
+ 
+diff --git a/taipy/core/_orchestrator/_orchestrator_factory.py b/taipy/core/_orchestrator/_orchestrator_factory.py
+index 051db1ee34..24021cf61c 100644
+--- a/taipy/core/_orchestrator/_orchestrator_factory.py
++++ b/taipy/core/_orchestrator/_orchestrator_factory.py
+@@ -8,7 +8,7 @@
+ # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ # an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ # specific language governing permissions and limitations under the License.
+-
++import typing
+ from importlib import util
+ from typing import Optional, Type
+ 
+@@ -27,7 +27,7 @@ class _OrchestratorFactory:
+     _TAIPY_ENTERPRISE_CORE_DISPATCHER_MODULE = _TAIPY_ENTERPRISE_MODULE + ".core._orchestrator._dispatcher"
+     __TAIPY_ENTERPRISE_BUILD_DISPATCHER_METHOD = "_build_dispatcher"
+ 
+-    _orchestrator: Optional[_Orchestrator] = None
++    _orchestrator: Optional[_AbstractOrchestrator] = None
+     _dispatcher: Optional[_JobDispatcher] = None
+ 
+     @classmethod
+@@ -80,20 +80,20 @@ def __build_standalone_job_dispatcher(cls, force_restart=False):
+                 cls._TAIPY_ENTERPRISE_CORE_DISPATCHER_MODULE, cls.__TAIPY_ENTERPRISE_BUILD_DISPATCHER_METHOD
+             )(cls._orchestrator)
+         else:
+-            cls._dispatcher = _StandaloneJobDispatcher(cls._orchestrator)  # type: ignore
++            cls._dispatcher = _StandaloneJobDispatcher(typing.cast(_AbstractOrchestrator, cls._orchestrator))
+         cls._dispatcher.start()  # type: ignore
+ 
+     @classmethod
+     def __build_development_job_dispatcher(cls):
+         if isinstance(cls._dispatcher, _StandaloneJobDispatcher):
+             cls._dispatcher.stop()
+-        cls._dispatcher = _DevelopmentJobDispatcher(cls._orchestrator)  # type: ignore
++        cls._dispatcher = _DevelopmentJobDispatcher(typing.cast(_AbstractOrchestrator, cls._orchestrator))
+ 
+     @classmethod
+     def __build_enterprise_job_dispatcher(cls, force_restart=False):
+         cls._dispatcher = _load_fct(
+             cls._TAIPY_ENTERPRISE_CORE_DISPATCHER_MODULE, cls.__TAIPY_ENTERPRISE_BUILD_DISPATCHER_METHOD
+-        )(cls._orchestrator, force_restart)
++        )(typing.cast(_AbstractOrchestrator, cls._orchestrator), force_restart)
+         if cls._dispatcher:
+             cls._dispatcher.start()
+         else:
+diff --git a/taipy/core/data/excel.py b/taipy/core/data/excel.py
+index e7a03554bc..90086df4e7 100644
+--- a/taipy/core/data/excel.py
++++ b/taipy/core/data/excel.py
+@@ -195,58 +195,59 @@ def _read(self):
+         return self._read_as()
+ 
+     def _read_as(self):
+-        excel_file = load_workbook(self._path)
+-        exposed_type = self.properties[self._EXPOSED_TYPE_PROPERTY]
+-        work_books = dict()
+-        sheet_names = excel_file.sheetnames
+-
+-        user_provided_sheet_names = self.properties.get(self.__SHEET_NAME_PROPERTY) or []
+-        if not isinstance(user_provided_sheet_names, (List, Set, Tuple)):
+-            user_provided_sheet_names = [user_provided_sheet_names]
+-
+-        provided_sheet_names = user_provided_sheet_names or sheet_names
+-
+-        for sheet_name in provided_sheet_names:
+-            if sheet_name not in sheet_names:
+-                raise NonExistingExcelSheet(sheet_name, self._path)
+-
+-        if isinstance(exposed_type, List):
+-            if len(provided_sheet_names) != len(self.properties[self._EXPOSED_TYPE_PROPERTY]):
+-                raise ExposedTypeLengthMismatch(
+-                    f"Expected {len(provided_sheet_names)} exposed types, got "
+-                    f"{len(self.properties[self._EXPOSED_TYPE_PROPERTY])}"
+-                )
+-
+-        for i, sheet_name in enumerate(provided_sheet_names):
+-            work_sheet = excel_file[sheet_name]
+-            sheet_exposed_type = exposed_type
+-
+-            if not isinstance(sheet_exposed_type, str):
+-                if isinstance(exposed_type, dict):
+-                    sheet_exposed_type = exposed_type.get(sheet_name, self._EXPOSED_TYPE_PANDAS)
+-                elif isinstance(exposed_type, List):
+-                    sheet_exposed_type = exposed_type[i]
+-
+-                if isinstance(sheet_exposed_type, str):
+-                    if sheet_exposed_type == self._EXPOSED_TYPE_NUMPY:
+-                        work_books[sheet_name] = self._read_as_pandas_dataframe(sheet_name).to_numpy()
+-                    elif sheet_exposed_type == self._EXPOSED_TYPE_PANDAS:
+-                        work_books[sheet_name] = self._read_as_pandas_dataframe(sheet_name)
+-                    continue
+-
+-            res = list()
+-            for row in work_sheet.rows:
+-                res.append([col.value for col in row])
+-            if self.properties[self._HAS_HEADER_PROPERTY] and res:
+-                header = res.pop(0)
+-                for i, row in enumerate(res):
+-                    res[i] = sheet_exposed_type(**dict([[h, r] for h, r in zip(header, row)]))
+-            else:
+-                for i, row in enumerate(res):
+-                    res[i] = sheet_exposed_type(*row)
+-            work_books[sheet_name] = res
+-
+-        excel_file.close()
++        try:
++            excel_file = load_workbook(self._path)
++            exposed_type = self.properties[self._EXPOSED_TYPE_PROPERTY]
++            work_books = dict()
++            sheet_names = excel_file.sheetnames
++
++            user_provided_sheet_names = self.properties.get(self.__SHEET_NAME_PROPERTY) or []
++            if not isinstance(user_provided_sheet_names, (List, Set, Tuple)):
++                user_provided_sheet_names = [user_provided_sheet_names]
++
++            provided_sheet_names = user_provided_sheet_names or sheet_names
++
++            for sheet_name in provided_sheet_names:
++                if sheet_name not in sheet_names:
++                    raise NonExistingExcelSheet(sheet_name, self._path)
++
++            if isinstance(exposed_type, List):
++                if len(provided_sheet_names) != len(self.properties[self._EXPOSED_TYPE_PROPERTY]):
++                    raise ExposedTypeLengthMismatch(
++                        f"Expected {len(provided_sheet_names)} exposed types, got "
++                        f"{len(self.properties[self._EXPOSED_TYPE_PROPERTY])}"
++                    )
++
++            for i, sheet_name in enumerate(provided_sheet_names):
++                work_sheet = excel_file[sheet_name]
++                sheet_exposed_type = exposed_type
++
++                if not isinstance(sheet_exposed_type, str):
++                    if isinstance(exposed_type, dict):
++                        sheet_exposed_type = exposed_type.get(sheet_name, self._EXPOSED_TYPE_PANDAS)
++                    elif isinstance(exposed_type, List):
++                        sheet_exposed_type = exposed_type[i]
++
++                    if isinstance(sheet_exposed_type, str):
++                        if sheet_exposed_type == self._EXPOSED_TYPE_NUMPY:
++                            work_books[sheet_name] = self._read_as_pandas_dataframe(sheet_name).to_numpy()
++                        elif sheet_exposed_type == self._EXPOSED_TYPE_PANDAS:
++                            work_books[sheet_name] = self._read_as_pandas_dataframe(sheet_name)
++                        continue
++
++                res = list()
++                for row in work_sheet.rows:
++                    res.append([col.value for col in row])
++                if self.properties[self._HAS_HEADER_PROPERTY] and res:
++                    header = res.pop(0)
++                    for i, row in enumerate(res):
++                        res[i] = sheet_exposed_type(**dict([[h, r] for h, r in zip(header, row)]))
++                else:
++                    for i, row in enumerate(res):
++                        res[i] = sheet_exposed_type(*row)
++                work_books[sheet_name] = res
++        finally:
++            excel_file.close()
+ 
+         if len(provided_sheet_names) == 1:
+             return work_books[provided_sheet_names[0]]
+diff --git a/tests/core/_orchestrator/_dispatcher/mock_standalone_dispatcher.py b/tests/core/_orchestrator/_dispatcher/mock_standalone_dispatcher.py
+index ce17b5e298..586bfa458d 100644
+--- a/tests/core/_orchestrator/_dispatcher/mock_standalone_dispatcher.py
++++ b/tests/core/_orchestrator/_dispatcher/mock_standalone_dispatcher.py
+@@ -10,7 +10,7 @@
+ # specific language governing permissions and limitations under the License.
+ 
+ from concurrent.futures import Executor, Future
+-from typing import List, Optional
++from typing import List
+ 
+ from taipy.core import Job
+ from taipy.core._orchestrator._abstract_orchestrator import _AbstractOrchestrator
+@@ -35,7 +35,7 @@ def submit(self, fn, *args, **kwargs):
+ 
+ 
+ class MockStandaloneDispatcher(_StandaloneJobDispatcher):
+-    def __init__(self, orchestrator: Optional[_AbstractOrchestrator]):
++    def __init__(self, orchestrator: _AbstractOrchestrator):
+         super(_StandaloneJobDispatcher, self).__init__(orchestrator)
+         self._executor: Executor = MockProcessPoolExecutor()
+         self.dispatch_calls: List = []
+diff --git a/tests/core/data/data_sample/temp2.xlsx b/tests/core/data/data_sample/temp2.xlsx
+new file mode 100644
+index 0000000000..6dc8ec83ba
+Binary files /dev/null and b/tests/core/data/data_sample/temp2.xlsx differ
+diff --git a/tests/core/data/test_write_multiple_sheet_excel_data_node.py b/tests/core/data/test_write_multiple_sheet_excel_data_node.py
+index b79fbc6b3e..46d07b0099 100644
+--- a/tests/core/data/test_write_multiple_sheet_excel_data_node.py
++++ b/tests/core/data/test_write_multiple_sheet_excel_data_node.py
+@@ -161,41 +161,45 @@ def test_write_with_header_multiple_sheet_numpy_without_sheet_name(tmp_excel_fil
+         assert np.array_equal(excel_dn_data[sheet_name], sheet_data[sheet_name])
+ 
+ 
+-def test_write_with_header_multiple_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo",
+-        Scope.SCENARIO,
+-        properties={"path": tmp_excel_file, "sheet_name": sheet_names, "exposed_type": MyCustomObject},
+-    )
+-
+-    row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
+-    sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
+-
+-    excel_dn.write(sheet_data)
+-    excel_dn_data = excel_dn.read()
+-    assert len(excel_dn_data) == len(sheet_data) == 2
+-    for sheet_name in sheet_data.keys():
+-        assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
+-
+-
+-def test_write_with_header_multiple_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode("foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "exposed_type": MyCustomObject})
+-
+-    row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
+-    sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
+-
+-    excel_dn.write(sheet_data)
+-    excel_dn_data = excel_dn.read()
+-    assert len(excel_dn_data) == len(sheet_data) == 2
+-    for sheet_name in sheet_data.keys():
+-        assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
+-
++# def test_write_with_header_multiple_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={"path": tmp_excel_file, "sheet_name": sheet_names, "exposed_type": MyCustomObject},
++#     )
++#     row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
++#     sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
++#
++#     excel_dn.write(sheet_data)
++#     excel_dn_data = excel_dn.read()
++#     assert len(excel_dn_data) == len(sheet_data) == 2
++#     for sheet_name in sheet_data.keys():
++#         assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
++#
++#
++# def test_write_with_header_multiple_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={"path": tmp_excel_file, "exposed_type": MyCustomObject})
++#
++#     row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
++#     sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
++#
++#     excel_dn.write(sheet_data)
++#     excel_dn_data = excel_dn.read()
++#     assert len(excel_dn_data) == len(sheet_data) == 2
++#     for sheet_name in sheet_data.keys():
++#         assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
++#
+ 
+ def test_write_without_header_multiple_sheet_pandas_with_sheet_name(tmp_excel_file):
+     excel_dn = ExcelDataNode(
+-        "foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "sheet_name": sheet_names, "has_header": False}
++        "foo",
++        Scope.SCENARIO,
++        properties={"path": tmp_excel_file, "sheet_name": sheet_names, "has_header": False}
+     )
+ 
+     df_1 = pd.DataFrame([*zip([1, 2, 3])])
+@@ -283,7 +287,9 @@ def test_write_without_header_multiple_sheet_numpy_with_sheet_name(tmp_excel_fil
+ 
+ def test_write_without_header_multiple_sheet_numpy_without_sheet_name(tmp_excel_file):
+     excel_dn = ExcelDataNode(
+-        "foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "exposed_type": "numpy", "has_header": False}
++        "foo",
++        Scope.SCENARIO,
++        properties={"path": tmp_excel_file, "exposed_type": "numpy", "has_header": False}
+     )
+ 
+     arr_1 = np.array([[1], [2], [3]])
+@@ -307,44 +313,46 @@ def test_write_without_header_multiple_sheet_numpy_without_sheet_name(tmp_excel_
+         assert np.array_equal(excel_dn_data[sheet_name], sheet_data[sheet_name])
+ 
+ 
+-def test_write_without_header_multiple_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo",
+-        Scope.SCENARIO,
+-        properties={
+-            "path": tmp_excel_file,
+-            "sheet_name": sheet_names,
+-            "exposed_type": MyCustomObject,
+-            "has_header": False,
+-        },
+-    )
+-
+-    row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
+-    sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
+-
+-    excel_dn.write(sheet_data)
+-    excel_dn_data = excel_dn.read()
+-    assert len(excel_dn_data) == len(sheet_data) == 2
+-    for sheet_name in sheet_data.keys():
+-        assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
+-
+-
+-def test_write_without_header_multiple_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "exposed_type": MyCustomObject, "has_header": False}
+-    )
+-
+-    row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
+-    sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
+-
+-    excel_dn.write(sheet_data)
+-    excel_dn_data = excel_dn.read()
+-    assert len(excel_dn_data) == len(sheet_data) == 2
+-    for sheet_name in sheet_data.keys():
+-        assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
+-
++# def test_write_without_header_multiple_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={
++#             "path": tmp_excel_file,
++#             "sheet_name": sheet_names,
++#             "exposed_type": MyCustomObject,
++#             "has_header": False,
++#         },
++#     )
++#
++#     row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
++#     sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
++#
++#     excel_dn.write(sheet_data)
++#     excel_dn_data = excel_dn.read()
++#     assert len(excel_dn_data) == len(sheet_data) == 2
++#     for sheet_name in sheet_data.keys():
++#         assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
++#
++#
++# def test_write_without_header_multiple_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={"path": tmp_excel_file, "exposed_type": MyCustomObject, "has_header": False}
++#     )
++#
++#     row_1 = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     row_2 = [MyCustomObject(0, 4, "hello"), MyCustomObject(1, 5, "abc"), MyCustomObject(2, 6, ".")]
++#     sheet_data = {"Sheet1": row_1, "Sheet2": row_2}
++#
++#     excel_dn.write(sheet_data)
++#     excel_dn_data = excel_dn.read()
++#     assert len(excel_dn_data) == len(sheet_data) == 2
++#     for sheet_name in sheet_data.keys():
++#         assert all(actual == expected for actual, expected in zip(excel_dn_data[sheet_name], sheet_data[sheet_name]))
++#
+ 
+ @pytest.mark.skip(reason="Not implemented on pandas 1.3.5")
+ @pytest.mark.parametrize(
+diff --git a/tests/core/data/test_write_single_sheet_excel_data_node.py b/tests/core/data/test_write_single_sheet_excel_data_node.py
+index 60cd400585..2f126164ce 100644
+--- a/tests/core/data/test_write_single_sheet_excel_data_node.py
++++ b/tests/core/data/test_write_single_sheet_excel_data_node.py
+@@ -51,6 +51,22 @@ def __post_init__(self):
+                 setattr(self, field.name, field.type(value))
+ 
+ 
++def test_fail():
++    path = os.path.join(pathlib.Path(__file__).parent.resolve(), "data_sample", "temp2.xlsx")
++
++    from openpyxl.reader.excel import load_workbook
++    from taipy.logger._taipy_logger import _TaipyLogger
++    logger = _TaipyLogger._get_logger()
++
++    excel_file = load_workbook(path)
++    excel_file.close()
++
++    if os.path.exists(path):
++        logger.warning(f"trying to delete {path}.")
++        os.remove(path)
++        logger.warning(f"{path} has been deleted.")
++
++
+ def test_write_with_header_single_sheet_pandas_with_sheet_name(tmp_excel_file):
+     excel_dn = ExcelDataNode("foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "sheet_name": "Sheet1"})
+ 
+@@ -242,64 +258,69 @@ def test_write_without_header_single_sheet_numpy_without_sheet_name(tmp_excel_fi
+     assert excel_dn.read()["Sheet1"].size == 0
+ 
+ 
+-def test_write_with_header_single_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo",
+-        Scope.SCENARIO,
+-        properties={"path": tmp_excel_file, "sheet_name": "Sheet1", "exposed_type": MyCustomObject},
+-    )
+-
+-    data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    excel_dn.write(data)
+-    assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
+-
+-    excel_dn.write(None)
+-    assert excel_dn.read() == []
+-
+-
+-def test_write_with_header_single_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode("foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "exposed_type": MyCustomObject})
+-
+-    data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    excel_dn.write(data)
+-    assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
+-
+-    excel_dn.write(None)
+-    assert excel_dn.read() == []
+-
+-
+-def test_write_without_header_single_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo",
+-        Scope.SCENARIO,
+-        properties={
+-            "path": tmp_excel_file,
+-            "sheet_name": "Sheet1",
+-            "exposed_type": MyCustomObject,
+-            "has_header": False,
+-        },
+-    )
+-
+-    data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    excel_dn.write(data)
+-    assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
+-
+-    excel_dn.write(None)
+-    assert excel_dn.read() == []
+-
+-
+-def test_write_without_header_single_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
+-    excel_dn = ExcelDataNode(
+-        "foo", Scope.SCENARIO, properties={"path": tmp_excel_file, "exposed_type": MyCustomObject, "has_header": False}
+-    )
+-
+-    data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
+-    excel_dn.write(data)
+-    assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
+-
+-    excel_dn.write(None)
+-    assert excel_dn.read() == []
+-
++# def test_write_with_header_single_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file_2):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={"path": tmp_excel_file_2, "sheet_name": "Sheet1", "exposed_type": MyCustomObject},
++#     )
++#     expected_data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#
++#     excel_dn.write(expected_data)
++#     actual_data = excel_dn.read()
++#
++#     assert all(actual == expected for actual, expected in zip(actual_data, expected_data))
++#
++#     excel_dn.write(None)
++#     actual_data = excel_dn.read()
++#     assert actual_data == []
++#
++#
++# def test_write_with_header_single_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode("foo", Scope.SCENARIO,
++#     properties={"path": tmp_excel_file, "exposed_type": MyCustomObject})
++#
++#     data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     excel_dn.write(data)
++#     assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
++#
++#     excel_dn.write(None)
++#     assert excel_dn.read() == []
++#
++#
++# def test_write_without_header_single_sheet_custom_exposed_type_with_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo",
++#         Scope.SCENARIO,
++#         properties={
++#             "path": tmp_excel_file,
++#             "sheet_name": "Sheet1",
++#             "exposed_type": MyCustomObject,
++#             "has_header": False,
++#         },
++#     )
++#
++#     data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     excel_dn.write(data)
++#     assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
++#
++#     excel_dn.write(None)
++#     assert excel_dn.read() == []
++#
++#
++# def test_write_without_header_single_sheet_custom_exposed_type_without_sheet_name(tmp_excel_file):
++#     excel_dn = ExcelDataNode(
++#         "foo", Scope.SCENARIO,
++#         properties={"path": tmp_excel_file, "exposed_type": MyCustomObject, "has_header": False}
++#     )
++#
++#     data = [MyCustomObject(0, 1, "hi"), MyCustomObject(1, 2, "world"), MyCustomObject(2, 3, "text")]
++#     excel_dn.write(data)
++#     assert all(actual == expected for actual, expected in zip(excel_dn.read(), data))
++#
++#     excel_dn.write(None)
++#     assert excel_dn.read() == []
++#
+ 
+ def test_raise_write_with_sheet_name_length_mismatch(excel_file_with_sheet_name):
+     excel_dn = ExcelDataNode(
+diff --git a/tests/core/job/test_job.py b/tests/core/job/test_job.py
+index a5674e24e6..11c419b28a 100644
+--- a/tests/core/job/test_job.py
++++ b/tests/core/job/test_job.py
+@@ -11,7 +11,7 @@
+ 
+ from datetime import timedelta
+ from time import sleep
+-from typing import Union
++from typing import Union, cast
+ from unittest import mock
+ from unittest.mock import MagicMock
+ 
+@@ -20,6 +20,7 @@
+ from taipy.config.common.scope import Scope
+ from taipy.config.config import Config
+ from taipy.core import JobId, TaskId
++from taipy.core._orchestrator._abstract_orchestrator import _AbstractOrchestrator
+ from taipy.core._orchestrator._dispatcher._development_job_dispatcher import _DevelopmentJobDispatcher
+ from taipy.core._orchestrator._dispatcher._standalone_job_dispatcher import _StandaloneJobDispatcher
+ from taipy.core._orchestrator._orchestrator_factory import _OrchestratorFactory
+@@ -310,10 +311,10 @@ def _dispatch(task: Task, job: Job, mode=JobConfig._DEVELOPMENT_MODE):
+     _TaskManager._set(task)
+     _JobManager._set(job)
+     dispatcher: Union[_StandaloneJobDispatcher, _DevelopmentJobDispatcher] = _StandaloneJobDispatcher(
+-        _OrchestratorFactory._orchestrator
++        cast(_AbstractOrchestrator, _OrchestratorFactory._orchestrator)
+     )
+     if mode == JobConfig._DEVELOPMENT_MODE:
+-        dispatcher = _DevelopmentJobDispatcher(_OrchestratorFactory._orchestrator)
++        dispatcher = _DevelopmentJobDispatcher(cast(_AbstractOrchestrator, _OrchestratorFactory._orchestrator))
+     dispatcher._dispatch(job)
+ 
+ 
+diff --git a/tests/core/scenario/test_scenario_manager.py b/tests/core/scenario/test_scenario_manager.py
+index 2f4a96baad..8080b7b763 100644
+--- a/tests/core/scenario/test_scenario_manager.py
++++ b/tests/core/scenario/test_scenario_manager.py
+@@ -48,7 +48,6 @@
+ from taipy.core.task._task_manager import _TaskManager
+ from taipy.core.task.task import Task
+ from taipy.core.task.task_id import TaskId
+-from tests.core.utils import assert_true_after_time
+ from tests.core.utils.NotifyMock import NotifyMock
+ 
+ 
+@@ -1166,9 +1165,7 @@ def addition(n1, n2):
+     return n1 + n2
+ 
+ 
+-def test_scenarios_comparison_development_mode():
+-    Config.configure_job_executions(mode=JobConfig._DEVELOPMENT_MODE)
+-
++def test_scenarios_comparison():
+     scenario_config = Config.configure_scenario(
+         "Awesome_scenario",
+         [
+@@ -1215,56 +1212,6 @@ def test_scenarios_comparison_development_mode():
+         _ScenarioManager._compare(scenario_1, scenario_2, data_node_config_id="abc")
+ 
+ 
+-@pytest.mark.standalone
+-def test_scenarios_comparison_standalone_mode():
+-    Config.configure_job_executions(mode=JobConfig._STANDALONE_MODE)
+-
+-    scenario_config = Config.configure_scenario(
+-        "Awesome_scenario",
+-        [
+-            Config.configure_task(
+-                "mult_by_2",
+-                mult_by_2,
+-                [Config.configure_data_node("foo", "in_memory", Scope.SCENARIO, default_data=1)],
+-                Config.configure_data_node("bar", "in_memory", Scope.SCENARIO, default_data=0),
+-            )
+-        ],
+-        comparators={"bar": [subtraction], "foo": [subtraction, addition]},
+-    )
+-
+-    _OrchestratorFactory._build_dispatcher()
+-
+-    assert scenario_config.comparators is not None
+-    scenario_1 = _ScenarioManager._create(scenario_config)
+-    scenario_2 = _ScenarioManager._create(scenario_config)
+-
+-    with pytest.raises(InsufficientScenarioToCompare):
+-        _ScenarioManager._compare(scenario_1, data_node_config_id="bar")
+-
+-    scenario_3 = Scenario("awesome_scenario_config", [], {})
+-    with pytest.raises(DifferentScenarioConfigs):
+-        _ScenarioManager._compare(scenario_1, scenario_3, data_node_config_id="bar")
+-
+-    _ScenarioManager._submit(scenario_1.id)
+-    _ScenarioManager._submit(scenario_2.id)
+-
+-    bar_comparison = _ScenarioManager._compare(scenario_1, scenario_2, data_node_config_id="bar")["bar"]
+-    assert_true_after_time(lambda: bar_comparison["subtraction"] == 0)
+-
+-    foo_comparison = _ScenarioManager._compare(scenario_1, scenario_2, data_node_config_id="foo")["foo"]
+-    assert_true_after_time(lambda: len(foo_comparison.keys()) == 2)
+-    assert_true_after_time(lambda: foo_comparison["addition"] == 2)
+-    assert_true_after_time(lambda: foo_comparison["subtraction"] == 0)
+-
+-    assert_true_after_time(lambda: len(_ScenarioManager._compare(scenario_1, scenario_2).keys()) == 2)
+-
+-    with pytest.raises(NonExistingScenarioConfig):
+-        _ScenarioManager._compare(scenario_3, scenario_3)
+-
+-    with pytest.raises(NonExistingComparator):
+-        _ScenarioManager._compare(scenario_1, scenario_2, data_node_config_id="abc")
+-
+-
+ def test_tags():
+     Config.configure_job_executions(mode=JobConfig._DEVELOPMENT_MODE)
+     _OrchestratorFactory._build_dispatcher()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

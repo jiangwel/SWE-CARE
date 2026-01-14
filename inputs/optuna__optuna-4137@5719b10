@@ -1,0 +1,235 @@
+  Task-ID: optuna__optuna-4137@5719b10
+  Please checkout to this commit first: 4bc3dfce1502a3bfc8c4f83b9c1a1ae8a16fb51b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ValueError: math domain error
+### Expected behavior
+
+Getting a math domain error on what appears to be valid parameter suggestions (ie no 0 or negative log)
+
+
+### Environment
+
+- Python version:3.8.13
+- Optuna version:3.0.2
+- OS:Linux-3.10.0-1127.el7.x86_64-x86_64-with-glibc2.17
+
+### Error messages, stack traces, or logs
+
+```shell
+Error Message:
+
+Traceback (most recent call last):
+  File "eras.py", line 47, in <module>
+    pipeline = pipeline.fit(X_train, y_train, x_test=X_test, y_test=y_test)
+  File "/home/jmrichardson/fml/fml/pipelines/standard.py", line 236, in fit
+    model.optimize(features, test=test_features)
+  File "/home/jmrichardson/fml/fml/models/lgbm.py", line 92, in optimize
+    study.optimize(partial(objective, train, test), n_trials=self.n_trials, timeout=self.timeout, show_progress_bar=True)
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/study/study.py", line 419, in optimize
+    _optimize(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/study/_optimize.py", line 66, in _optimize
+    _optimize_sequential(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/study/_optimize.py", line 160, in _optimize_sequential
+    frozen_trial = _run_trial(study, func, catch)
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/study/_optimize.py", line 187, in _run_trial
+    trial = study.ask()
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/study/study.py", line 514, in ask
+    trial = trial_module.Trial(self, trial_id)
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/trial/_trial.py", line 54, in __init__
+    self._init_relative_params()
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/trial/_trial.py", line 63, in _init_relative_params
+    self.relative_params = self.study.sampler.sample_relative(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/samplers/nsgaii/_sampler.py", line 211, in sample_relative
+    child_params = perform_crossover(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/samplers/nsgaii/_crossover.py", line 104, in perform_crossover
+    child_params = _try_crossover(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/samplers/nsgaii/_crossover.py", line 60, in _try_crossover
+    [
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/samplers/nsgaii/_crossover.py", line 61, in <listcomp>
+    numerical_transform.transform(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/_transform.py", line 117, in transform
+    trans_params[bound_idx] = _transform_numerical_param(
+  File "/home/jmrichardson/anaconda3/envs/fml/lib/python3.8/site-packages/optuna/_transform.py", line 239, in _transform_numerical_param
+    trans_param = math.log(param) if transform_log else float(param)
+ValueError: math domain error
+```
+
+
+### Steps to reproduce
+
+Parameter suggest in objective function:
+
+```
+params = {'n_estimators': trial.suggest_int("n_estimators", 2000, 6000),
+              'num_leaves': trial.suggest_int("num_leaves", 12, 256),
+              'min_child_weight': trial.suggest_float('min_child_weight', 1e-5, 1024.0, log=True),
+              'learning_rate': trial.suggest_float("learning_rate", .0001, 0.02, step=.001),
+              'colsample_bytree': trial.suggest_float("colsample_bytree", 0.01, 1.0),
+              'subsample': trial.suggest_float("subsample", 0.01, 1.0),
+              'reg_alpha': trial.suggest_float("reg_alpha", 1e-5, 1024, log=True),
+              'reg_lambda': trial.suggest_float("reg_lambda", 1e-5, 1024, log=True),
+              'max_depth': trial.suggest_int("max_depth", 3, 32),
+              "seed": 123,
+              "objective": "regression",
+              "verbose": -1,
+              "force_row_wise": True,
+              "metric": "None"}
+```
+
+### Additional context (optional)
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/optuna/distributions.py b/optuna/distributions.py
+index fd1d785fde3..7fdd4d99abf 100644
+--- a/optuna/distributions.py
++++ b/optuna/distributions.py
+@@ -191,13 +191,21 @@ def _contains(self, param_value_in_internal_repr: float) -> bool:
+ 
+     def to_internal_repr(self, param_value_in_external_repr: float) -> float:
+         try:
+-            return float(param_value_in_external_repr)
++            internal_repr = float(param_value_in_external_repr)
+         except (ValueError, TypeError) as e:
+             raise ValueError(
+                 f"'{param_value_in_external_repr}' is not a valid type. "
+                 "float-castable value is expected."
+             ) from e
+ 
++        if np.isnan(internal_repr):
++            raise ValueError(f"`{param_value_in_external_repr}` is invalid value.")
++        if self.log and internal_repr <= 0.0:
++            raise ValueError(
++                f"`{param_value_in_external_repr}` is invalid value for the case log=True."
++            )
++        return internal_repr
++
+ 
+ @deprecated_class("3.0.0", "6.0.0", text=_float_distribution_deprecated_msg)
+ class UniformDistribution(FloatDistribution):
+@@ -375,13 +383,21 @@ def to_external_repr(self, param_value_in_internal_repr: float) -> int:
+ 
+     def to_internal_repr(self, param_value_in_external_repr: int) -> float:
+         try:
+-            return float(param_value_in_external_repr)
++            internal_repr = float(param_value_in_external_repr)
+         except (ValueError, TypeError) as e:
+             raise ValueError(
+                 f"'{param_value_in_external_repr}' is not a valid type. "
+                 "float-castable value is expected."
+             ) from e
+ 
++        if np.isnan(internal_repr):
++            raise ValueError(f"`{param_value_in_external_repr}` is invalid value.")
++        if self.log and internal_repr <= 0.0:
++            raise ValueError(
++                f"`{param_value_in_external_repr}` is invalid value for the case log=True."
++            )
++        return internal_repr
++
+     def single(self) -> bool:
+         if self.log:
+             return self.low == self.high
+diff --git a/optuna/trial/_trial.py b/optuna/trial/_trial.py
+index 5579b7bd337..d20316b25c1 100644
+--- a/optuna/trial/_trial.py
++++ b/optuna/trial/_trial.py
+@@ -597,6 +597,7 @@ def _suggest(self, name: str, distribution: BaseDistribution) -> Any:
+                     study, trial, name, distribution
+                 )
+ 
++            # param_value is validated here (invalid value like np.nan raises ValueError)
+             param_value_in_internal_repr = distribution.to_internal_repr(param_value)
+             storage.set_trial_param(trial_id, name, param_value_in_internal_repr, distribution)
+ 
+diff --git a/tests/test_distributions.py b/tests/test_distributions.py
+index fea40a569de..be86c90492f 100644
+--- a/tests/test_distributions.py
++++ b/tests/test_distributions.py
+@@ -213,9 +213,21 @@ def test_int_internal_representation(value: Any) -> None:
+     assert i.to_external_repr(i.to_internal_repr(value)) == expected_value
+ 
+ 
+-@pytest.mark.parametrize("value", ("foo", (), [], {}, set(), np.ones(2)))
+-def test_int_internal_representation_error(value: Any) -> None:
+-    i = distributions.IntDistribution(low=1, high=10)
++@pytest.mark.parametrize(
++    "value, kwargs",
++    [
++        ("foo", {}),
++        ((), {}),
++        ([], {}),
++        ({}, {}),
++        (set(), {}),
++        (np.ones(2), {}),
++        (np.nan, {}),
++        (0, dict(log=True)),
++    ],
++)
++def test_int_internal_representation_error(value: Any, kwargs: Dict[str, Any]) -> None:
++    i = distributions.IntDistribution(low=1, high=10, **kwargs)
+     with pytest.raises(ValueError):
+         i.to_internal_repr(value)
+ 
+@@ -234,9 +246,21 @@ def test_float_internal_representation(value: Any) -> None:
+     assert f.to_external_repr(f.to_internal_repr(value)) == expected_value
+ 
+ 
+-@pytest.mark.parametrize("value", ("foo", (), [], {}, set(), np.ones(2)))
+-def test_float_internal_representation_error(value: Any) -> None:
+-    f = distributions.FloatDistribution(low=2.0, high=7.0)
++@pytest.mark.parametrize(
++    "value, kwargs",
++    [
++        ("foo", {}),
++        ((), {}),
++        ([], {}),
++        ({}, {}),
++        (set(), {}),
++        (np.ones(2), {}),
++        (np.nan, {}),
++        (0, dict(log=True)),
++    ],
++)
++def test_float_internal_representation_error(value: Any, kwargs: Dict[str, Any]) -> None:
++    f = distributions.FloatDistribution(low=2.0, high=7.0, **kwargs)
+     with pytest.raises(ValueError):
+         f.to_internal_repr(value)
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

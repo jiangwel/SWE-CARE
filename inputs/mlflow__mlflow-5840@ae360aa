@@ -1,0 +1,367 @@
+  Task-ID: mlflow__mlflow-5840@ae360aa
+  Please checkout to this commit first: f3484d8b0a86f816a58fbd622ad8333ac0d83776
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [BUG] 1.24.0 regression: Deadlock when downloading directory (async download)
+# Regression: Downloading directories using SFTP may cause deadlocks on 1.24.0
+
+### Willingness to contribute
+The MLflow Community encourages bug fix contributions. Would you or another member of your organization be willing to contribute a fix for this bug to the MLflow code base?
+
+- [ ] Yes. I can contribute a fix for this bug independently.
+- [x] Yes. I would be willing to contribute a fix for this bug with guidance from the MLflow community.
+- [ ] No. I cannot contribute a bug fix at this time.
+
+### System information
+- **OS Platform and Distribution**: `Ubuntu 20.04.3 LTS`
+- **MLflow installed from**: binary
+- **MLflow version**: 1.24 (works on version 1.23)
+- **Python version**: 3.8.10
+
+### Describe the problem
+Downloading directory artifacts causes a deadlock, and sometimes a paramiko issue (Garbage package received) when using sftp artifact storage.
+
+### Code to reproduce issue
+Working:
+```python
+from mlflow.tracking import MlflowClient
+run_id = "run-id"
+server = "server-uri"
+# This works; fetches the contents of model sequentually.
+MlflowClient(server).download_artifacts(run_id, "model/MLmodel", "out")
+MlflowClient(server).download_artifacts(run_id, "model/conda.yaml", "out")
+MlflowClient(server).download_artifacts(run_id, "model/model.pkl", "out")
+MlflowClient(server).download_artifacts(run_id, "model/requirements.txt", "out")
+```
+Not working:
+```python
+# Hangs or throws exception
+MlflowClient(server).download_artifacts(run_id, "model", "out2")
+```
+Both work on 1.23.1
+
+### Other info / logs
+Paramiko exception:
+```
+---------------------------------------------------------------------------
+MlflowException                           Traceback (most recent call last)
+<ipython-input-4-3293f4eca114> in <module>
+----> 1 MlflowClient("<server url>").download_artifacts("run-id", "model", "out2")
+
+~/.local/lib/python3.8/site-packages/mlflow/tracking/client.py in download_artifacts(self, run_id, path, dst_path)
+   1411             Artifacts: ['features.txt']
+   1412         """
+-> 1413         return self._tracking_client.download_artifacts(run_id, path, dst_path)
+   1414 
+   1415     def set_terminated(
+
+~/.local/lib/python3.8/site-packages/mlflow/tracking/_tracking_service/client.py in download_artifacts(self, run_id, path, dst_path)
+    389         :return: Local path of desired artifact.
+    390         """
+--> 391         return self._get_artifact_repo(run_id).download_artifacts(path, dst_path)
+    392 
+    393     def set_terminated(self, run_id, status=None, end_time=None):
+
+~/.local/lib/python3.8/site-packages/mlflow/store/artifact/artifact_repo.py in download_artifacts(self, artifact_path, dst_path)
+    263 
+    264         if len(failed_downloads) > 0:
+--> 265             raise MlflowException(
+    266                 message=(
+    267                     "The following failures occurred while downloading one or more"
+
+MlflowException: The following failures occurred while downloading one or more artifacts from sftp://server:/mlflow_ftp/upload/exp-id/run-id/artifacts: {'model/MLmodel': "SFTPError('Garbage packet received')", 'model/conda.yaml': "SFTPError('Garbage packet received')", 'model/model.pkl': "SFTPError('Garbage packet received')", 'model/requirements.txt': "SFTPError('Garbage packet received')"}
+```
+
+Exception when interrupting deadlock:
+```
+---------------------------------------------------------------------------
+KeyboardInterrupt                         Traceback (most recent call last)
+<ipython-input-4-3293f4eca114> in <module>
+----> 1 MlflowClient(server).download_artifacts(run_id, "model", "out2")
+
+~/.local/lib/python3.8/site-packages/mlflow/tracking/client.py in download_artifacts(self, run_id, path, dst_path)
+   1411             Artifacts: ['features.txt']
+   1412         """
+-> 1413         return self._tracking_client.download_artifacts(run_id, path, dst_path)
+   1414 
+   1415     def set_terminated(
+
+~/.local/lib/python3.8/site-packages/mlflow/tracking/_tracking_service/client.py in download_artifacts(self, run_id, path, dst_path)
+    389         :return: Local path of desired artifact.
+    390         """
+--> 391         return self._get_artifact_repo(run_id).download_artifacts(path, dst_path)
+    392 
+    393     def set_terminated(self, run_id, status=None, end_time=None):
+
+~/.local/lib/python3.8/site-packages/mlflow/store/artifact/artifact_repo.py in download_artifacts(self, artifact_path, dst_path)
+    258         for inflight_download in inflight_downloads:
+    259             try:
+--> 260                 inflight_download.download_future.result()
+    261             except Exception as e:
+    262                 failed_downloads[inflight_download.src_artifact_path] = repr(e)
+
+/usr/lib/python3.8/concurrent/futures/_base.py in result(self, timeout)
+    437                     return self.__get_result()
+    438 
+--> 439                 self._condition.wait(timeout)
+    440 
+    441                 if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]:
+
+/usr/lib/python3.8/threading.py in wait(self, timeout)
+    300         try:    # restore state no matter what (e.g., KeyboardInterrupt)
+    301             if timeout is None:
+--> 302                 waiter.acquire()
+    303                 gotit = True
+    304             else:
+
+KeyboardInterrupt:
+```
+
+### What component(s), interfaces, languages, and integrations does this bug affect?
+Components 
+- [ ] `area/artifacts`: Artifact stores and artifact logging
+- [ ] `area/build`: Build and test infrastructure for MLflow
+- [ ] `area/docs`: MLflow documentation pages
+- [ ] `area/examples`: Example code
+- [ ] `area/model-registry`: Model Registry service, APIs, and the fluent client calls for Model Registry
+- [ ] `area/models`: MLmodel format, model serialization/deserialization, flavors
+- [ ] `area/projects`: MLproject format, project running backends
+- [ ] `area/scoring`: MLflow Model server, model deployment tools, Spark UDFs
+- [ ] `area/server-infra`: MLflow Tracking server backend
+- [x] `area/tracking`: Tracking Service, tracking client APIs, autologging
+
+Interface 
+- [ ] `area/uiux`: Front-end, user experience, plotting, JavaScript, JavaScript dev server
+- [ ] `area/docker`: Docker use across MLflow's components, such as MLflow Projects and MLflow Models
+- [ ] `area/sqlalchemy`: Use of SQLAlchemy in the Tracking Service or Model Registry
+- [ ] `area/windows`: Windows support
+
+Language 
+- [ ] `language/r`: R APIs and clients
+- [ ] `language/java`: Java APIs and clients
+- [ ] `language/new`: Proposals for new client languages
+
+Integrations
+- [ ] `integrations/azure`: Azure and Azure ML integrations
+- [ ] `integrations/sagemaker`: SageMaker integrations
+- [ ] `integrations/databricks`: Databricks integrations
+  </issue>
+  
+  <patch>
+  diff --git a/mlflow/store/artifact/artifact_repo.py b/mlflow/store/artifact/artifact_repo.py
+index 99a9760c12403..63a0195c3a51a 100644
+--- a/mlflow/store/artifact/artifact_repo.py
++++ b/mlflow/store/artifact/artifact_repo.py
+@@ -34,9 +34,7 @@ def __init__(self, artifact_uri):
+         # Limit the number of threads used for artifact uploads/downloads. Use at most
+         # constants._NUM_MAX_THREADS threads or 2 * the number of CPU cores available on the
+         # system (whichever is smaller)
+-        num_cpus = os.cpu_count() or _NUM_DEFAULT_CPUS
+-        num_artifact_workers = min(num_cpus * _NUM_MAX_THREADS_PER_CPU, _NUM_MAX_THREADS)
+-        self.thread_pool = ThreadPoolExecutor(max_workers=num_artifact_workers)
++        self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
+ 
+     @abstractmethod
+     def log_artifact(self, local_file, artifact_path=None):
+@@ -294,6 +292,12 @@ def delete_artifacts(self, artifact_path=None):
+         """
+         pass
+ 
++    @property
++    def max_workers(self) -> int:
++        """Compute the number of workers to use for multi-threading."""
++        num_cpus = os.cpu_count() or _NUM_DEFAULT_CPUS
++        return min(num_cpus * _NUM_MAX_THREADS_PER_CPU, _NUM_MAX_THREADS)
++
+ 
+ def verify_artifact_path(artifact_path):
+     if artifact_path and path_not_unique(artifact_path):
+diff --git a/mlflow/store/artifact/sftp_artifact_repo.py b/mlflow/store/artifact/sftp_artifact_repo.py
+index 7856ac8fbe8c9..53ed4010ab71b 100644
+--- a/mlflow/store/artifact/sftp_artifact_repo.py
++++ b/mlflow/store/artifact/sftp_artifact_repo.py
+@@ -1,11 +1,13 @@
+ import os
+ import sys
++import threading
+ 
+ import posixpath
+ import urllib.parse
+ 
+ from mlflow.entities import FileInfo
+ from mlflow.store.artifact.artifact_repo import ArtifactRepository
++from contextlib import contextmanager
+ 
+ 
+ # Based on: https://stackoverflow.com/a/58466685
+@@ -20,6 +22,20 @@ def _put_r_for_windows(sftp, local_dir, remote_dir, preserve_mtime=False):
+             sftp.put(local_path, remote_path, preserve_mtime=preserve_mtime)
+ 
+ 
++class _SftpPool:
++    def __init__(self, connections):
++        self._connections = connections
++        self._cond = threading.Condition()
++
++    @contextmanager
++    def get_sfp_connection(self):
++        with self._cond:
++            self._cond.wait_for(lambda: bool(self._connections))
++            connection = self._connections.pop(-1)
++        yield connection
++        self._connections.append(connection)
++
++
+ class SFTPArtifactRepository(ArtifactRepository):
+     """Stores artifacts as files in a remote directory, via sftp."""
+ 
+@@ -63,53 +79,63 @@ def __init__(self, artifact_uri):
+         if "identityfile" in user_config:
+             self.config["private_key"] = user_config["identityfile"][0]
+ 
+-        self.sftp = pysftp.Connection(**self.config)
++        connections = [pysftp.Connection(**self.config) for _ in range(self.max_workers)]
++        self.pool = _SftpPool(connections)
+ 
+         super().__init__(artifact_uri)
+ 
+     def log_artifact(self, local_file, artifact_path=None):
+         artifact_dir = posixpath.join(self.path, artifact_path) if artifact_path else self.path
+-        self.sftp.makedirs(artifact_dir)
+-        self.sftp.put(local_file, posixpath.join(artifact_dir, os.path.basename(local_file)))
++        with self.pool.get_sfp_connection() as sftp:
++            sftp.makedirs(artifact_dir)
++            sftp.put(local_file, posixpath.join(artifact_dir, os.path.basename(local_file)))
+ 
+     def log_artifacts(self, local_dir, artifact_path=None):
+         artifact_dir = posixpath.join(self.path, artifact_path) if artifact_path else self.path
+-        self.sftp.makedirs(artifact_dir)
+-        if sys.platform == "win32":
+-            _put_r_for_windows(self.sftp, local_dir, artifact_dir)
+-        else:
+-            self.sftp.put_r(local_dir, artifact_dir)
++        with self.pool.get_sfp_connection() as sftp:
++            sftp.makedirs(artifact_dir)
++            if sys.platform == "win32":
++                _put_r_for_windows(sftp, local_dir, artifact_dir)
++            else:
++                sftp.put_r(local_dir, artifact_dir)
+ 
+     def _is_directory(self, artifact_path):
+         artifact_dir = self.path
+         path = posixpath.join(artifact_dir, artifact_path) if artifact_path else artifact_dir
+-        return self.sftp.isdir(path)
++        with self.pool.get_sfp_connection() as sftp:
++            return sftp.isdir(path)
+ 
+     def list_artifacts(self, path=None):
+         artifact_dir = self.path
+         list_dir = posixpath.join(artifact_dir, path) if path else artifact_dir
+-        if not self.sftp.isdir(list_dir):
+-            return []
+-        artifact_files = self.sftp.listdir(list_dir)
+-        infos = []
+-        for file_name in artifact_files:
+-            file_path = file_name if path is None else posixpath.join(path, file_name)
+-            full_file_path = posixpath.join(list_dir, file_name)
+-            if self.sftp.isdir(full_file_path):
+-                infos.append(FileInfo(file_path, True, None))
+-            else:
+-                infos.append(FileInfo(file_path, False, self.sftp.stat(full_file_path).st_size))
+-        return infos
++        with self.pool.get_sfp_connection() as sftp:
++            if not sftp.isdir(list_dir):
++                return []
++            artifact_files = sftp.listdir(list_dir)
++            infos = []
++            for file_name in artifact_files:
++                file_path = file_name if path is None else posixpath.join(path, file_name)
++                full_file_path = posixpath.join(list_dir, file_name)
++                if sftp.isdir(full_file_path):
++                    infos.append(FileInfo(file_path, True, None))
++                else:
++                    infos.append(FileInfo(file_path, False, sftp.stat(full_file_path).st_size))
++            return infos
+ 
+     def _download_file(self, remote_file_path, local_path):
+         remote_full_path = posixpath.join(self.path, remote_file_path)
+-        self.sftp.get(remote_full_path, local_path)
++        with self.pool.get_sfp_connection() as sftp:
++            sftp.get(remote_full_path, local_path)
+ 
+     def delete_artifacts(self, artifact_path=None):
+-        if self.sftp.isdir(artifact_path):
+-            with self.sftp.cd(artifact_path):
+-                for element in self.sftp.listdir():
+-                    self.delete_artifacts(element)
+-            self.sftp.rmdir(artifact_path)
+-        elif self.sftp.isfile(artifact_path):
+-            self.sftp.remove(artifact_path)
++        with self.pool.get_sfp_connection() as sftp:
++            self._delete_inner(artifact_path, sftp)
++
++    def _delete_inner(self, artifact_path, sftp):
++        if sftp.isdir(artifact_path):
++            with sftp.cd(artifact_path):
++                for element in sftp.listdir():
++                    self._delete_inner(element, sftp)
++            sftp.rmdir(artifact_path)
++        elif sftp.isfile(artifact_path):
++            sftp.remove(artifact_path)
+diff --git a/tests/store/artifact/test_sftp_artifact_repo.py b/tests/store/artifact/test_sftp_artifact_repo.py
+index eba21d0ba7e73..454453bb38f7a 100644
+--- a/tests/store/artifact/test_sftp_artifact_repo.py
++++ b/tests/store/artifact/test_sftp_artifact_repo.py
+@@ -196,3 +196,18 @@ def test_delete_selective_artifacts(artifact_path):
+         assert not posixpath.exists(posixpath.join(remote_dir, file1))
+         assert posixpath.isfile(posixpath.join(remote_dir, directory, file2))
+         assert posixpath.isdir(remote_dir)
++
++
++def test_download_sklearn():
++    from mlflow import create_experiment, start_run, sklearn
++
++    with TempDir() as remote:
++        experiment_id = create_experiment(
++            name="sklearn-model-experiment", artifact_location=f"sftp://{remote.path()}"
++        )
++
++        with start_run(experiment_id=experiment_id):
++            original = {"not": "a", "real": "model"}
++            model_uri = sklearn.log_model(original, "model").model_uri
++            downloaded = sklearn.load_model(model_uri)
++            assert downloaded == original
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

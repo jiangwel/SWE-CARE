@@ -1,0 +1,330 @@
+  Task-ID: modin-project__modin-3765@d2d8bd2
+  Please checkout to this commit first: 4bcce6ef12c0c80d6df15ef4a4b2b3a85713c106
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  df.loc[max(df.index) + 1] = df.loc[any_number] raises KeyError
+### System information
+- **OS Platform and Distribution (e.g., Linux Ubuntu 16.04)**:
+- **Modin version** (`modin.__version__`):
+- **Python version**:
+- **Code we can use to reproduce**:
+
+<!--
+You can obtain the Modin version with
+
+python -c "import modin; print(modin.__version__)"
+-->
+
+### Describe the problem
+<!-- Describe the problem clearly here. -->
+When we do the following in pandas:
+```python
+df = pd.DataFrame([[1, 2, 3], [3, 4, 5]])
+df.loc[2] = df.loc[1]
+```
+df becomes
+```python
+   0  1  2
+0  1  2  3
+1  3  4  5
+2  3  4  5
+```
+When we do it Modin, the following happens:
+```python
+---------------------------------------------------------------------------
+KeyError                                  Traceback (most recent call last)
+<ipython-input-3-8988af25de4f> in <module>
+      1 df = pd.DataFrame([[1, 2, 3], [3, 4, 5]])
+----> 2 df.loc[2] = df.loc[1]
+
+~/Documents/modin/modin/pandas/indexing.py in __setitem__(self, key, item)
+    713             self.qc = self.df._query_compiler
+    714         else:
+--> 715             row_lookup, col_lookup = self._compute_lookup(row_loc, col_loc)
+    716             super(_LocIndexer, self).__setitem__(
+    717                 row_lookup,
+
+~/Documents/modin/modin/pandas/indexing.py in _compute_lookup(self, row_loc, col_loc)
+    840                         else axis_loc
+    841                     )
+--> 842                     raise KeyError(missing_labels)
+    843
+    844             if isinstance(axis_lookup, pandas.Index) and not is_range_like(axis_lookup):
+
+KeyError: array([2])
+```
+(we get a KeyError since we're trying to index into an index position that doesn't exist)
+### Source code / logs
+<!-- Include any logs or source code that would be helpful to diagnose the problem. If including tracebacks, please include the full traceback. Large logs and files should be attached. Try to provide a reproducible test case that is the bare minimum necessary to generate the problem. -->
+  </issue>
+  
+  <patch>
+  diff --git a/modin/core/dataframe/pandas/partitioning/partition_manager.py b/modin/core/dataframe/pandas/partitioning/partition_manager.py
+index db16ff6de1c..89a250a0962 100644
+--- a/modin/core/dataframe/pandas/partitioning/partition_manager.py
++++ b/modin/core/dataframe/pandas/partitioning/partition_manager.py
+@@ -1227,6 +1227,7 @@ def compute_part_size(indexer, remote_part, part_idx, axis):
+         for row_idx, row_values in enumerate(row_partitions_list):
+             row_blk_idx, row_internal_idx = row_values
+             col_position_counter = 0
++            row_offset = 0
+             for col_idx, col_values in enumerate(col_partitions_list):
+                 col_blk_idx, col_internal_idx = col_values
+                 remote_part = partition_copy[row_blk_idx, col_blk_idx]
+diff --git a/modin/pandas/indexing.py b/modin/pandas/indexing.py
+index b3a9d8a7caf..fa75144d059 100644
+--- a/modin/pandas/indexing.py
++++ b/modin/pandas/indexing.py
+@@ -764,32 +764,130 @@ def _loc(df):
+                 new_query_compiler=self.df._default_to_pandas(_loc)._query_compiler
+             )
+             return
+-        row_loc, col_loc, _ = self._parse_row_and_column_locators(key)
+-        if isinstance(row_loc, list) and len(row_loc) == 1:
+-            if row_loc[0] not in self.qc.index:
+-                index = self.qc.index.insert(len(self.qc.index), row_loc[0])
+-                self.qc = self.qc.reindex(labels=index, axis=0)
+-                self.df._update_inplace(new_query_compiler=self.qc)
++        row_loc, col_loc, ndims = self._parse_row_and_column_locators(key)
++        append_axis = self._check_missing_loc(row_loc, col_loc)
++        if ndims >= 1 and append_axis is not None:
++            # We enter this codepath if we're either appending a row or a column
++            if append_axis:
++                # Appending at least one new column
++                if is_scalar(col_loc):
++                    col_loc = [col_loc]
++                self._setitem_with_new_columns(row_loc, col_loc, item)
++            else:
++                # Appending at most one new row
++                if is_scalar(row_loc) or len(row_loc) == 1:
++                    index = self.qc.index.insert(len(self.qc.index), row_loc)
++                    self.qc = self.qc.reindex(labels=index, axis=0, fill_value=0)
++                    self.df._update_inplace(new_query_compiler=self.qc)
++                self._set_item_existing_loc(row_loc, col_loc, item)
++        else:
++            self._set_item_existing_loc(row_loc, col_loc, item)
++
++    def _setitem_with_new_columns(self, row_loc, col_loc, item):
++        """
++        Assign `item` value to dataset located by `row_loc` and `col_loc` with new columns.
+ 
++        Parameters
++        ----------
++        row_loc : scalar, slice, list, array or tuple
++            Row locator.
++        col_loc : scalar, slice, list, array or tuple
++            Columns locator.
++        item : modin.pandas.DataFrame, modin.pandas.Series or scalar
++            Value that should be assigned to located dataset.
++        """
++        exist_items = item
++        common_label_loc = np.isin(col_loc, self.qc.columns.values)
++        if is_list_like(item) and not isinstance(item, (DataFrame, Series)):
++            item = np.array(item)
++            if len(item.shape) == 1:
++                if item.shape[0] != len(col_loc):
++                    raise ValueError(
++                        "Must have equal len keys and value when setting with an iterable"
++                    )
++            else:
++                if item.shape[0] != len(self.qc.index) or item.shape[1] != len(col_loc):
++                    raise ValueError(
++                        "Must have equal len keys and value when setting with an iterable"
++                    )
++            exist_items = (
++                item[:, common_label_loc]
++                if len(item.shape) > 1
++                else item[common_label_loc]
++            )
++        if not all(common_label_loc):
++            # In this case we have some new cols and some old ones
++            columns = self.qc.columns
++            for i in range(len(common_label_loc)):
++                if not common_label_loc[i]:
++                    columns = columns.insert(len(columns), col_loc[i])
++            self.qc = self.qc.reindex(labels=columns, axis=1, fill_value=0)
++            self.df._update_inplace(new_query_compiler=self.qc)
++        self._set_item_existing_loc(row_loc, np.array(col_loc), exist_items)
++
++    def _set_item_existing_loc(self, row_loc, col_loc, item):
++        """
++        Assign `item` value to dataset located by `row_loc` and `col_loc` with existing rows and columns.
++
++        Parameters
++        ----------
++        row_loc : scalar, slice, list, array or tuple
++            Row locator.
++        col_loc : scalar, slice, list, array or tuple
++            Columns locator.
++        item : modin.pandas.DataFrame, modin.pandas.Series or scalar
++            Value that should be assigned to located dataset.
++        """
++        row_lookup, col_lookup = self._compute_lookup(row_loc, col_loc)
++        self._setitem_positional(
++            row_lookup,
++            col_lookup,
++            item,
++            axis=self._determine_setitem_axis(
++                row_lookup, col_lookup, is_scalar(row_loc), is_scalar(col_loc)
++            ),
++        )
++
++    def _check_missing_loc(self, row_loc, col_loc):
++        """
++        Help `__setitem__` compute whether an axis needs appending.
++
++        Parameters
++        ----------
++        row_loc : scalar, slice, list, array or tuple
++            Row locator.
++        col_loc : scalar, slice, list, array or tuple
++            Columns locator.
++
++        Returns
++        -------
++        int or None :
++            0 if new row, 1 if new column, None if neither.
++        """
++        if is_scalar(row_loc):
++            return 0 if row_loc not in self.qc.index else None
++        elif isinstance(row_loc, list):
++            missing_labels = self._compute_enlarge_labels(
++                pandas.Index(row_loc), self.qc.index
++            )
++            if len(missing_labels) > 1:
++                # We cast to list to copy pandas' error:
++                # In pandas, we get: KeyError: [a, b,...] not in index
++                # If we don't convert to list we get: KeyError: [a b ...] not in index
++                raise KeyError("{} not in index".format(list(missing_labels)))
++        if (
++            not (is_list_like(row_loc) or isinstance(row_loc, slice))
++            and row_loc not in self.qc.index
++        ):
++            return 0
+         if (
+             isinstance(col_loc, list)
+-            and len(col_loc) == 1
+-            and col_loc[0] not in self.qc.columns
++            and len(pandas.Index(col_loc).difference(self.qc.columns)) >= 1
+         ):
+-            new_col = pandas.Series(index=self.df.index)
+-            new_col[row_loc] = item
+-            self.df.insert(loc=len(self.df.columns), column=col_loc[0], value=new_col)
+-            self.qc = self.df._query_compiler
+-        else:
+-            row_lookup, col_lookup = self._compute_lookup(row_loc, col_loc)
+-            self._setitem_positional(
+-                row_lookup,
+-                col_lookup,
+-                item,
+-                axis=self._determine_setitem_axis(
+-                    row_lookup, col_lookup, is_scalar(row_loc), is_scalar(col_loc)
+-                ),
+-            )
++            return 1
++        if is_scalar(col_loc) and col_loc not in self.qc.columns:
++            return 1
++        return None
+ 
+     def _compute_enlarge_labels(self, locator, base_index):
+         """
+@@ -810,16 +908,24 @@ def _compute_enlarge_labels(self, locator, base_index):
+         # base_index_type can be pd.Index or pd.DatetimeIndex
+         # depending on user input and pandas behavior
+         # See issue #2264
+-        base_index_type = type(base_index)
+-        locator_as_index = base_index_type(locator)
++        base_as_index = pandas.Index(list(base_index))
++        locator_as_index = pandas.Index(list(locator))
+ 
+-        nan_labels = locator_as_index.difference(base_index)
+-        common_labels = locator_as_index.intersection(base_index)
++        if locator_as_index.inferred_type == "boolean":
++            if len(locator_as_index) != len(base_as_index):
++                raise ValueError(
++                    f"Item wrong length {len(locator_as_index)} instead of {len(base_as_index)}!"
++                )
++            common_labels = base_as_index[locator_as_index]
++            nan_labels = pandas.Index([])
++        else:
++            common_labels = locator_as_index.intersection(base_as_index)
++            nan_labels = locator_as_index.difference(base_as_index)
+ 
+         if len(common_labels) == 0:
+             raise KeyError(
+                 "None of [{labels}] are in the [{base_index_name}]".format(
+-                    labels=list(locator_as_index), base_index_name=base_index
++                    labels=list(locator_as_index), base_index_name=base_as_index
+                 )
+             )
+         return nan_labels
+diff --git a/modin/pandas/test/dataframe/test_indexing.py b/modin/pandas/test/dataframe/test_indexing.py
+index ba2c7ce0ffd..b3935a1190a 100644
+--- a/modin/pandas/test/dataframe/test_indexing.py
++++ b/modin/pandas/test/dataframe/test_indexing.py
+@@ -412,6 +412,31 @@ def test_loc(data):
+     with pytest.raises(KeyError):
+         modin_df.loc["NO_EXIST"]
+ 
++    # From issue #3764
++    pandas_df = pandas.DataFrame([[1, 2, 3], [4, 5, 6]])
++    modin_df = pd.DataFrame([[1, 2, 3], [4, 5, 6]])
++
++    for left, right in [(2, 1), (6, 1), (lambda df: 70, 1), (90, 70)]:
++
++        def _test_loc_rows(df):
++            df.loc[left] = df.loc[right]
++            return df
++
++        eval_general(modin_df, pandas_df, _test_loc_rows)
++
++    for columns in [10, (100, 102), (2, 6), [10, 11, 12], "a", ["b", "c", "d"]]:
++        if isinstance(columns, tuple) and len(columns) == 2:
++
++            def _test_loc_cols(df):
++                df.loc[:, columns[0] : columns[1]] = 1
++
++        else:
++
++            def _test_loc_cols(df):
++                df.loc[:, columns] = 1
++
++        eval_general(modin_df, pandas_df, _test_loc_cols)
++
+ 
+ @pytest.mark.parametrize(
+     "key_getter, value_getter",
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

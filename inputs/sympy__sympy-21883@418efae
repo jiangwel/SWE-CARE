@@ -1,0 +1,295 @@
+  Task-ID: sympy__sympy-21883@418efae
+  Please checkout to this commit first: ad4cbf280c381a08601405b4453e4a60a73b7e52
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Incorrect solutions given by `solve` 
+The following code tries to find the solutions of a system of (multivariate quadratic) equations. However, the single solution returned by `solve` is not correct.
+It seems like `f = 0` should be part of the solution but is not.
+
+```python
+from sympy import solve, sympify
+
+equations = [
+    "-k*a + b + 5*f/6 + 2*c/9 + 5*d/6 + 4*a/3",
+    "-k*f + 4*f/3 + d/2",
+    "-k*d + f/6 + d",
+    "13*b/18 + 13*c/18 + 13*a/18",
+    "-k*c + b/2 + 20*c/9 + a",
+    "-k*b + b + c/18 + a/6",
+    "5*b/3 + c/3 + a",
+    "2*b/3 + 2*c + 4*a/3",
+    "-g"
+]
+equations = [sympify(e) for e in equations]
+unknowns = {s for e in equations for s in e.free_symbols}
+
+solutions = solve(equations, unknowns, dict=True)
+# Should all be zero but are not:
+for solution in solutions:
+    for e in equations:
+        print(e.subs(solution).simplify())
+
+```
+
+Output:
+```
+0
+f*(-12*k**2 + 28*k - 15)/(12*(k - 1))
+0
+65*f*(5 - 6*k)/(108*(3*k**2 - 5*k + 2))
+5*f*(6*k - 5)*(9*k - 17)/(36*(k - 1)*(3*k - 2))
+0
+0
+35*f*(5 - 6*k)/(18*(3*k**2 - 5*k + 2))
+0
+```
+
+Expected Output:
+```
+0
+0
+0
+0
+0
+0
+0
+0
+0
+```
+
+The bug exists in sympy versions `1.8` and `1.7` but NOT in version `1.6`.
+
+In the meantime, is there a way to circumvent this problem until the issue is fixed? We thought about calling `solve` again on the equations of the output but are not sure if that is the best way.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/src/tutorial/solvers.rst b/doc/src/tutorial/solvers.rst
+index f41f1d9f5979..7091ee6a0af1 100644
+--- a/doc/src/tutorial/solvers.rst
++++ b/doc/src/tutorial/solvers.rst
+@@ -142,9 +142,9 @@ In the ``solveset`` module, the non linear system of equations is solved using
+    ``solve`` can be used for such cases:
+ 
+    >>> solve([x**2 - y**2/exp(x)], [x, y], dict=True)
+-   ⎡⎧      ⎛-y ⎞⎫  ⎧      ⎛y⎞⎫⎤
+-   ⎢⎨x: 2⋅W⎜───⎟⎬, ⎨x: 2⋅W⎜─⎟⎬⎥
+-   ⎣⎩      ⎝ 2 ⎠⎭  ⎩      ⎝2⎠⎭⎦
++   ⎡⎧         ____⎫  ⎧        ____⎫⎤
++   ⎢⎨        ╱  x ⎬  ⎨       ╱  x ⎬⎥
++   ⎣⎩y: -x⋅╲╱  ℯ  ⎭, ⎩y: x⋅╲╱  ℯ  ⎭⎦
+ 
+    3. Currently ``nonlinsolve`` is not properly capable of solving the system of equations
+    having trigonometric functions.
+diff --git a/sympy/solvers/solvers.py b/sympy/solvers/solvers.py
+index fd9e6a5fc83f..f5c109c0a0f2 100644
+--- a/sympy/solvers/solvers.py
++++ b/sympy/solvers/solvers.py
+@@ -51,7 +51,7 @@
+ from sympy.utilities.lambdify import lambdify
+ from sympy.utilities.misc import filldedent
+ from sympy.utilities.iterables import (cartes, connected_components,
+-    generate_bell, uniq, sift)
++    generate_bell, uniq)
+ from sympy.utilities.decorator import conserve_mpmath_dps
+ 
+ from mpmath import findroot
+@@ -1758,17 +1758,6 @@ def _solve_system(exprs, symbols, **flags):
+                 for e in subexpr:
+                     subsyms |= exprsyms[e]
+                 subsyms = list(sorted(subsyms, key = lambda x: sym_indices[x]))
+-                # use canonical subset to solve these equations
+-                # since there may be redundant equations in the set:
+-                # take the first equation of several that may have the
+-                # same sub-maximal free symbols of interest; the
+-                # other equations that weren't used should be checked
+-                # to see that they did not fail -- does the solver
+-                # take care of that?
+-                choices = sift(subexpr, lambda x: tuple(ordered(exprsyms[x])))
+-                subexpr = choices.pop(tuple(ordered(subsyms)), [])
+-                for k in choices:
+-                    subexpr.append(next(ordered(choices[k])))
+                 flags['_split'] = False  # skip split step
+                 subsol = _solve_system(subexpr, subsyms, **flags)
+                 if not isinstance(subsol, list):
+@@ -1895,9 +1884,22 @@ def _solve_system(exprs, symbols, **flags):
+         # be solved.
+         def _ok_syms(e, sort=False):
+             rv = (e.free_symbols - solved_syms) & legal
++
++            # Solve first for symbols that have lower degree in the equation.
++            # Ideally we want to solve firstly for symbols that appear linearly
++            # with rational coefficients e.g. if e = x*y + z then we should
++            # solve for z first.
++            def key(sym):
++                ep = e.as_poly(sym)
++                if ep is None:
++                    complexity = (S.Infinity, S.Infinity, S.Infinity)
++                else:
++                    coeff_syms = ep.LC().free_symbols
++                    complexity = (ep.degree(), len(coeff_syms & rv), len(coeff_syms))
++                return complexity + (default_sort_key(sym),)
++
+             if sort:
+-                rv = list(rv)
+-                rv.sort(key=default_sort_key)
++                rv = sorted(rv, key=key)
+             return rv
+ 
+         solved_syms = set(solved_syms)  # set of symbols we have solved for
+diff --git a/sympy/solvers/tests/test_solvers.py b/sympy/solvers/tests/test_solvers.py
+index ef5a4176c719..9ea118021c9f 100644
+--- a/sympy/solvers/tests/test_solvers.py
++++ b/sympy/solvers/tests/test_solvers.py
+@@ -870,12 +870,12 @@ def test_issue_5132():
+         {(log(-sin(2)), -S(2)), (log(sin(2)), S(2))}
+     eqs = [exp(x)**2 - sin(y) + z**2, 1/exp(y) - 3]
+     assert solve(eqs, set=True) == \
+-        ([x, y], {
+-        (log(-sqrt(-z**2 - sin(log(3)))), -log(3)),
+-        (log(-z**2 - sin(log(3)))/2, -log(3))})
++        ([y, z], {
++        (-log(3), sqrt(-exp(2*x) - sin(log(3)))),
++        (-log(3), -sqrt(-exp(2*x) - sin(log(3))))})
+     assert solve(eqs, x, z, set=True) == (
+         [x, z],
+-        {(log(-z**2 + sin(y))/2, z), (log(-sqrt(-z**2 + sin(y))), z)})
++        {(x, sqrt(-exp(2*x) + sin(y))), (x, -sqrt(-exp(2*x) + sin(y)))})
+     assert set(solve(eqs, x, y)) == \
+         {
+             (log(-sqrt(-z**2 - sin(log(3)))), -log(3)),
+@@ -885,12 +885,10 @@ def test_issue_5132():
+             (-log(3), -sqrt(-exp(2*x) - sin(log(3)))),
+         (-log(3), sqrt(-exp(2*x) - sin(log(3))))}
+     eqs = [exp(x)**2 - sin(y) + z, 1/exp(y) - 3]
+-    assert solve(eqs, set=True) == ([x, y], {
+-        (log(-sqrt(-z - sin(log(3)))), -log(3)),
+-            (log(-z - sin(log(3)))/2, -log(3))})
++    assert solve(eqs, set=True) == ([y, z], {
++        (-log(3), -exp(2*x) - sin(log(3)))})
+     assert solve(eqs, x, z, set=True) == (
+-        [x, z],
+-        {(log(-sqrt(-z + sin(y))), z), (log(-z + sin(y))/2, z)})
++        [x, z], {(x, -exp(2*x) + sin(y))})
+     assert set(solve(eqs, x, y)) == {
+             (log(-sqrt(-z - sin(log(3)))), -log(3)),
+             (log(-z - sin(log(3)))/2, -log(3))}
+@@ -1316,6 +1314,11 @@ def test_issue_5114_solvers():
+ 
+ 
+ def test_issue_5849():
++    #
++    # XXX: This system does not have a solution for most values of the
++    # parameters. Generally solve returns the empty set for systems that are
++    # generically inconsistent.
++    #
+     I1, I2, I3, I4, I5, I6 = symbols('I1:7')
+     dI1, dI4, dQ2, dQ4, Q2, Q4 = symbols('dI1,dI4,dQ2,dQ4,Q2,Q4')
+ 
+@@ -1332,21 +1335,24 @@ def test_issue_5849():
+     )
+ 
+     ans = [{
+-    I1: I2 + I6,
+-    dI1: -4*I2 - 4*I3 - 4*I5 - 10*I6 + 24,
+-    I4: -I5 + I6,
+-    dQ4: -I5 + I6,
+-    Q4: 3*I5/2 - I6/2 - dI4/2,
++    I1: I2 + I3,
++    dI1: -4*I2 - 8*I3 - 4*I5 - 6*I6 + 24,
++    I4: I3 - I5,
++    dQ4: I3 - I5,
++    Q4: -I3/2 + 3*I5/2 - dI4/2,
+     dQ2: I2,
+     Q2: 2*I3 + 2*I5 + 3*I6}]
+ 
+     v = I1, I4, Q2, Q4, dI1, dI4, dQ2, dQ4
+     assert solve(e, *v, manual=True, check=False, dict=True) == ans
+-    assert solve(e, *v, manual=True) == ans[0]
++    assert solve(e, *v, manual=True, check=False) == ans[0]
++    assert solve(e, *v, manual=True) == []
++    assert solve(e, *v) == []
++
+     # the matrix solver (tested below) doesn't like this because it produces
+     # a zero row in the matrix. Is this related to issue 4551?
+     assert [ei.subs(
+-        ans[0]) for ei in e] == [-I3 + I6, I3 - I6, 0, 0, 0, 0, 0, 0, 0]
++        ans[0]) for ei in e] == [0, 0, I3 - I6, -I3 + I6, 0, 0, 0, 0, 0]
+ 
+ 
+ def test_issue_5849_matrix():
+@@ -1373,14 +1379,33 @@ def test_issue_5849_matrix():
+         2*I3 + 2*I5 + 3*I6 - Q2,
+         I4 - 2*I5 + 2*Q4 + dI4
+     )
+-    assert solve(e, I1, I4, Q2, Q4, dI1, dI4, dQ2, dQ4) == {
+-    I1: I2 + I6,
+-    dI1: -4*I2 - 4*I3 - 4*I5 - 10*I6 + 24,
+-    I4: -I5 + I6,
+-    dQ4: -I5 + I6,
+-    Q4: 3*I5/2 - I6/2 - dI4/2,
+-    dQ2: I2,
+-    Q2: 2*I3 + 2*I5 + 3*I6}
++    assert solve(e, I1, I4, Q2, Q4, dI1, dI4, dQ2, dQ4) == []
++
++
++def test_issue_21882():
++
++    a, b, c, d, f, g, k = unknowns = symbols('a, b, c, d, f, g, k')
++
++    equations = [
++        -k*a + b + 5*f/6 + 2*c/9 + 5*d/6 + 4*a/3,
++        -k*f + 4*f/3 + d/2,
++        -k*d + f/6 + d,
++        13*b/18 + 13*c/18 + 13*a/18,
++        -k*c + b/2 + 20*c/9 + a,
++        -k*b + b + c/18 + a/6,
++        5*b/3 + c/3 + a,
++        2*b/3 + 2*c + 4*a/3,
++        -g,
++    ]
++
++    answer = [
++        {a: 0, f: 0, b: 0, d: 0, c: 0, g: 0},
++        {a: 0, f: -d, b: 0, k: S(5)/6, c: 0, g: 0},
++        {a: -2*c, f: 0, b: c, d: 0, k: S(13)/18, g: 0},
++        {a: 0, f: 0, b: 0, k: S(3)/2, c: 0, d: 0, g: 0}
++    ]
++
++    assert solve(equations, unknowns, dict=True) == answer
+ 
+ 
+ def test_issue_5901():
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

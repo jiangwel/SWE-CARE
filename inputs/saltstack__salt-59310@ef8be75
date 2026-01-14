@@ -1,0 +1,568 @@
+  Task-ID: saltstack__salt-59310@ef8be75
+  Please checkout to this commit first: 3f589b998e4655fd4cdfcaf3e563c1da18068c03
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [BUG] Grain does not report configured nameservers for systemd-resolved
+**Description**
+On systems using `systemd-resolved`, by default the `/etc/resolv.conf` file lists 127.0.0.53 as the nameserver (for clients not using the libc or bus APIs). The list of actual nameservers is available e.g. via `systemd-resolve --status`, or `resolvectl dns` on newer systems.
+
+I'm not sure when `resolvectl` was added. It's not available in `237` but is in `245`.
+
+**Setup**
+A default install of e.g. Ubuntu 18.04 (server).
+
+**Steps to Reproduce the behavior**
+```
+# salt '*' grains.get dns
+minion:
+    ----------
+    domain:
+    ip4_nameservers:
+        - 127.0.0.53
+    ip6_nameservers:
+    nameservers:
+        - 127.0.0.53
+    options:
+        - edns0
+    search:
+        - local
+    sortlist:
+```
+```
+# systemd-resolve --status | tail
+
+Link 2 (ens3)
+      Current Scopes: DNS
+       LLMNR setting: yes
+MulticastDNS setting: no
+      DNSSEC setting: no
+    DNSSEC supported: yes
+         DNS Servers: 1.1.1.1
+                      1.0.0.1
+          DNS Domain: local
+```
+
+**Expected behavior**
+The system's actual configured nameservers should be returned.
+
+**Versions Report**
+<details><summary>salt --versions-report</summary>
+(Provided by running salt --versions-report. Please also mention any differences in master/minion versions.) 
+
+```
+Salt Version:
+           Salt: 3000.3
+
+Dependency Versions:
+           cffi: Not Installed
+       cherrypy: Not Installed
+       dateutil: 2.6.1
+      docker-py: Not Installed
+          gitdb: 2.0.3
+      gitpython: 2.1.8
+         Jinja2: 2.10
+        libgit2: 0.26.0
+       M2Crypto: 0.32.0
+           Mako: Not Installed
+   msgpack-pure: Not Installed
+ msgpack-python: 0.5.6
+   mysql-python: Not Installed
+      pycparser: Not Installed
+       pycrypto: 2.6.1
+   pycryptodome: Not Installed
+         pygit2: 0.26.2
+         Python: 3.6.9 (default, Apr 18 2020, 01:56:04)
+   python-gnupg: 0.4.1
+         PyYAML: 3.12
+          PyZMQ: 16.0.2
+          smmap: 2.0.3
+        timelib: Not Installed
+        Tornado: 4.5.3
+            ZMQ: 4.2.5
+
+System Versions:
+           dist: Ubuntu 18.04 bionic
+         locale: ISO-8859-1
+        machine: x86_64
+        release: 4.15.0-101-generic
+         system: Linux
+        version: Ubuntu 18.04 bionic
+```
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/changelog/57618.added b/changelog/57618.added
+new file mode 100644
+index 000000000000..d42c23173ad4
+--- /dev/null
++++ b/changelog/57618.added
+@@ -0,0 +1 @@
++Allow the nameservers to be populated from systemd-resolve.
+diff --git a/salt/grains/core.py b/salt/grains/core.py
+index 5c5949bdcd37..1a43b5861bd9 100644
+--- a/salt/grains/core.py
++++ b/salt/grains/core.py
+@@ -2548,6 +2548,11 @@ def dns():
+         if key in resolv:
+             resolv[key] = [str(i) for i in resolv[key]]
+ 
++    systemd_resolve = salt.utils.path.which("systemd-resolve")
++    if systemd_resolve:
++        out = salt.utils.dns.parse_systemd_resolve()
++        resolv.update(out)
++
+     return {"dns": resolv} if resolv else {}
+ 
+ 
+diff --git a/salt/utils/dns.py b/salt/utils/dns.py
+index 9e7cdaa1dc4f..4a890e3a8c69 100644
+--- a/salt/utils/dns.py
++++ b/salt/utils/dns.py
+@@ -1,4 +1,3 @@
+-# -*- coding: utf-8 -*-
+ """
+ Compendium of generic DNS utilities
+ # Examples:
+@@ -10,9 +9,7 @@
+ dns.srv_name('ldap/tcp', 'example.com')
+ 
+ """
+-from __future__ import absolute_import, print_function, unicode_literals
+ 
+-# Import Python libs
+ import base64
+ import binascii
+ import functools
+@@ -27,16 +24,11 @@
+ import string
+ 
+ import salt.modules.cmdmod
+-
+-# Import Salt libs
+ import salt.utils.files
+ import salt.utils.network
+ import salt.utils.path
+ import salt.utils.stringutils
+ from salt._compat import ipaddress
+-
+-# Import 3rd-party libs
+-from salt.ext import six
+ from salt.ext.six.moves import zip  # pylint: disable=redefined-builtin
+ from salt.utils.odict import OrderedDict
+ 
+@@ -63,7 +55,7 @@
+ log = logging.getLogger(__name__)
+ 
+ 
+-class RFC(object):
++class RFC:
+     """
+     Simple holding class for all RFC/IANA registered lists & standards
+     """
+@@ -104,7 +96,7 @@ def _to_port(port):
+         assert 1 <= port <= 65535
+         return port
+     except (ValueError, AssertionError):
+-        raise ValueError("Invalid port {0}".format(port))
++        raise ValueError("Invalid port {}".format(port))
+ 
+ 
+ def _tree(domain, tld=False):
+@@ -195,14 +187,10 @@ def _data2rec(schema, rec_data):
+         if len(schema) == 1:
+             res = _cast(rec_fields[0], next(iter(schema.values())))
+         else:
+-            res = dict(
+-                (
+-                    (field_name, _cast(rec_field, rec_cast))
+-                    for (field_name, rec_cast), rec_field in zip(
+-                        schema.items(), rec_fields
+-                    )
+-                )
+-            )
++            res = {
++                field_name: _cast(rec_field, rec_cast)
++                for (field_name, rec_cast), rec_field in zip(schema.items(), rec_fields)
++            }
+         return res
+     except (AssertionError, AttributeError, TypeError, ValueError) as e:
+         raise ValueError(
+@@ -234,7 +222,7 @@ def _data2rec_group(schema, recs_data, group_key):
+         return res
+     except (AssertionError, ValueError) as e:
+         raise ValueError(
+-            'Unable to cast "{0}" as a group of "{1}": {2}'.format(
++            'Unable to cast "{}" as a group of "{}": {}'.format(
+                 ",".join(recs_data), " ".join(schema.keys()), e
+             )
+         )
+@@ -261,20 +249,20 @@ def _lookup_dig(name, rdtype, timeout=None, servers=None, secure=None):
+     :param servers: [] of servers to use
+     :return: [] of records or False if error
+     """
+-    cmd = "dig {0} -t {1} ".format(DIG_OPTIONS, rdtype)
++    cmd = "dig {} -t {} ".format(DIG_OPTIONS, rdtype)
+     if servers:
+-        cmd += "".join(["@{0} ".format(srv) for srv in servers])
++        cmd += "".join(["@{} ".format(srv) for srv in servers])
+     if timeout is not None:
+         if servers:
+             timeout = int(float(timeout) / len(servers))
+         else:
+             timeout = int(timeout)
+-        cmd += "+time={0} ".format(timeout)
++        cmd += "+time={} ".format(timeout)
+     if secure:
+         cmd += "+dnssec +adflag "
+ 
+     cmd = __salt__["cmd.run_all"](
+-        "{0} {1}".format(cmd, name), python_shell=False, output_loglevel="quiet"
++        "{} {}".format(cmd, name), python_shell=False, output_loglevel="quiet"
+     )
+ 
+     if "ignoring invalid type" in cmd["stderr"]:
+@@ -318,9 +306,9 @@ def _lookup_drill(name, rdtype, timeout=None, servers=None, secure=None):
+     cmd = "drill "
+     if secure:
+         cmd += "-D -o ad "
+-    cmd += "{0} {1} ".format(rdtype, name)
++    cmd += "{} {} ".format(rdtype, name)
+     if servers:
+-        cmd += "".join(["@{0} ".format(srv) for srv in servers])
++        cmd += "".join(["@{} ".format(srv) for srv in servers])
+     cmd = __salt__["cmd.run_all"](
+         cmd, timeout=timeout, python_shell=False, output_loglevel="quiet"
+     )
+@@ -397,13 +385,13 @@ def _lookup_host(name, rdtype, timeout=None, server=None):
+     :param timeout: server response wait
+     :return: [] of records or False if error
+     """
+-    cmd = "host -t {0} ".format(rdtype)
++    cmd = "host -t {} ".format(rdtype)
+ 
+     if timeout:
+-        cmd += "-W {0} ".format(int(timeout))
++        cmd += "-W {} ".format(int(timeout))
+     cmd += name
+     if server is not None:
+-        cmd += " {0}".format(server)
++        cmd += " {}".format(server)
+ 
+     cmd = __salt__["cmd.run_all"](cmd, python_shell=False, output_loglevel="quiet")
+ 
+@@ -474,12 +462,12 @@ def _lookup_nslookup(name, rdtype, timeout=None, server=None):
+     :param server: server to query
+     :return: [] of records or False if error
+     """
+-    cmd = "nslookup -query={0} {1}".format(rdtype, name)
++    cmd = "nslookup -query={} {}".format(rdtype, name)
+ 
+     if timeout is not None:
+-        cmd += " -timeout={0}".format(int(timeout))
++        cmd += " -timeout={}".format(int(timeout))
+     if server is not None:
+-        cmd += " {0}".format(server)
++        cmd += " {}".format(server)
+ 
+     cmd = __salt__["cmd.run_all"](cmd, python_shell=False, output_loglevel="quiet")
+ 
+@@ -875,7 +863,7 @@ def spf_rec(rdata):
+             # It's a modifier
+             mod, val = mech_spec.split("=", 1)
+             if mod in mods:
+-                raise KeyError("Modifier {0} can only appear once".format(mod))
++                raise KeyError("Modifier {} can only appear once".format(mod))
+ 
+             mods.add(mod)
+             continue
+@@ -939,7 +927,7 @@ def srv_name(svc, proto="tcp", domain=None):
+ 
+     if domain:
+         domain = "." + domain
+-    return "_{0}._{1}{2}".format(svc, proto, domain)
++    return "_{}._{}{}".format(svc, proto, domain)
+ 
+ 
+ def srv_rec(rdatas):
+@@ -1108,7 +1096,7 @@ def services(services_file="/etc/services"):
+                         if not curr_desc:
+                             pp_res["desc"] = comment
+                         elif comment != curr_desc:
+-                            pp_res["desc"] = "{0}, {1}".format(curr_desc, comment)
++                            pp_res["desc"] = "{}, {}".format(curr_desc, comment)
+                 res[name] = svc_res
+ 
+     for svc, data in res.items():
+@@ -1179,13 +1167,13 @@ def parse_resolv(src="/etc/resolv.conf"):
+                                     # No netmask has been provided, guess
+                                     # the "natural" one
+                                     if ip_net.version == 4:
+-                                        ip_addr = six.text_type(ip_net.network_address)
++                                        ip_addr = str(ip_net.network_address)
+                                         # pylint: disable=protected-access
+                                         mask = salt.utils.network.natural_ipv4_netmask(
+                                             ip_addr
+                                         )
+                                         ip_net = ipaddress.ip_network(
+-                                            "{0}{1}".format(ip_addr, mask), strict=False
++                                            "{}{}".format(ip_addr, mask), strict=False
+                                         )
+                                     if ip_net.version == 6:
+                                         # TODO
+@@ -1216,5 +1204,67 @@ def parse_resolv(src="/etc/resolv.conf"):
+             "search": search,
+             "options": options,
+         }
+-    except IOError:
++    except OSError:
++        return {}
++
++
++def parse_systemd_resolve():
++    """
++    Parse the information from systemd-resolve
++    """
++
++    nameservers = []
++    ip4_nameservers = []
++    ip6_nameservers = []
++    domain = ""
++
++    cmd = "systemd-resolve --status"
++    cmd = __salt__["cmd.run_all"](
++        "{}".format(cmd), python_shell=False, output_loglevel="quiet"
++    )
++
++    if cmd["retcode"] == 0:
++        prev_section = None
++        lines = [re.sub("[\t ]", "", line) for line in cmd["stdout"].splitlines()]
++
++        contents = {}
++        prev_section = None
++        for line in lines:
++            section = None
++            if ":" in line and line.count(":") <= 1:
++                section, value = line.split(":")
++            else:
++                value = line
++            if not section:
++                section = prev_section
++
++            if section:
++                if section in contents:
++                    contents[section].append(value)
++                else:
++                    contents[section] = [value]
++                prev_section = section
++
++        for item in contents:
++            if item == "DNSServers":
++                for addr in contents[item]:
++                    try:
++                        ip_addr = ipaddress.ip_address(addr)
++                        version = ip_addr.version
++                        ip_addr = str(ip_addr)
++                        if ip_addr not in nameservers:
++                            nameservers.append(ip_addr)
++                        if version == 4 and ip_addr not in ip4_nameservers:
++                            ip4_nameservers.append(ip_addr)
++                        elif version == 6 and ip_addr not in ip6_nameservers:
++                            ip6_nameservers.append(ip_addr)
++                    except ValueError as exc:
++                        log.error("%s: %s", addr, exc)
++
++        return {
++            "nameservers": nameservers,
++            "ip4_nameservers": ip4_nameservers,
++            "ip6_nameservers": ip6_nameservers,
++        }
++    else:
+         return {}
+diff --git a/tests/unit/grains/test_core.py b/tests/unit/grains/test_core.py
+index 926cb9559e71..18cce4c1a16e 100644
+--- a/tests/unit/grains/test_core.py
++++ b/tests/unit/grains/test_core.py
+@@ -1312,6 +1312,7 @@ def _check_type(key, value, ip4_empty, ip6_empty):
+ 
+     @skipIf(not salt.utils.platform.is_linux(), "System is not Linux")
+     @patch.object(salt.utils.platform, "is_windows", MagicMock(return_value=False))
++    @patch.object(salt.utils.path, "which", MagicMock(return_value=False))
+     @patch("salt.grains.core.__opts__", {"ipv6": False})
+     def test_dns_return(self):
+         """
+diff --git a/tests/unit/utils/test_dns.py b/tests/unit/utils/test_dns.py
+index 45809147b04d..34e8d1b6fc83 100644
+--- a/tests/unit/utils/test_dns.py
++++ b/tests/unit/utils/test_dns.py
+@@ -1,10 +1,9 @@
+-# -*- coding: utf-8 -*-
+ """
+ 
+ """
+-from __future__ import absolute_import, print_function, unicode_literals
+ 
+ # Python
++import logging
+ import socket
+ import textwrap
+ 
+@@ -34,6 +33,8 @@
+ from tests.support.mock import MagicMock, patch
+ from tests.support.unit import TestCase, skipIf
+ 
++log = logging.getLogger(__name__)
++
+ 
+ class DNShelpersCase(TestCase):
+     """
+@@ -164,6 +165,79 @@ def test_data2group(self):
+             group = _data2rec_group(rschema, rdata, "prio")
+             self.assertEqual(group, res)
+ 
++    def test_parse_systemd_resolve(self):
++        # all nslookup returns look like this
++        SYSTEMD_RESOLVE = textwrap.dedent(
++            """\
++            Global
++                   LLMNR setting: no
++            MulticastDNS setting: no
++              DNSOverTLS setting: no
++                  DNSSEC setting: no
++                DNSSEC supported: no
++                      DNSSEC NTA: 10.in-addr.arpa
++                                  16.172.in-addr.arpa
++                                  168.192.in-addr.arpa
++                                  17.172.in-addr.arpa
++                                  18.172.in-addr.arpa
++                                  19.172.in-addr.arpa
++                                  20.172.in-addr.arpa
++                                  21.172.in-addr.arpa
++                                  22.172.in-addr.arpa
++                                  23.172.in-addr.arpa
++                                  24.172.in-addr.arpa
++                                  25.172.in-addr.arpa
++                                  26.172.in-addr.arpa
++                                  27.172.in-addr.arpa
++                                  28.172.in-addr.arpa
++                                  29.172.in-addr.arpa
++                                  30.172.in-addr.arpa
++                                  31.172.in-addr.arpa
++                                  corp
++                                  d.f.ip6.arpa
++                                  home
++                                  internal
++                                  intranet
++                                  lan
++                                  local
++                                  private
++                                  test
++
++            Link 2 (ens33)
++                  Current Scopes: DNS
++            DefaultRoute setting: yes
++                   LLMNR setting: yes
++            MulticastDNS setting: no
++              DNSOverTLS setting: no
++                  DNSSEC setting: no
++                DNSSEC supported: no
++              Current DNS Server: 172.23.5.15
++                     DNS Servers: 172.23.5.15
++                                  172.23.5.16
++                                  73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d608
++                                  73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d609
++                      DNS Domain: loc.wiked.org
++        """
++        )
++
++        cmd_mock = MagicMock(return_value={"stdout": SYSTEMD_RESOLVE, "retcode": 0})
++        expected = {
++            "nameservers": [
++                "172.23.5.15",
++                "172.23.5.16",
++                "73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d608",
++                "73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d609",
++            ],
++            "ip4_nameservers": ["172.23.5.15", "172.23.5.16"],
++            "ip6_nameservers": [
++                "73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d608",
++                "73cf:ee8c:f2b3:7d0e:25a7:696e:b7f6:d609",
++            ],
++        }
++        with patch.dict(salt.utils.dns.__salt__, {"cmd.run_all": cmd_mock}, clear=True):
++            ret = salt.utils.dns.parse_systemd_resolve()
++            self.assertEqual(ret, expected)
++
+ 
+ class DNSlookupsCase(TestCase):
+     """
+@@ -299,7 +373,7 @@ def _test_cmd_lookup(
+                     self.assertEqual(
+                         lookup_cb("mocksrvr.example.com", rec_t, secure=True),
+                         False,
+-                        msg="Insecure {0} returns should not be returned".format(rec_t),
++                        msg="Insecure {} returns should not be returned".format(rec_t),
+                     )
+ 
+         for rec_t, tests in secure.items():
+@@ -308,7 +382,7 @@ def _test_cmd_lookup(
+                     self.assertEqual(
+                         lookup_cb("mocksrvr.example.com", rec_t, secure=True),
+                         test_res,
+-                        msg="Error parsing DNSSEC'd {0} returns".format(rec_t),
++                        msg="Error parsing DNSSEC'd {} returns".format(rec_t),
+                     )
+ 
+     @skipIf(not salt.utils.dns.HAS_NSLOOKUP, "nslookup is not available")
+@@ -354,7 +428,7 @@ def test_lookup_with_servers(self):
+ 
+     @skipIf(not salt.utils.dns.HAS_DIG, "dig is not available")
+     def test_dig_options(self):
+-        cmd = "dig {0} -v".format(salt.utils.dns.DIG_OPTIONS)
++        cmd = "dig {} -v".format(salt.utils.dns.DIG_OPTIONS)
+         cmd = salt.modules.cmdmod.retcode(
+             cmd, python_shell=False, output_loglevel="quiet"
+         )
+@@ -557,7 +631,7 @@ def test_gai(self):
+                     self.assertEqual(
+                         _lookup_gai("mockq", rec_t),
+                         test_res,
+-                        msg="Error parsing {0} returns".format(rec_t),
++                        msg="Error parsing {} returns".format(rec_t),
+                     )
+ 
+     def test_host(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

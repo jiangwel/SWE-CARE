@@ -1,0 +1,232 @@
+  Task-ID: apache__airflow-16732@8ec4f26
+  Please checkout to this commit first: df06a71bfc5e637fda38d555864b791ab5f0ad7d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Update `airflow.models.baseoperator.chain()` function to support XComArgs
+**Description**
+The `airflow.models.baseoperator.chain()` is a very useful and convenient way to add sequential task dependencies in DAGs but the function only supports tasks of a `BaseOperator` type.
+
+**Use case / motivation**
+Users who create tasks via the `@task` decorator will not be able to use the `chain()` function to apply sequential dependencies that do not share an `XComArg` implicit dependency.
+
+**Are you willing to submit a PR?**
+Absolutely. 🚀 
+
+**Related Issues**
+None
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/models/baseoperator.py b/airflow/models/baseoperator.py
+index 17ad7a7057d7b..d1f4043c7fec6 100644
+--- a/airflow/models/baseoperator.py
++++ b/airflow/models/baseoperator.py
+@@ -74,6 +74,7 @@
+ from airflow.utils.weight_rule import WeightRule
+ 
+ if TYPE_CHECKING:
++    from airflow.models.xcom_arg import XComArg
+     from airflow.utils.task_group import TaskGroup
+ 
+ ScheduleInterval = Union[str, timedelta, relativedelta]
+@@ -1540,12 +1541,12 @@ def inherits_from_dummy_operator(self):
+         return getattr(self, '_is_dummy', False)
+ 
+ 
+-def chain(*tasks: Union[BaseOperator, Sequence[BaseOperator]]):
++def chain(*tasks: Union[BaseOperator, "XComArg", Sequence[BaseOperator], Sequence["XComArg"]]):
+     r"""
+     Given a number of tasks, builds a dependency chain.
+-    Support mix airflow.models.BaseOperator and List[airflow.models.BaseOperator].
+-    If you want to chain between two List[airflow.models.BaseOperator], have to
+-    make sure they have same length.
++    Support mix airflow.models.BaseOperator, List[airflow.models.BaseOperator], XComArg, and
++    List[airflow.models.XComArg]. If you want to chain between two List[airflow.models.BaseOperator]
++    or List[airflow.models.XComArg], you have to make sure they have same length.
+ 
+     .. code-block:: python
+ 
+@@ -1566,20 +1567,24 @@ def chain(*tasks: Union[BaseOperator, Sequence[BaseOperator]]):
+         t4.set_downstream(t6)
+         t5.set_downstream(t6)
+ 
+-    :param tasks: List of tasks or List[airflow.models.BaseOperator] to set dependencies
+-    :type tasks: List[airflow.models.BaseOperator] or airflow.models.BaseOperator
++    :param tasks: List of tasks, List[airflow.models.BaseOperator], XComArg, or List[airflow.models.XComArg]
++        to set dependencies
++    :type tasks: List[airflow.models.BaseOperator], airflow.models.BaseOperator, List[airflow.models.XComArg],
++        or XComArg
+     """
++    from airflow.models.xcom_arg import XComArg
++
+     for index, up_task in enumerate(tasks[:-1]):
+         down_task = tasks[index + 1]
+-        if isinstance(up_task, BaseOperator):
++        if isinstance(up_task, (BaseOperator, XComArg)):
+             up_task.set_downstream(down_task)
+             continue
+-        if isinstance(down_task, BaseOperator):
++        if isinstance(down_task, (BaseOperator, XComArg)):
+             down_task.set_upstream(up_task)
+             continue
+         if not isinstance(up_task, Sequence) or not isinstance(down_task, Sequence):
+             raise TypeError(
+-                'Chain not supported between instances of {up_type} and {down_type}'.format(
++                "Chain not supported between instances of {up_type} and {down_type}".format(
+                     up_type=type(up_task), down_type=type(down_task)
+                 )
+             )
+@@ -1587,15 +1592,16 @@ def chain(*tasks: Union[BaseOperator, Sequence[BaseOperator]]):
+         down_task_list = down_task
+         if len(up_task_list) != len(down_task_list):
+             raise AirflowException(
+-                f'Chain not supported different length Iterable '
+-                f'but get {len(up_task_list)} and {len(down_task_list)}'
++                f"Chain not supported different length Iterable "
++                f"but get {len(up_task_list)} and {len(down_task_list)}"
+             )
+         for up_t, down_t in zip(up_task_list, down_task_list):
+             up_t.set_downstream(down_t)
+ 
+ 
+ def cross_downstream(
+-    from_tasks: Sequence[BaseOperator], to_tasks: Union[BaseOperator, Sequence[BaseOperator]]
++    from_tasks: Union[Sequence[BaseOperator], Sequence["XComArg"]],
++    to_tasks: Union[Sequence[BaseOperator], Sequence["XComArg"]],
+ ):
+     r"""
+     Set downstream dependencies for all tasks in from_tasks to all tasks in to_tasks.
+@@ -1625,10 +1631,10 @@ def cross_downstream(
+         t3.set_downstream(t5)
+         t3.set_downstream(t6)
+ 
+-    :param from_tasks: List of tasks to start from.
+-    :type from_tasks: List[airflow.models.BaseOperator]
+-    :param to_tasks: List of tasks to set as downstream dependencies.
+-    :type to_tasks: List[airflow.models.BaseOperator]
++    :param from_tasks: List of tasks or XComArgs to start from.
++    :type from_tasks: List[airflow.models.BaseOperator] or List[airflow.models.XComArg]
++    :param to_tasks: List of tasks or XComArgs to set as downstream dependencies.
++    :type to_tasks: List[airflow.models.BaseOperator] or List[airflow.models.XComArg]
+     """
+     for task in from_tasks:
+         task.set_downstream(to_tasks)
+diff --git a/docs/spelling_wordlist.txt b/docs/spelling_wordlist.txt
+index 8f4c341fd502f..429f0928a36f2 100644
+--- a/docs/spelling_wordlist.txt
++++ b/docs/spelling_wordlist.txt
+@@ -371,6 +371,8 @@ Webhook
+ Webserver
+ Werkzeug
+ XCom
++XComArg
++XComArgs
+ XComs
+ Xcom
+ Xero
+diff --git a/tests/dags/test_chain_xcomargs.py b/tests/dags/test_chain_xcomargs.py
+new file mode 100644
+index 0000000000000..7a568072536cf
+--- /dev/null
++++ b/tests/dags/test_chain_xcomargs.py
+@@ -0,0 +1,66 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++"""DAG testing the use of chaining XComArgs."""
++from datetime import datetime
++
++from airflow.decorators import task
++from airflow.models import DAG
++from airflow.models.baseoperator import chain
++from airflow.operators.dummy import DummyOperator
++from airflow.operators.python import PythonOperator
++
++
++@task
++def generate_value():
++    return "Bring me a shrubbery!"
++
++
++@task
++def print_value(value):
++    print(value)
++
++
++@task
++def pass_1():
++    pass
++
++
++@task
++def pass_2():
++    pass
++
++
++@task
++def pass_3():
++    pass
++
++
++with DAG(
++    dag_id="test_chain_xcomargs",
++    start_date=datetime(2021, 6, 30),
++    schedule_interval=None,
++    catchup=False,
++) as dag:
++    empty_func = PythonOperator(task_id="empty_func", python_callable=lambda: None)
++    dummy_1 = DummyOperator(task_id="dummy_1")
++    dummy_2 = DummyOperator(task_id="dummy_2")
++
++    chain(empty_func, [pass_1(), pass_2()], dummy_1)
++
++    chain(print_value(generate_value()), dummy_2, pass_3())
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

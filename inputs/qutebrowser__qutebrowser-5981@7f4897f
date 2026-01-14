@@ -1,0 +1,129 @@
+  Task-ID: qutebrowser__qutebrowser-5981@7f4897f
+  Please checkout to this commit first: 05e6ef85d66885a105072d03879d924d48a81e9f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  qt.environ setting
+Sometimes it can be useful to set environment variables for qutebrowser only. This can be done in `config.py` already, but having a setting would make things a bit easier (also to test via `--temp-basedir -s`.
+
+In the config, this would be of `type: Dict` with `keytype: String` and `valtype: String`, as well as `restart: true` set (perhaps also `none_ok: true` so that `None` can be used as a value to remove a previously set variable).
+
+Then qutebrowser would apply those in `qutebrowser/config/qtargs.py` or so, similar to how other settings (e.g. `config.val.qt.force_platform`) are already mapped to environment variables
+  </issue>
+  
+  <patch>
+  diff --git a/qutebrowser/config/configdata.yml b/qutebrowser/config/configdata.yml
+index 64534276714..5788dc4abfe 100644
+--- a/qutebrowser/config/configdata.yml
++++ b/qutebrowser/config/configdata.yml
+@@ -156,6 +156,18 @@ qt.args:
+     https://peter.sh/experiments/chromium-command-line-switches/ for a list)
+     will work.
+ 
++qt.environ:
++  type:
++    name: Dict
++    keytype: String
++    valtype: String
++    none_ok: true
++  default: {}
++  restart: true
++  desc: >-
++    Additional environment variables to set. Set to `None` to unset an environment
++    variable.
++
+ force_software_rendering:
+   renamed: qt.force_software_rendering
+ 
+diff --git a/qutebrowser/config/qtargs.py b/qutebrowser/config/qtargs.py
+index 2136f7e7f40..dde8e11310e 100644
+--- a/qutebrowser/config/qtargs.py
++++ b/qutebrowser/config/qtargs.py
+@@ -259,3 +259,10 @@ def init_envvars() -> None:
+                    if qtutils.version_check('5.14', compiled=False)
+                    else 'QT_AUTO_SCREEN_SCALE_FACTOR')
+         os.environ[env_var] = '1'
++
++    for var in config.val.qt.environ:
++        val = config.val.qt.environ[var]
++        if val == 'None':
++            os.environ[var] = ''
++        else:
++            os.environ[var] = val
+diff --git a/tests/unit/config/test_qtargs.py b/tests/unit/config/test_qtargs.py
+index b050113b4b0..4abf6913928 100644
+--- a/tests/unit/config/test_qtargs.py
++++ b/tests/unit/config/test_qtargs.py
+@@ -428,6 +428,39 @@ def test_env_vars(self, monkeypatch, config_stub,
+ 
+         assert os.environ[envvar] == expected
+ 
++    @pytest.mark.parametrize('config_opt, config_val, init_val, envvar, expected', [
++        ('qt.environ', {'QT_SCALE_FACTOR': '2'},
++         [None], ['QT_SCALE_FACTOR'], ['2']),
++        #Test changing an environment variable
++        ('qt.environ', {'QT_SCALE_FACTOR': '4'},
++         ['2'], ['QT_SCALE_FACTOR'], ['4']),
++        ('qt.environ', {'QT_SCALE_FACTOR': '4'},
++         ['unset'], ['QT_SCALE_FACTOR'], ['4']),
++        #Test unsetting an environment variable
++        ('qt.environ', {'QT_SCALE_FACTOR': 'None'},
++         ['3'], ['QT_SCALE_FACTOR'], ['']),
++        #Test setting multiple environment variables
++        ('qt.environ', {'QT_SCALE_FACTOR': '3', 'QT_PLUGIN_PATH': '/tmp/',
++                        'QT_NEWVAR': 'newval'},
++         [None, None, None], ['QT_SCALE_FACTOR', 'QT_PLUGIN_PATH', 'QT_NEWVAR'],
++         ['3', '/tmp/', 'newval']),
++    ])
++    def test_environ_settings(self, monkeypatch, config_stub,
++                              config_opt, config_val, init_val, envvar, expected):
++        """Test extra environment settings."""
++        for (var, val) in zip(envvar, init_val):
++            if val is not None:
++                if val == 'unset':
++                    monkeypatch.delenv(var)
++                else:
++                    monkeypatch.setenv(var, val)
++
++        config_stub.set_obj(config_opt, config_val)
++        qtargs.init_envvars()
++
++        for (var, result) in zip(envvar, expected):
++            assert os.environ[var] == result
++
+     @pytest.mark.parametrize('new_qt', [True, False])
+     def test_highdpi(self, monkeypatch, config_stub, new_qt):
+         """Test HighDPI environment variables.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

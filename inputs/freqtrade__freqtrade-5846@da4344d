@@ -1,0 +1,651 @@
+  Task-ID: freqtrade__freqtrade-5846@da4344d
+  Please checkout to this commit first: d99eaccb5a6d87a27aacc9107140db09e570e46d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Show average profit in overview
+<!-- 
+Note: this section will not show up in the issue.
+Have you search for this feature before requesting it? It's highly likely that a similar request was already filed.
+-->
+
+## Describe your environment
+(if applicable)
+
+  * Operating system: ____
+  * Python Version: _____ (`python -V`)
+  * CCXT version: _____ (`pip freeze | grep ccxt`)
+  * Freqtrade Version: ____ (`freqtrade -V` or `docker-compose run --rm freqtrade -V` for Freqtrade running in docker)
+## Describe the enhancement
+
+I would like to see (daily / monthly / yearly) average profit in the /profit RPC 
+
+Example: 
+
+ROI: Closed trades
+∙ -
+∙ -
+ROI: All trades
+∙ -
+∙ -
+
+Total Trade Count: -
+First Trade opened: -
+Latest Trade opened: 15 hours ago
+Win / Loss: 68 / 12
+Average Weekly Profit: -% (100 USDT)
+Avg. Duration: TIME
+Best Performing: PAIR
+
+*Explain the enhancement you would like*
+  </issue>
+  
+  <patch>
+  diff --git a/docs/telegram-usage.md b/docs/telegram-usage.md
+index 0c45fbbf163..0c1af9f4ddb 100644
+--- a/docs/telegram-usage.md
++++ b/docs/telegram-usage.md
+@@ -175,6 +175,8 @@ official commands. You can ask at any moment for help with `/help`.
+ | `/performance` | Show performance of each finished trade grouped by pair
+ | `/balance` | Show account balance per currency
+ | `/daily <n>` | Shows profit or loss per day, over the last n days (n defaults to 7)
++| `/weekly <n>` | Shows profit or loss per week, over the last n weeks (n defaults to 8)
++| `/monthly <n>` | Shows profit or loss per month, over the last n months (n defaults to 6)
+ | `/stats` | Shows Wins / losses by Sell reason as well as Avg. holding durations for buys and sells
+ | `/whitelist` | Show the current whitelist
+ | `/blacklist [pair]` | Show the current blacklist, or adds a pair to the blacklist.
+@@ -307,8 +309,7 @@ Return the balance of all crypto-currency your have on the exchange.
+ 
+ ### /daily <n>
+ 
+-Per default `/daily` will return the 7 last days.
+-The example below if for `/daily 3`:
++Per default `/daily` will return the 7 last days. The example below if for `/daily 3`:
+ 
+ > **Daily Profit over the last 3 days:**
+ ```
+@@ -319,6 +320,34 @@ Day         Profit BTC      Profit USD
+ 2018-01-01  0.00269130 BTC  34.986 USD
+ ```
+ 
++### /weekly <n>
++
++Per default `/weekly` will return the 8 last weeks, including the current week. Each week starts
++from Monday. The example below if for `/weekly 3`:
++
++> **Weekly Profit over the last 3 weeks (starting from Monday):**
++```
++Monday         Profit BTC      Profit USD
++----------  --------------  ------------
++2018-01-03  0.00224175 BTC  29,142 USD
++2017-12-27  0.00033131 BTC   4,307 USD
++2017-12-20  0.00269130 BTC  34.986 USD
++```
++
++### /monthly <n>
++
++Per default `/monthly` will return the 6 last months, including the current month. The example below
++if for `/monthly 3`:
++
++> **Monthly Profit over the last 3 months:**
++```
++Month         Profit BTC      Profit USD
++----------  --------------  ------------
++2018-01     0.00224175 BTC  29,142 USD
++2017-12     0.00033131 BTC   4,307 USD
++2017-11     0.00269130 BTC  34.986 USD
++```
++
+ ### /whitelist
+ 
+ Shows the current whitelist
+diff --git a/freqtrade/rpc/rpc.py b/freqtrade/rpc/rpc.py
+index da8d23b7a19..3cdcdf70a03 100644
+--- a/freqtrade/rpc/rpc.py
++++ b/freqtrade/rpc/rpc.py
+@@ -9,6 +9,7 @@
+ 
+ import arrow
+ import psutil
++from dateutil.relativedelta import relativedelta
+ from numpy import NAN, inf, int64, mean
+ from pandas import DataFrame
+ 
+@@ -289,6 +290,91 @@ def _rpc_daily_profit(
+             'data': data
+         }
+ 
++    def _rpc_weekly_profit(
++            self, timescale: int,
++            stake_currency: str, fiat_display_currency: str) -> Dict[str, Any]:
++        today = datetime.utcnow().date()
++        first_iso_day_of_week = today - timedelta(days=today.weekday())  # Monday
++        profit_weeks: Dict[date, Dict] = {}
++
++        if not (isinstance(timescale, int) and timescale > 0):
++            raise RPCException('timescale must be an integer greater than 0')
++
++        for week in range(0, timescale):
++            profitweek = first_iso_day_of_week - timedelta(weeks=week)
++            trades = Trade.get_trades(trade_filter=[
++                Trade.is_open.is_(False),
++                Trade.close_date >= profitweek,
++                Trade.close_date < (profitweek + timedelta(weeks=1))
++            ]).order_by(Trade.close_date).all()
++            curweekprofit = sum(
++                trade.close_profit_abs for trade in trades if trade.close_profit_abs is not None)
++            profit_weeks[profitweek] = {
++                'amount': curweekprofit,
++                'trades': len(trades)
++            }
++
++        data = [
++            {
++                'date': key,
++                'abs_profit': value["amount"],
++                'fiat_value': self._fiat_converter.convert_amount(
++                    value['amount'],
++                    stake_currency,
++                    fiat_display_currency
++                ) if self._fiat_converter else 0,
++                'trade_count': value["trades"],
++            }
++            for key, value in profit_weeks.items()
++        ]
++        return {
++            'stake_currency': stake_currency,
++            'fiat_display_currency': fiat_display_currency,
++            'data': data
++        }
++
++    def _rpc_monthly_profit(
++            self, timescale: int,
++            stake_currency: str, fiat_display_currency: str) -> Dict[str, Any]:
++        first_day_of_month = datetime.utcnow().date().replace(day=1)
++        profit_months: Dict[date, Dict] = {}
++
++        if not (isinstance(timescale, int) and timescale > 0):
++            raise RPCException('timescale must be an integer greater than 0')
++
++        for month in range(0, timescale):
++            profitmonth = first_day_of_month - relativedelta(months=month)
++            trades = Trade.get_trades(trade_filter=[
++                Trade.is_open.is_(False),
++                Trade.close_date >= profitmonth,
++                Trade.close_date < (profitmonth + relativedelta(months=1))
++            ]).order_by(Trade.close_date).all()
++            curmonthprofit = sum(
++                trade.close_profit_abs for trade in trades if trade.close_profit_abs is not None)
++            profit_months[profitmonth] = {
++                'amount': curmonthprofit,
++                'trades': len(trades)
++            }
++
++        data = [
++            {
++                'date': f"{key.year}-{key.month:02d}",
++                'abs_profit': value["amount"],
++                'fiat_value': self._fiat_converter.convert_amount(
++                    value['amount'],
++                    stake_currency,
++                    fiat_display_currency
++                ) if self._fiat_converter else 0,
++                'trade_count': value["trades"],
++            }
++            for key, value in profit_months.items()
++        ]
++        return {
++            'stake_currency': stake_currency,
++            'fiat_display_currency': fiat_display_currency,
++            'data': data
++        }
++
+     def _rpc_trade_history(self, limit: int, offset: int = 0, order_by_id: bool = False) -> Dict:
+         """ Returns the X last trades """
+         order_by = Trade.id if order_by_id else Trade.close_date.desc()
+diff --git a/freqtrade/rpc/telegram.py b/freqtrade/rpc/telegram.py
+index 77d5f06e258..1dea5fae710 100644
+--- a/freqtrade/rpc/telegram.py
++++ b/freqtrade/rpc/telegram.py
+@@ -159,6 +159,8 @@ def _init(self) -> None:
+             CommandHandler('mix_tags', self._mix_tag_performance),
+             CommandHandler('stats', self._stats),
+             CommandHandler('daily', self._daily),
++            CommandHandler('weekly', self._weekly),
++            CommandHandler('monthly', self._monthly),
+             CommandHandler('count', self._count),
+             CommandHandler('locks', self._locks),
+             CommandHandler(['unlock', 'delete_locks'], self._delete_locks),
+@@ -175,6 +177,8 @@ def _init(self) -> None:
+         callbacks = [
+             CallbackQueryHandler(self._status_table, pattern='update_status_table'),
+             CallbackQueryHandler(self._daily, pattern='update_daily'),
++            CallbackQueryHandler(self._weekly, pattern='update_weekly'),
++            CallbackQueryHandler(self._monthly, pattern='update_monthly'),
+             CallbackQueryHandler(self._profit, pattern='update_profit'),
+             CallbackQueryHandler(self._balance, pattern='update_balance'),
+             CallbackQueryHandler(self._performance, pattern='update_performance'),
+@@ -501,6 +505,86 @@ def _daily(self, update: Update, context: CallbackContext) -> None:
+         except RPCException as e:
+             self._send_msg(str(e))
+ 
++    @authorized_only
++    def _weekly(self, update: Update, context: CallbackContext) -> None:
++        """
++        Handler for /weekly <n>
++        Returns a weekly profit (in BTC) over the last n weeks.
++        :param bot: telegram bot
++        :param update: message update
++        :return: None
++        """
++        stake_cur = self._config['stake_currency']
++        fiat_disp_cur = self._config.get('fiat_display_currency', '')
++        try:
++            timescale = int(context.args[0]) if context.args else 8
++        except (TypeError, ValueError, IndexError):
++            timescale = 8
++        try:
++            stats = self._rpc._rpc_weekly_profit(
++                timescale,
++                stake_cur,
++                fiat_disp_cur
++            )
++            stats_tab = tabulate(
++                [[week['date'],
++                  f"{round_coin_value(week['abs_profit'], stats['stake_currency'])}",
++                  f"{week['fiat_value']:.3f} {stats['fiat_display_currency']}",
++                  f"{week['trade_count']} trades"] for week in stats['data']],
++                headers=[
++                    'Monday',
++                    f'Profit {stake_cur}',
++                    f'Profit {fiat_disp_cur}',
++                    'Trades',
++                ],
++                tablefmt='simple')
++            message = f'<b>Weekly Profit over the last {timescale} weeks ' \
++                      f'(starting from Monday)</b>:\n<pre>{stats_tab}</pre> '
++            self._send_msg(message, parse_mode=ParseMode.HTML, reload_able=True,
++                           callback_path="update_weekly", query=update.callback_query)
++        except RPCException as e:
++            self._send_msg(str(e))
++
++    @authorized_only
++    def _monthly(self, update: Update, context: CallbackContext) -> None:
++        """
++        Handler for /monthly <n>
++        Returns a monthly profit (in BTC) over the last n months.
++        :param bot: telegram bot
++        :param update: message update
++        :return: None
++        """
++        stake_cur = self._config['stake_currency']
++        fiat_disp_cur = self._config.get('fiat_display_currency', '')
++        try:
++            timescale = int(context.args[0]) if context.args else 6
++        except (TypeError, ValueError, IndexError):
++            timescale = 6
++        try:
++            stats = self._rpc._rpc_monthly_profit(
++                timescale,
++                stake_cur,
++                fiat_disp_cur
++            )
++            stats_tab = tabulate(
++                [[month['date'],
++                  f"{round_coin_value(month['abs_profit'], stats['stake_currency'])}",
++                  f"{month['fiat_value']:.3f} {stats['fiat_display_currency']}",
++                  f"{month['trade_count']} trades"] for month in stats['data']],
++                headers=[
++                    'Month',
++                    f'Profit {stake_cur}',
++                    f'Profit {fiat_disp_cur}',
++                    'Trades',
++                ],
++                tablefmt='simple')
++            message = f'<b>Monthly Profit over the last {timescale} months' \
++                      f'</b>:\n<pre>{stats_tab}</pre> '
++            self._send_msg(message, parse_mode=ParseMode.HTML, reload_able=True,
++                           callback_path="update_monthly", query=update.callback_query)
++        except RPCException as e:
++            self._send_msg(str(e))
++
+     @authorized_only
+     def _profit(self, update: Update, context: CallbackContext) -> None:
+         """
+diff --git a/requirements.txt b/requirements.txt
+index e2f6a316206..8337d7bd10d 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -42,3 +42,6 @@ colorama==0.4.4
+ # Building config files interactively
+ questionary==1.10.0
+ prompt-toolkit==3.0.21
++# Extensions to datetime library
++types-python-dateutil==2.8.2
++python-dateutil==2.8.2
+\ No newline at end of file
+diff --git a/tests/rpc/test_rpc_telegram.py b/tests/rpc/test_rpc_telegram.py
+index 5f49c8bf715..74c33d2af59 100644
+--- a/tests/rpc/test_rpc_telegram.py
++++ b/tests/rpc/test_rpc_telegram.py
+@@ -4,7 +4,7 @@
+ 
+ import logging
+ import re
+-from datetime import datetime
++from datetime import datetime, timedelta
+ from functools import reduce
+ from random import choice, randint
+ from string import ascii_uppercase
+@@ -94,10 +94,11 @@ def test_telegram_init(default_conf, mocker, caplog) -> None:
+     message_str = ("rpc.telegram is listening for following commands: [['status'], ['profit'], "
+                    "['balance'], ['start'], ['stop'], ['forcesell'], ['forcebuy'], ['trades'], "
+                    "['delete'], ['performance'], ['buys'], ['sells'], ['mix_tags'], "
+-                   "['stats'], ['daily'], ['count'], ['locks'], "
+-                   "['unlock', 'delete_locks'], ['reload_config', 'reload_conf'], "
+-                   "['show_config', 'show_conf'], ['stopbuy'], "
+-                   "['whitelist'], ['blacklist'], ['logs'], ['edge'], ['help'], ['version']"
++                   "['stats'], ['daily'], ['weekly'], ['monthly'], "
++                   "['count'], ['locks'], ['unlock', 'delete_locks'], "
++                   "['reload_config', 'reload_conf'], ['show_config', 'show_conf'], "
++                   "['stopbuy'], ['whitelist'], ['blacklist'], "
++                   "['logs'], ['edge'], ['help'], ['version']"
+                    "]")
+ 
+     assert log_has(message_str, caplog)
+@@ -354,7 +355,8 @@ def test_daily_handle(default_conf, update, ticker, limit_buy_order, fee,
+     context.args = ["2"]
+     telegram._daily(update=update, context=context)
+     assert msg_mock.call_count == 1
+-    assert 'Daily' in msg_mock.call_args_list[0][0][0]
++    assert "Daily Profit over the last 2 days</b>:" in msg_mock.call_args_list[0][0][0]
++    assert 'Day ' in msg_mock.call_args_list[0][0][0]
+     assert str(datetime.utcnow().date()) in msg_mock.call_args_list[0][0][0]
+     assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
+     assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
+@@ -366,7 +368,7 @@ def test_daily_handle(default_conf, update, ticker, limit_buy_order, fee,
+     context.args = []
+     telegram._daily(update=update, context=context)
+     assert msg_mock.call_count == 1
+-    assert 'Daily' in msg_mock.call_args_list[0][0][0]
++    assert "Daily Profit over the last 7 days</b>:" in msg_mock.call_args_list[0][0][0]
+     assert str(datetime.utcnow().date()) in msg_mock.call_args_list[0][0][0]
+     assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
+     assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
+@@ -422,7 +424,242 @@ def test_daily_wrong_input(default_conf, update, ticker, mocker) -> None:
+     context = MagicMock()
+     context.args = ["today"]
+     telegram._daily(update=update, context=context)
+-    assert str('Daily Profit over the last 7 days') in msg_mock.call_args_list[0][0][0]
++    assert str('Daily Profit over the last 7 days</b>:') in msg_mock.call_args_list[0][0][0]
++
++
++def test_weekly_handle(default_conf, update, ticker, limit_buy_order, fee,
++                       limit_sell_order, mocker) -> None:
++    default_conf['max_open_trades'] = 1
++    mocker.patch(
++        'freqtrade.rpc.rpc.CryptoToFiatConverter._find_price',
++        return_value=15000.0
++    )
++    mocker.patch.multiple(
++        'freqtrade.exchange.Exchange',
++        fetch_ticker=ticker,
++        get_fee=fee,
++    )
++
++    telegram, freqtradebot, msg_mock = get_telegram_testobject(mocker, default_conf)
++
++    patch_get_signal(freqtradebot)
++
++    # Create some test data
++    freqtradebot.enter_positions()
++    trade = Trade.query.first()
++    assert trade
++
++    # Simulate fulfilled LIMIT_BUY order for trade
++    trade.update(limit_buy_order)
++
++    # Simulate fulfilled LIMIT_SELL order for trade
++    trade.update(limit_sell_order)
++
++    trade.close_date = datetime.utcnow()
++    trade.is_open = False
++
++    # Try valid data
++    # /weekly 2
++    context = MagicMock()
++    context.args = ["2"]
++    telegram._weekly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert "Weekly Profit over the last 2 weeks (starting from Monday)</b>:" \
++           in msg_mock.call_args_list[0][0][0]
++    assert 'Monday ' in msg_mock.call_args_list[0][0][0]
++    today = datetime.utcnow().date()
++    first_iso_day_of_current_week = today - timedelta(days=today.weekday())
++    assert str(first_iso_day_of_current_week) in msg_mock.call_args_list[0][0][0]
++    assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  1 trade') in msg_mock.call_args_list[0][0][0]
++    assert str('  0 trade') in msg_mock.call_args_list[0][0][0]
++
++    # Reset msg_mock
++    msg_mock.reset_mock()
++    context.args = []
++    telegram._weekly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert "Weekly Profit over the last 8 weeks (starting from Monday)</b>:" \
++           in msg_mock.call_args_list[0][0][0]
++    assert 'Weekly' in msg_mock.call_args_list[0][0][0]
++    assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  1 trade') in msg_mock.call_args_list[0][0][0]
++    assert str('  0 trade') in msg_mock.call_args_list[0][0][0]
++
++    # Reset msg_mock
++    msg_mock.reset_mock()
++    freqtradebot.config['max_open_trades'] = 2
++    # Add two other trades
++    n = freqtradebot.enter_positions()
++    assert n == 2
++
++    trades = Trade.query.all()
++    for trade in trades:
++        trade.update(limit_buy_order)
++        trade.update(limit_sell_order)
++        trade.close_date = datetime.utcnow()
++        trade.is_open = False
++
++    # /weekly 1
++    # By default, the 8 previous weeks are shown
++    # So the previous modified trade should be excluded from the stats
++    context = MagicMock()
++    context.args = ["1"]
++    telegram._weekly(update=update, context=context)
++    assert str('  0.00018651 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  2.798 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  3 trades') in msg_mock.call_args_list[0][0][0]
++
++
++def test_weekly_wrong_input(default_conf, update, ticker, mocker) -> None:
++    mocker.patch.multiple(
++        'freqtrade.exchange.Exchange',
++        fetch_ticker=ticker
++    )
++
++    telegram, freqtradebot, msg_mock = get_telegram_testobject(mocker, default_conf)
++    patch_get_signal(freqtradebot)
++
++    # Try invalid data
++    msg_mock.reset_mock()
++    freqtradebot.state = State.RUNNING
++    # /weekly -3
++    context = MagicMock()
++    context.args = ["-3"]
++    telegram._weekly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert 'must be an integer greater than 0' in msg_mock.call_args_list[0][0][0]
++
++    # Try invalid data
++    msg_mock.reset_mock()
++    freqtradebot.state = State.RUNNING
++    # /weekly this week
++    context = MagicMock()
++    context.args = ["this week"]
++    telegram._weekly(update=update, context=context)
++    assert str('Weekly Profit over the last 8 weeks (starting from Monday)</b>:') \
++           in msg_mock.call_args_list[0][0][0]
++
++
++def test_monthly_handle(default_conf, update, ticker, limit_buy_order, fee,
++                        limit_sell_order, mocker) -> None:
++    default_conf['max_open_trades'] = 1
++    mocker.patch(
++        'freqtrade.rpc.rpc.CryptoToFiatConverter._find_price',
++        return_value=15000.0
++    )
++    mocker.patch.multiple(
++        'freqtrade.exchange.Exchange',
++        fetch_ticker=ticker,
++        get_fee=fee,
++    )
++
++    telegram, freqtradebot, msg_mock = get_telegram_testobject(mocker, default_conf)
++
++    patch_get_signal(freqtradebot)
++
++    # Create some test data
++    freqtradebot.enter_positions()
++    trade = Trade.query.first()
++    assert trade
++
++    # Simulate fulfilled LIMIT_BUY order for trade
++    trade.update(limit_buy_order)
++
++    # Simulate fulfilled LIMIT_SELL order for trade
++    trade.update(limit_sell_order)
++
++    trade.close_date = datetime.utcnow()
++    trade.is_open = False
++
++    # Try valid data
++    # /monthly 2
++    context = MagicMock()
++    context.args = ["2"]
++    telegram._monthly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert 'Monthly Profit over the last 2 months</b>:' in msg_mock.call_args_list[0][0][0]
++    assert 'Month ' in msg_mock.call_args_list[0][0][0]
++    today = datetime.utcnow().date()
++    current_month = f"{today.year}-{today.month} "
++    assert current_month in msg_mock.call_args_list[0][0][0]
++    assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  1 trade') in msg_mock.call_args_list[0][0][0]
++    assert str('  0 trade') in msg_mock.call_args_list[0][0][0]
++
++    # Reset msg_mock
++    msg_mock.reset_mock()
++    context.args = []
++    telegram._monthly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    # Default to 6 months
++    assert 'Monthly Profit over the last 6 months</b>:' in msg_mock.call_args_list[0][0][0]
++    assert 'Month ' in msg_mock.call_args_list[0][0][0]
++    assert current_month in msg_mock.call_args_list[0][0][0]
++    assert str('  0.00006217 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  0.933 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  1 trade') in msg_mock.call_args_list[0][0][0]
++    assert str('  0 trade') in msg_mock.call_args_list[0][0][0]
++
++    # Reset msg_mock
++    msg_mock.reset_mock()
++    freqtradebot.config['max_open_trades'] = 2
++    # Add two other trades
++    n = freqtradebot.enter_positions()
++    assert n == 2
++
++    trades = Trade.query.all()
++    for trade in trades:
++        trade.update(limit_buy_order)
++        trade.update(limit_sell_order)
++        trade.close_date = datetime.utcnow()
++        trade.is_open = False
++
++    # /monthly 12
++    context = MagicMock()
++    context.args = ["12"]
++    telegram._monthly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert 'Monthly Profit over the last 12 months</b>:' in msg_mock.call_args_list[0][0][0]
++    assert str('  0.00018651 BTC') in msg_mock.call_args_list[0][0][0]
++    assert str('  2.798 USD') in msg_mock.call_args_list[0][0][0]
++    assert str('  3 trades') in msg_mock.call_args_list[0][0][0]
++
++    # The one-digit months should contain a zero, Eg: September 2021 = "2021-09"
++    # Since we loaded the last 12 months, any month should appear
++    assert str('-09') in msg_mock.call_args_list[0][0][0]
++
++
++def test_monthly_wrong_input(default_conf, update, ticker, mocker) -> None:
++    mocker.patch.multiple(
++        'freqtrade.exchange.Exchange',
++        fetch_ticker=ticker
++    )
++
++    telegram, freqtradebot, msg_mock = get_telegram_testobject(mocker, default_conf)
++    patch_get_signal(freqtradebot)
++
++    # Try invalid data
++    msg_mock.reset_mock()
++    freqtradebot.state = State.RUNNING
++    # /monthly -3
++    context = MagicMock()
++    context.args = ["-3"]
++    telegram._monthly(update=update, context=context)
++    assert msg_mock.call_count == 1
++    assert 'must be an integer greater than 0' in msg_mock.call_args_list[0][0][0]
++
++    # Try invalid data
++    msg_mock.reset_mock()
++    freqtradebot.state = State.RUNNING
++    # /monthly february
++    context = MagicMock()
++    context.args = ["february"]
++    telegram._monthly(update=update, context=context)
++    assert str('Monthly Profit over the last 6 months</b>:') in msg_mock.call_args_list[0][0][0]
+ 
+ 
+ def test_profit_handle(default_conf, update, ticker, ticker_sell_up, fee,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

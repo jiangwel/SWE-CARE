@@ -1,0 +1,493 @@
+  Task-ID: mlflow__mlflow-16231@b3c45e2
+  Please checkout to this commit first: 8c2af744e89b0239edaaea57afabbb003d8225a8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Lint Rule to Prevent Unnamed `threading.Thread`
+# Proposal: Lint Rule to Prevent Unnamed `threading.Thread`
+
+## Summary
+
+This proposal suggests implementing a lint rule to prevent the creation of unnamed `threading.Thread` instances in Python code. Unnamed threads make debugging and monitoring significantly more difficult, especially in complex applications.
+
+## Problem
+
+When creating threads without explicit names using `threading.Thread()`, Python assigns generic names like "Thread-1", "Thread-2", etc. This creates several issues:
+
+1. **Debugging Difficulty**: Stack traces and logs show generic thread names, making it hard to identify which part of the code spawned a problematic thread
+2. **Monitoring Challenges**: Thread monitoring tools cannot provide meaningful insights when all threads have generic names
+3. **Code Maintainability**: Developers cannot easily understand the purpose of threads when reviewing code or investigating issues
+
+## Examples
+
+### Bad (should be flagged):
+
+```python
+import threading
+
+# Unnamed thread - difficult to debug
+thread = threading.Thread(target=my_function)
+thread.start()
+
+# Also bad - using positional args without name
+thread = threading.Thread(my_function, (arg1, arg2))
+thread.start()
+```
+
+### Good (should pass):
+
+```python
+import threading
+import uuid
+
+# Named thread - easy to identify in debugging
+thread = threading.Thread(target=my_function, name="data_processor")
+thread.start()
+
+# Also good - using keyword args with name
+thread = threading.Thread(target=my_function, args=(arg1, arg2), name="background_worker")
+thread.start()
+
+# Unique names for multiple similar threads
+thread = threading.Thread(target=my_function, name=f"worker_{uuid.uuid4().hex[:8]}")
+thread.start()
+```
+
+## Proposed Rule
+
+The lint rule should:
+
+1. **Flag** any `threading.Thread()` instantiation that doesn't include a `name` parameter
+2. **Suggest** adding a descriptive `name` parameter
+3. **Allow** exemptions via comments (e.g., `# clint: disable=unnamed-thread`) for rare cases where unnamed threads are intentional
+
+## Implementation Considerations
+
+- **Scope**: Apply to direct `threading.Thread` instantiation
+- **Severity**: Warning level (not error) to allow gradual adoption
+- **Framework Compatibility**: Consider exemptions for testing frameworks that may create temporary threads
+- **Performance**: Rule should have minimal impact on linting performance
+
+## Benefits
+
+1. **Improved Debugging**: Thread names appear in stack traces and debugging tools
+2. **Better Monitoring**: APM and monitoring tools can track threads by meaningful names
+3. **Enhanced Code Quality**: Forces developers to think about thread purpose when creating them
+4. **Easier Maintenance**: Code reviews and troubleshooting become more efficient
+
+## Migration Path
+
+For existing codebases:
+
+1. Start with warnings only
+2. Provide automated fixes where possible
+3. Allow gradual migration with disable comments
+4. Eventually promote to error level after adoption period
+
+## Implementation in MLflow's Custom Linter (Clint)
+
+MLflow has a custom linter called **Clint** located in `dev/clint/` that enforces rules not covered by ruff. This threading rule would fit perfectly into this framework.
+
+### Code Structure References
+
+- **Main linter logic**: `dev/clint/src/clint/linter.py:273-689` (Linter class)
+- **Rule definitions**: `dev/clint/src/clint/rules.py` (where new rule should be added)
+- **Configuration**: `dev/clint/src/clint/config.py`
+- **Usage**: Via `clint file.py` command or integrated with VS Code
+
+### Implementation Steps
+
+1. **Add rule class** in `dev/clint/src/clint/rules.py`:
+
+   ```python
+   class UnnamedThread(Rule):
+       def _id(self) -> str:
+           return "MLF0024"  # Next available ID
+
+       def _message(self) -> str:
+           return "threading.Thread() calls should include a 'name' parameter for easier debugging"
+
+       @staticmethod
+       def check(node: ast.Call) -> bool:
+           """
+           Returns True if the call is threading.Thread() without a name parameter.
+           """
+           # Check if it's a threading.Thread call
+           if not UnnamedThread._is_threading_thread_call(node):
+               return False
+
+           # Check if name parameter is provided
+           return not UnnamedThread._has_name_parameter(node)
+
+       @staticmethod
+       def _is_threading_thread_call(node: ast.Call) -> bool:
+           """Check if this is a threading.Thread() call."""
+           if isinstance(node.func, ast.Attribute):
+               return (
+                   isinstance(node.func.value, ast.Name)
+                   and node.func.value.id == "threading"
+                   and node.func.attr == "Thread"
+               )
+           elif isinstance(node.func, ast.Name):
+               return node.func.id == "Thread"  # Direct import case
+           return False
+
+       @staticmethod
+       def _has_name_parameter(node: ast.Call) -> bool:
+           """Check if the call includes a name parameter."""
+           # Check keyword arguments
+           for keyword in node.keywords:
+               if keyword.arg == "name":
+                   return True
+           return False
+   ```
+
+2. **Add detection logic** in `dev/clint/src/clint/linter.py`:
+
+   In the `visit_Call()` method around line 608, add:
+
+   ```python
+   if rules.UnnamedThread.check(node):
+       self._check(Location.from_node(node), rules.UnnamedThread())
+   ```
+
+3. **Add tests** in `tests/dev/clint/`:
+   - Create test cases for both violation and passing scenarios
+   - Test both `threading.Thread()` and direct `Thread()` import patterns
+   - Verify the disable comment functionality works
+
+## Acceptance Criteria
+
+- [ ] Rule correctly identifies unnamed `threading.Thread()` calls
+- [ ] Rule handles both `threading.Thread()` and `from threading import Thread` patterns
+- [ ] Rule can be disabled with `# clint: disable=unnamed-thread` comments
+- [ ] Tests cover all edge cases and scenarios
+- [ ] Documentation is updated if needed
+  </issue>
+  
+  <patch>
+  diff --git a/dev/clint/src/clint/linter.py b/dev/clint/src/clint/linter.py
+index ad8dd97826e48..b7a44a8994806 100644
+--- a/dev/clint/src/clint/linter.py
++++ b/dev/clint/src/clint/linter.py
+@@ -628,6 +628,9 @@ def visit_Call(self, node: ast.Call) -> None:
+         if self.path.parts[0] != "tests" and _is_set_active_model(node.func):
+             self._check(Location.from_node(node), rules.ForbiddenSetActiveModelUsage())
+ 
++        if rules.UnnamedThread.check(node):
++            self._check(Location.from_node(node), rules.UnnamedThread())
++
+         self.generic_visit(node)
+ 
+     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+diff --git a/dev/clint/src/clint/rules.py b/dev/clint/src/clint/rules.py
+index bc0ce0e4fe794..a15059c0261f5 100644
+--- a/dev/clint/src/clint/rules.py
++++ b/dev/clint/src/clint/rules.py
+@@ -409,3 +409,45 @@ def _is_pytest_mark_repeat(decorator: ast.AST) -> bool:
+             return True
+ 
+         return False
++
++
++class UnnamedThread(Rule):
++    def _id(self) -> str:
++        return "MLF0024"
++
++    def _message(self) -> str:
++        return "threading.Thread() calls should include a 'name' parameter for easier debugging"
++
++    @staticmethod
++    def check(node: ast.Call) -> bool:
++        """
++        Returns True if the call is threading.Thread() without a name parameter.
++        """
++        # Check if it's a threading.Thread call
++        if not UnnamedThread._is_threading_thread_call(node):
++            return False
++
++        # Check if name parameter is provided
++        return not UnnamedThread._has_name_parameter(node)
++
++    @staticmethod
++    def _is_threading_thread_call(node: ast.Call) -> bool:
++        """Check if this is a threading.Thread() call."""
++        # Only check for threading.Thread() pattern for now
++        # This avoids false positives with other classes named Thread
++        if isinstance(node.func, ast.Attribute):
++            return (
++                isinstance(node.func.value, ast.Name)
++                and node.func.value.id == "threading"
++                and node.func.attr == "Thread"
++            )
++        return False
++
++    @staticmethod
++    def _has_name_parameter(node: ast.Call) -> bool:
++        """Check if the call includes a name parameter."""
++        # Check keyword arguments
++        for keyword in node.keywords:
++            if keyword.arg == "name":
++                return True
++        return False
+diff --git a/mlflow/llama_index/pyfunc_wrapper.py b/mlflow/llama_index/pyfunc_wrapper.py
+index 8dd7b1a5fc281..22bedac129cab 100644
+--- a/mlflow/llama_index/pyfunc_wrapper.py
++++ b/mlflow/llama_index/pyfunc_wrapper.py
+@@ -236,7 +236,7 @@ def _run():
+                 finally:
+                     loop.close()
+ 
+-            thread = threading.Thread(target=_run)
++            thread = threading.Thread(target=_run, name="llamaindex_async_task_runner")
+             thread.start()
+             thread.join()
+ 
+diff --git a/mlflow/optuna/storage.py b/mlflow/optuna/storage.py
+index 72f0ccccebae5..fa891ed44e3cd 100644
+--- a/mlflow/optuna/storage.py
++++ b/mlflow/optuna/storage.py
+@@ -90,7 +90,9 @@ def __init__(
+         self._stop_worker = False
+ 
+         # Start a background thread for periodic flushing
+-        self._flush_thread = threading.Thread(target=self._periodic_flush_worker, daemon=True)
++        self._flush_thread = threading.Thread(
++            target=self._periodic_flush_worker, daemon=True, name="optuna_batch_flush_worker"
++        )
+         self._flush_thread.start()
+ 
+     def __getstate__(self):
+diff --git a/mlflow/pyfunc/__init__.py b/mlflow/pyfunc/__init__.py
+index 583993dbb2c41..e33205d6cd3cc 100644
+--- a/mlflow/pyfunc/__init__.py
++++ b/mlflow/pyfunc/__init__.py
+@@ -2679,6 +2679,7 @@ def server_redirect_log_thread_func(child_stdout):
+                     target=server_redirect_log_thread_func,
+                     args=(scoring_server_proc.stdout,),
+                     daemon=True,
++                    name="pyfunc_model_server_log_redirector",
+                 )
+                 server_redirect_log_thread.start()
+ 
+diff --git a/tests/autologging/test_autologging_behaviors_unit.py b/tests/autologging/test_autologging_behaviors_unit.py
+index 62fa22fe63d9b..01898eb12ece5 100644
+--- a/tests/autologging/test_autologging_behaviors_unit.py
++++ b/tests/autologging/test_autologging_behaviors_unit.py
+@@ -334,10 +334,14 @@ def test_autolog(disable=False, silent=False):
+         time.sleep(0.2)
+         safe_patch("test_integration", patch_destination, "fn", patch_impl)
+ 
+-    thread1 = threading.Thread(target=test_autolog, kwargs={"disable": False})
++    thread1 = threading.Thread(
++        target=test_autolog, kwargs={"disable": False}, name="autolog_test_thread_1"
++    )
+     thread1.start()
+     time.sleep(0.1)
+-    thread2 = threading.Thread(target=test_autolog, kwargs={"disable": True})
++    thread2 = threading.Thread(
++        target=test_autolog, kwargs={"disable": True}, name="autolog_test_thread_2"
++    )
+     thread2.start()
+ 
+     thread1.join()
+diff --git a/tests/gateway/tools.py b/tests/gateway/tools.py
+index 311998b6048e7..76f8c9ea12ffa 100644
+--- a/tests/gateway/tools.py
++++ b/tests/gateway/tools.py
+@@ -201,7 +201,7 @@ def start_server(self):
+         def run():
+             self.loop.run_until_complete(self.server.serve())
+ 
+-        self.thread = threading.Thread(target=run)
++        self.thread = threading.Thread(target=run, name="uvicorn_gateway_server")
+         self.thread.start()
+ 
+     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> requests.Response:
+diff --git a/tests/pyfunc/docker/test_docker_flavors.py b/tests/pyfunc/docker/test_docker_flavors.py
+index aa5f0e1a7124b..e73f76a3d4dec 100644
+--- a/tests/pyfunc/docker/test_docker_flavors.py
++++ b/tests/pyfunc/docker/test_docker_flavors.py
+@@ -98,7 +98,7 @@ def stream_logs():
+             sys.stdout.write(line.decode("utf-8"))
+ 
+     # Start a thread to stream logs from the container
+-    t = threading.Thread(target=stream_logs, daemon=True)
++    t = threading.Thread(target=stream_logs, daemon=True, name="container_log_streamer")
+     t.start()
+ 
+     try:
+diff --git a/tests/pyfunc/test_spark.py b/tests/pyfunc/test_spark.py
+index 13b65f7e5a9f0..f84527648441e 100644
+--- a/tests/pyfunc/test_spark.py
++++ b/tests/pyfunc/test_spark.py
+@@ -854,7 +854,7 @@ def run_job():
+         model_uri=model_path
+     )
+ 
+-    job_thread = threading.Thread(target=run_job)
++    job_thread = threading.Thread(target=run_job, name="spark_job_runner")
+     job_thread.start()
+ 
+     client = ScoringServerClient("127.0.0.1", server_port)
+diff --git a/tests/store/model_registry/test_abstract_store.py b/tests/store/model_registry/test_abstract_store.py
+index 90d57d2b58fd9..d92af7c8fb87b 100644
+--- a/tests/store/model_registry/test_abstract_store.py
++++ b/tests/store/model_registry/test_abstract_store.py
+@@ -322,7 +322,9 @@ def link_prompt(prompt_name):
+     # Create and start threads
+     threads = []
+     for i in range(2):
+-        thread = threading.Thread(target=link_prompt, args=[f"test_prompt_{i + 1}"])
++        thread = threading.Thread(
++            target=link_prompt, args=[f"test_prompt_{i + 1}"], name=f"model_prompt_linker_{i + 1}"
++        )
+         threads.append(thread)
+         thread.start()
+ 
+@@ -547,7 +549,9 @@ def link_prompt(prompt_name):
+     # Create and start threads
+     threads = []
+     for i in range(2):
+-        thread = threading.Thread(target=link_prompt, args=[f"test_prompt_{i + 1}"])
++        thread = threading.Thread(
++            target=link_prompt, args=[f"test_prompt_{i + 1}"], name=f"trace_prompt_linker_{i + 1}"
++        )
+         threads.append(thread)
+         thread.start()
+ 
+@@ -795,7 +799,9 @@ def link_prompt(prompt_name):
+     # Execute concurrent linking
+     threads = []
+     for prompt_name in ["test_prompt_1", "test_prompt_2"]:
+-        thread = threading.Thread(target=link_prompt, args=(prompt_name,))
++        thread = threading.Thread(
++            target=link_prompt, args=(prompt_name,), name=f"run_prompt_linker_{prompt_name}"
++        )
+         threads.append(thread)
+         thread.start()
+ 
+diff --git a/tests/tracking/fluent/test_fluent.py b/tests/tracking/fluent/test_fluent.py
+index a59ba92f72376..765ec5045ed20 100644
+--- a/tests/tracking/fluent/test_fluent.py
++++ b/tests/tracking/fluent/test_fluent.py
+@@ -1581,9 +1581,9 @@ def thread_target():
+             exp = mlflow.set_experiment("test_experiment")
+             created_exp_ids.append(exp.experiment_id)
+ 
+-        t1 = threading.Thread(target=thread_target)
++        t1 = threading.Thread(target=thread_target, name="set_experiment_thread_1")
+         t1.start()
+-        t2 = threading.Thread(target=thread_target)
++        t2 = threading.Thread(target=thread_target, name="set_experiment_thread_2")
+         t2.start()
+ 
+         t1.join()
+@@ -1647,7 +1647,7 @@ def thread_target():
+             nonlocal thread_active_run
+             thread_active_run = mlflow.active_run()
+ 
+-        thread1 = threading.Thread(target=thread_target)
++        thread1 = threading.Thread(target=thread_target, name="active_run_checker")
+         thread1.start()
+         thread1.join()
+         # assert in another thread, active run is None.
+@@ -1681,7 +1681,7 @@ def thread_target():
+         nonlocal thread_last_active_run
+         thread_last_active_run = mlflow.last_active_run()
+ 
+-    thread1 = threading.Thread(target=thread_target)
++    thread1 = threading.Thread(target=thread_target, name="last_active_run_checker")
+     thread1.start()
+     thread1.join()
+     # assert in another thread, active run is None.
+@@ -1880,7 +1880,11 @@ def test_last_logged_model():
+     assert mlflow.last_logged_model().model_id == another_model.model_id
+ 
+     # model created by another thread should be ignored
+-    t = threading.Thread(daemon=True, target=lambda: mlflow.initialize_logged_model())
++    t = threading.Thread(
++        daemon=True,
++        target=lambda: mlflow.initialize_logged_model(),
++        name="model_initializer_thread",
++    )
+     t.start()
+     t.join()
+     assert mlflow.last_logged_model().model_id == another_model.model_id
+diff --git a/tests/utils/test_async_artifacts_logging_queue.py b/tests/utils/test_async_artifacts_logging_queue.py
+index 44743d2729750..8cf8663574fd0 100644
+--- a/tests/utils/test_async_artifacts_logging_queue.py
++++ b/tests/utils/test_async_artifacts_logging_queue.py
+@@ -172,8 +172,16 @@ def _send_artifact(run_data_queueing_processor, run_operations=None):
+             artifacts_sent.append(artifact)
+ 
+     run_operations = []
+-    t1 = threading.Thread(target=_send_artifact, args=(async_logging_queue, run_operations))
+-    t2 = threading.Thread(target=_send_artifact, args=(async_logging_queue, run_operations))
++    t1 = threading.Thread(
++        target=_send_artifact,
++        args=(async_logging_queue, run_operations),
++        name="test_artifact_sender_1",
++    )
++    t2 = threading.Thread(
++        target=_send_artifact,
++        args=(async_logging_queue, run_operations),
++        name="test_artifact_sender_2",
++    )
+ 
+     t1.start()
+     t2.start()
+diff --git a/tests/utils/test_async_logging_queue.py b/tests/utils/test_async_logging_queue.py
+index 8052a3a98c461..3bc671dd9ecf7 100644
+--- a/tests/utils/test_async_logging_queue.py
++++ b/tests/utils/test_async_logging_queue.py
+@@ -217,10 +217,14 @@ def test_publish_multithread_consume_single_thread():
+ 
+         run_operations = []
+         t1 = threading.Thread(
+-            target=_send_metrics_tags_params, args=(async_logging_queue, run_id, run_operations)
++            target=_send_metrics_tags_params,
++            args=(async_logging_queue, run_id, run_operations),
++            name="test_metrics_sender_1",
+         )
+         t2 = threading.Thread(
+-            target=_send_metrics_tags_params, args=(async_logging_queue, run_id, run_operations)
++            target=_send_metrics_tags_params,
++            args=(async_logging_queue, run_id, run_operations),
++            name="test_metrics_sender_2",
+         )
+ 
+         t1.start()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

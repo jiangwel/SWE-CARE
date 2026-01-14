@@ -1,0 +1,468 @@
+  Task-ID: xorbitsai__inference-1168@f3ada96
+  Please checkout to this commit first: 31032869b5e1f9a0915723d9e689a3a55eb9c9d0
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Any further plan to add access key for rest API call
+As  mentioned in title .
+
+Model services are exposed by http reuqest for many cases, seems there is no palce in system to add authentication in http request (like the bare token in openai ), or it's already in the system?
+
+Any related infomation/documentation  is welcomed !!!
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/development/contributing_environment.rst b/doc/source/development/contributing_environment.rst
+index 80aa266dfb..25ee11cc71 100644
+--- a/doc/source/development/contributing_environment.rst
++++ b/doc/source/development/contributing_environment.rst
+@@ -8,7 +8,7 @@ Creating a development environment
+ Before proceeding with any code modifications, it's essential to set up the necessary environment for Xinference development,
+ which includes familiarizing yourself with Git usage, establishing an isolated environment, installing Xinference, and compiling the frontend.
+ 
+-Getting startted with Git
++Getting started with Git
+ -------------------------
+ 
+ Now that you have identified an issue you wish to resolve, an enhancement to incorporate, or documentation to enhance,
+diff --git a/doc/source/locale/zh_CN/LC_MESSAGES/development/contributing_environment.po b/doc/source/locale/zh_CN/LC_MESSAGES/development/contributing_environment.po
+index 8ced444523..7aa3765a32 100644
+--- a/doc/source/locale/zh_CN/LC_MESSAGES/development/contributing_environment.po
++++ b/doc/source/locale/zh_CN/LC_MESSAGES/development/contributing_environment.po
+@@ -8,7 +8,7 @@ msgid ""
+ msgstr ""
+ "Project-Id-Version: Xinference \n"
+ "Report-Msgid-Bugs-To: \n"
+-"POT-Creation-Date: 2024-03-06 16:29+0800\n"
++"POT-Creation-Date: 2024-03-21 09:59+0800\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language: zh_CN\n"
+@@ -38,7 +38,7 @@ msgstr ""
+ "Xinference 以及前端部分的编译。"
+ 
+ #: ../../source/development/contributing_environment.rst:12
+-msgid "Getting startted with Git"
++msgid "Getting started with Git"
+ msgstr "Git 的使用"
+ 
+ #: ../../source/development/contributing_environment.rst:14
+diff --git a/xinference/api/oauth2/auth_service.py b/xinference/api/oauth2/auth_service.py
+index 2f11c26f18..2dfa5a474b 100644
+--- a/xinference/api/oauth2/auth_service.py
++++ b/xinference/api/oauth2/auth_service.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import re
+ from datetime import timedelta
+ from typing import List, Optional
+ 
+@@ -40,13 +41,33 @@ def __init__(self, auth_config_file: Optional[str]):
+     def config(self):
+         return self._config
+ 
++    @staticmethod
++    def is_legal_api_key(key: str):
++        pattern = re.compile("^[sk]{2}-[a-zA-Z0-9]{48}$")
++        if re.match(pattern, key):
++            return True
++        else:
++            return False
++
+     def init_auth_config(self):
+         if self._auth_config_file:
+             config: AuthStartupConfig = parse_file_as(
+                 path=self._auth_config_file, type_=AuthStartupConfig
+             )
++            total_keys = set()
+             for user in config.user_config:
+                 user.password = get_password_hash(user.password)
++                if len(set(user.api_keys)) != len(user.api_keys):
++                    raise ValueError("User has duplicate Api-Keys")
++                for api_key in user.api_keys:
++                    if not self.is_legal_api_key(api_key):
++                        raise ValueError(
++                            "Api-Key should be a string started with 'sk-' with a total length of 51"
++                        )
++                    if api_key in total_keys:
++                        raise ValueError("Api-Keys of different users have conflict")
++                    else:
++                        total_keys.add(api_key)
+             return config
+ 
+     def __call__(
+@@ -67,22 +88,33 @@ def __call__(
+             headers={"WWW-Authenticate": authenticate_value},
+         )
+ 
++        through_api_key = False
++
+         try:
+             assert self._config is not None
+-            payload = jwt.decode(
+-                token,
+-                self._config.auth_config.secret_key,
+-                algorithms=[self._config.auth_config.algorithm],
+-                options={"verify_exp": False},  # TODO: supports token expiration
+-            )
+-            username: str = payload.get("sub")
+-            if username is None:
+-                raise credentials_exception
+-            token_scopes = payload.get("scopes", [])
+-            token_data = TokenData(scopes=token_scopes, username=username)
++            if self.is_legal_api_key(token):
++                through_api_key = True
++            else:
++                payload = jwt.decode(
++                    token,
++                    self._config.auth_config.secret_key,
++                    algorithms=[self._config.auth_config.algorithm],
++                    options={"verify_exp": False},  # TODO: supports token expiration
++                )
++                username: str = payload.get("sub")
++                if username is None:
++                    raise credentials_exception
++                token_scopes = payload.get("scopes", [])
++                token_data = TokenData(scopes=token_scopes, username=username)
+         except (JWTError, ValidationError):
+             raise credentials_exception
+-        user = self.get_user(token_data.username)
++        if not through_api_key:
++            user = self.get_user(token_data.username)
++        else:
++            user = self.get_user_with_api_key(token)
++            if user is None:
++                raise credentials_exception
++            token_data = TokenData(scopes=user.permissions, username=user.username)
+         if user is None:
+             raise credentials_exception
+         if "admin" in token_data.scopes:
+@@ -102,6 +134,13 @@ def get_user(self, username: str) -> Optional[User]:
+                 return user
+         return None
+ 
++    def get_user_with_api_key(self, api_key: str) -> Optional[User]:
++        for user in self._config.user_config:
++            for key in user.api_keys:
++                if api_key == key:
++                    return user
++        return None
++
+     def authenticate_user(self, username: str, password: str):
+         user = self.get_user(username)
+         if not user:
+diff --git a/xinference/api/oauth2/types.py b/xinference/api/oauth2/types.py
+index 106680deac..deb5740a19 100644
+--- a/xinference/api/oauth2/types.py
++++ b/xinference/api/oauth2/types.py
+@@ -23,6 +23,7 @@ class LoginUserForm(BaseModel):
+ 
+ class User(LoginUserForm):
+     permissions: List[str]
++    api_keys: List[str]
+ 
+ 
+ class AuthConfig(BaseModel):
+diff --git a/xinference/client/restful/restful_client.py b/xinference/client/restful/restful_client.py
+index ca5d8ef0a3..0e6c00f23a 100644
+--- a/xinference/client/restful/restful_client.py
++++ b/xinference/client/restful/restful_client.py
+@@ -651,11 +651,13 @@ def translations(
+ 
+ 
+ class Client:
+-    def __init__(self, base_url):
++    def __init__(self, base_url, api_key: Optional[str] = None):
+         self.base_url = base_url
+-        self._headers = {}
++        self._headers: Dict[str, str] = {}
+         self._cluster_authed = False
+         self._check_cluster_authenticated()
++        if api_key is not None:
++            self._headers["Authorization"] = f"Bearer {api_key}"
+ 
+     def _set_token(self, token: Optional[str]):
+         if not self._cluster_authed or token is None:
+diff --git a/xinference/deploy/cmdline.py b/xinference/deploy/cmdline.py
+index df620023e5..5e27fe15c1 100644
+--- a/xinference/deploy/cmdline.py
++++ b/xinference/deploy/cmdline.py
+@@ -376,18 +376,27 @@ def worker(
+     is_flag=True,
+     help="Persist the model configuration to the filesystem, retains the model registration after server restarts.",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def register_model(
+     endpoint: Optional[str],
+     model_type: str,
+     file: str,
+     persist: bool,
++    api_key: Optional[str],
+ ):
+     endpoint = get_endpoint(endpoint)
+     with open(file) as fd:
+         model = fd.read()
+ 
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+     client.register_model(
+         model_type=model_type,
+         model=model,
+@@ -408,15 +417,24 @@ def register_model(
+     help="Type of model to unregister (default is 'LLM').",
+ )
+ @click.option("--model-name", "-n", type=str, help="Name of the model to unregister.")
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def unregister_model(
+     endpoint: Optional[str],
+     model_type: str,
+     model_name: str,
++    api_key: Optional[str],
+ ):
+     endpoint = get_endpoint(endpoint)
+ 
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+     client.unregister_model(
+         model_type=model_type,
+         model_name=model_name,
+@@ -437,15 +455,24 @@ def unregister_model(
+     type=str,
+     help="Filter by model type (default is 'LLM').",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def list_model_registrations(
+     endpoint: Optional[str],
+     model_type: str,
++    api_key: Optional[str],
+ ):
+     from tabulate import tabulate
+ 
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+ 
+     registrations = client.list_model_registrations(model_type=model_type)
+ 
+@@ -638,6 +665,13 @@ def list_model_registrations(
+     type=bool,
+     help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ @click.pass_context
+ def model_launch(
+     ctx,
+@@ -654,6 +688,7 @@ def model_launch(
+     image_lora_load_kwargs: Optional[Tuple],
+     image_lora_fuse_kwargs: Optional[Tuple],
+     trust_remote_code: bool,
++    api_key: Optional[str],
+ ):
+     kwargs = {}
+     for i in range(0, len(ctx.args), 2):
+@@ -686,8 +721,9 @@ def model_launch(
+         if size_in_billions is None or "_" in size_in_billions
+         else int(size_in_billions)
+     )
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+ 
+     model_uid = client.launch_model(
+         model_name=model_name,
+@@ -718,12 +754,20 @@ def model_launch(
+     type=str,
+     help="Xinference endpoint.",
+ )
+-def model_list(endpoint: Optional[str]):
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
++def model_list(endpoint: Optional[str], api_key: Optional[str]):
+     from tabulate import tabulate
+ 
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+ 
+     llm_table = []
+     embedding_table = []
+@@ -844,13 +888,22 @@ def model_list(endpoint: Optional[str]):
+     required=True,
+     help="The unique identifier (UID) of the model.",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def model_terminate(
+     endpoint: Optional[str],
+     model_uid: str,
++    api_key: Optional[str],
+ ):
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+     client.terminate_model(model_uid=model_uid)
+ 
+ 
+@@ -873,15 +926,24 @@ def model_terminate(
+     type=bool,
+     help="Whether to stream the generated text. Use 'True' for streaming (default is True).",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def model_generate(
+     endpoint: Optional[str],
+     model_uid: str,
+     max_tokens: int,
+     stream: bool,
++    api_key: Optional[str],
+ ):
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+     if stream:
+         # TODO: when stream=True, RestfulClient cannot generate words one by one.
+         # So use Client in temporary. The implementation needs to be changed to
+@@ -959,16 +1021,25 @@ async def generate_internal():
+     type=bool,
+     help="Whether to stream the chat messages. Use 'True' for streaming (default is True).",
+ )
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
+ def model_chat(
+     endpoint: Optional[str],
+     model_uid: str,
+     max_tokens: int,
+     stream: bool,
++    api_key: Optional[str],
+ ):
+     # TODO: chat model roles may not be user and assistant.
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+ 
+     chat_history: "List[ChatCompletionMessage]" = []
+     if stream:
+@@ -1048,10 +1119,18 @@ async def chat_internal():
+ 
+ @cli.command("vllm-models", help="Query and display models compatible with vLLM.")
+ @click.option("--endpoint", "-e", type=str, help="Xinference endpoint.")
+-def vllm_models(endpoint: Optional[str]):
++@click.option(
++    "--api-key",
++    "-ak",
++    default=None,
++    type=str,
++    help="Api-Key for access xinference api with authorization.",
++)
++def vllm_models(endpoint: Optional[str], api_key: Optional[str]):
+     endpoint = get_endpoint(endpoint)
+-    client = RESTfulClient(base_url=endpoint)
+-    client._set_token(get_stored_token(endpoint, client))
++    client = RESTfulClient(base_url=endpoint, api_key=api_key)
++    if client._get_token() is None:
++        client._set_token(get_stored_token(endpoint, client))
+     vllm_models_dict = client.vllm_models()
+     print("VLLM supported model families:")
+     chat_models = vllm_models_dict["chat"]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

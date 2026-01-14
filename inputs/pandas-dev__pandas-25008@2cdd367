@@ -1,0 +1,123 @@
+  Task-ID: pandas-dev__pandas-25008@2cdd367
+  Please checkout to this commit first: f74aba614554d1de4d7986fef6296a4eda951ac9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  DOC: Detect whether a Returns section is needed in validate_docstrings.py
+One of the validations performed in the docstrings in `validate_docstrings.py` is whether a `Returns` section is present. So far we just check if the `return` word exist in the source code, and if it does, we generate an error if the docsting does not have the documentation section.
+
+But this causes false positives, see this case:
+```python
+def say_hello(lang):
+    """
+    This function does not have a Returns section.
+
+    This is correct because nothing is returned.
+
+    Parameters
+    ----------
+    lang : str
+         Language to say hello in.
+     """
+     if lang not in ('en', 'es'):
+         return
+
+    print({'en': 'Hi!', 'es': 'Hola!'}[lang])
+```
+
+The `return` keyword is found in the code, so the presence of a `Returns` section is validated, but it should not.
+
+Without making anything complicated, it'd be nice to check when validating:
+- That the return words found are not a bare return or a `return None` or are not comments...
+
+If any code `return` is found that does not return always `None` is found, then we should show the error.
+  </issue>
+  
+  <patch>
+  diff --git a/scripts/tests/test_validate_docstrings.py b/scripts/tests/test_validate_docstrings.py
+index bb58449843096..615c81b8b9ec2 100644
+--- a/scripts/tests/test_validate_docstrings.py
++++ b/scripts/tests/test_validate_docstrings.py
+@@ -229,6 +229,23 @@ def good_imports(self):
+         """
+         pass
+ 
++    def does_nothing(self, x):
++        """
++        Do nothing and always return none.
++
++        But in other cases it might also
++        return nothing at all.
++
++        Parameters
++        ----------
++        x : int
++            Useless parameter.
++        """
++        if random.random() % 2:
++            return  # the method might return here
++        else:
++            return None  # or perhaps here
++
+ 
+ class BadGenericDocStrings(object):
+     """Everything here has a bad docstring
+@@ -783,7 +800,7 @@ def test_good_class(self, capsys):
+ 
+     @pytest.mark.parametrize("func", [
+         'plot', 'sample', 'random_letters', 'sample_values', 'head', 'head1',
+-        'contains', 'mode', 'good_imports'])
++        'contains', 'mode', 'good_imports', 'does_nothing'])
+     def test_good_functions(self, capsys, func):
+         errors = validate_one(self._import_path(
+             klass='GoodDocStrings', func=func))['errors']
+diff --git a/scripts/validate_docstrings.py b/scripts/validate_docstrings.py
+index bce33f7e78daa..47211d60ad805 100755
+--- a/scripts/validate_docstrings.py
++++ b/scripts/validate_docstrings.py
+@@ -691,7 +691,11 @@ def get_validation_data(doc):
+ 
+     if doc.is_function_or_method:
+         if not doc.returns:
+-            if 'return' in doc.method_source:
++            if re.search(r""" \"\"\".*\"\"\".*  # Skip the docstring.
++                              \n[ \t\f\v]*return  # Find a return command.
++                              # Check if it's not bare or simply returns None.
++                              (?![ \t\f\v]*(None)?[ \t\f\v]*[\n#]) """,
++                         doc.method_source, re.DOTALL | re.VERBOSE):
+                 errs.append(error('RT01'))
+         else:
+             if len(doc.returns) == 1 and doc.returns[0][1]:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

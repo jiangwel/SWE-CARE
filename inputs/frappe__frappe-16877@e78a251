@@ -1,0 +1,178 @@
+  Task-ID: frappe__frappe-16877@e78a251
+  Please checkout to this commit first: fea45bf34183ce01c8a689e0c33326daac26faf1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  bug: "is" query operator no longer working
+Just checked out the latest version of the develop branch. Every doctype throws an error if i try to filter by "is" "set"/"not set"
+
+See traceback
+
+### App Versions
+```
+{
+	"dickerschutz": "0.0.1",
+	"erpnext": "14.0.0-dev",
+	"frappe": "14.0.0-dev"
+}
+```
+### Route
+```
+List/Lead/List
+```
+### Trackeback
+```
+Traceback (most recent call last):
+  File "apps/frappe/frappe/app.py", line 67, in application
+    response = frappe.api.handle()
+  File "apps/frappe/frappe/api.py", line 54, in handle
+    return frappe.handler.handle()
+  File "apps/frappe/frappe/handler.py", line 38, in handle
+    data = execute_cmd(cmd)
+  File "apps/frappe/frappe/handler.py", line 76, in execute_cmd
+    return frappe.call(method, **frappe.form_dict)
+  File "apps/frappe/frappe/__init__.py", line 1503, in call
+    return fn(*args, **newargs)
+  File "apps/frappe/frappe/__init__.py", line 762, in wrapper_fn
+    retval = fn(*args, **get_newargs(fn, kwargs))
+  File "apps/frappe/frappe/desk/reportview.py", line 56, in get_count
+    data = frappe.db.count(args["doctype"], args["filters"], distinct=distinct)
+  File "apps/frappe/frappe/database/database.py", line 1028, in count
+    query = self.query.get_sql(table=dt, filters=filters, fields=Count("*"), distinct=distinct)
+  File "apps/frappe/frappe/database/query.py", line 317, in get_sql
+    criterion = self.build_conditions(table, filters, **kwargs)
+  File "apps/frappe/frappe/database/query.py", line 301, in build_conditions
+    criterion = self.misc_query(table, filters, **kwargs)
+  File "apps/frappe/frappe/database/query.py", line 231, in misc_query
+    _operator = OPERATOR_MAP[f[-2]]
+KeyError: 'is'
+```
+
+### Request Data
+```
+{
+	"type": "POST",
+	"args": {
+		"doctype": "Lead",
+		"filters": "[[\"Lead\",\"name\",\"is\",\"set\"],[\"Lead\",\"status\",\"=\",\"Open\"]]",
+		"fields": "[]",
+		"distinct": false
+	},
+	"headers": {},
+	"error_handlers": {},
+	"url": "/api/method/frappe.desk.reportview.get_count"
+}
+```
+### Response Data
+```
+{
+	"exception": "KeyError: 'is'"
+}
+```
+
+
+Full traceback
+
+```
+15:51:01 web.1            | Traceback (most recent call last):
+15:51:01 web.1            |   File "apps/frappe/frappe/app.py", line 67, in application
+15:51:01 web.1            |     response = frappe.api.handle()
+15:51:01 web.1            |   File "apps/frappe/frappe/api.py", line 54, in handle
+15:51:01 web.1            |     return frappe.handler.handle()
+15:51:01 web.1            |   File "apps/frappe/frappe/handler.py", line 38, in handle
+15:51:01 web.1            |     data = execute_cmd(cmd)
+15:51:01 web.1            |   File "apps/frappe/frappe/handler.py", line 76, in execute_cmd
+15:51:01 web.1            |     return frappe.call(method, **frappe.form_dict)
+15:51:01 web.1            |   File "apps/frappe/frappe/__init__.py", line 1503, in call
+15:51:01 web.1            |     return fn(*args, **newargs)
+15:51:01 web.1            |   File "apps/frappe/frappe/__init__.py", line 762, in wrapper_fn
+15:51:01 web.1            |     retval = fn(*args, **get_newargs(fn, kwargs))
+15:51:01 web.1            |   File "apps/frappe/frappe/desk/reportview.py", line 56, in get_count
+15:51:01 web.1            |     data = frappe.db.count(args["doctype"], args["filters"], distinct=distinct)
+15:51:01 web.1            |   File "apps/frappe/frappe/database/database.py", line 1028, in count
+15:51:01 web.1            |     query = self.query.get_sql(table=dt, filters=filters, fields=Count("*"), distinct=distinct)
+15:51:01 web.1            |   File "apps/frappe/frappe/database/query.py", line 317, in get_sql
+15:51:01 web.1            |     criterion = self.build_conditions(table, filters, **kwargs)
+15:51:01 web.1            |   File "apps/frappe/frappe/database/query.py", line 301, in build_conditions
+15:51:01 web.1            |     criterion = self.misc_query(table, filters, **kwargs)
+15:51:01 web.1            |   File "apps/frappe/frappe/database/query.py", line 231, in misc_query
+15:51:01 web.1            |     _operator = OPERATOR_MAP[f[-2]]
+15:51:01 web.1            | KeyError: 'is'
+```
+  </issue>
+  
+  <patch>
+  diff --git a/frappe/database/query.py b/frappe/database/query.py
+index f7393bfa54f3..701286c9894c 100644
+--- a/frappe/database/query.py
++++ b/frappe/database/query.py
+@@ -85,6 +85,11 @@ def func_between(key: Field, value: Union[List, Tuple]) -> frappe.qb:
+ 	return key[slice(*value)]
+ 
+ 
++def func_is(key, value):
++	"Wrapper for IS"
++	return key.isnotnull() if value.lower() == "set" else key.isnull()
++
++
+ def make_function(key: Any, value: Union[int, str]):
+ 	"""returns fucntion query
+ 
+@@ -135,6 +140,7 @@ def change_orderby(order: str):
+ 	"not like": not_like,
+ 	"regex": func_regex,
+ 	"between": func_between,
++	"is": func_is,
+ }
+ 
+ 
+diff --git a/frappe/tests/test_db.py b/frappe/tests/test_db.py
+index 4d105ef28ed8..8ab70445ebea 100644
+--- a/frappe/tests/test_db.py
++++ b/frappe/tests/test_db.py
+@@ -841,3 +841,12 @@ def test_sequence_table_creation(self):
+ 			)
+ 
+ 		dt.delete(ignore_permissions=True)
++
++	def test_is(self):
++		user = frappe.qb.DocType("User")
++		self.assertIn(
++			"is not null", frappe.db.get_values(user, filters={user.name: ("is", "set")}, run=False).lower()
++		)
++		self.assertIn(
++			"is null", frappe.db.get_values(user, filters={user.name: ("is", "not set")}, run=False).lower()
++		)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

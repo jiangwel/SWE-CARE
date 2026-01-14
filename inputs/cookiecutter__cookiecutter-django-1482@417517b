@@ -1,0 +1,172 @@
+  Task-ID: cookiecutter__cookiecutter-django-1482@417517b
+  Please checkout to this commit first: f4cadeec97ef9f00652c27b7f8caff53e31e1ce9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Move to the python:alpine docker image
+The default image we are currently using is super fat (around 700MB) as it is based on a full fletched debian. There's a lot of movement to images based on alpine going on and the official image now supports that too.
+
+Alpine uses musl libc instead of glibc, so that might be a problem for packages that have tight dependencies with libc.
+  </issue>
+  
+  <patch>
+  diff --git a/{{cookiecutter.project_slug}}/compose/local/django/Dockerfile b/{{cookiecutter.project_slug}}/compose/local/django/Dockerfile
+index e62b524a42..e7997187b8 100644
+--- a/{{cookiecutter.project_slug}}/compose/local/django/Dockerfile
++++ b/{{cookiecutter.project_slug}}/compose/local/django/Dockerfile
+@@ -1,7 +1,16 @@
+-FROM python:3.5
++FROM python:3.5-alpine
+ 
+ ENV PYTHONUNBUFFERED 1
+ 
++RUN apk update \
++  # psycopg2 dependencies
++  && apk add --virtual build-deps gcc python3-dev musl-dev \
++  && apk add postgresql-dev \
++  # Pillow dependencies
++  && apk add jpeg-dev zlib-dev freetype-dev lcms2-dev openjpeg-dev tiff-dev tk-dev tcl-dev \
++  # CFFI dependencies
++  && apk add libffi-dev openssl-dev py-cffi
++
+ # Requirements have to be pulled and installed here, otherwise caching won't work
+ COPY ./requirements /requirements
+ RUN pip install -r /requirements/local.txt
+diff --git a/{{cookiecutter.project_slug}}/compose/local/django/celery/beat/start.sh b/{{cookiecutter.project_slug}}/compose/local/django/celery/beat/start.sh
+index c26318b442..0ca8bb507a 100644
+--- a/{{cookiecutter.project_slug}}/compose/local/django/celery/beat/start.sh
++++ b/{{cookiecutter.project_slug}}/compose/local/django/celery/beat/start.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+diff --git a/{{cookiecutter.project_slug}}/compose/local/django/celery/worker/start.sh b/{{cookiecutter.project_slug}}/compose/local/django/celery/worker/start.sh
+index 8b50c8cfd0..4335340de2 100644
+--- a/{{cookiecutter.project_slug}}/compose/local/django/celery/worker/start.sh
++++ b/{{cookiecutter.project_slug}}/compose/local/django/celery/worker/start.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+diff --git a/{{cookiecutter.project_slug}}/compose/local/django/start.sh b/{{cookiecutter.project_slug}}/compose/local/django/start.sh
+index cf4a41667f..50227e19eb 100644
+--- a/{{cookiecutter.project_slug}}/compose/local/django/start.sh
++++ b/{{cookiecutter.project_slug}}/compose/local/django/start.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+diff --git a/{{cookiecutter.project_slug}}/compose/production/django/Dockerfile b/{{cookiecutter.project_slug}}/compose/production/django/Dockerfile
+index fcbe518446..4451989601 100644
+--- a/{{cookiecutter.project_slug}}/compose/production/django/Dockerfile
++++ b/{{cookiecutter.project_slug}}/compose/production/django/Dockerfile
+@@ -1,9 +1,18 @@
+-FROM python:3.5
++FROM python:3.5-alpine
+ 
+ ENV PYTHONUNBUFFERED 1
+ 
+-RUN groupadd -r django \
+-    && useradd -r -g django django
++RUN apk update \
++  # psycopg2 dependencies
++  && apk add --virtual build-deps gcc python3-dev musl-dev \
++  && apk add postgresql-dev \
++  # Pillow dependencies
++  && apk add jpeg-dev zlib-dev freetype-dev lcms2-dev openjpeg-dev tiff-dev tk-dev tcl-dev \
++  # CFFI dependencies
++  && apk add libffi-dev openssl-dev py-cffi
++
++RUN addgroup -S django \
++    && adduser -S -G django django
+ 
+ # Requirements have to be pulled and installed here, otherwise caching won't work
+ COPY ./requirements /requirements
+diff --git a/{{cookiecutter.project_slug}}/compose/production/django/celery/beat/start.sh b/{{cookiecutter.project_slug}}/compose/production/django/celery/beat/start.sh
+index 845db0a3d9..def83076c3 100644
+--- a/{{cookiecutter.project_slug}}/compose/production/django/celery/beat/start.sh
++++ b/{{cookiecutter.project_slug}}/compose/production/django/celery/beat/start.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+diff --git a/{{cookiecutter.project_slug}}/compose/production/django/celery/worker/start.sh b/{{cookiecutter.project_slug}}/compose/production/django/celery/worker/start.sh
+index 4529aad925..10f0d20c5a 100644
+--- a/{{cookiecutter.project_slug}}/compose/production/django/celery/worker/start.sh
++++ b/{{cookiecutter.project_slug}}/compose/production/django/celery/worker/start.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+diff --git a/{{cookiecutter.project_slug}}/compose/production/django/entrypoint.sh b/{{cookiecutter.project_slug}}/compose/production/django/entrypoint.sh
+index 3b83c7bb66..a40a2b7e43 100644
+--- a/{{cookiecutter.project_slug}}/compose/production/django/entrypoint.sh
++++ b/{{cookiecutter.project_slug}}/compose/production/django/entrypoint.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+@@ -25,7 +25,7 @@ export DATABASE_URL=postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$
+ export CELERY_BROKER_URL=$REDIS_URL/0
+ {% endif %}
+ 
+-function postgres_ready(){
++postgres_ready() {
+ python << END
+ import sys
+ import psycopg2
+diff --git a/{{cookiecutter.project_slug}}/compose/production/django/gunicorn.sh b/{{cookiecutter.project_slug}}/compose/production/django/gunicorn.sh
+index 25da06496d..8846cafb28 100644
+--- a/{{cookiecutter.project_slug}}/compose/production/django/gunicorn.sh
++++ b/{{cookiecutter.project_slug}}/compose/production/django/gunicorn.sh
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env bash
++#!/bin/sh
+ 
+ set -o errexit
+ set -o pipefail
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,453 @@
+  Task-ID: huggingface__datasets-2182@748e2e9
+  Please checkout to this commit first: a0aef983f5351c46cf0559df55cb9a5467423d0a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Load small datasets in-memory instead of using memory map
+Currently all datasets are loaded using memory mapping by default in `load_dataset`.
+However this might not be necessary for small datasets. If a dataset is small enough, then it can be loaded in-memory and:
+- its memory footprint would be small so it's ok
+- in-memory computations/queries would be faster
+- the caching on-disk would be disabled, making computations even faster (no I/O bound because of the disk)
+- but running the same computation a second time would recompute everything since there would be no cached results on-disk. But this is probably fine since computations would be fast anyway + users should be able to provide a cache filename if needed.
+
+Therefore, maybe the default behavior of `load_dataset` should be to load small datasets in-memory and big datasets using memory mapping.
+  </issue>
+  
+  <patch>
+  diff --git a/docs/source/loading_datasets.rst b/docs/source/loading_datasets.rst
+index 8d418eb01a0..d4840ed2d81 100644
+--- a/docs/source/loading_datasets.rst
++++ b/docs/source/loading_datasets.rst
+@@ -28,15 +28,15 @@ All the datasets currently available on the `Hub <https://huggingface.co/dataset
+     656
+     >>> print(', '.join(dataset for dataset in datasets_list))
+     aeslc, ag_news, ai2_arc, allocine, anli, arcd, art, billsum, blended_skill_talk, blimp, blog_authorship_corpus, bookcorpus, boolq, break_data,
+-    c4, cfq, civil_comments, cmrc2018, cnn_dailymail, coarse_discourse, com_qa, commonsense_qa, compguesswhat, coqa, cornell_movie_dialog, cos_e, 
+-    cosmos_qa, crime_and_punish, csv, definite_pronoun_resolution, discofuse, docred, drop, eli5, empathetic_dialogues, eraser_multi_rc, esnli, 
+-    event2Mind, fever, flores, fquad, gap, germeval_14, ghomasHudson/cqc, gigaword, glue, hansards, hellaswag, hyperpartisan_news_detection, 
+-    imdb, jeopardy, json, k-halid/ar, kor_nli, lc_quad, lhoestq/c4, librispeech_lm, lm1b, math_dataset, math_qa, mlqa, movie_rationales, 
+-    multi_news, multi_nli, multi_nli_mismatch, mwsc, natural_questions, newsroom, openbookqa, opinosis, pandas, para_crawl, pg19, piaf, qa4mre, 
+-    qa_zre, qangaroo, qanta, qasc, quarel, quartz, quoref, race, reclor, reddit, reddit_tifu, rotten_tomatoes, scan, scicite, scientific_papers, 
+-    scifact, sciq, scitail, sentiment140, snli, social_i_qa, squad, squad_es, squad_it, squad_v1_pt, squad_v2, squadshifts, super_glue, ted_hrlr, 
+-    ted_multi, tiny_shakespeare, trivia_qa, tydiqa, ubuntu_dialogs_corpus, webis/tl_dr, wiki40b, wiki_dpr, wiki_qa, wiki_snippets, wiki_split, 
+-    wikihow, wikipedia, wikisql, wikitext, winogrande, wiqa, wmt14, wmt15, wmt16, wmt17, wmt18, wmt19, wmt_t2t, wnut_17, x_stance, xcopa, xnli, 
++    c4, cfq, civil_comments, cmrc2018, cnn_dailymail, coarse_discourse, com_qa, commonsense_qa, compguesswhat, coqa, cornell_movie_dialog, cos_e,
++    cosmos_qa, crime_and_punish, csv, definite_pronoun_resolution, discofuse, docred, drop, eli5, empathetic_dialogues, eraser_multi_rc, esnli,
++    event2Mind, fever, flores, fquad, gap, germeval_14, ghomasHudson/cqc, gigaword, glue, hansards, hellaswag, hyperpartisan_news_detection,
++    imdb, jeopardy, json, k-halid/ar, kor_nli, lc_quad, lhoestq/c4, librispeech_lm, lm1b, math_dataset, math_qa, mlqa, movie_rationales,
++    multi_news, multi_nli, multi_nli_mismatch, mwsc, natural_questions, newsroom, openbookqa, opinosis, pandas, para_crawl, pg19, piaf, qa4mre,
++    qa_zre, qangaroo, qanta, qasc, quarel, quartz, quoref, race, reclor, reddit, reddit_tifu, rotten_tomatoes, scan, scicite, scientific_papers,
++    scifact, sciq, scitail, sentiment140, snli, social_i_qa, squad, squad_es, squad_it, squad_v1_pt, squad_v2, squadshifts, super_glue, ted_hrlr,
++    ted_multi, tiny_shakespeare, trivia_qa, tydiqa, ubuntu_dialogs_corpus, webis/tl_dr, wiki40b, wiki_dpr, wiki_qa, wiki_snippets, wiki_split,
++    wikihow, wikipedia, wikisql, wikitext, winogrande, wiqa, wmt14, wmt15, wmt16, wmt17, wmt18, wmt19, wmt_t2t, wnut_17, x_stance, xcopa, xnli,
+     xquad, xsum, xtreme, yelp_polarity
+ 
+ 
+@@ -61,7 +61,14 @@ This call to :func:`datasets.load_dataset` does the following steps under the ho
+ 
+ .. note::
+ 
+-    An Apache Arrow Table is the internal storing format for 🤗Datasets. It allows to store arbitrarily long dataframe, typed with potentially complex nested types that can be mapped to numpy/pandas/python types. Apache Arrow allows you to map blobs of data on-drive without doing any deserialization. So caching the dataset directly on disk can use memory-mapping and pay effectively zero cost with O(1) random access. The default in 🤗Datasets is thus to always memory-map dataset on drive.
++    An Apache Arrow Table is the internal storing format for 🤗Datasets. It allows to store arbitrarily long dataframe,
++    typed with potentially complex nested types that can be mapped to numpy/pandas/python types. Apache Arrow allows you
++    to map blobs of data on-drive without doing any deserialization. So caching the dataset directly on disk can use
++    memory-mapping and pay effectively zero cost with O(1) random access. Alternatively, you can copy it in CPU memory
++    (RAM) by setting the ``keep_in_memory`` argument of :func:`datasets.load_datasets` to ``True``.
++    The default in 🤗Datasets is to memory-map the dataset on drive if its size is larger than
++    ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES`` (default ``250`` MiB); otherwise, the dataset is copied
++    in-memory. This behavior can be disabled by setting ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = None``.
+ 
+ 3. Return a **dataset built from the splits** asked by the user (default: all); in the above example we create a dataset with the train split.
+ 
+@@ -129,7 +136,7 @@ After you've downloaded the files, you can point to the folder hosting them loca
+ 
+     >>> dataset = load_dataset("xtreme", "PAN-X.fr")
+     Downloading and preparing dataset xtreme/PAN-X.fr (download: Unknown size, generated: 5.80 MiB, total: 5.80 MiB) to /Users/thomwolf/.cache/huggingface/datasets/xtreme/PAN-X.fr/1.0.0...
+-    AssertionError: The dataset xtreme with config PAN-X.fr requires manual data. 
++    AssertionError: The dataset xtreme with config PAN-X.fr requires manual data.
+     Please follow the manual download instructions: You need to manually download the AmazonPhotos.zip file on Amazon Cloud Drive (https://www.amazon.com/clouddrive/share/d3KGCRCIYwhKJF0H3eWA26hjg2ZCRhjpEQtDL70FSBN). The folder containing the saved file can be used to load the dataset via 'datasets.load_dataset("xtreme", data_dir="<path/to/folder>")'
+ 
+ 
+@@ -167,7 +174,7 @@ Let's see an example of all the various ways you can provide files to :func:`dat
+     >>> from datasets import load_dataset
+     >>> dataset = load_dataset('csv', data_files='my_file.csv')
+     >>> dataset = load_dataset('csv', data_files=['my_file_1.csv', 'my_file_2.csv', 'my_file_3.csv'])
+-    >>> dataset = load_dataset('csv', data_files={'train': ['my_train_file_1.csv', 'my_train_file_2.csv'], 
++    >>> dataset = load_dataset('csv', data_files={'train': ['my_train_file_1.csv', 'my_train_file_2.csv'],
+                                                   'test': 'my_test_file.csv'})
+ 
+ .. note::
+@@ -384,7 +391,7 @@ The following table describes the three available modes for download:
+    * - ``"reuse_cache_if_exists"``
+      - Reuse
+      - Fresh
+-   * - ``"force_redownload"``  
++   * - ``"force_redownload"``
+      - Fresh
+      - Fresh
+ 
+diff --git a/src/datasets/arrow_dataset.py b/src/datasets/arrow_dataset.py
+index 0fa5e7f4ea4..0766f541509 100644
+--- a/src/datasets/arrow_dataset.py
++++ b/src/datasets/arrow_dataset.py
+@@ -59,6 +59,7 @@
+ from .table import InMemoryTable, MemoryMappedTable, Table, concat_tables, list_table_cache_files
+ from .utils import map_nested
+ from .utils.deprecation_utils import deprecated
++from .utils.info_utils import is_small_dataset
+ from .utils.logging import WARNING, get_logger, get_verbosity, set_verbosity_warning
+ from .utils.typing import PathLike
+ 
+@@ -621,7 +622,7 @@ def save_to_disk(self, dataset_path: str, fs=None):
+         logger.info("Dataset saved in {}".format(dataset_path))
+ 
+     @staticmethod
+-    def load_from_disk(dataset_path: str, fs=None, keep_in_memory=False) -> "Dataset":
++    def load_from_disk(dataset_path: str, fs=None, keep_in_memory: Optional[bool] = None) -> "Dataset":
+         """
+         Loads a dataset that was previously saved using :meth:`save_to_disk` from a dataset directory, or from a
+         filesystem using either :class:`~filesystems.S3FileSystem` or any implementation of ``fsspec.spec.AbstractFileSystem``.
+@@ -631,7 +632,10 @@ def load_from_disk(dataset_path: str, fs=None, keep_in_memory=False) -> "Dataset
+                 the dataset directory where the dataset will be loaded from.
+             fs (:class:`~filesystems.S3FileSystem`, ``fsspec.spec.AbstractFileSystem``, optional, default ``None``):
+                 Instance of the remote filesystem used to download the files from.
+-            keep_in_memory (:obj:`bool`, default ``False``): Whether to copy the data in-memory.
++            keep_in_memory (:obj:`bool`, default ``None``): Whether to copy the dataset in-memory. If `None`, the
++                dataset will be copied in-memory if its size is smaller than
++                `datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES` (default `250 MiB`). This behavior can be
++                disabled by setting ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = None``.
+ 
+         Returns:
+             :class:`Dataset` or :class:`DatasetDict`.
+@@ -652,6 +656,7 @@ def load_from_disk(dataset_path: str, fs=None, keep_in_memory=False) -> "Dataset
+         with open(Path(dataset_path, DATASET_INFO_FILENAME).as_posix(), "r", encoding="utf-8") as dataset_info_file:
+             dataset_info = DatasetInfo.from_dict(json.load(dataset_info_file))
+ 
++        keep_in_memory = keep_in_memory if keep_in_memory is not None else is_small_dataset(dataset_info.dataset_size)
+         table_cls = InMemoryTable if keep_in_memory else MemoryMappedTable
+         arrow_table = concat_tables(
+             table_cls.from_file(Path(dataset_path, data_file["filename"]).as_posix())
+diff --git a/src/datasets/config.py b/src/datasets/config.py
+index 46ea82caea1..4239248fa77 100644
+--- a/src/datasets/config.py
++++ b/src/datasets/config.py
+@@ -148,8 +148,10 @@
+ else:
+     HF_DATASETS_OFFLINE = False
+ 
+-# File names
++# In-memory
++MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = 250 * 2 ** 20  # 250 MiB
+ 
++# File names
+ DATASET_ARROW_FILENAME = "dataset.arrow"
+ DATASET_INDICES_FILENAME = "indices.arrow"
+ DATASET_STATE_JSON_FILENAME = "state.json"
+diff --git a/src/datasets/dataset_dict.py b/src/datasets/dataset_dict.py
+index ed181c7b28b..3769e70af6b 100644
+--- a/src/datasets/dataset_dict.py
++++ b/src/datasets/dataset_dict.py
+@@ -673,20 +673,24 @@ def save_to_disk(self, dataset_dict_path: str, fs=None):
+             dataset.save_to_disk(Path(dest_dataset_dict_path, k).as_posix(), fs)
+ 
+     @staticmethod
+-    def load_from_disk(dataset_dict_path: str, fs=None, keep_in_memory=False) -> "DatasetDict":
++    def load_from_disk(dataset_dict_path: str, fs=None, keep_in_memory: Optional[bool] = None) -> "DatasetDict":
+         """
+-        Loads a dataset that was previously saved using :meth:`save_to_disk` from a filesystem using either
++        Load a dataset that was previously saved using :meth:`save_to_disk` from a filesystem using either
+         :class:`~filesystems.S3FileSystem` or ``fsspec.spec.AbstractFileSystem``.
+ 
+         Args:
+-            dataset_dict_path (``str``): Path (e.g. `dataset/train`) or remote URI (e.g. `s3//my-bucket/dataset/train`)
+-                of the dataset dict directory where the dataset dict will be loaded from.
+-            fs (:class:`~filesystems.S3FileSystem`, ``fsspec.spec.AbstractFileSystem``, optional, defaults ``None``):
++            dataset_dict_path (:obj:`str`): Path (e.g. ``"dataset/train"``) or remote URI (e.g.
++                ``"s3//my-bucket/dataset/train"``) of the dataset dict directory where the dataset dict will be loaded
++                from.
++            fs (:class:`~filesystems.S3FileSystem` or ``fsspec.spec.AbstractFileSystem``, optional, default ``None``):
+                 Instance of the remote filesystem used to download the files from.
+-            keep_in_memory (``bool``, default False): Whether to copy the data in-memory.
++            keep_in_memory (:obj:`bool`, default ``None``): Whether to copy the dataset in-memory. If `None`, the
++                dataset will be copied in-memory if its size is smaller than
++                `datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES` (default `250 MiB`). This behavior can be
++                disabled by setting ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = None``.
+ 
+         Returns:
+-            :class:`DatasetDict`.
++            :class:`DatasetDict`
+         """
+         dataset_dict = DatasetDict()
+         if is_remote_filesystem(fs):
+diff --git a/src/datasets/load.py b/src/datasets/load.py
+index a32067b0dd8..bafaa436871 100644
+--- a/src/datasets/load.py
++++ b/src/datasets/load.py
+@@ -52,6 +52,7 @@
+     url_or_path_parent,
+ )
+ from .utils.filelock import FileLock
++from .utils.info_utils import is_small_dataset
+ from .utils.logging import get_logger
+ from .utils.version import Version
+ 
+@@ -635,13 +636,13 @@ def load_dataset(
+     download_config: Optional[DownloadConfig] = None,
+     download_mode: Optional[GenerateMode] = None,
+     ignore_verifications: bool = False,
+-    keep_in_memory: bool = False,
++    keep_in_memory: Optional[bool] = None,
+     save_infos: bool = False,
+     script_version: Optional[Union[str, Version]] = None,
+     use_auth_token: Optional[Union[bool, str]] = None,
+     **config_kwargs,
+ ) -> Union[DatasetDict, Dataset]:
+-    r"""Load a dataset
++    """Load a dataset.
+ 
+     This method does the following under the hood:
+ 
+@@ -684,7 +685,10 @@ def load_dataset(
+         download_config (:class:`~utils.DownloadConfig`, optional): Specific download configuration parameters.
+         download_mode (:class:`GenerateMode`, optional): Select the download/generate mode - Default to REUSE_DATASET_IF_EXISTS
+         ignore_verifications (:obj:`bool`, default ``False``): Ignore the verifications of the downloaded/processed dataset information (checksums/size/splits/...).
+-        keep_in_memory (:obj:`bool`, default ``False``): Whether to copy the data in-memory.
++        keep_in_memory (:obj:`bool`, default ``None``): Whether to copy the dataset in-memory. If `None`, the
++            dataset will be copied in-memory if its size is smaller than
++            `datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES` (default `250 MiB`). This behavior can be disabled by
++            setting ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = None``.
+         save_infos (:obj:`bool`, default ``False``): Save the dataset information (checksums/size/splits/...).
+         script_version (:class:`~utils.Version` or :obj:`str`, optional): Version of the dataset script to load:
+ 
+@@ -692,8 +696,8 @@ def load_dataset(
+               You can specify a different version from your local version of the lib (e.g. "master" or "1.2.0") but it might cause compatibility issues.
+             - For community provided datasets like "lhoestq/squad" that have their own git repository on the Datasets Hub, the default version "main" corresponds to the "main" branch.
+               You can specify a different version that the default "main" by using a commit sha or a git tag of the dataset repository.
+-        use_auth_token (Optional ``Union[str, bool]``): Optional string or boolean to use as Bearer token for remote files on the Datasets Hub.
+-            If True, will get token from `~/.huggingface`.
++        use_auth_token (``str`` or ``bool``, optional): Optional string or boolean to use as Bearer token for remote files on the Datasets Hub.
++            If True, will get token from `"~/.huggingface"`.
+         **config_kwargs: Keyword arguments to be passed to the :class:`BuilderConfig` and used in the :class:`DatasetBuilder`.
+ 
+     Returns:
+@@ -748,6 +752,9 @@ def load_dataset(
+     )
+ 
+     # Build dataset for splits
++    keep_in_memory = (
++        keep_in_memory if keep_in_memory is not None else is_small_dataset(builder_instance.info.dataset_size)
++    )
+     ds = builder_instance.as_dataset(split=split, ignore_verifications=ignore_verifications, in_memory=keep_in_memory)
+     if save_infos:
+         builder_instance._save_infos()
+@@ -755,13 +762,20 @@ def load_dataset(
+     return ds
+ 
+ 
+-def load_from_disk(dataset_path: str, fs=None, keep_in_memory=False) -> Union[Dataset, DatasetDict]:
++def load_from_disk(dataset_path: str, fs=None, keep_in_memory: Optional[bool] = None) -> Union[Dataset, DatasetDict]:
+     """
+     Loads a dataset that was previously saved using ``dataset.save_to_disk(dataset_path)`` from a dataset directory, or from a filesystem using either :class:`datasets.filesystems.S3FileSystem` or any implementation of ``fsspec.spec.AbstractFileSystem``.
+ 
+     Args:
+-        dataset_path (``str``): path (e.g. ``dataset/train``) or remote uri (e.g. ``s3://my-bucket/dataset/train``) of the Dataset or DatasetDict directory where the dataset will be loaded from
+-        fs (Optional[:class:`datasets.filesystems.S3FileSystem`,``fsspec.spec.AbstractFileSystem``],  `optional`, defaults ``None``): instance of :class:`datasets.filesystems.S3FileSystem` or ``fsspec.spec.AbstractFileSystem`` used to download the files from remote filesystem.
++        dataset_path (:obj:`str`): Path (e.g. ``"dataset/train"``) or remote uri (e.g.
++            ``"s3://my-bucket/dataset/train"``) of the Dataset or DatasetDict directory where the dataset will be
++            loaded from.
++        fs (:class:`~filesystems.S3FileSystem` or ``fsspec.spec.AbstractFileSystem``, optional, default ``None``):
++            Instance of of the remote filesystem used to download the files from.
++        keep_in_memory (:obj:`bool`, default ``None``): Whether to copy the dataset in-memory. If `None`, the
++            dataset will be copied in-memory if its size is smaller than
++            `datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES` (default `250 MiB`). This behavior can be disabled by
++            setting ``datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES = None``.
+ 
+     Returns:
+         ``datasets.Dataset`` or ``datasets.DatasetDict``
+diff --git a/src/datasets/utils/info_utils.py b/src/datasets/utils/info_utils.py
+index 37967bfd23f..c2529a70fdf 100644
+--- a/src/datasets/utils/info_utils.py
++++ b/src/datasets/utils/info_utils.py
+@@ -2,6 +2,7 @@
+ from hashlib import sha256
+ from typing import Optional
+ 
++from .. import config
+ from .logging import get_logger
+ 
+ 
+@@ -81,3 +82,18 @@ def get_size_checksum_dict(path: str) -> dict:
+         for chunk in iter(lambda: f.read(1 << 20), b""):
+             m.update(chunk)
+     return {"num_bytes": os.path.getsize(path), "checksum": m.hexdigest()}
++
++
++def is_small_dataset(dataset_size):
++    """Check if `dataset_size` is smaller than `config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES`.
++
++    Args:
++        dataset_size (int): Dataset size in bytes.
++
++    Returns:
++        bool: Whether `dataset_size` is smaller than `config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES`.
++    """
++    if dataset_size and config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES is not None:
++        return dataset_size < config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES
++    else:
++        return False
+diff --git a/tests/test_dataset_common.py b/tests/test_dataset_common.py
+index 00ef255efb5..e0ff52cc618 100644
+--- a/tests/test_dataset_common.py
++++ b/tests/test_dataset_common.py
+@@ -408,12 +408,24 @@ def test_caching(self):
+             open(os.path.join(tmp_dir, "text.txt"), "w", encoding="utf-8").write(
+                 "\n".join("foo" for _ in range(n_samples))
+             )
+-            ds = load_dataset("text", data_files=os.path.join(tmp_dir, "text.txt"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "text",
++                data_files=os.path.join(tmp_dir, "text.txt"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             data_file = ds.cache_files[0]["filename"]
+             fingerprint = ds._fingerprint
+             self.assertEqual(len(ds), n_samples)
+             del ds
+-            ds = load_dataset("text", data_files=os.path.join(tmp_dir, "text.txt"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "text",
++                data_files=os.path.join(tmp_dir, "text.txt"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             self.assertEqual(ds.cache_files[0]["filename"], data_file)
+             self.assertEqual(ds._fingerprint, fingerprint)
+             del ds
+@@ -421,7 +433,13 @@ def test_caching(self):
+             open(os.path.join(tmp_dir, "text.txt"), "w", encoding="utf-8").write(
+                 "\n".join("bar" for _ in range(n_samples))
+             )
+-            ds = load_dataset("text", data_files=os.path.join(tmp_dir, "text.txt"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "text",
++                data_files=os.path.join(tmp_dir, "text.txt"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             self.assertNotEqual(ds.cache_files[0]["filename"], data_file)
+             self.assertNotEqual(ds._fingerprint, fingerprint)
+             self.assertEqual(len(ds), n_samples)
+@@ -440,12 +458,24 @@ def test_caching(self):
+             open(os.path.join(tmp_dir, "table.csv"), "w", encoding="utf-8").write(
+                 "\n".join(",".join(["foo", "bar"]) for _ in range(n_rows + 1))
+             )
+-            ds = load_dataset("csv", data_files=os.path.join(tmp_dir, "table.csv"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "csv",
++                data_files=os.path.join(tmp_dir, "table.csv"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             data_file = ds.cache_files[0]["filename"]
+             fingerprint = ds._fingerprint
+             self.assertEqual(len(ds), n_rows)
+             del ds
+-            ds = load_dataset("csv", data_files=os.path.join(tmp_dir, "table.csv"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "csv",
++                data_files=os.path.join(tmp_dir, "table.csv"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             self.assertEqual(ds.cache_files[0]["filename"], data_file)
+             self.assertEqual(ds._fingerprint, fingerprint)
+             del ds
+@@ -455,6 +485,7 @@ def test_caching(self):
+                 cache_dir=tmp_dir,
+                 split="train",
+                 features=features,
++                keep_in_memory=False,
+             )
+             self.assertNotEqual(ds.cache_files[0]["filename"], data_file)
+             self.assertNotEqual(ds._fingerprint, fingerprint)
+@@ -463,7 +494,13 @@ def test_caching(self):
+             open(os.path.join(tmp_dir, "table.csv"), "w", encoding="utf-8").write(
+                 "\n".join(",".join(["Foo", "Bar"]) for _ in range(n_rows + 1))
+             )
+-            ds = load_dataset("csv", data_files=os.path.join(tmp_dir, "table.csv"), cache_dir=tmp_dir, split="train")
++            ds = load_dataset(
++                "csv",
++                data_files=os.path.join(tmp_dir, "table.csv"),
++                cache_dir=tmp_dir,
++                split="train",
++                keep_in_memory=False,
++            )
+             self.assertNotEqual(ds.cache_files[0]["filename"], data_file)
+             self.assertNotEqual(ds._fingerprint, fingerprint)
+             self.assertEqual(len(ds), n_rows)
+diff --git a/tests/test_info_utils.py b/tests/test_info_utils.py
+new file mode 100644
+index 00000000000..489fde5fa48
+--- /dev/null
++++ b/tests/test_info_utils.py
+@@ -0,0 +1,20 @@
++import pytest
++
++import datasets.config
++from datasets.utils.info_utils import is_small_dataset
++
++
++@pytest.mark.parametrize("dataset_size", [None, 400 * 2 ** 20, 600 * 2 ** 20])
++@pytest.mark.parametrize("max_in_memory_dataset_size", ["default", None, 0, 100 * 2 ** 20, 900 * 2 ** 20])
++def test_is_small_dataset(dataset_size, max_in_memory_dataset_size, monkeypatch):
++    if max_in_memory_dataset_size == "default":
++        # default = 250 * 2 ** 20
++        max_in_memory_dataset_size = datasets.config.MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES
++    else:
++        monkeypatch.setattr(datasets.config, "MAX_IN_MEMORY_DATASET_SIZE_IN_BYTES", max_in_memory_dataset_size)
++    if dataset_size is None or max_in_memory_dataset_size is None:
++        expected = False
++    else:
++        expected = dataset_size < max_in_memory_dataset_size
++    result = is_small_dataset(dataset_size)
++    assert result == expected
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

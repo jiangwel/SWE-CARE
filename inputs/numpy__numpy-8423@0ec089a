@@ -1,0 +1,339 @@
+  Task-ID: numpy__numpy-8423@0ec089a
+  Please checkout to this commit first: d5657b9e29a8e00ad8e074bc32c15dec220d766f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: in1d, but preserve shape of ar1
+in1d takes two arrays, `ar1` and `ar2`, and returns a 1d array with the same number of elements as `ar1`. The logical extension would be a function that does the same thing but returns a (possibly multi-dimensional) array of the same shape as `ar1`. Effectively, it would be equivalent to this:
+
+    def in(ar1, ar2, **kwargs):
+      return np.in1d(ar1, ar2, **kwargs).reshape(ar1.shape)
+
+although it might be implemented differently.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/release/1.13.0-notes.rst b/doc/release/1.13.0-notes.rst
+index 0c9d743f65dd..86e55fafae38 100644
+--- a/doc/release/1.13.0-notes.rst
++++ b/doc/release/1.13.0-notes.rst
+@@ -111,6 +111,12 @@ In an N-dimensional array, the user can now choose the axis along which to look
+ for duplicate N-1-dimensional elements using ``numpy.unique``. The original
+ behaviour is recovered if ``axis=None`` (default).
+ 
++``isin`` function, improving on ``in1d``
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++The new function ``isin`` tests whether elements in an array are also present 
++in another array, preserving the shape of the first array. It builds on 
++the existing ``in1d`` routine. 
++                                        
+ ``np.gradient`` now supports unevenly spaced data
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ Users can now specify a not-constant spacing for data. 
+diff --git a/doc/source/reference/routines.set.rst b/doc/source/reference/routines.set.rst
+index 27c6aeb89829..0089fb3e919e 100644
+--- a/doc/source/reference/routines.set.rst
++++ b/doc/source/reference/routines.set.rst
+@@ -17,6 +17,7 @@ Boolean operations
+ 
+    in1d
+    intersect1d
++   isin   
+    setdiff1d
+    setxor1d
+    union1d
+diff --git a/numpy/add_newdocs.py b/numpy/add_newdocs.py
+index cf4af9f8410c..827da89c54d5 100644
+--- a/numpy/add_newdocs.py
++++ b/numpy/add_newdocs.py
+@@ -1500,7 +1500,7 @@ def luf(lamdaexpr, *args, **kwargs):
+     Find the indices of elements of `x` that are in `goodvalues`.
+ 
+     >>> goodvalues = [3, 4, 7]
+-    >>> ix = np.in1d(x.ravel(), goodvalues).reshape(x.shape)
++    >>> ix = np.isin(x, goodvalues)
+     >>> ix
+     array([[False, False, False],
+            [ True,  True, False],
+diff --git a/numpy/lib/arraysetops.py b/numpy/lib/arraysetops.py
+index fae3e3cbce17..0ee7cd118021 100644
+--- a/numpy/lib/arraysetops.py
++++ b/numpy/lib/arraysetops.py
+@@ -1,9 +1,10 @@
+ """
+-Set operations for 1D numeric arrays based on sorting.
++Set operations for arrays based on sorting.
+ 
+ :Contains:
+-  ediff1d,
+   unique,
++  isin,
++  ediff1d,
+   intersect1d,
+   setxor1d,
+   in1d,
+@@ -31,7 +32,7 @@
+ 
+ __all__ = [
+     'ediff1d', 'intersect1d', 'setxor1d', 'union1d', 'setdiff1d', 'unique',
+-    'in1d'
++    'in1d', 'isin'
+     ]
+ 
+ 
+@@ -380,6 +381,7 @@ def setxor1d(ar1, ar2, assume_unique=False):
+     flag2 = flag[1:] == flag[:-1]
+     return aux[flag2]
+ 
++
+ def in1d(ar1, ar2, assume_unique=False, invert=False):
+     """
+     Test whether each element of a 1-D array is also present in a second array.
+@@ -411,6 +413,8 @@ def in1d(ar1, ar2, assume_unique=False, invert=False):
+ 
+     See Also
+     --------
++    isin                  : Version of this function that preserves the
++                            shape of ar1.
+     numpy.lib.arraysetops : Module with a number of other functions for
+                             performing set operations on arrays.
+ 
+@@ -481,6 +485,59 @@ def in1d(ar1, ar2, assume_unique=False, invert=False):
+     else:
+         return ret[rev_idx]
+ 
++
++def isin(elements, test_elements, **kwargs):
++    """
++    Test whether each element of an array is also present in a second array.
++    Returns a boolean array of the same shape as `elements` that is True
++    where an element of `elements` is in `test_elements` and False otherwise.
++
++    Parameters
++    ----------
++    elements : array_like
++        Input array.
++    test_elements : iterable
++        The values against which to test each value of `elements`.
++        This argument is flattened if it is an array or array_like.
++    **kwargs: Keyword arguments passed to `in1d`.
++
++    Returns
++    -------
++    isin : ndarray, bool
++        Has the same shape as `elements`. The values `elements[isin]`
++        are in `test_elements`.
++
++    See Also
++    --------
++    in1d                  : Flattened version of this function.
++    numpy.lib.arraysetops : Module with a number of other functions for
++                            performing set operations on arrays.
++    Notes
++    -----
++    .. versionadded:: 1.13.0
++
++    Examples
++    --------
++    >>> elements = np.array([[0, 2], [4, 6]])
++    >>> test_elements = {1, 2, 4, 8}
++    >>> mask = np.isin(elements, test_elements)
++    >>> mask
++    array([[ False,  True],
++           [ True,  False]], dtype=bool)
++    >>> elements[mask]
++    array([2, 4])
++    >>> mask = np.isin(elements, test_elements, invert=True)
++    >>> mask
++    array([[ True, False],
++           [ False, True]], dtype=bool)
++    >>> elements[mask]
++    array([0, 6])"""
++    elements = np.array(elements)
++    if has_attr(test_elements, '__iter__') and not has_attr(test_elements, '__getitem__'):
++        test_elements = np.array([i for i in test_elements])
++    return in1d(elements, test_elements, **kwargs).reshape(elements.shape)
++
++
+ def union1d(ar1, ar2):
+     """
+     Find the union of two arrays.
+diff --git a/numpy/lib/info.py b/numpy/lib/info.py
+index 141df2ace8aa..c2b5ae9d653f 100644
+--- a/numpy/lib/info.py
++++ b/numpy/lib/info.py
+@@ -147,6 +147,8 @@
+ setxor1d         Set exclusive-or of 1D arrays with unique elements.
+ in1d             Test whether elements in a 1D array are also present in
+                  another array.
++isin             Test whether elements in an array are also present in
++                 another array, preserving shape of first array.
+ union1d          Union of 1D arrays with unique elements.
+ setdiff1d        Set difference of 1D arrays with unique elements.
+ ================ ===================
+diff --git a/numpy/lib/tests/test_arraysetops.py b/numpy/lib/tests/test_arraysetops.py
+index eb4cca0ceec2..07783f78e73a 100644
+--- a/numpy/lib/tests/test_arraysetops.py
++++ b/numpy/lib/tests/test_arraysetops.py
+@@ -8,7 +8,7 @@
+     run_module_suite, TestCase, assert_array_equal, assert_equal, assert_raises
+     )
+ from numpy.lib.arraysetops import (
+-    ediff1d, intersect1d, setxor1d, union1d, setdiff1d, unique, in1d
++    ediff1d, intersect1d, setxor1d, union1d, setdiff1d, unique, in1d, isin
+     )
+ 
+ 
+@@ -77,6 +77,23 @@ def test_ediff1d(self):
+         assert(isinstance(ediff1d(np.matrix(1)), np.matrix))
+         assert(isinstance(ediff1d(np.matrix(1), to_begin=1), np.matrix))
+ 
++    def test_isin(self):
++        # the tests for in1d cover most of isin's behavior
++        # if in1d is deprecated, would need to change those tests to test
++        # isin instead.
++        a = np.arange(24).reshape([2, 3, 4])
++        b = [0, 10, 20, 30, 1, 3, 11, 22, 33]
++        ec = np.zeros((2, 3, 4), dtype=bool)
++        ec[0, 0, 0] = True
++        ec[0, 0, 1] = True
++        ec[0, 0, 3] = True
++        ec[0, 2, 2] = True
++        ec[0, 2, 3] = True
++        ec[1, 2, 0] = True
++        ec[1, 2, 2] = True
++        c = isin(a, b)
++        assert_array_equal(c, ec)
++
+     def test_in1d(self):
+         # we use two different sizes for the b array here to test the
+         # two different paths in in1d().
+diff --git a/numpy/ma/extras.py b/numpy/ma/extras.py
+index 69756525193d..0b05fc3b7418 100644
+--- a/numpy/ma/extras.py
++++ b/numpy/ma/extras.py
+@@ -16,7 +16,7 @@
+     'column_stack', 'compress_cols', 'compress_nd', 'compress_rowcols',
+     'compress_rows', 'count_masked', 'corrcoef', 'cov', 'diagflat', 'dot',
+     'dstack', 'ediff1d', 'flatnotmasked_contiguous', 'flatnotmasked_edges',
+-    'hsplit', 'hstack', 'in1d', 'intersect1d', 'mask_cols', 'mask_rowcols',
++    'hsplit', 'hstack', 'isin', 'in1d', 'intersect1d', 'mask_cols', 'mask_rowcols',
+     'mask_rows', 'masked_all', 'masked_all_like', 'median', 'mr_',
+     'notmasked_contiguous', 'notmasked_edges', 'polyfit', 'row_stack',
+     'setdiff1d', 'setxor1d', 'unique', 'union1d', 'vander', 'vstack',
+@@ -1137,6 +1137,7 @@ def setxor1d(ar1, ar2, assume_unique=False):
+     flag2 = (flag[1:] == flag[:-1])
+     return aux[flag2]
+ 
++
+ def in1d(ar1, ar2, assume_unique=False, invert=False):
+     """
+     Test whether each element of an array is also present in a second
+@@ -1146,6 +1147,7 @@ def in1d(ar1, ar2, assume_unique=False, invert=False):
+ 
+     See Also
+     --------
++    isin       : Version of this function that preserves the shape of ar1.
+     numpy.in1d : Equivalent function for ndarrays.
+ 
+     Notes
+@@ -1176,6 +1178,28 @@ def in1d(ar1, ar2, assume_unique=False, invert=False):
+         return flag[indx][rev_idx]
+ 
+ 
++def isin(elements, test_elements, **kwargs):
++    """
++    Test whether each element of an array is also present in a second
++    array.
++
++    The output is always a masked array of the same shape as `elements`.
++    See `numpy.isin` for more details.
++
++    See Also
++    --------
++    in1d       : Flattened version of this function.
++    numpy.isin : Equivalent function for ndarrays.
++
++    Notes
++    -----
++    .. versionadded:: 1.13.0
++
++    """
++    elements = ma.array(elements)
++    return in1d(elements, test_elements, **kwargs).reshape(elements.shape)
++
++
+ def union1d(ar1, ar2):
+     """
+     Union of two arrays.
+diff --git a/numpy/ma/tests/test_extras.py b/numpy/ma/tests/test_extras.py
+index 547a3fb8138a..fb2d39f142aa 100644
+--- a/numpy/ma/tests/test_extras.py
++++ b/numpy/ma/tests/test_extras.py
+@@ -28,7 +28,7 @@
+     median, average, unique, setxor1d, setdiff1d, union1d, intersect1d, in1d,
+     ediff1d, apply_over_axes, apply_along_axis, compress_nd, compress_rowcols,
+     mask_rowcols, clump_masked, clump_unmasked, flatnotmasked_contiguous,
+-    notmasked_contiguous, notmasked_edges, masked_all, masked_all_like,
++    notmasked_contiguous, notmasked_edges, masked_all, masked_all_like, isin,
+     diagflat
+     )
+ import numpy.ma.extras as mae
+@@ -1435,6 +1435,24 @@ def test_setxor1d(self):
+         #
+         assert_array_equal([], setxor1d([], []))
+ 
++    def test_isin(self):
++        # the tests for in1d cover most of isin's behavior
++        # if in1d is deprecated, would need to change those tests to test
++        # isin instead.
++        a = np.arange(24).reshape([2, 3, 4])
++        mask = np.zeros([2, 3, 4])
++        mask[1, 2, 0] = 1
++        a = array(a, mask=mask)
++        #masked:   N   Y   N   Y  N  Y   N   Y   N
++        b = array([0, 10, 20, 30, 1, 3, 11, 22, 33],
++                  mask=[0, 1, 0, 1, 0, 1, 0, 1, 0])
++        ec = zeros((2, 3, 4), dtype=bool)
++        ec[0, 0, 0] = True
++        ec[0, 0, 1] = True
++        ec[0, 2, 3] = True
++        c = isin(a, b)
++        assert_array_equal(c, ec)
++
+     def test_in1d(self):
+         # Test in1d
+         a = array([1, 2, 5, 7, -1], mask=[0, 0, 0, 0, 1])
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

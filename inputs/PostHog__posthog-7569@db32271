@@ -1,0 +1,1976 @@
+  Task-ID: PostHog__posthog-7569@db32271
+  Please checkout to this commit first: 6017a39d7e8a4b66b459c3f8206ba58f197ae87a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Create static cohorts
+## Is your feature request related to a problem?
+
+I want to be able to easily create cohorts from the list of users I got from doing a query.
+
+## Describe the solution you'd like
+
+Everywhere we can currently click on charts to see a list of users should have an option to create a static cohort.
+
+- Insights
+- Retention
+- Funnels (an entire step)
+- Lifecycle
+
+## Describe alternatives you've considered
+
+
+
+## Additional context
+
+
+
+#### *Thank you* for your feature request – we love each and every one!
+  </issue>
+  
+  <patch>
+  diff --git a/ee/clickhouse/queries/actor_base_query.py b/ee/clickhouse/queries/actor_base_query.py
+index dd6026996e3c5..0f216810aa003 100644
+--- a/ee/clickhouse/queries/actor_base_query.py
++++ b/ee/clickhouse/queries/actor_base_query.py
+@@ -48,13 +48,17 @@ class ActorBaseQuery:
+     entity: Optional[Entity] = None
+ 
+     def __init__(
+-        self, team: Team, filter: Union[Filter, StickinessFilter, RetentionFilter], entity: Optional[Entity] = None
++        self,
++        team: Team,
++        filter: Union[Filter, StickinessFilter, RetentionFilter],
++        entity: Optional[Entity] = None,
++        **kwargs
+     ):
+         self._team = team
+         self.entity = entity
+         self._filter = filter
+ 
+-    def actor_query(self) -> Tuple[str, Dict]:
++    def actor_query(self, limit_actors: Optional[bool] = True) -> Tuple[str, Dict]:
+         """ Implemented by subclasses. Must provide query and params. The query must return list of uuids. Can be group uuids (group_key) or person uuids """
+         raise NotImplementedError()
+ 
+diff --git a/ee/clickhouse/queries/funnels/base.py b/ee/clickhouse/queries/funnels/base.py
+index 860512dc791fd..1e8b2a57f2e68 100644
+--- a/ee/clickhouse/queries/funnels/base.py
++++ b/ee/clickhouse/queries/funnels/base.py
+@@ -18,7 +18,13 @@
+ from ee.clickhouse.queries.breakdown_props import format_breakdown_cohort_join_query, get_breakdown_prop_values
+ from ee.clickhouse.queries.funnels.funnel_event_query import FunnelEventQuery
+ from ee.clickhouse.sql.funnels.funnel import FUNNEL_INNER_EVENT_STEPS_QUERY
+-from posthog.constants import FUNNEL_WINDOW_INTERVAL, FUNNEL_WINDOW_INTERVAL_UNIT, LIMIT, TREND_FILTER_TYPE_ACTIONS
++from posthog.constants import (
++    FUNNEL_WINDOW_INTERVAL,
++    FUNNEL_WINDOW_INTERVAL_UNIT,
++    LIMIT,
++    OFFSET,
++    TREND_FILTER_TYPE_ACTIONS,
++)
+ from posthog.models import Entity, Filter, Team
+ from posthog.queries.funnel import Funnel
+ from posthog.utils import relative_date_parse
+@@ -29,7 +35,6 @@ class ClickhouseFunnelBase(ABC, Funnel):
+     _team: Team
+     _include_timestamp: Optional[bool]
+     _include_preceding_timestamp: Optional[bool]
+-    _no_person_limit: Optional[bool]  # used when paths are querying for filter people
+ 
+     def __init__(
+         self,
+@@ -37,7 +42,6 @@ def __init__(
+         team: Team,
+         include_timestamp: Optional[bool] = None,
+         include_preceding_timestamp: Optional[bool] = None,
+-        no_person_limit: Optional[bool] = False,
+         base_uri: str = "/",
+     ) -> None:
+         self._filter = filter
+@@ -66,9 +70,9 @@ def __init__(
+         else:
+             self.params.update({LIMIT: self._filter.limit})
+ 
+-        self._update_filters()
++        self.params.update({OFFSET: self._filter.offset})
+ 
+-        self._no_person_limit = no_person_limit
++        self._update_filters()
+ 
+     def run(self, *args, **kwargs):
+         if len(self._filter.entities) == 0:
+diff --git a/ee/clickhouse/queries/funnels/funnel_correlation.py b/ee/clickhouse/queries/funnels/funnel_correlation.py
+index 79e842eb04cf4..0c969dc45518a 100644
+--- a/ee/clickhouse/queries/funnels/funnel_correlation.py
++++ b/ee/clickhouse/queries/funnels/funnel_correlation.py
+@@ -141,7 +141,6 @@ def __init__(
+             # NOTE: we don't need these as we have all the information we need to
+             # deduce if the person was successful or not
+             include_preceding_timestamp=False,
+-            no_person_limit=True,
+         )
+ 
+     def support_autocapture_elements(self) -> bool:
+@@ -755,7 +754,9 @@ def get_partial_event_contingency_tables(self) -> Tuple[List[EventContingencyTab
+ 
+     def get_funnel_actors_cte(self) -> Tuple[str, Dict[str, Any]]:
+ 
+-        return self._funnel_actors_generator.actor_query(extra_fields=["steps", "final_timestamp", "first_timestamp"])
++        return self._funnel_actors_generator.actor_query(
++            limit_actors=False, extra_fields=["steps", "final_timestamp", "first_timestamp"]
++        )
+ 
+     @staticmethod
+     def are_results_insignificant(event_contingency_table: EventContingencyTable) -> bool:
+diff --git a/ee/clickhouse/queries/funnels/funnel_correlation_persons.py b/ee/clickhouse/queries/funnels/funnel_correlation_persons.py
+index a814c99db5f00..3e25933564dc5 100644
+--- a/ee/clickhouse/queries/funnels/funnel_correlation_persons.py
++++ b/ee/clickhouse/queries/funnels/funnel_correlation_persons.py
+@@ -19,7 +19,7 @@
+ 
+ 
+ class FunnelCorrelationActors:
+-    def __init__(self, filter: Filter, team: Team, base_uri: str = "/") -> None:
++    def __init__(self, filter: Filter, team: Team, base_uri: str = "/", **kwargs) -> None:
+         self._base_uri = base_uri
+         self._filter = filter
+         self._team = team
+@@ -27,6 +27,16 @@ def __init__(self, filter: Filter, team: Team, base_uri: str = "/") -> None:
+         if not self._filter.correlation_person_limit:
+             self._filter = self._filter.with_data({FUNNEL_CORRELATION_PERSON_LIMIT: 100})
+ 
++    def actor_query(self, limit_actors: Optional[bool] = True):
++        if self._filter.correlation_type == FunnelCorrelationType.PROPERTIES:
++            return _FunnelPropertyCorrelationActors(self._filter, self._team, self._base_uri).actor_query(
++                limit_actors=limit_actors
++            )
++        else:
++            return _FunnelEventsCorrelationActors(self._filter, self._team, self._base_uri).actor_query(
++                limit_actors=limit_actors
++            )
++
+     def get_actors(
+         self,
+     ) -> Tuple[Union[QuerySet[Person], QuerySet[Group]], Union[List[SerializedGroup], List[SerializedPerson]]]:
+@@ -47,7 +57,7 @@ def __init__(self, filter: Filter, team: Team, base_uri: str = "/") -> None:
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self, extra_fields: Optional[List[str]] = None):
++    def actor_query(self, limit_actors: Optional[bool] = True):
+ 
+         if not self._filter.correlation_person_entity:
+             raise ValidationError("No entity for persons specified")
+@@ -82,8 +92,8 @@ def actor_query(self, extra_fields: Optional[List[str]] = None):
+                 {conversion_filter}
+                 {prop_query}
+             ORDER BY actor_id
+-            LIMIT {self._filter.correlation_person_limit}
+-            OFFSET {self._filter.correlation_person_offset}
++            {"LIMIT %(limit)s" if limit_actors else ""}
++            {"OFFSET %(offset)s" if limit_actors else ""}
+         """
+ 
+         params = {
+@@ -92,6 +102,8 @@ def actor_query(self, extra_fields: Optional[List[str]] = None):
+             "target_event": self._filter.correlation_person_entity.id,
+             "funnel_step_names": [entity.id for entity in self._filter.events],
+             "target_step": len(self._filter.entities),
++            "limit": self._filter.correlation_person_limit,
++            "offset": self._filter.correlation_person_offset,
+         }
+ 
+         return query, params
+@@ -108,7 +120,7 @@ def __init__(self, filter: Filter, team: Team, base_uri: str = "/") -> None:
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self, extra_fields: Optional[List[str]] = None):
++    def actor_query(self, limit_actors: Optional[bool] = True, extra_fields: Optional[List[str]] = None):
+         if not self._filter.correlation_property_values:
+             raise ValidationError("Property Correlation expects atleast one Property to get persons for")
+ 
+@@ -134,14 +146,16 @@ def actor_query(self, extra_fields: Optional[List[str]] = None):
+             WHERE {conversion_filter}
+             {group_filters}
+             ORDER BY actor_id
+-            LIMIT {self._filter.correlation_person_limit}
+-            OFFSET {self._filter.correlation_person_offset}
++            {"LIMIT %(limit)s" if limit_actors else ""}
++            {"OFFSET %(offset)s" if limit_actors else ""}
+         """
+         params = {
+             **funnel_persons_params,
+             **actor_join_subquery_params,
+             **group_filters_params,
+             "target_step": len(self._filter.entities),
++            "limit": self._filter.correlation_person_limit,
++            "offset": self._filter.correlation_person_offset,
+         }
+ 
+         return query, params
+diff --git a/ee/clickhouse/queries/funnels/funnel_persons.py b/ee/clickhouse/queries/funnels/funnel_persons.py
+index fc7e00824a4eb..dc9384441d9fa 100644
+--- a/ee/clickhouse/queries/funnels/funnel_persons.py
++++ b/ee/clickhouse/queries/funnels/funnel_persons.py
+@@ -15,15 +15,15 @@ class ClickhouseFunnelActors(ClickhouseFunnel, ActorBaseQuery):
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self, extra_fields: Optional[List[str]] = None):
++    def actor_query(self, limit_actors: Optional[bool] = True, extra_fields: Optional[List[str]] = None):
+         extra_fields_string = ", ".join([self._get_timestamp_outer_select()] + (extra_fields or []))
+         return (
+             FUNNEL_PERSONS_BY_STEP_SQL.format(
+-                offset=self._filter.offset,
+                 steps_per_person_query=self.get_step_counts_query(),
+                 persons_steps=self._get_funnel_person_step_condition(),
+                 extra_fields=extra_fields_string,
+-                limit="" if self._no_person_limit else "LIMIT %(limit)s",
++                limit="LIMIT %(limit)s" if limit_actors else "",
++                offset="OFFSET %(offset)s" if limit_actors else "",
+             ),
+             self.params,
+         )
+diff --git a/ee/clickhouse/queries/funnels/funnel_strict_persons.py b/ee/clickhouse/queries/funnels/funnel_strict_persons.py
+index 619200fc234a0..9aa6486b85c5b 100644
+--- a/ee/clickhouse/queries/funnels/funnel_strict_persons.py
++++ b/ee/clickhouse/queries/funnels/funnel_strict_persons.py
+@@ -14,15 +14,15 @@ class ClickhouseFunnelStrictActors(ClickhouseFunnelStrict, ActorBaseQuery):
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self, extra_fields: Optional[List[str]] = None):
++    def actor_query(self, limit_actors: Optional[bool] = True, extra_fields: Optional[List[str]] = None):
+         extra_fields_string = ", ".join([self._get_timestamp_outer_select()] + (extra_fields or []))
+         return (
+             FUNNEL_PERSONS_BY_STEP_SQL.format(
+-                offset=self._filter.offset,
+                 steps_per_person_query=self.get_step_counts_query(),
+                 persons_steps=self._get_funnel_person_step_condition(),
+                 extra_fields=extra_fields_string,
+-                limit="" if self._no_person_limit else "LIMIT %(limit)s",
++                limit="LIMIT %(limit)s" if limit_actors else "",
++                offset="OFFSET %(offset)s" if limit_actors else "",
+             ),
+             self.params,
+         )
+diff --git a/ee/clickhouse/queries/funnels/funnel_trends_persons.py b/ee/clickhouse/queries/funnels/funnel_trends_persons.py
+index 4eacab1a8535d..a1f3607427e54 100644
+--- a/ee/clickhouse/queries/funnels/funnel_trends_persons.py
++++ b/ee/clickhouse/queries/funnels/funnel_trends_persons.py
+@@ -1,15 +1,13 @@
+-from typing import cast
++from typing import Optional
+ 
+ from rest_framework.exceptions import ValidationError
+ 
+ from ee.clickhouse.queries.actor_base_query import ActorBaseQuery
+-from ee.clickhouse.queries.funnels.funnel_trends import TIMESTAMP_FORMAT, ClickhouseFunnelTrends
+-from ee.clickhouse.queries.util import get_trunc_func_ch
++from ee.clickhouse.queries.funnels.funnel_trends import ClickhouseFunnelTrends
+ from ee.clickhouse.sql.funnels.funnel import FUNNEL_PERSONS_BY_STEP_SQL
+ from posthog.constants import DROP_OFF, ENTRANCE_PERIOD_START
+ from posthog.models.filters.filter import Filter
+ from posthog.models.filters.mixins.utils import cached_property
+-from posthog.models.person import Person
+ 
+ 
+ class ClickhouseFunnelTrendsActors(ClickhouseFunnelTrends, ActorBaseQuery):
+@@ -19,7 +17,7 @@ class ClickhouseFunnelTrendsActors(ClickhouseFunnelTrends, ActorBaseQuery):
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self):
++    def actor_query(self, limit_actors: Optional[bool] = True):
+         drop_off = self._filter.drop_off
+         if drop_off is None:
+             raise ValidationError(f"Filter parameter {DROP_OFF} must be provided and a bool for funnel trends persons!")
+@@ -40,11 +38,11 @@ def actor_query(self):
+ 
+         return (
+             FUNNEL_PERSONS_BY_STEP_SQL.format(
+-                offset=self._filter.offset,
+                 steps_per_person_query=step_counts_query,
+                 persons_steps=did_not_reach_to_step_count_condition if drop_off else reached_to_step_count_condition,
+                 extra_fields="",
+-                limit="" if self._no_person_limit else "LIMIT %(limit)s",
++                limit="LIMIT %(limit)s" if limit_actors else "",
++                offset="OFFSET %(offset)s" if limit_actors else "",
+             ),
+             self.params,
+         )
+diff --git a/ee/clickhouse/queries/funnels/funnel_unordered_persons.py b/ee/clickhouse/queries/funnels/funnel_unordered_persons.py
+index e13e2bb1d985a..478e0c0d32f59 100644
+--- a/ee/clickhouse/queries/funnels/funnel_unordered_persons.py
++++ b/ee/clickhouse/queries/funnels/funnel_unordered_persons.py
+@@ -14,15 +14,15 @@ class ClickhouseFunnelUnorderedActors(ClickhouseFunnelUnordered, ActorBaseQuery)
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self, extra_fields: Optional[List[str]] = None):
++    def actor_query(self, limit_actors: Optional[bool] = True, extra_fields: Optional[List[str]] = None):
+         extra_fields_string = ", ".join([self._get_timestamp_outer_select()] + (extra_fields or []))
+         return (
+             FUNNEL_PERSONS_BY_STEP_SQL.format(
+-                offset=self._filter.offset,
+                 steps_per_person_query=self.get_step_counts_query(),
+                 persons_steps=self._get_funnel_person_step_condition(),
+                 extra_fields=extra_fields_string,
+-                limit="" if self._no_person_limit else "LIMIT %(limit)s",
++                limit="LIMIT %(limit)s" if limit_actors else "",
++                offset="OFFSET %(offset)s" if limit_actors else "",
+             ),
+             self.params,
+         )
+diff --git a/ee/clickhouse/queries/funnels/test/__snapshots__/test_funnel_correlation.ambr b/ee/clickhouse/queries/funnels/test/__snapshots__/test_funnel_correlation.ambr
+index d50beb74457f5..299843f6516e0 100644
+--- a/ee/clickhouse/queries/funnels/test/__snapshots__/test_funnel_correlation.ambr
++++ b/ee/clickhouse/queries/funnels/test/__snapshots__/test_funnel_correlation.ambr
+@@ -80,8 +80,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -197,8 +196,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+@@ -302,8 +300,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -398,8 +395,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -494,8 +490,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -590,8 +585,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -686,8 +680,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+@@ -791,8 +784,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -886,8 +878,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -981,8 +972,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -1076,8 +1066,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -1171,8 +1160,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1284,8 +1272,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1397,8 +1384,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1500,8 +1486,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1599,8 +1584,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1698,8 +1682,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1797,8 +1780,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -1906,8 +1888,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -2019,8 +2000,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -2128,8 +2108,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        toDateTime('2020-01-14 23:59:59') AS date_to,
+        toDateTime('2020-01-01 00:00:00') AS date_from,
+        2 AS target_step,
+@@ -2227,8 +2206,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+@@ -2332,8 +2310,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -2429,8 +2406,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -2526,8 +2502,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -2623,8 +2598,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -2720,8 +2694,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+@@ -2827,8 +2800,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+@@ -2932,8 +2904,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -3029,8 +3000,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -3126,8 +3096,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -3223,8 +3192,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT DISTINCT funnel_actors.actor_id AS actor_id
+   FROM funnel_actors
+@@ -3320,8 +3288,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps IN [1, 2]
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1),
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1),
+        2 AS target_step
+   SELECT concat(prop.1, '::', prop.2) as name,
+          countDistinctIf(actor_id, steps = target_step) AS success_count,
+diff --git a/ee/clickhouse/queries/funnels/test/test_funnel_correlation_persons.py b/ee/clickhouse/queries/funnels/test/test_funnel_correlation_persons.py
+index 7d7b174391860..e5b36481ce64d 100644
+--- a/ee/clickhouse/queries/funnels/test/test_funnel_correlation_persons.py
++++ b/ee/clickhouse/queries/funnels/test/test_funnel_correlation_persons.py
+@@ -1,4 +1,7 @@
++import json
++import urllib.parse
+ from datetime import datetime
++from unittest.mock import patch
+ from uuid import uuid4
+ 
+ from ee.clickhouse.models.event import create_event
+@@ -8,6 +11,7 @@
+ from posthog.constants import INSIGHT_FUNNELS
+ from posthog.models import Cohort, Filter
+ from posthog.models.person import Person
++from posthog.tasks.calculate_cohort import insert_cohort_from_insight_filter
+ from posthog.test.base import APIBaseTest, test_with_materialized_columns
+ 
+ FORMAT_TIME = "%Y-%m-%d 00:00:00"
+@@ -30,7 +34,7 @@ class TestClickhouseFunnelCorrelationActors(ClickhouseTestMixin, APIBaseTest):
+ 
+     maxDiff = None
+ 
+-    def test_basic_funnel_correlation_with_events(self):
++    def _setup_basic_test(self):
+         filters = {
+             "events": [
+                 {"id": "user signed up", "type": "events", "order": 0},
+@@ -89,7 +93,10 @@ def test_basic_funnel_correlation_with_events(self):
+         ]
+         journeys_for(events_by_person, self.team)
+ 
+-        # TESTS
++        return filter, success_target_persons, failure_target_persons, person_fail, person_succ
++
++    def test_basic_funnel_correlation_with_events(self):
++        filter, success_target_persons, failure_target_persons, person_fail, person_succ = self._setup_basic_test()
+ 
+         # test positively_related successes
+         filter = filter.with_data(
+@@ -162,6 +169,52 @@ def test_basic_funnel_correlation_with_events(self):
+             [str(val["id"]) for val in serialized_actors], [*failure_target_persons, str(person_succ.uuid)]
+         )
+ 
++    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_insight_filter.delay")
++    def test_create_funnel_correlation_cohort(self, _insert_cohort_from_insight_filter):
++        filter, success_target_persons, failure_target_persons, person_fail, person_succ = self._setup_basic_test()
++
++        params = {
++            "events": [
++                {"id": "user signed up", "type": "events", "order": 0},
++                {"id": "paid", "type": "events", "order": 1},
++            ],
++            "insight": INSIGHT_FUNNELS,
++            "date_from": "2020-01-01",
++            "date_to": "2020-01-14",
++            "funnel_correlation_type": "events",
++            "funnel_correlation_person_entity": {"id": "positively_related", "type": "events"},
++            "funnel_correlation_person_converted": "TrUe",
++        }
++
++        response = self.client.post(
++            f"/api/projects/{self.team.id}/cohorts/?{urllib.parse.urlencode(params)}",
++            {"name": "test", "is_static": True},
++        ).json()
++
++        cohort_id = response["id"]
++
++        _insert_cohort_from_insight_filter.assert_called_once_with(
++            cohort_id,
++            {
++                "events": "[{'id': 'user signed up', 'type': 'events', 'order': 0}, {'id': 'paid', 'type': 'events', 'order': 1}]",
++                "insight": "FUNNELS",
++                "date_from": "2020-01-01",
++                "date_to": "2020-01-14",
++                "funnel_correlation_type": "events",
++                "funnel_correlation_person_entity": "{'id': 'positively_related', 'type': 'events'}",
++                "funnel_correlation_person_converted": "TrUe",
++            },
++        )
++
++        insert_cohort_from_insight_filter(
++            cohort_id, params,
++        )
++
++        cohort = Cohort.objects.get(pk=cohort_id)
++        people = Person.objects.filter(cohort__id=cohort.pk)
++        self.assertEqual(cohort.errors_calculating, 0)
++        self.assertEqual(len(people), 5)
++
+     def test_people_arent_returned_multiple_times(self):
+ 
+         people = journeys_for(
+diff --git a/ee/clickhouse/queries/paths/paths.py b/ee/clickhouse/queries/paths/paths.py
+index 7d3b1fcdc4e20..f425642a8a237 100644
+--- a/ee/clickhouse/queries/paths/paths.py
++++ b/ee/clickhouse/queries/paths/paths.py
+@@ -146,9 +146,8 @@ def get_path_query_funnel_cte(self, funnel_filter: Filter):
+             self._team,
+             include_timestamp=bool(self._filter.funnel_paths),
+             include_preceding_timestamp=self._filter.funnel_paths == FUNNEL_PATH_BETWEEN_STEPS,
+-            no_person_limit=True,
+         )
+-        funnel_persons_query, funnel_persons_param = funnel_persons_generator.actor_query()
++        funnel_persons_query, funnel_persons_param = funnel_persons_generator.actor_query(limit_actors=False)
+         funnel_persons_query_new_params = funnel_persons_query.replace("%(", "%(funnel_")
+         new_funnel_params = {"funnel_" + str(key): val for key, val in funnel_persons_param.items()}
+         self.params.update(new_funnel_params)
+diff --git a/ee/clickhouse/queries/paths/paths_actors.py b/ee/clickhouse/queries/paths/paths_actors.py
+index af5bd333b5282..0418d556802d2 100644
+--- a/ee/clickhouse/queries/paths/paths_actors.py
++++ b/ee/clickhouse/queries/paths/paths_actors.py
+@@ -1,4 +1,4 @@
+-from typing import Dict, Tuple, cast
++from typing import Dict, Optional, Tuple, cast
+ 
+ from ee.clickhouse.queries.actor_base_query import ActorBaseQuery
+ from ee.clickhouse.queries.paths.paths import ClickhousePaths
+@@ -30,7 +30,7 @@ class ClickhousePathsActors(ClickhousePaths, ActorBaseQuery):  # type: ignore
+     def is_aggregating_by_groups(self) -> bool:
+         return False
+ 
+-    def actor_query(self) -> Tuple[str, Dict]:
++    def actor_query(self, limit_actors: Optional[bool] = True) -> Tuple[str, Dict]:
+         paths_per_person_query = self.get_paths_per_person_query()
+         person_path_filter = self.get_person_path_filter()
+         paths_funnel_cte = ""
+@@ -44,14 +44,14 @@ def actor_query(self) -> Tuple[str, Dict]:
+         return (
+             f"""
+             {paths_funnel_cte}
+-            SELECT DISTINCT person_id
++            SELECT DISTINCT person_id AS actor_id
+             FROM (
+                 {paths_per_person_query}
+             )
+             WHERE {person_path_filter}
+             ORDER BY person_id
+-            LIMIT %(limit)s
+-            OFFSET %(offset)s
++            {"LIMIT %(limit)s" if limit_actors else ""}
++            {"OFFSET %(offset)s" if limit_actors else ""}
+         """,
+             self.params,
+         )
+diff --git a/ee/clickhouse/queries/retention/retention_actors.py b/ee/clickhouse/queries/retention/retention_actors.py
+index 2e32f60c2ebf9..98a947890bff8 100644
+--- a/ee/clickhouse/queries/retention/retention_actors.py
++++ b/ee/clickhouse/queries/retention/retention_actors.py
+@@ -25,7 +25,7 @@ def __init__(self, team: Team, filter: RetentionFilter):
+     def is_aggregating_by_groups(self) -> bool:
+         return self._filter.aggregation_group_type_index is not None
+ 
+-    def actor_query(self) -> Tuple[str, Dict]:
++    def actor_query(self, limit_actors: Optional[bool] = True) -> Tuple[str, Dict]:
+         actor_query = _build_actor_query(
+             filter=self._filter,
+             team=self._team,
+@@ -152,7 +152,8 @@ def _build_actor_query(
+         -- NOTE: relies on ids being monotonic
+         ORDER BY actor_id
+ 
+-        LIMIT 100 OFFSET %(offset)s
++        LIMIT 100 
++        OFFSET %(offset)s
+     """
+ 
+     return substitute_params(actor_query, {"offset": filter.offset})
+diff --git a/ee/clickhouse/queries/stickiness/stickiness_actors.py b/ee/clickhouse/queries/stickiness/stickiness_actors.py
+index 8b05affbd91cb..5b4d85aa80800 100644
+--- a/ee/clickhouse/queries/stickiness/stickiness_actors.py
++++ b/ee/clickhouse/queries/stickiness/stickiness_actors.py
+@@ -1,4 +1,4 @@
+-from typing import Dict, Tuple
++from typing import Dict, Optional, Tuple
+ 
+ from ee.clickhouse.queries.actor_base_query import ActorBaseQuery
+ from ee.clickhouse.queries.stickiness.stickiness_event_query import StickinessEventsQuery
+@@ -12,23 +12,23 @@ class ClickhouseStickinessActors(ActorBaseQuery):
+     entity: Entity
+     _filter: StickinessFilter
+ 
+-    def __init__(self, team: Team, entity: Entity, filter: StickinessFilter):
+-        super().__init__(team, filter, entity)
++    def __init__(self, team: Team, entity: Entity, filter: StickinessFilter, **kwargs):
++        super().__init__(team, filter, entity, **kwargs)
+ 
+     @cached_property
+     def is_aggregating_by_groups(self) -> bool:
+         return self.entity.math == "unique_group"
+ 
+-    def actor_query(self) -> Tuple[str, Dict]:
++    def actor_query(self, limit_actors: Optional[bool] = True) -> Tuple[str, Dict]:
+         events_query, event_params = StickinessEventsQuery(
+             entity=self.entity, filter=self._filter, team_id=self._team.pk
+         ).get_query()
+ 
+         return (
+             f"""
+-        SELECT DISTINCT aggregation_target FROM ({events_query}) WHERE num_intervals = %(stickiness_day)s
+-        {'LIMIT %(limit)s' if self._filter.limit > 0 else ''}
+-        {'OFFSET %(offset)s' if self._filter.limit > 0 else ''}
++        SELECT DISTINCT aggregation_target AS actor_id FROM ({events_query}) WHERE num_intervals = %(stickiness_day)s
++        {"LIMIT %(limit)s" if limit_actors else ""}
++        {"OFFSET %(offset)s" if limit_actors else ""}
+         """,
+             {
+                 **event_params,
+diff --git a/ee/clickhouse/queries/test/__snapshots__/test_paths.ambr b/ee/clickhouse/queries/test/__snapshots__/test_paths.ambr
+index 75887f7b252cb..6ab01c5b67908 100644
+--- a/ee/clickhouse/queries/test/__snapshots__/test_paths.ambr
++++ b/ee/clickhouse/queries/test/__snapshots__/test_paths.ambr
+@@ -105,8 +105,7 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps = 1
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1)
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1)
+   SELECT last_path_key as source_event,
+          path_key as target_event,
+          COUNT(*) AS event_count,
+@@ -313,9 +312,8 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps = 1
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1)
+-  SELECT DISTINCT person_id
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1)
++  SELECT DISTINCT person_id AS actor_id
+   FROM
+     (SELECT person_id,
+             path,
+@@ -516,9 +514,8 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps = 1
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1)
+-  SELECT DISTINCT person_id
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1)
++  SELECT DISTINCT person_id AS actor_id
+   FROM
+     (SELECT person_id,
+             path,
+@@ -719,9 +716,8 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps = 1
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1)
+-  SELECT DISTINCT person_id
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1)
++  SELECT DISTINCT person_id AS actor_id
+   FROM
+     (SELECT person_id,
+             path,
+@@ -922,9 +918,8 @@
+                  steps
+         HAVING steps = max_steps SETTINGS allow_experimental_window_functions = 1)
+      WHERE steps = 1
+-     ORDER BY aggregation_target
+-     OFFSET 0 SETTINGS allow_experimental_window_functions = 1)
+-  SELECT DISTINCT person_id
++     ORDER BY aggregation_target SETTINGS allow_experimental_window_functions = 1)
++  SELECT DISTINCT person_id AS actor_id
+   FROM
+     (SELECT person_id,
+             path,
+diff --git a/ee/clickhouse/queries/test/test_trends.py b/ee/clickhouse/queries/test/test_trends.py
+index 987d4a98d555e..06404bbb333cc 100644
+--- a/ee/clickhouse/queries/test/test_trends.py
++++ b/ee/clickhouse/queries/test/test_trends.py
+@@ -10,7 +10,7 @@
+ from ee.clickhouse.models.group import create_group
+ from ee.clickhouse.models.person import create_person_distinct_id
+ from ee.clickhouse.queries.trends.clickhouse_trends import ClickhouseTrends
+-from ee.clickhouse.queries.trends.person import TrendsPersonQuery
++from ee.clickhouse.queries.trends.person import ClickhouseTrendsActors
+ from ee.clickhouse.test.test_journeys import journeys_for
+ from ee.clickhouse.util import ClickhouseTestMixin, snapshot_clickhouse_queries
+ from posthog.constants import TRENDS_BAR_VALUE
+@@ -53,7 +53,7 @@ class TestClickhouseTrends(ClickhouseTestMixin, trend_test_factory(ClickhouseTre
+     maxDiff = None
+ 
+     def _get_trend_people(self, filter, entity):
+-        _, serialized_actors = TrendsPersonQuery(filter=filter, entity=entity, team=self.team).get_actors()
++        _, serialized_actors = ClickhouseTrendsActors(filter=filter, entity=entity, team=self.team).get_actors()
+         return serialized_actors
+ 
+     def _create_groups(self):
+diff --git a/ee/clickhouse/queries/trends/person.py b/ee/clickhouse/queries/trends/person.py
+index 517b8ffd523d1..13637d370358d 100644
+--- a/ee/clickhouse/queries/trends/person.py
++++ b/ee/clickhouse/queries/trends/person.py
+@@ -35,24 +35,24 @@ def _handle_date_interval(filter: Filter) -> Filter:
+     return filter.with_data(data)
+ 
+ 
+-class TrendsPersonQuery(ActorBaseQuery):
++class ClickhouseTrendsActors(ActorBaseQuery):
+     entity: Entity
+     _filter: Filter
+ 
+-    def __init__(self, team: Team, entity: Optional[Entity], filter: Filter):
++    def __init__(self, team: Team, entity: Optional[Entity], filter: Filter, **kwargs):
+         if not entity:
+             raise ValueError("Entity is required")
+ 
+         if filter.display != TRENDS_CUMULATIVE and not filter.display in TRENDS_DISPLAY_BY_VALUE:
+             filter = _handle_date_interval(filter)
+ 
+-        super().__init__(team, filter, entity)
++        super().__init__(team, filter, entity, **kwargs)
+ 
+     @cached_property
+     def is_aggregating_by_groups(self) -> bool:
+         return self.entity.math == "unique_group"
+ 
+-    def actor_query(self) -> Tuple[str, Dict]:
++    def actor_query(self, limit_actors: Optional[bool] = True) -> Tuple[str, Dict]:
+         if self._filter.breakdown_type == "cohort" and self._filter.breakdown_value != "all":
+             cohort = Cohort.objects.get(pk=self._filter.breakdown_value, team_id=self._team.pk)
+             self._filter = self._filter.with_data(
+@@ -87,7 +87,12 @@ def actor_query(self) -> Tuple[str, Dict]:
+         ).get_query()
+ 
+         return (
+-            GET_ACTORS_FROM_EVENT_QUERY.format(id_field=self._aggregation_actor_field, events_query=events_query),
++            GET_ACTORS_FROM_EVENT_QUERY.format(
++                id_field=self._aggregation_actor_field,
++                events_query=events_query,
++                limit="LIMIT %(limit)s" if limit_actors else "",
++                offset="OFFSET %(offset)s" if limit_actors else "",
++            ),
+             {**params, "offset": self._filter.offset, "limit": 200},
+         )
+ 
+diff --git a/ee/clickhouse/sql/funnels/funnel.py b/ee/clickhouse/sql/funnels/funnel.py
+index 1d3cc01145407..cf379bdb0d984 100644
+--- a/ee/clickhouse/sql/funnels/funnel.py
++++ b/ee/clickhouse/sql/funnels/funnel.py
+@@ -6,7 +6,7 @@
+ WHERE {persons_steps}
+ ORDER BY aggregation_target
+ {limit}
+-OFFSET {offset}
++{offset}
+ SETTINGS allow_experimental_window_functions = 1
+ """
+ 
+diff --git a/ee/clickhouse/sql/person.py b/ee/clickhouse/sql/person.py
+index 2c5d3470f435d..8963f4c2773e9 100644
+--- a/ee/clickhouse/sql/person.py
++++ b/ee/clickhouse/sql/person.py
+@@ -372,6 +372,6 @@
+     {id_field} AS actor_id
+ FROM ({events_query})
+ GROUP BY actor_id
+-LIMIT %(limit)s
+-OFFSET %(offset)s
++{limit}
++{offset}
+ """
+diff --git a/ee/clickhouse/views/actions.py b/ee/clickhouse/views/actions.py
+index a3f880f465749..293a3f03271f3 100644
+--- a/ee/clickhouse/views/actions.py
++++ b/ee/clickhouse/views/actions.py
+@@ -10,7 +10,7 @@
+ 
+ from ee.clickhouse.client import sync_execute
+ from ee.clickhouse.models.action import format_action_filter
+-from ee.clickhouse.queries.trends.person import TrendsPersonQuery
++from ee.clickhouse.queries.trends.person import ClickhouseTrendsActors
+ from ee.clickhouse.sql.person import INSERT_COHORT_ALL_PEOPLE_THROUGH_PERSON_ID, PERSON_STATIC_COHORT_TABLE
+ from posthog.api.action import ActionSerializer, ActionViewSet
+ from posthog.api.person import get_person_name
+@@ -41,10 +41,10 @@ def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+     def people(self, request: Request, *args: Any, **kwargs: Any) -> Response:  # type: ignore
+         team = self.team
+         filter = Filter(request=request, team=self.team)
+-        entity = get_target_entity(request)
++        entity = get_target_entity(filter)
+ 
+         current_url = request.get_full_path()
+-        actors, serialized_actors = TrendsPersonQuery(team, entity, filter).get_actors()
++        actors, serialized_actors = ClickhouseTrendsActors(team, entity, filter).get_actors()
+ 
+         current_url = request.get_full_path()
+         next_url: Optional[str] = request.get_full_path()
+@@ -98,7 +98,7 @@ def count(self, request: Request, **kwargs) -> Response:  # type: ignore
+ 
+ 
+ def insert_entity_people_into_cohort(cohort: Cohort, entity: Entity, filter: Filter):
+-    query, params = TrendsPersonQuery(cohort.team, entity, filter).actor_query()
++    query, params = ClickhouseTrendsActors(cohort.team, entity, filter).actor_query()
+     sync_execute(
+         INSERT_COHORT_ALL_PEOPLE_THROUGH_PERSON_ID.format(cohort_table=PERSON_STATIC_COHORT_TABLE, query=query),
+         {"cohort_id": cohort.pk, "_timestamp": datetime.now(), **params},
+diff --git a/ee/clickhouse/views/cohort.py b/ee/clickhouse/views/cohort.py
+index 7f1bb60e69293..f1ac35b16a514 100644
+--- a/ee/clickhouse/views/cohort.py
++++ b/ee/clickhouse/views/cohort.py
+@@ -1,28 +1,41 @@
++from datetime import datetime
++from typing import Callable, Dict
++
++from django.conf import settings
++from django.db.models.expressions import F
++from django.utils import timezone
+ from rest_framework.request import Request
++from sentry_sdk.api import capture_exception
+ 
+-from ee.clickhouse.client import sync_execute
++from ee.clickhouse.client import substitute_params, sync_execute
++from ee.clickhouse.queries.funnels.funnel_correlation_persons import FunnelCorrelationActors
++from ee.clickhouse.queries.paths.paths_actors import ClickhousePathsActors
++from ee.clickhouse.queries.stickiness.stickiness_actors import ClickhouseStickinessActors
++from ee.clickhouse.queries.trends.person import ClickhouseTrendsActors
+ from ee.clickhouse.queries.util import get_earliest_timestamp
+-from ee.clickhouse.sql.person import PERSON_STATIC_COHORT_TABLE
++from ee.clickhouse.sql.person import INSERT_COHORT_ALL_PEOPLE_THROUGH_PERSON_ID, PERSON_STATIC_COHORT_TABLE
++from ee.clickhouse.views.person import get_funnel_actor_class
+ from posthog.api.cohort import CohortSerializer, CohortViewSet
+-from posthog.constants import INSIGHT_STICKINESS, INSIGHT_TRENDS
++from posthog.api.utils import get_target_entity
++from posthog.constants import INSIGHT_FUNNELS, INSIGHT_PATHS, INSIGHT_STICKINESS, INSIGHT_TRENDS
+ from posthog.models.cohort import Cohort
+-from posthog.models.entity import Entity
++from posthog.models.filters import stickiness_filter
+ from posthog.models.filters.filter import Filter
++from posthog.models.filters.path_filter import PathFilter
+ from posthog.models.filters.stickiness_filter import StickinessFilter
+-from posthog.models.team import Team
+-from posthog.tasks.calculate_cohort import insert_cohort_from_query
++from posthog.tasks.calculate_cohort import insert_cohort_from_insight_filter
+ 
+ 
+ class ClickhouseCohortSerializer(CohortSerializer):
+     earliest_timestamp_func = get_earliest_timestamp
+ 
+-    def _handle_stickiness_people(self, target_entity: Entity, cohort: Cohort, filter: StickinessFilter) -> None:
+-        insert_cohort_from_query.delay(
+-            cohort.pk, INSIGHT_STICKINESS, filter.to_dict(), entity_data=target_entity.to_dict()
+-        )
+-
+-    def _handle_trend_people(self, target_entity: Entity, cohort: Cohort, filter: Filter, request: Request) -> None:
+-        insert_cohort_from_query.delay(cohort.pk, INSIGHT_TRENDS, filter.to_dict(), entity_data=target_entity.to_dict())
++    def _handle_static(self, cohort: Cohort, request: Request):
++        if request.FILES.get("csv"):
++            self._calculate_static_by_csv(request.FILES["csv"], cohort)
++        else:
++            filter_data = request.GET.dict()
++            if filter_data:
++                insert_cohort_from_insight_filter.delay(cohort.pk, filter_data)
+ 
+ 
+ def insert_cohort_people_into_pg(cohort: Cohort):
+@@ -35,6 +48,63 @@ def insert_cohort_people_into_pg(cohort: Cohort):
+     cohort.insert_users_list_by_uuid(items=[str(id[0]) for id in ids])
+ 
+ 
++def insert_cohort_actors_into_ch(cohort: Cohort, filter_data: Dict):
++    insight_type = filter_data.get("insight")
++
++    if insight_type == INSIGHT_TRENDS:
++        filter = Filter(data=filter_data).simplify(team=cohort.team)
++        entity = get_target_entity(filter)
++        query, params = ClickhouseTrendsActors(cohort.team, entity, filter).actor_query(limit_actors=False)
++    elif insight_type == INSIGHT_STICKINESS:
++        stickiness_filter = StickinessFilter(data=filter_data, team=cohort.team).simplify(team=cohort.team)
++        entity = get_target_entity(stickiness_filter)
++        query, params = ClickhouseStickinessActors(cohort.team, entity, stickiness_filter).actor_query(
++            limit_actors=False
++        )
++    elif insight_type == INSIGHT_FUNNELS:
++        funnel_filter = Filter(data=filter_data).simplify(team=cohort.team)
++        if funnel_filter.correlation_person_entity:
++            query, params = FunnelCorrelationActors(filter=funnel_filter, team=cohort.team).actor_query(
++                limit_actors=False
++            )
++        else:
++            funnel_actor_class = get_funnel_actor_class(funnel_filter)
++            query, params = funnel_actor_class(filter=funnel_filter, team=cohort.team).actor_query(limit_actors=False)
++    elif insight_type == INSIGHT_PATHS:
++        path_filter = PathFilter(data=filter_data).simplify(team=cohort.team)
++        query, params = ClickhousePathsActors(path_filter, cohort.team, funnel_filter=None).actor_query(
++            limit_actors=False
++        )
++    else:
++        if settings.DEBUG:
++            raise ValueError(f"Insight type: {insight_type} not supported for cohort creation")
++        else:
++            capture_exception(Exception(f"Insight type: {insight_type} not supported for cohort creation"))
++
++    insert_actors_into_cohort_by_query(cohort, substitute_params(query, params))
++
++
++def insert_actors_into_cohort_by_query(cohort: Cohort, query: str):
++    try:
++        sync_execute(
++            INSERT_COHORT_ALL_PEOPLE_THROUGH_PERSON_ID.format(cohort_table=PERSON_STATIC_COHORT_TABLE, query=query),
++            {"cohort_id": cohort.pk, "_timestamp": datetime.now(), "team_id": cohort.team.pk},
++        )
++
++        cohort.is_calculating = False
++        cohort.last_calculation = timezone.now()
++        cohort.errors_calculating = 0
++        cohort.save()
++    except Exception as err:
++
++        if settings.DEBUG:
++            raise err
++        cohort.is_calculating = False
++        cohort.errors_calculating = F("errors_calculating") + 1
++        cohort.save()
++        capture_exception(err)
++
++
+ class ClickhouseCohortViewSet(CohortViewSet):
+     serializer_class = ClickhouseCohortSerializer
+ 
+diff --git a/ee/clickhouse/views/person.py b/ee/clickhouse/views/person.py
+index 827f68bec405f..fdbb7f66b4098 100644
+--- a/ee/clickhouse/views/person.py
++++ b/ee/clickhouse/views/person.py
+@@ -1,5 +1,5 @@
+ import json
+-from typing import Callable, Dict, List, Optional, Tuple, Union
++from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+ 
+ from rest_framework.decorators import action
+ from rest_framework.exceptions import NotFound
+@@ -10,6 +10,7 @@
+ from ee.clickhouse.client import sync_execute
+ from ee.clickhouse.models.person import delete_person
+ from ee.clickhouse.queries.funnels import ClickhouseFunnelActors, ClickhouseFunnelTrendsActors
++from ee.clickhouse.queries.funnels.base import ClickhouseFunnelBase
+ from ee.clickhouse.queries.funnels.funnel_correlation_persons import FunnelCorrelationActors
+ from ee.clickhouse.queries.funnels.funnel_strict_persons import ClickhouseFunnelStrictActors
+ from ee.clickhouse.queries.funnels.funnel_unordered_persons import ClickhouseFunnelUnorderedActors
+@@ -37,6 +38,21 @@ def should_paginate(results, limit: Union[str, int]) -> bool:
+     return len(results) > int(limit) - 1
+ 
+ 
++def get_funnel_actor_class(filter: Filter) -> Callable:
++    funnel_actor_class: Type[ClickhouseFunnelBase]
++    if filter.funnel_viz_type == FunnelVizType.TRENDS:
++        funnel_actor_class = ClickhouseFunnelTrendsActors
++    else:
++        if filter.funnel_order_type == "unordered":
++            funnel_actor_class = ClickhouseFunnelUnorderedActors
++        elif filter.funnel_order_type == "strict":
++            funnel_actor_class = ClickhouseFunnelStrictActors
++        else:
++            funnel_actor_class = ClickhouseFunnelActors
++
++    return funnel_actor_class
++
++
+ class ClickhousePersonViewSet(PersonViewSet):
+     lifecycle_class = ClickhouseLifecycle
+     retention_class = ClickhouseRetention
+@@ -73,17 +89,7 @@ def calculate_funnel_persons(self, request: Request) -> Dict[str, Tuple[list, Op
+         if not filter.limit:
+             filter = filter.with_data({LIMIT: 100})
+ 
+-        funnel_actor_class: Callable
+-
+-        if filter.funnel_viz_type == FunnelVizType.TRENDS:
+-            funnel_actor_class = ClickhouseFunnelTrendsActors
+-        else:
+-            if filter.funnel_order_type == "unordered":
+-                funnel_actor_class = ClickhouseFunnelUnorderedActors
+-            elif filter.funnel_order_type == "strict":
+-                funnel_actor_class = ClickhouseFunnelStrictActors
+-            else:
+-                funnel_actor_class = ClickhouseFunnelActors
++        funnel_actor_class = get_funnel_actor_class(filter)
+ 
+         actors, serialized_actors = funnel_actor_class(filter, self.team).get_actors()
+         _should_paginate = should_paginate(actors, filter.limit)
+diff --git a/ee/clickhouse/views/test/__snapshots__/test_clickhouse_stickiness.ambr b/ee/clickhouse/views/test/__snapshots__/test_clickhouse_stickiness.ambr
+index 3748b526644f5..e3e59970e1523 100644
+--- a/ee/clickhouse/views/test/__snapshots__/test_clickhouse_stickiness.ambr
++++ b/ee/clickhouse/views/test/__snapshots__/test_clickhouse_stickiness.ambr
+@@ -35,7 +35,7 @@
+ # name: TestClickhouseStickiness.test_aggregate_by_groups.1
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT e.$group_0 AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+@@ -59,6 +59,7 @@
+        AND timestamp <= '2020-02-15 23:59:59'
+        AND event = 'watched movie'
+        AND NOT has([''], $group_0)
++       AND NOT has([''], $group_0)
+      GROUP BY aggregation_target)
+   WHERE num_intervals = 1
+   LIMIT 100
+@@ -68,7 +69,7 @@
+ # name: TestClickhouseStickiness.test_aggregate_by_groups.2
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT e.$group_0 AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+@@ -92,6 +93,7 @@
+        AND timestamp <= '2020-02-15 23:59:59'
+        AND event = 'watched movie'
+        AND NOT has([''], $group_0)
++       AND NOT has([''], $group_0)
+      GROUP BY aggregation_target)
+   WHERE num_intervals = 2
+   LIMIT 100
+@@ -101,7 +103,7 @@
+ # name: TestClickhouseStickiness.test_aggregate_by_groups.3
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT e.$group_0 AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+@@ -125,6 +127,7 @@
+        AND timestamp <= '2020-02-15 23:59:59'
+        AND event = 'watched movie'
+        AND NOT has([''], $group_0)
++       AND NOT has([''], $group_0)
+      GROUP BY aggregation_target)
+   WHERE num_intervals = 3
+   LIMIT 100
+@@ -176,7 +179,7 @@
+ # name: TestClickhouseStickiness.test_filter_by_group_properties.1
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT pdi.person_id AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+@@ -217,7 +220,7 @@
+ # name: TestClickhouseStickiness.test_filter_by_group_properties.2
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT pdi.person_id AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+@@ -258,7 +261,7 @@
+ # name: TestClickhouseStickiness.test_filter_by_group_properties.3
+   '
+   /* request:api_person_stickiness_?$ (LegacyClickhousePersonViewSet) */
+-  SELECT DISTINCT aggregation_target
++  SELECT DISTINCT aggregation_target AS actor_id
+   FROM
+     (SELECT pdi.person_id AS aggregation_target,
+             countDistinct(toStartOfWeek(toDateTime(timestamp))) as num_intervals
+diff --git a/ee/clickhouse/views/test/__snapshots__/test_clickhouse_trends.ambr b/ee/clickhouse/views/test/__snapshots__/test_clickhouse_trends.ambr
+index c6a5e9e392414..d5126d3bee70d 100644
+--- a/ee/clickhouse/views/test/__snapshots__/test_clickhouse_trends.ambr
++++ b/ee/clickhouse/views/test/__snapshots__/test_clickhouse_trends.ambr
+@@ -567,6 +567,7 @@
+        AND event = '$pageview'
+        AND timestamp >= '2020-01-02 00:00:00'
+        AND timestamp <= '2020-01-02 23:59:59'
++       AND NOT has([''], $group_0)
+        AND NOT has([''], $group_0) )
+   GROUP BY actor_id
+   LIMIT 200
+diff --git a/ee/clickhouse/views/test/test_clickhouse_path_person.py b/ee/clickhouse/views/test/test_clickhouse_path_person.py
+index 24076afe57a38..628c523d18a31 100644
+--- a/ee/clickhouse/views/test/test_clickhouse_path_person.py
++++ b/ee/clickhouse/views/test/test_clickhouse_path_person.py
+@@ -1,4 +1,5 @@
+ import json
++import urllib.parse
+ from unittest.mock import patch
+ from uuid import uuid4
+ 
+@@ -8,7 +9,9 @@
+ from ee.clickhouse.models.event import create_event
+ from ee.clickhouse.util import ClickhouseTestMixin
+ from posthog.constants import FUNNEL_PATH_AFTER_STEP, INSIGHT_FUNNELS, INSIGHT_PATHS
++from posthog.models.cohort import Cohort
+ from posthog.models.person import Person
++from posthog.tasks.calculate_cohort import insert_cohort_from_insight_filter
+ from posthog.test.base import APIBaseTest
+ 
+ 
+@@ -68,6 +71,38 @@ def test_basic_format(self):
+         self.assertTrue("id" in first_person and "name" in first_person and "distinct_ids" in first_person)
+         self.assertEqual(5, j["results"][0]["count"])
+ 
++    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_insight_filter.delay")
++    def test_create_paths_cohort(self, _insert_cohort_from_insight_filter):
++        self._create_sample_data(5)
++
++        params = {
++            "insight": INSIGHT_PATHS,
++            "filter_test_accounts": "false",
++            "date_from": "2021-05-01",
++            "date_to": "2021-05-10",
++        }
++
++        response = self.client.post(
++            f"/api/projects/{self.team.id}/cohorts/?{urllib.parse.urlencode(params)}",
++            {"name": "test", "is_static": True},
++        ).json()
++
++        cohort_id = response["id"]
++
++        _insert_cohort_from_insight_filter.assert_called_once_with(
++            cohort_id,
++            {"insight": "PATHS", "filter_test_accounts": "false", "date_from": "2021-05-01", "date_to": "2021-05-10"},
++        )
++
++        insert_cohort_from_insight_filter(
++            cohort_id, params,
++        )
++
++        cohort = Cohort.objects.get(pk=cohort_id)
++        people = Person.objects.filter(cohort__id=cohort.pk)
++        self.assertEqual(cohort.errors_calculating, 0)
++        self.assertEqual(len(people), 5)
++
+     def test_basic_format_with_path_start_key_constraints(self):
+         self._create_sample_data(5)
+         request_data = {
+diff --git a/ee/tasks/test/test_calculate_cohort.py b/ee/tasks/test/test_calculate_cohort.py
+index 23c75d9ad629c..b347bdee785e0 100644
+--- a/ee/tasks/test/test_calculate_cohort.py
++++ b/ee/tasks/test/test_calculate_cohort.py
+@@ -1,3 +1,5 @@
++import json
++import urllib.parse
+ from unittest.mock import patch
+ from uuid import uuid4
+ 
+@@ -8,7 +10,7 @@
+ from ee.clickhouse.util import ClickhouseTestMixin
+ from posthog.models.cohort import Cohort
+ from posthog.models.person import Person
+-from posthog.tasks.calculate_cohort import insert_cohort_from_query
++from posthog.tasks.calculate_cohort import insert_cohort_from_insight_filter
+ from posthog.tasks.test.test_calculate_cohort import calculate_cohort_test_factory
+ 
+ 
+@@ -23,8 +25,8 @@ def _create_person(**kwargs):
+ 
+ 
+ class TestClickhouseCalculateCohort(ClickhouseTestMixin, calculate_cohort_test_factory(_create_event, _create_person)):  # type: ignore
+-    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_query.delay")
+-    def test_create_stickiness_cohort(self, _insert_cohort_from_query):
++    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_insight_filter.delay")
++    def test_create_stickiness_cohort(self, _insert_cohort_from_insight_filter):
+         _create_person(team_id=self.team.pk, distinct_ids=["blabla"])
+         _create_event(
+             team=self.team,
+@@ -40,44 +42,25 @@ def test_create_stickiness_cohort(self, _insert_cohort_from_query):
+ 
+         cohort_id = response["id"]
+ 
+-        _insert_cohort_from_query.assert_called_once_with(
++        _insert_cohort_from_insight_filter.assert_called_once_with(
+             cohort_id,
+-            "STICKINESS",
+             {
+-                "date_from": "2021-01-01",
+-                "events": [
+-                    {
+-                        "id": "$pageview",
+-                        "type": "events",
+-                        "order": 0,
+-                        "name": "$pageview",
+-                        "custom_name": None,
+-                        "math": None,
+-                        "math_property": None,
+-                        "math_group_type_index": None,
+-                        "properties": [],
+-                    }
+-                ],
+                 "insight": "STICKINESS",
++                "properties": "[]",
+                 "interval": "day",
+-                "selected_interval": 1,
++                "display": "ActionsLineGraph",
++                "events": '[{"id":"$pageview","name":"$pageview","type":"events","order":0}]',
+                 "shown_as": "Stickiness",
+-            },
+-            entity_data={
+-                "id": "$pageview",
+-                "type": "events",
+-                "order": 0,
+-                "name": "$pageview",
+-                "custom_name": None,
+-                "math": None,
+-                "math_property": None,
+-                "math_group_type_index": None,
+-                "properties": [],
++                "date_from": "2021-01-01",
++                "entity_id": "$pageview",
++                "entity_type": "events",
++                "stickiness_days": "1",
++                "label": "$pageview",
+             },
+         )
+-        insert_cohort_from_query(
++
++        insert_cohort_from_insight_filter(
+             cohort_id,
+-            "STICKINESS",
+             {
+                 "date_from": "2021-01-01",
+                 "events": [
+@@ -97,25 +80,17 @@ def test_create_stickiness_cohort(self, _insert_cohort_from_query):
+                 "interval": "day",
+                 "selected_interval": 1,
+                 "shown_as": "Stickiness",
+-            },
+-            entity_data={
+-                "id": "$pageview",
+-                "type": "events",
+-                "order": None,
+-                "name": "$pageview",
+-                "custom_name": None,
+-                "math": None,
+-                "math_property": None,
+-                "math_group_type_index": None,
+-                "properties": [],
++                "entity_id": "$pageview",
++                "entity_type": "events",
++                "entity_math": None,
+             },
+         )
+         cohort = Cohort.objects.get(pk=cohort_id)
+         people = Person.objects.filter(cohort__id=cohort.pk)
+         self.assertEqual(len(people), 1)
+ 
+-    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_query.delay")
+-    def test_create_trends_cohort(self, _insert_cohort_from_query):
++    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_insight_filter.delay")
++    def test_create_trends_cohort(self, _insert_cohort_from_insight_filter):
+         _create_person(team_id=self.team.pk, distinct_ids=["blabla"])
+         with freeze_time("2021-01-01 00:06:34"):
+             _create_event(
+@@ -140,46 +115,22 @@ def test_create_trends_cohort(self, _insert_cohort_from_query):
+             {"name": "test", "is_static": True},
+         ).json()
+         cohort_id = response["id"]
+-        _insert_cohort_from_query.assert_called_once_with(
++        _insert_cohort_from_insight_filter.assert_called_once_with(
+             cohort_id,
+-            "TRENDS",
+             {
+-                "date_from": "2021-01-01",
+-                "date_to": "2021-01-01",
++                "interval": "day",
+                 "display": "ActionsLineGraph",
+-                "events": [
+-                    {
+-                        "id": "$pageview",
+-                        "type": "events",
+-                        "order": 0,
+-                        "name": "$pageview",
+-                        "custom_name": None,
+-                        "math": None,
+-                        "math_property": None,
+-                        "math_group_type_index": None,
+-                        "properties": [],
+-                    }
+-                ],
++                "events": '[{"id":"$pageview","name":"$pageview","type":"events","order":0}]',
++                "properties": "[]",
+                 "entity_id": "$pageview",
+                 "entity_type": "events",
+-                "insight": "TRENDS",
+-                "interval": "day",
+-            },
+-            entity_data={
+-                "id": "$pageview",
+-                "type": "events",
+-                "order": 0,
+-                "name": "$pageview",
+-                "custom_name": None,
+-                "math": None,
+-                "math_property": None,
+-                "math_group_type_index": None,
+-                "properties": [],
++                "date_from": "2021-01-01",
++                "date_to": "2021-01-01",
++                "label": "$pageview",
+             },
+         )
+-        insert_cohort_from_query(
++        insert_cohort_from_insight_filter(
+             cohort_id,
+-            "TRENDS",
+             {
+                 "date_from": "2021-01-01",
+                 "date_to": "2021-01-01",
+@@ -201,16 +152,6 @@ def test_create_trends_cohort(self, _insert_cohort_from_query):
+                 "insight": "TRENDS",
+                 "interval": "day",
+             },
+-            entity_data={
+-                "id": "$pageview",
+-                "type": "events",
+-                "order": 0,
+-                "name": "$pageview",
+-                "math": None,
+-                "math_property": None,
+-                "math_group_type_index": None,
+-                "properties": [],
+-            },
+         )
+         cohort = Cohort.objects.get(pk=cohort_id)
+         people = Person.objects.filter(cohort__id=cohort.pk)
+@@ -231,3 +172,86 @@ def test_create_trends_cohort(self, _insert_cohort_from_query):
+                 ),
+             },
+         )
++
++    @patch("posthog.tasks.calculate_cohort.insert_cohort_from_insight_filter.delay")
++    def test_create_funnels_cohort(self, _insert_cohort_from_insight_filter):
++        _create_person(team_id=self.team.pk, distinct_ids=["blabla"])
++        with freeze_time("2021-01-01 00:06:34"):
++            _create_event(
++                team=self.team,
++                event="$pageview",
++                distinct_id="blabla",
++                properties={"$math_prop": 1},
++                timestamp="2021-01-01T12:00:00Z",
++            )
++
++        with freeze_time("2021-01-02 00:06:34"):
++            _create_event(
++                team=self.team,
++                event="$another_view",
++                distinct_id="blabla",
++                properties={"$math_prop": 4},
++                timestamp="2021-01-02T12:00:00Z",
++            )
++
++        params = {
++            "insight": "FUNNELS",
++            "events": json.dumps(
++                [
++                    {
++                        "id": "$pageview",
++                        "math": None,
++                        "name": "$pageview",
++                        "type": "events",
++                        "order": 0,
++                        "properties": [],
++                        "math_property": None,
++                    },
++                    {
++                        "id": "$another_view",
++                        "math": None,
++                        "name": "$another_view",
++                        "type": "events",
++                        "order": 1,
++                        "properties": [],
++                        "math_property": None,
++                    },
++                ]
++            ),
++            "display": "FunnelViz",
++            "interval": "day",
++            "layout": "horizontal",
++            "date_from": "2021-01-01",
++            "date_to": "2021-01-07",
++            "funnel_step": 1,
++        }
++
++        response = self.client.post(
++            f"/api/projects/{self.team.id}/cohorts/?{urllib.parse.urlencode(params)}",
++            {"name": "test", "is_static": True},
++        ).json()
++
++        cohort_id = response["id"]
++
++        _insert_cohort_from_insight_filter.assert_called_once_with(
++            cohort_id,
++            {
++                "insight": "FUNNELS",
++                "events": '[{"id": "$pageview", "math": null, "name": "$pageview", "type": "events", "order": 0, "properties": [], "math_property": null}, {"id": "$another_view", "math": null, "name": "$another_view", "type": "events", "order": 1, "properties": [], "math_property": null}]',
++                "display": "FunnelViz",
++                "interval": "day",
++                "layout": "horizontal",
++                "date_from": "2021-01-01",
++                "date_to": "2021-01-07",
++                "funnel_step": "1",
++            },
++        )
++
++        insert_cohort_from_insight_filter(
++            cohort_id, params,
++        )
++
++        cohort = Cohort.objects.get(pk=cohort_id)
++        people = Person.objects.filter(cohort__id=cohort.pk)
++        self.assertEqual(cohort.errors_calculating, 0)
++        self.assertEqual(len(people), 1)
+diff --git a/posthog/api/action.py b/posthog/api/action.py
+index 441c08e77cdc7..33ac0178f3ce4 100644
+--- a/posthog/api/action.py
++++ b/posthog/api/action.py
+@@ -283,7 +283,7 @@ def people(self, request: request.Request, *args: Any, **kwargs: Any) -> Respons
+     def get_people(self, request: request.Request) -> Union[Dict[str, Any], List]:
+         team = self.team
+         filter = Filter(request=request, team=self.team)
+-        entity = get_target_entity(request)
++        entity = get_target_entity(filter)
+ 
+         events = filter_by_type(entity=entity, team=team, filter=filter)
+         people = calculate_people(team=team, events=events, filter=filter, request=request)
+diff --git a/posthog/api/cohort.py b/posthog/api/cohort.py
+index 7613e9a4dcea4..ec6ed00092bfc 100644
+--- a/posthog/api/cohort.py
++++ b/posthog/api/cohort.py
+@@ -90,7 +90,7 @@ def _handle_static(self, cohort: Cohort, request: Request):
+             try:
+                 filter = Filter(request=request)
+                 team = cast(User, request.user).team
+-                target_entity = get_target_entity(request)
++                target_entity = get_target_entity(filter)
+                 if filter.shown_as == TRENDS_STICKINESS:
+                     stickiness_filter = StickinessFilter(
+                         request=request, team=team, get_earliest_timestamp=self.earliest_timestamp_func
+diff --git a/posthog/api/person.py b/posthog/api/person.py
+index f900d4edd331c..ef70ea59242de 100644
+--- a/posthog/api/person.py
++++ b/posthog/api/person.py
+@@ -236,7 +236,7 @@ def stickiness(self, request: request.Request) -> response.Response:
+         if not filter.limit:
+             filter = filter.with_data({LIMIT: 100})
+ 
+-        target_entity = get_target_entity(request)
++        target_entity = get_target_entity(filter)
+ 
+         people = self.stickiness_class().people(target_entity, filter, team, request)
+         next_url = paginated_result(people, request, filter.offset)
+diff --git a/posthog/api/test/test_utils.py b/posthog/api/test/test_utils.py
+index 4534d68d3c4ee..2d7da4482eff9 100644
+--- a/posthog/api/test/test_utils.py
++++ b/posthog/api/test/test_utils.py
+@@ -9,6 +9,7 @@
+ 
+ from posthog.api.test.test_capture import mocked_get_team_from_token
+ from posthog.api.utils import PaginationMode, format_paginated_url, get_data, get_target_entity, get_team
++from posthog.models.filters.filter import Filter
+ from posthog.test.base import BaseTest
+ 
+ 
+@@ -97,19 +98,27 @@ def test_format_paginated_url(self):
+ 
+     def test_get_target_entity(self):
+         request = lambda url: cast(Any, RequestFactory().get(url))
+-        first_request = request(
+-            f"/api/?entity_id=$pageview&entity_type=events&events={json.dumps([{'id': '$pageview', 'type': 'events'}])}"
++        filter = Filter(
++            data={"entity_id": "$pageview", "entity_type": "events", "events": [{"id": "$pageview", "type": "events"}],}
+         )
+-        entity = get_target_entity(first_request)
++        entity = get_target_entity(filter)
+ 
+         assert entity.id == "$pageview"
+         assert entity.type == "events"
+         assert entity.math == None
+ 
+-        second_request = request(
+-            f"/api/?entity_id=$pageview&entity_type=events&entity_math=unique_group&events={json.dumps([{'id': '$pageview', 'type': 'events', 'math': 'unique_group'}, {'id': '$pageview', 'type': 'events'}])}"
++        filter = Filter(
++            data={
++                "entity_id": "$pageview",
++                "entity_type": "events",
++                "entity_math": "unique_group",
++                "events": [
++                    {"id": "$pageview", "type": "events", "math": "unique_group"},
++                    {"id": "$pageview", "type": "events"},
++                ],
++            }
+         )
+-        entity = get_target_entity(second_request)
++        entity = get_target_entity(filter)
+ 
+         assert entity.id == "$pageview"
+         assert entity.type == "events"
+diff --git a/posthog/api/utils.py b/posthog/api/utils.py
+index d3b7b010d8b6f..b3639f51d77a7 100644
+--- a/posthog/api/utils.py
++++ b/posthog/api/utils.py
+@@ -18,7 +18,11 @@
+ from posthog.constants import ENTITY_ID, ENTITY_MATH, ENTITY_TYPE
+ from posthog.exceptions import RequestParsingError, generate_exception_response
+ from posthog.models import Entity
++from posthog.models.action import Action
+ from posthog.models.entity import MATH_TYPE
++from posthog.models.event import Event
++from posthog.models.filters.filter import Filter
++from posthog.models.filters.stickiness_filter import StickinessFilter
+ from posthog.models.team import Team
+ from posthog.models.user import User
+ from posthog.utils import cors_response, is_clickhouse_enabled, load_data_from_request
+@@ -29,28 +33,26 @@ class PaginationMode(Enum):
+     previous = auto()
+ 
+ 
+-def get_target_entity(request: request.Request) -> Entity:
+-    entity_id: Optional[str] = request.GET.get(ENTITY_ID)
+-    events = request.GET.get("events", "[]")
+-    actions = request.GET.get("actions", "[]")
+-    entity_type = request.GET.get(ENTITY_TYPE)
+-    entity_math = cast(MATH_TYPE, request.GET.get(ENTITY_MATH, "total"))
+-
+-    if not entity_id:
++def get_target_entity(filter: Union[Filter, StickinessFilter]) -> Entity:
++    if not filter.target_entity_id:
+         raise ValueError("An entity id and the entity type must be provided to determine an entity")
+ 
+-    possible_entity = retrieve_entity_from(entity_id, entity_type, entity_math, json.loads(events), json.loads(actions))
++    entity_math = filter.target_entity_math or "total"  # make math explicit
++
++    possible_entity = retrieve_entity_from(
++        filter.target_entity_id, filter.target_entity_type, entity_math, filter.events, filter.actions
++    )
+     if possible_entity:
+-        return Entity(data=possible_entity)
+-    elif entity_type:
+-        return Entity({"id": entity_id, "type": entity_type, "math": entity_math})
++        return possible_entity
++    elif filter.target_entity_type:
++        return Entity({"id": filter.target_entity_id, "type": filter.target_entity_type, "math": entity_math})
+     else:
+         raise ValueError("An entity must be provided for target entity to be determined")
+ 
+ 
+ def retrieve_entity_from(
+-    entity_id: str, entity_type: Optional[str], entity_math: MATH_TYPE, events: List[Dict], actions: List[Dict]
+-) -> Optional[Dict]:
++    entity_id: str, entity_type: Optional[str], entity_math: MATH_TYPE, events: List[Entity], actions: List[Entity]
++) -> Optional[Entity]:
+     """
+     Retrieves the entity from the events and actions.
+ 
+@@ -67,11 +69,11 @@ def retrieve_entity_from(
+ 
+     if entity_type == "actions":
+         for action in actions:
+-            if str(action.get("id")) == entity_id and action.get("math", "total") == entity_math:
++            if action.id == entity_id and (action.math or "total") == entity_math:
+                 return action
+     else:
+         for event in events:
+-            if event.get("id") == entity_id and event.get("math", "total") == entity_math:
++            if event.id == entity_id and (event.math or "total") == entity_math:
+                 return event
+     return None
+ 
+diff --git a/posthog/models/filters/filter.py b/posthog/models/filters/filter.py
+index 4cf1fdec07e5a..9e8a2bc7d094c 100644
+--- a/posthog/models/filters/filter.py
++++ b/posthog/models/filters/filter.py
+@@ -14,6 +14,7 @@
+     DisplayDerivedMixin,
+     EntitiesMixin,
+     EntityIdMixin,
++    EntityMathMixin,
+     EntityTypeMixin,
+     FilterTestAccountsMixin,
+     FormulaMixin,
+@@ -49,6 +50,7 @@ class Filter(
+     EntitiesMixin,
+     EntityIdMixin,
+     EntityTypeMixin,
++    EntityMathMixin,
+     DisplayDerivedMixin,
+     SelectorMixin,
+     ShownAsMixin,
+diff --git a/posthog/models/filters/mixins/common.py b/posthog/models/filters/mixins/common.py
+index ebdc8a27a677f..7481e8681c4ac 100644
+--- a/posthog/models/filters/mixins/common.py
++++ b/posthog/models/filters/mixins/common.py
+@@ -38,7 +38,7 @@
+     TREND_FILTER_TYPE_ACTIONS,
+     TREND_FILTER_TYPE_EVENTS,
+ )
+-from posthog.models.entity import Entity, ExclusionEntity
++from posthog.models.entity import MATH_TYPE, Entity, ExclusionEntity
+ from posthog.models.filters.mixins.base import BaseParamMixin, BreakdownType, IntervalType
+ from posthog.models.filters.mixins.utils import cached_property, include_dict, process_bool
+ from posthog.models.filters.utils import GroupTypeIndex, validate_group_type_index
+@@ -390,6 +390,7 @@ def entities_to_dict(self):
+         }
+ 
+ 
++# These arguments are used to specify the target entity for insight actor retrieval on trend graphs
+ class EntityIdMixin(BaseParamMixin):
+     @cached_property
+     def target_entity_id(self) -> Optional[str]:
+@@ -408,3 +409,13 @@ def target_entity_type(self) -> Optional[str]:
+     @include_dict
+     def entity_type_to_dict(self):
+         return {"entity_type": self.target_entity_type} if self.target_entity_type else {}
++
++
++class EntityMathMixin(BaseParamMixin):
++    @cached_property
++    def target_entity_math(self) -> Optional[MATH_TYPE]:
++        return self._data.get("entity_math", None)
++
++    @include_dict
++    def entity_math_to_dict(self):
++        return {"entity_math": self.target_entity_math} if self.target_entity_math else {}
+diff --git a/posthog/models/filters/stickiness_filter.py b/posthog/models/filters/stickiness_filter.py
+index fd932c7280bcb..c3d28b008568f 100644
+--- a/posthog/models/filters/stickiness_filter.py
++++ b/posthog/models/filters/stickiness_filter.py
+@@ -8,6 +8,9 @@
+ from posthog.models.filters.mixins.common import (
+     CompareMixin,
+     EntitiesMixin,
++    EntityIdMixin,
++    EntityMathMixin,
++    EntityTypeMixin,
+     FilterTestAccountsMixin,
+     InsightMixin,
+     LimitMixin,
+@@ -23,6 +26,9 @@
+ class StickinessFilter(
+     TotalIntervalsDerivedMixin,
+     EntitiesMixin,
++    EntityIdMixin,
++    EntityTypeMixin,
++    EntityMathMixin,
+     SelectedIntervalMixin,
+     PropertyMixin,
+     FilterTestAccountsMixin,
+diff --git a/posthog/tasks/calculate_cohort.py b/posthog/tasks/calculate_cohort.py
+index 95d363f4bfa53..3d29afdc5cc6b 100644
+--- a/posthog/tasks/calculate_cohort.py
++++ b/posthog/tasks/calculate_cohort.py
+@@ -62,27 +62,11 @@ def calculate_cohort_from_list(cohort_id: int, items: List[str]) -> None:
+ 
+ 
+ @shared_task(ignore_result=True, max_retries=1)
+-def insert_cohort_from_query(
+-    cohort_id: int, insight_type: str, filter_data: Dict[str, Any], entity_data: Dict[str, Any]
+-) -> None:
++def insert_cohort_from_insight_filter(cohort_id: int, filter_data: Dict[str, Any]) -> None:
+     if is_clickhouse_enabled():
+-        from ee.clickhouse.queries.stickiness.clickhouse_stickiness import insert_stickiness_people_into_cohort
+-        from ee.clickhouse.queries.util import get_earliest_timestamp
+-        from ee.clickhouse.views.actions import insert_entity_people_into_cohort
+-        from ee.clickhouse.views.cohort import insert_cohort_people_into_pg
+-        from posthog.models.entity import Entity
+-        from posthog.models.filters.filter import Filter
+-        from posthog.models.filters.stickiness_filter import StickinessFilter
++        from ee.clickhouse.views.cohort import insert_cohort_actors_into_ch, insert_cohort_people_into_pg
+ 
+         cohort = Cohort.objects.get(pk=cohort_id)
+-        entity = Entity(data=entity_data)
+-        if insight_type == INSIGHT_STICKINESS:
+-            _stickiness_filter = StickinessFilter(
+-                data=filter_data, team=cohort.team, get_earliest_timestamp=get_earliest_timestamp
+-            )
+-            insert_stickiness_people_into_cohort(cohort, entity, _stickiness_filter)
+-        else:
+-            _filter = Filter(data=filter_data)
+-            insert_entity_people_into_cohort(cohort, entity, _filter)
+ 
++        insert_cohort_actors_into_ch(cohort, filter_data)
+         insert_cohort_people_into_pg(cohort=cohort)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

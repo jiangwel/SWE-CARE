@@ -1,0 +1,776 @@
+  Task-ID: getmoto__moto-1344@e1a3676
+  Please checkout to this commit first: cdb7305dac6f9089236539133f6c8eab1ec9dd55
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  lambda doesn't support get function by name and version
+When calling the get_function API and specifying the version in the qualifier parameter, the call throws a ClientError('An error occurred (404) when calling the GetFunction operation: ') 
+
+function_data = client.get_function(FunctionName="my_func", Qualifier="$LATEST")  
+
+
+Looking at the source code, this occurs because the version gets concatenated to the function name.
+  </issue>
+  
+  <patch>
+  diff --git a/moto/awslambda/models.py b/moto/awslambda/models.py
+index 6306acd5c5bf..d3657dc7774e 100644
+--- a/moto/awslambda/models.py
++++ b/moto/awslambda/models.py
+@@ -2,6 +2,7 @@
+ 
+ import base64
+ from collections import defaultdict
++import copy
+ import datetime
+ import docker.errors
+ import hashlib
+@@ -17,18 +18,23 @@
+ import calendar
+ import threading
+ import traceback
++import weakref
+ import requests.adapters
+ 
+ import boto.awslambda
+ from moto.core import BaseBackend, BaseModel
++from moto.core.exceptions import RESTError
+ from moto.core.utils import unix_time_millis
+ from moto.s3.models import s3_backend
+ from moto.logs.models import logs_backends
+ from moto.s3.exceptions import MissingBucket, MissingKey
+ from moto import settings
++from .utils import make_function_arn
+ 
+ logger = logging.getLogger(__name__)
+ 
++ACCOUNT_ID = '123456789012'
++
+ 
+ try:
+     from tempfile import TemporaryDirectory
+@@ -121,7 +127,7 @@ def __exit__(self, exc_type, exc_val, exc_tb):
+ 
+ 
+ class LambdaFunction(BaseModel):
+-    def __init__(self, spec, region, validate_s3=True):
++    def __init__(self, spec, region, validate_s3=True, version=1):
+         # required
+         self.region = region
+         self.code = spec['Code']
+@@ -161,7 +167,7 @@ def replace_adapter_send(*args, **kwargs):
+             'VpcConfig', {'SubnetIds': [], 'SecurityGroupIds': []})
+ 
+         # auto-generated
+-        self.version = '$LATEST'
++        self.version = version
+         self.last_modified = datetime.datetime.utcnow().strftime(
+             '%Y-%m-%d %H:%M:%S')
+ 
+@@ -203,11 +209,15 @@ def replace_adapter_send(*args, **kwargs):
+                 self.code_size = key.size
+                 self.code_sha_256 = hashlib.sha256(key.value).hexdigest()
+ 
+-        self.function_arn = 'arn:aws:lambda:{}:123456789012:function:{}'.format(
+-            self.region, self.function_name)
++        self.function_arn = make_function_arn(self.region, ACCOUNT_ID, self.function_name, version)
+ 
+         self.tags = dict()
+ 
++    def set_version(self, version):
++        self.function_arn = make_function_arn(self.region, ACCOUNT_ID, self.function_name, version)
++        self.version = version
++        self.last_modified = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
++
+     @property
+     def vpc_config(self):
+         config = self._vpc_config.copy()
+@@ -231,7 +241,7 @@ def get_configuration(self):
+             "Role": self.role,
+             "Runtime": self.run_time,
+             "Timeout": self.timeout,
+-            "Version": self.version,
++            "Version": str(self.version),
+             "VpcConfig": self.vpc_config,
+         }
+ 
+@@ -389,8 +399,7 @@ def get_cfn_attribute(self, attribute_name):
+         from moto.cloudformation.exceptions import \
+             UnformattedGetAttTemplateException
+         if attribute_name == 'Arn':
+-            return 'arn:aws:lambda:{0}:123456789012:function:{1}'.format(
+-                self.region, self.function_name)
++            return make_function_arn(self.region, ACCOUNT_ID, self.function_name)
+         raise UnformattedGetAttTemplateException()
+ 
+     @staticmethod
+@@ -446,9 +455,121 @@ def create_from_cloudformation_json(cls, resource_name, cloudformation_json,
+         return LambdaVersion(spec)
+ 
+ 
++class LambdaStorage(object):
++    def __init__(self):
++        # Format 'func_name' {'alias': {}, 'versions': []}
++        self._functions = {}
++        self._arns = weakref.WeakValueDictionary()
++
++    def _get_latest(self, name):
++        return self._functions[name]['latest']
++
++    def _get_version(self, name, version):
++        index = version - 1
++
++        try:
++            return self._functions[name]['versions'][index]
++        except IndexError:
++            return None
++
++    def _get_alias(self, name, alias):
++        return self._functions[name]['alias'].get(alias, None)
++
++    def get_function(self, name, qualifier=None):
++        if name not in self._functions:
++            return None
++
++        if qualifier is None:
++            return self._get_latest(name)
++
++        try:
++            return self._get_version(name, int(qualifier))
++        except ValueError:
++            return self._functions[name]['latest']
++
++    def get_arn(self, arn):
++        return self._arns.get(arn, None)
++
++    def put_function(self, fn):
++        """
++        :param fn: Function
++        :type fn: LambdaFunction
++        """
++        if fn.function_name in self._functions:
++            self._functions[fn.function_name]['latest'] = fn
++        else:
++            self._functions[fn.function_name] = {
++                'latest': fn,
++                'versions': [],
++                'alias': weakref.WeakValueDictionary()
++            }
++
++        self._arns[fn.function_arn] = fn
++
++    def publish_function(self, name):
++        if name not in self._functions:
++            return None
++        if not self._functions[name]['latest']:
++            return None
++
++        new_version = len(self._functions[name]['versions']) + 1
++        fn = copy.copy(self._functions[name]['latest'])
++        fn.set_version(new_version)
++
++        self._functions[name]['versions'].append(fn)
++        return fn
++
++    def del_function(self, name, qualifier=None):
++        if name in self._functions:
++            if not qualifier:
++                # Something is still reffing this so delete all arns
++                latest = self._functions[name]['latest'].function_arn
++                del self._arns[latest]
++
++                for fn in self._functions[name]['versions']:
++                    del self._arns[fn.function_arn]
++
++                del self._functions[name]
++
++                return True
++
++            elif qualifier == '$LATEST':
++                self._functions[name]['latest'] = None
++
++                # If theres no functions left
++                if not self._functions[name]['versions'] and not self._functions[name]['latest']:
++                    del self._functions[name]
++
++                return True
++
++            else:
++                fn = self.get_function(name, qualifier)
++                if fn:
++                    self._functions[name]['versions'].remove(fn)
++
++                    # If theres no functions left
++                    if not self._functions[name]['versions'] and not self._functions[name]['latest']:
++                        del self._functions[name]
++
++                    return True
++
++        return False
++
++    def all(self):
++        result = []
++
++        for function_group in self._functions.values():
++            if function_group['latest'] is not None:
++                result.append(function_group['latest'])
++
++            result.extend(function_group['versions'])
++
++        return result
++
++
+ class LambdaBackend(BaseBackend):
+     def __init__(self, region_name):
+-        self._functions = {}
++        self._lambdas = LambdaStorage()
+         self.region_name = region_name
+ 
+     def reset(self):
+@@ -456,31 +577,31 @@ def reset(self):
+         self.__dict__ = {}
+         self.__init__(region_name)
+ 
+-    def has_function(self, function_name):
+-        return function_name in self._functions
++    def create_function(self, spec):
++        function_name = spec.get('FunctionName', None)
++        if function_name is None:
++            raise RESTError('InvalidParameterValueException', 'Missing FunctionName')
+ 
+-    def has_function_arn(self, function_arn):
+-        return self.get_function_by_arn(function_arn) is not None
++        fn = LambdaFunction(spec, self.region_name, version='$LATEST')
++
++        self._lambdas.put_function(fn)
+ 
+-    def create_function(self, spec):
+-        fn = LambdaFunction(spec, self.region_name)
+-        self._functions[fn.function_name] = fn
+         return fn
+ 
+-    def get_function(self, function_name):
+-        return self._functions[function_name]
++    def publish_function(self, function_name):
++        return self._lambdas.publish_function(function_name)
++
++    def get_function(self, function_name, qualifier=None):
++        return self._lambdas.get_function(function_name, qualifier)
+ 
+     def get_function_by_arn(self, function_arn):
+-        for function in self._functions.values():
+-            if function.function_arn == function_arn:
+-                return function
+-        return None
++        return self._lambdas.get_arn(function_arn)
+ 
+-    def delete_function(self, function_name):
+-        del self._functions[function_name]
++    def delete_function(self, function_name, qualifier=None):
++        return self._lambdas.del_function(function_name, qualifier)
+ 
+     def list_functions(self):
+-        return self._functions.values()
++        return self._lambdas.all()
+ 
+     def send_message(self, function_name, message):
+         event = {
+@@ -515,23 +636,31 @@ def send_message(self, function_name, message):
+             ]
+ 
+         }
+-        self._functions[function_name].invoke(json.dumps(event), {}, {})
++        self._functions[function_name][-1].invoke(json.dumps(event), {}, {})
+         pass
+ 
+     def list_tags(self, resource):
+         return self.get_function_by_arn(resource).tags
+ 
+     def tag_resource(self, resource, tags):
+-        self.get_function_by_arn(resource).tags.update(tags)
++        fn = self.get_function_by_arn(resource)
++        if fn:
++            fn.tags.update(tags)
++            return True
++
++        return False
+ 
+     def untag_resource(self, resource, tagKeys):
+-        function = self.get_function_by_arn(resource)
+-        for key in tagKeys:
+-            try:
+-                del function.tags[key]
+-            except KeyError:
+-                pass
+-                # Don't care
++        fn = self.get_function_by_arn(resource)
++        if fn:
++            for key in tagKeys:
++                try:
++                    del fn.tags[key]
++                except KeyError:
++                    pass
++                    # Don't care
++            return True
++        return False
+ 
+     def add_policy(self, function_name, policy):
+         self.get_function(function_name).policy = policy
+diff --git a/moto/awslambda/responses.py b/moto/awslambda/responses.py
+index 4ba837ea243a..4e8759b2faef 100644
+--- a/moto/awslambda/responses.py
++++ b/moto/awslambda/responses.py
+@@ -5,15 +5,31 @@
+ 
+ try:
+     from urllib import unquote
+-    from urlparse import urlparse, parse_qs
+ except:
+-    from urllib.parse import unquote, urlparse, parse_qs
++    from urllib.parse import unquote
+ 
+ from moto.core.utils import amz_crc32, amzn_request_id
+ from moto.core.responses import BaseResponse
++from .models import lambda_backends
+ 
+ 
+ class LambdaResponse(BaseResponse):
++    @property
++    def json_body(self):
++        """
++        :return: JSON
++        :rtype: dict
++        """
++        return json.loads(self.body)
++
++    @property
++    def lambda_backend(self):
++        """
++        Get backend
++        :return: Lambda Backend
++        :rtype: moto.awslambda.models.LambdaBackend
++        """
++        return lambda_backends[self.region]
+ 
+     def root(self, request, full_url, headers):
+         self.setup_class(request, full_url, headers)
+@@ -33,6 +49,16 @@ def function(self, request, full_url, headers):
+         else:
+             raise ValueError("Cannot handle request")
+ 
++    def versions(self, request, full_url, headers):
++        self.setup_class(request, full_url, headers)
++        if request.method == 'GET':
++            # This is ListVersionByFunction
++            raise ValueError("Cannot handle request")
++        elif request.method == 'POST':
++            return self._publish_function(request, full_url, headers)
++        else:
++            raise ValueError("Cannot handle request")
++
+     @amz_crc32
+     @amzn_request_id
+     def invoke(self, request, full_url, headers):
+@@ -93,13 +119,12 @@ def _get_policy(self, request, full_url, headers):
+ 
+     def _invoke(self, request, full_url):
+         response_headers = {}
+-        lambda_backend = self.get_lambda_backend(full_url)
+ 
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_name = path.split('/')[-2]
++        function_name = self.path.rsplit('/', 2)[-2]
++        qualifier = self._get_param('qualifier')
+ 
+-        if lambda_backend.has_function(function_name):
+-            fn = lambda_backend.get_function(function_name)
++        fn = self.lambda_backend.get_function(function_name, qualifier)
++        if fn:
+             payload = fn.invoke(self.body, self.headers, response_headers)
+             response_headers['Content-Length'] = str(len(payload))
+             return 202, response_headers, payload
+@@ -108,66 +133,70 @@ def _invoke(self, request, full_url):
+ 
+     def _invoke_async(self, request, full_url):
+         response_headers = {}
+-        lambda_backend = self.get_lambda_backend(full_url)
+ 
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_name = path.split('/')[-3]
+-        if lambda_backend.has_function(function_name):
+-            fn = lambda_backend.get_function(function_name)
+-            fn.invoke(self.body, self.headers, response_headers)
+-            response_headers['Content-Length'] = str(0)
+-            return 202, response_headers, ""
++        function_name = self.path.rsplit('/', 3)[-3]
++
++        fn = self.lambda_backend.get_function(function_name, None)
++        if fn:
++            payload = fn.invoke(self.body, self.headers, response_headers)
++            response_headers['Content-Length'] = str(len(payload))
++            return 202, response_headers, payload
+         else:
+             return 404, response_headers, "{}"
+ 
+     def _list_functions(self, request, full_url, headers):
+-        lambda_backend = self.get_lambda_backend(full_url)
+-        return 200, {}, json.dumps({
+-            "Functions": [fn.get_configuration() for fn in lambda_backend.list_functions()],
+-            # "NextMarker": str(uuid.uuid4()),
+-        })
++        result = {
++            'Functions': []
++        }
++
++        for fn in self.lambda_backend.list_functions():
++            json_data = fn.get_configuration()
++
++            result['Functions'].append(json_data)
++
++        return 200, {}, json.dumps(result)
+ 
+     def _create_function(self, request, full_url, headers):
+-        lambda_backend = self.get_lambda_backend(full_url)
+-        spec = json.loads(self.body)
+         try:
+-            fn = lambda_backend.create_function(spec)
++            fn = self.lambda_backend.create_function(self.json_body)
+         except ValueError as e:
+             return 400, {}, json.dumps({"Error": {"Code": e.args[0], "Message": e.args[1]}})
+         else:
+             config = fn.get_configuration()
+             return 201, {}, json.dumps(config)
+ 
+-    def _delete_function(self, request, full_url, headers):
+-        lambda_backend = self.get_lambda_backend(full_url)
++    def _publish_function(self, request, full_url, headers):
++        function_name = self.path.rsplit('/', 2)[-2]
+ 
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_name = path.split('/')[-1]
++        fn = self.lambda_backend.publish_function(function_name)
++        if fn:
++            config = fn.get_configuration()
++            return 200, {}, json.dumps(config)
++        else:
++            return 404, {}, "{}"
+ 
+-        if lambda_backend.has_function(function_name):
+-            lambda_backend.delete_function(function_name)
++    def _delete_function(self, request, full_url, headers):
++        function_name = self.path.rsplit('/', 1)[-1]
++        qualifier = self._get_param('Qualifier', None)
++
++        if self.lambda_backend.delete_function(function_name, qualifier):
+             return 204, {}, ""
+         else:
+             return 404, {}, "{}"
+ 
+     def _get_function(self, request, full_url, headers):
+-        lambda_backend = self.get_lambda_backend(full_url)
++        function_name = self.path.rsplit('/', 1)[-1]
++        qualifier = self._get_param('Qualifier', None)
+ 
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_name = path.split('/')[-1]
++        fn = self.lambda_backend.get_function(function_name, qualifier)
+ 
+-        if lambda_backend.has_function(function_name):
+-            fn = lambda_backend.get_function(function_name)
++        if fn:
+             code = fn.get_code()
++
+             return 200, {}, json.dumps(code)
+         else:
+             return 404, {}, "{}"
+ 
+-    def get_lambda_backend(self, full_url):
+-        from moto.awslambda.models import lambda_backends
+-        region = self._get_aws_region(full_url)
+-        return lambda_backends[region]
+-
+     def _get_aws_region(self, full_url):
+         region = re.search(self.region_regex, full_url)
+         if region:
+@@ -176,41 +205,27 @@ def _get_aws_region(self, full_url):
+             return self.default_region
+ 
+     def _list_tags(self, request, full_url):
+-        lambda_backend = self.get_lambda_backend(full_url)
+-
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_arn = unquote(path.split('/')[-1])
++        function_arn = unquote(self.path.rsplit('/', 1)[-1])
+ 
+-        if lambda_backend.has_function_arn(function_arn):
+-            function = lambda_backend.get_function_by_arn(function_arn)
+-            return 200, {}, json.dumps(dict(Tags=function.tags))
++        fn = self.lambda_backend.get_function_by_arn(function_arn)
++        if fn:
++            return 200, {}, json.dumps({'Tags': fn.tags})
+         else:
+             return 404, {}, "{}"
+ 
+     def _tag_resource(self, request, full_url):
+-        lambda_backend = self.get_lambda_backend(full_url)
+-
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_arn = unquote(path.split('/')[-1])
+-
+-        spec = json.loads(self.body)
++        function_arn = unquote(self.path.rsplit('/', 1)[-1])
+ 
+-        if lambda_backend.has_function_arn(function_arn):
+-            lambda_backend.tag_resource(function_arn, spec['Tags'])
++        if self.lambda_backend.tag_resource(function_arn, self.json_body['Tags']):
+             return 200, {}, "{}"
+         else:
+             return 404, {}, "{}"
+ 
+     def _untag_resource(self, request, full_url):
+-        lambda_backend = self.get_lambda_backend(full_url)
+-
+-        path = request.path if hasattr(request, 'path') else request.path_url
+-        function_arn = unquote(path.split('/')[-1].split('?')[0])
+-
+-        tag_keys = parse_qs(urlparse(full_url).query)['tagKeys']
++        function_arn = unquote(self.path.rsplit('/', 1)[-1])
++        tag_keys = self.querystring['tagKeys']
+ 
+-        if lambda_backend.has_function_arn(function_arn):
+-            lambda_backend.untag_resource(function_arn, tag_keys)
++        if self.lambda_backend.untag_resource(function_arn, tag_keys):
+             return 204, {}, "{}"
+         else:
+             return 404, {}, "{}"
+diff --git a/moto/awslambda/urls.py b/moto/awslambda/urls.py
+index 005785f19752..7c4d064dc259 100644
+--- a/moto/awslambda/urls.py
++++ b/moto/awslambda/urls.py
+@@ -10,6 +10,7 @@
+ url_paths = {
+     '{0}/(?P<api_version>[^/]+)/functions/?$': response.root,
+     r'{0}/(?P<api_version>[^/]+)/functions/(?P<function_name>[\w_-]+)/?$': response.function,
++    r'{0}/(?P<api_version>[^/]+)/functions/(?P<function_name>[\w_-]+)/versions/?$': response.versions,
+     r'{0}/(?P<api_version>[^/]+)/functions/(?P<function_name>[\w_-]+)/invocations/?$': response.invoke,
+     r'{0}/(?P<api_version>[^/]+)/functions/(?P<function_name>[\w_-]+)/invoke-async/?$': response.invoke_async,
+     r'{0}/(?P<api_version>[^/]+)/tags/(?P<resource_arn>.+)': response.tag,
+diff --git a/moto/awslambda/utils.py b/moto/awslambda/utils.py
+new file mode 100644
+index 000000000000..88146d34f02b
+--- /dev/null
++++ b/moto/awslambda/utils.py
+@@ -0,0 +1,15 @@
++from collections import namedtuple
++
++ARN = namedtuple('ARN', ['region', 'account', 'function_name', 'version'])
++
++
++def make_function_arn(region, account, name, version='1'):
++    return 'arn:aws:lambda:{0}:{1}:function:{2}:{3}'.format(region, account, name, version)
++
++
++def split_function_arn(arn):
++    arn = arn.replace('arn:aws:lambda:')
++
++    region, account, _, name, version = arn.split(':')
++
++    return ARN(region, account, name, version)
+diff --git a/moto/core/responses.py b/moto/core/responses.py
+index be0a4ef45f9d..5fce3bf9de4a 100644
+--- a/moto/core/responses.py
++++ b/moto/core/responses.py
+@@ -106,7 +106,7 @@ class BaseResponse(_TemplateEnvironmentMixin):
+ 
+     default_region = 'us-east-1'
+     # to extract region, use [^.]
+-    region_regex = r'\.([^.]+?)\.amazonaws\.com'
++    region_regex = r'\.(?P<region>[a-z]{2}-[a-z]+-\d{1})\.amazonaws\.com'
+     aws_service_spec = None
+ 
+     @classmethod
+diff --git a/tests/test_awslambda/test_lambda.py b/tests/test_awslambda/test_lambda.py
+index 7bdfe32562e6..e7a9f9174b6c 100644
+--- a/tests/test_awslambda/test_lambda.py
++++ b/tests/test_awslambda/test_lambda.py
+@@ -12,7 +12,7 @@
+ from freezegun import freeze_time
+ from moto import mock_lambda, mock_s3, mock_ec2, settings
+ 
+-_lambda_region = 'us-east-1' if settings.TEST_SERVER_MODE else 'us-west-2'
++_lambda_region = 'us-west-2'
+ 
+ 
+ def _process_lambda(func_str):
+@@ -220,7 +220,7 @@ def test_create_function_from_aws_bucket():
+     result.pop('LastModified')
+     result.should.equal({
+         'FunctionName': 'testFunction',
+-        'FunctionArn': 'arn:aws:lambda:{}:123456789012:function:testFunction'.format(_lambda_region),
++        'FunctionArn': 'arn:aws:lambda:{}:123456789012:function:testFunction:$LATEST'.format(_lambda_region),
+         'Runtime': 'python2.7',
+         'Role': 'test-iam-role',
+         'Handler': 'lambda_function.lambda_handler',
+@@ -265,7 +265,7 @@ def test_create_function_from_zipfile():
+ 
+     result.should.equal({
+         'FunctionName': 'testFunction',
+-        'FunctionArn': 'arn:aws:lambda:{}:123456789012:function:testFunction'.format(_lambda_region),
++        'FunctionArn': 'arn:aws:lambda:{}:123456789012:function:testFunction:$LATEST'.format(_lambda_region),
+         'Runtime': 'python2.7',
+         'Role': 'test-iam-role',
+         'Handler': 'lambda_function.lambda_handler',
+@@ -317,30 +317,25 @@ def test_get_function():
+     result['ResponseMetadata'].pop('RetryAttempts', None)
+     result['Configuration'].pop('LastModified')
+ 
+-    result.should.equal({
+-        "Code": {
+-            "Location": "s3://awslambda-{0}-tasks.s3-{0}.amazonaws.com/test.zip".format(_lambda_region),
+-            "RepositoryType": "S3"
+-        },
+-        "Configuration": {
+-            "CodeSha256": hashlib.sha256(zip_content).hexdigest(),
+-            "CodeSize": len(zip_content),
+-            "Description": "test lambda function",
+-            "FunctionArn": 'arn:aws:lambda:{}:123456789012:function:testFunction'.format(_lambda_region),
+-            "FunctionName": "testFunction",
+-            "Handler": "lambda_function.lambda_handler",
+-            "MemorySize": 128,
+-            "Role": "test-iam-role",
+-            "Runtime": "python2.7",
+-            "Timeout": 3,
+-            "Version": '$LATEST',
+-            "VpcConfig": {
+-                "SecurityGroupIds": [],
+-                "SubnetIds": [],
+-            }
+-        },
+-        'ResponseMetadata': {'HTTPStatusCode': 200},
+-    })
++    result['Code']['Location'].should.equal('s3://awslambda-{0}-tasks.s3-{0}.amazonaws.com/test.zip'.format(_lambda_region))
++    result['Code']['RepositoryType'].should.equal('S3')
++
++    result['Configuration']['CodeSha256'].should.equal(hashlib.sha256(zip_content).hexdigest())
++    result['Configuration']['CodeSize'].should.equal(len(zip_content))
++    result['Configuration']['Description'].should.equal('test lambda function')
++    result['Configuration'].should.contain('FunctionArn')
++    result['Configuration']['FunctionName'].should.equal('testFunction')
++    result['Configuration']['Handler'].should.equal('lambda_function.lambda_handler')
++    result['Configuration']['MemorySize'].should.equal(128)
++    result['Configuration']['Role'].should.equal('test-iam-role')
++    result['Configuration']['Runtime'].should.equal('python2.7')
++    result['Configuration']['Timeout'].should.equal(3)
++    result['Configuration']['Version'].should.equal('$LATEST')
++    result['Configuration'].should.contain('VpcConfig')
++
++    # Test get function with
++    result = conn.get_function(FunctionName='testFunction', Qualifier='$LATEST')
++    result['Configuration']['Version'].should.equal('$LATEST')
+ 
+ 
+ @mock_lambda
+@@ -380,6 +375,52 @@ def test_delete_function():
+         FunctionName='testFunctionThatDoesntExist').should.throw(botocore.client.ClientError)
+ 
+ 
++@mock_lambda
++@mock_s3
++def test_publish():
++    s3_conn = boto3.client('s3', 'us-west-2')
++    s3_conn.create_bucket(Bucket='test-bucket')
++
++    zip_content = get_test_zip_file2()
++    s3_conn.put_object(Bucket='test-bucket', Key='test.zip', Body=zip_content)
++    conn = boto3.client('lambda', 'us-west-2')
++
++    conn.create_function(
++        FunctionName='testFunction',
++        Runtime='python2.7',
++        Role='test-iam-role',
++        Handler='lambda_function.lambda_handler',
++        Code={
++            'S3Bucket': 'test-bucket',
++            'S3Key': 'test.zip',
++        },
++        Description='test lambda function',
++        Timeout=3,
++        MemorySize=128,
++        Publish=True,
++    )
++
++    function_list = conn.list_functions()
++    function_list['Functions'].should.have.length_of(1)
++    latest_arn = function_list['Functions'][0]['FunctionArn']
++
++    conn.publish_version(FunctionName='testFunction')
++
++    function_list = conn.list_functions()
++    function_list['Functions'].should.have.length_of(2)
++
++    # #SetComprehension ;-)
++    published_arn = list({f['FunctionArn'] for f in function_list['Functions']} - {latest_arn})[0]
++    published_arn.should.contain('testFunction:1')
++
++    conn.delete_function(FunctionName='testFunction', Qualifier='1')
++
++    function_list = conn.list_functions()
++    function_list['Functions'].should.have.length_of(1)
++    function_list['Functions'][0]['FunctionArn'].should.contain('testFunction:$LATEST')
++
++
++
+ @mock_lambda
+ @mock_s3
+ @freeze_time('2015-01-01 00:00:00')
+@@ -420,7 +461,7 @@ def test_list_create_list_get_delete_list():
+             "CodeSha256": hashlib.sha256(zip_content).hexdigest(),
+             "CodeSize": len(zip_content),
+             "Description": "test lambda function",
+-            "FunctionArn": 'arn:aws:lambda:{}:123456789012:function:testFunction'.format(_lambda_region),
++            "FunctionArn": 'arn:aws:lambda:{}:123456789012:function:testFunction:$LATEST'.format(_lambda_region),
+             "FunctionName": "testFunction",
+             "Handler": "lambda_function.lambda_handler",
+             "MemorySize": 128,
+@@ -633,7 +674,7 @@ def test_get_function_created_with_zipfile():
+             "CodeSha256": hashlib.sha256(zip_content).hexdigest(),
+             "CodeSize": len(zip_content),
+             "Description": "test lambda function",
+-            "FunctionArn":'arn:aws:lambda:{}:123456789012:function:testFunction'.format(_lambda_region),
++            "FunctionArn":'arn:aws:lambda:{}:123456789012:function:testFunction:$LATEST'.format(_lambda_region),
+             "FunctionName": "testFunction",
+             "Handler": "lambda_function.handler",
+             "MemorySize": 128,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

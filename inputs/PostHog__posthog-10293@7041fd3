@@ -1,0 +1,1542 @@
+  Task-ID: PostHog__posthog-10293@7041fd3
+  Please checkout to this commit first: 3ced2ae1188093b321de17c2082e2e132b2b4429
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Persist custom column settings (per user)
+## Is your feature request related to a problem?
+
+When I set custom columns in the live events tables and then leave PostHog these custom columns are not present when I come back
+
+## Describe the solution you'd like
+I would like my personal custom columns to be consistent every time I use the live events table
+
+
+## Describe alternatives you've considered
+Setting custom columns every time I use live events, takes quite a while
+
+
+## Additional context
+
+
+
+#### *Thank you* for your feature request – we love each and every one!
+  </issue>
+  
+  <patch>
+  diff --git a/cypress/e2e/events.js b/cypress/e2e/events.js
+index 5ab0538bd976b..744cc8bdef844 100644
+--- a/cypress/e2e/events.js
++++ b/cypress/e2e/events.js
+@@ -90,6 +90,14 @@ describe('Events', () => {
+         cy.get('.operator-value-option').contains('> greater than').should('be.visible')
+     })
+ 
++    it.only('adds and removes an additional column', () => {
++        cy.get('[data-attr=events-table-column-selector]').click()
++        cy.get('[data-attr=taxonomic-filter-searchfield]').type('$browser_version')
++        cy.get('.taxonomic-list-row').should('have.length', 1).click()
++        cy.get('.column-display-item').should('have.length', 5).last().click()
++        cy.get('.column-display-item').should('have.length', 4)
++    })
++
+     /**
+      * Test fails because property filters act on properties.$time but not all events have that property
+      *
+diff --git a/frontend/src/lib/api.mock.ts b/frontend/src/lib/api.mock.ts
+index 42514d03fde7b..0bb837409516e 100644
+--- a/frontend/src/lib/api.mock.ts
++++ b/frontend/src/lib/api.mock.ts
+@@ -61,6 +61,7 @@ export const MOCK_DEFAULT_TEAM: TeamType = {
+     access_control: true,
+     has_group_types: true,
+     primary_dashboard: 1,
++    live_events_columns: ['event', 'person'],
+ }
+ 
+ export const MOCK_DEFAULT_ORGANIZATION: OrganizationType = {
+diff --git a/frontend/src/lib/components/LemonCheckbox/LemonCheckbox.scss b/frontend/src/lib/components/LemonCheckbox/LemonCheckbox.scss
+index bcf11391804f3..045011132c15c 100644
+--- a/frontend/src/lib/components/LemonCheckbox/LemonCheckbox.scss
++++ b/frontend/src/lib/components/LemonCheckbox/LemonCheckbox.scss
+@@ -15,7 +15,10 @@
+     padding-left: 0.5rem;
+     overflow: hidden;
+     text-overflow: ellipsis;
++    display: flex;
++    align-items: center;
+     cursor: pointer;
++
+     .LemonRow--disabled & {
+         cursor: not-allowed;
+     }
+@@ -30,36 +33,45 @@
+     width: 1em;
+     height: 1em;
+     cursor: pointer;
++
+     .LemonRow--disabled & {
+         cursor: not-allowed;
+     }
++
+     .LemonCheckbox--indeterminate & {
+         --tick-length: 9;
+     }
++
+     .LemonCheckbox:not(.LemonRow--disabled):hover & {
+         --box-color: var(--primary-hover);
+     }
++
+     .LemonCheckbox:not(.LemonRow--disabled):active & {
+         --box-color: var(--primary-active);
+     }
++
+     svg {
+         transition: border 200ms ease, background 200ms ease;
+         background: var(--bg-light);
+         border: 1.5px solid var(--border-dark);
+         border-radius: 3px; // Intentionally a bit smaller than --radius
++
+         path {
+             transition: stroke-dashoffset 200ms ease;
+             stroke: var(--bg-light);
+             stroke-dasharray: var(--tick-length);
+             stroke-dashoffset: var(--tick-length);
+         }
++
+         .LemonCheckbox:not(.LemonRow--disabled):hover &,
+         .LemonCheckbox:not(.LemonRow--disabled):active & {
+             border-color: var(--box-color);
+         }
++
+         .LemonCheckbox--checked & {
+             background: var(--box-color);
+             border-color: transparent;
++
+             path {
+                 stroke-dashoffset: 0;
+             }
+diff --git a/frontend/src/lib/components/ResizableTable/TableConfig.scss b/frontend/src/lib/components/ResizableTable/TableConfig.scss
+index f3c2829257e04..7d7c1cf671758 100644
+--- a/frontend/src/lib/components/ResizableTable/TableConfig.scss
++++ b/frontend/src/lib/components/ResizableTable/TableConfig.scss
+@@ -4,7 +4,6 @@
+     }
+ 
+     .column-display-item {
+-        cursor: pointer;
+         display: flex;
+         align-items: center;
+         justify-content: flex-start;
+@@ -24,7 +23,7 @@
+         }
+ 
+         &.selected {
+-            background-color: var(--primary-hover);
++            background-color: var(--bg-light-blue);
+         }
+ 
+         .property-key-info {
+@@ -33,4 +32,52 @@
+             text-overflow: ellipsis;
+         }
+     }
++
++    .main-content {
++        margin-bottom: 0.5rem;
++
++        .lists {
++            background-color: var(--bg-side);
++            border-radius: 0.25rem;
++            padding: 0.5rem;
++            margin-left: 0 !important;
++            margin-right: 0 !important;
++        }
++    }
++
++    .selected-column-col {
++        display: flex;
++        flex-direction: column;
++    }
++
++    .drag-handle {
++        cursor: move;
++        color: var(--text-default);
++        font-size: 1.2em;
++        padding-right: 0.25rem;
++
++        svg {
++            transform: rotate(90deg) translateX(2px);
++        }
++    }
++
++    .save-as-default-button {
++        border: 1px solid var(--dark-grey);
++        border-radius: 0.25rem;
++    }
++}
++
++.column-configurator-modal-sortable-container {
++    z-index: 9999;
++    display: flex;
++    align-items: center;
++    justify-content: flex-start;
++    padding: 0.5rem;
++
++    .drag-handle {
++        color: var(--text-default);
++        font-size: 1.2em;
++        padding-right: 0.25rem;
++        transform: rotate(90deg) translateX(2px);
++    }
+ }
+diff --git a/frontend/src/lib/components/ResizableTable/TableConfig.tsx b/frontend/src/lib/components/ResizableTable/TableConfig.tsx
+index cbd622f137345..66903722e7433 100644
+--- a/frontend/src/lib/components/ResizableTable/TableConfig.tsx
++++ b/frontend/src/lib/components/ResizableTable/TableConfig.tsx
+@@ -1,6 +1,6 @@
+ import { Button, Col, Row, Space } from 'antd'
+ import React from 'react'
+-import { ControlOutlined, LockOutlined, CloseOutlined } from '@ant-design/icons'
++import { LockOutlined, CloseOutlined } from '@ant-design/icons'
+ import './TableConfig.scss'
+ import { useActions, useValues } from 'kea'
+ import { tableConfigLogic } from './tableConfigLogic'
+@@ -15,29 +15,26 @@ import { TaxonomicFilter } from 'lib/components/TaxonomicFilter/TaxonomicFilter'
+ import { TaxonomicFilterGroupType } from 'lib/components/TaxonomicFilter/types'
+ import { LemonButton } from 'lib/components/LemonButton'
+ import { IconTuning } from 'lib/components/icons'
++import { LemonCheckbox } from 'lib/components/LemonCheckbox'
++import {
++    SortableHandle as sortableHandle,
++    SortableContainer as sortableContainer,
++    SortableElement as sortableElement,
++} from 'react-sortable-hoc'
++import { SortableDragIcon } from 'lib/components/icons'
++import { userLogic } from 'scenes/userLogic'
++
++const DragHandle = sortableHandle(() => (
++    <span className="drag-handle">
++        <SortableDragIcon />
++    </span>
++))
+ 
+ interface TableConfigProps {
+     immutableColumns?: string[] //the titles of the columns that are always displayed
+     defaultColumns: string[] // the titles of the set of columns to show when there is no user choice
+ }
+ 
+-/**
+- * A scene that contains a ResizableTable with many possible columns
+- * can use this to let the user choose which columns they see
+- */
+-export function TableConfig(props: TableConfigProps): JSX.Element {
+-    const { showModal } = useActions(tableConfigLogic)
+-
+-    return (
+-        <>
+-            <Button data-attr="events-table-column-selector" onClick={showModal} icon={<ControlOutlined rotate={90} />}>
+-                Customize columns
+-            </Button>
+-            <ColumnConfigurator immutableColumns={props.immutableColumns} defaultColumns={props.defaultColumns} />
+-        </>
+-    )
+-}
+-
+ export function LemonTableConfig(props: TableConfigProps): JSX.Element {
+     const { showModal } = useActions(tableConfigLogic)
+ 
+@@ -49,7 +46,7 @@ export function LemonTableConfig(props: TableConfigProps): JSX.Element {
+                 onClick={showModal}
+                 icon={<IconTuning style={{ color: 'var(--primary)' }} />}
+             >
+-                Customize columns
++                Configure columns
+             </LemonButton>
+             <ColumnConfigurator immutableColumns={props.immutableColumns} defaultColumns={props.defaultColumns} />
+         </>
+@@ -67,37 +64,78 @@ function ColumnConfigurator({ immutableColumns, defaultColumns }: TableConfigPro
+     const { selectedColumns: currentlySelectedColumns, modalVisible } = useValues(tableConfigLogic)
+     const { hideModal } = useActions(tableConfigLogic)
+ 
+-    const logic = columnConfiguratorLogic({
++    const configuratorLogic = columnConfiguratorLogic({
+         selectedColumns: currentlySelectedColumns === 'DEFAULT' ? defaultColumns : currentlySelectedColumns,
+     })
+-    const { selectColumn, unselectColumn, resetColumns, save } = useActions(logic)
+-    const { selectedColumns } = useValues(logic)
+-
+-    function SelectedColumn({ index, style, key }: ListRowProps): JSX.Element {
+-        const disabled = immutableColumns?.includes(selectedColumns[index])
++    const { selectColumn, unselectColumn, resetColumns, setColumns, toggleSaveAsDefault, save } =
++        useActions(configuratorLogic)
++    const { selectedColumns } = useValues(configuratorLogic)
++    const { user } = useValues(userLogic)
+ 
++    const SelectedColumn = ({ column, disabled }: { column: string; disabled?: boolean }): JSX.Element => {
+         return (
+-            <div style={style} key={key} onClick={() => !disabled && unselectColumn(selectedColumns[index])}>
+-                <div
+-                    className={clsx(['column-display-item', { selected: !disabled, disabled: disabled }])}
+-                    style={{ height: `${rowItemHeight}px` }}
+-                >
+-                    <PropertyKeyInfo value={selectedColumns[index]} />
+-                    <div className="text-right" style={{ flex: 1 }}>
+-                        <Tooltip title={disabled ? 'Reserved' : 'Remove'}>
+-                            {disabled ? <LockOutlined /> : <CloseOutlined style={{ color: 'var(--danger)' }} />}
+-                        </Tooltip>
+-                    </div>
++            <div
++                className={clsx(['column-display-item', { selected: !disabled, disabled: disabled }])}
++                style={{ height: `${rowItemHeight}px` }}
++            >
++                {!disabled && <DragHandle />}
++                <PropertyKeyInfo value={column} />
++                <div className="text-right" style={{ flex: 1 }}>
++                    <Tooltip title={disabled ? 'Reserved' : 'Remove'}>
++                        {disabled ? (
++                            <LockOutlined />
++                        ) : (
++                            <CloseOutlined style={{ color: 'var(--danger)' }} onClick={() => unselectColumn(column)} />
++                        )}
++                    </Tooltip>
+                 </div>
+             </div>
+         )
+     }
+ 
++    const SortableSelectedColumn = sortableElement(SelectedColumn)
++
++    const SortableSelectedColumnRenderer = ({ index, style, key }: ListRowProps): JSX.Element => {
++        const disabled = immutableColumns?.includes(selectedColumns[index])
++        return (
++            <div style={style} key={key}>
++                {disabled && <SelectedColumn column={selectedColumns[index]} disabled={Boolean(disabled)} />}
++                {!disabled && <SortableSelectedColumn column={selectedColumns[index]} index={index} />}
++            </div>
++        )
++    }
++
++    const SortableColumnList = sortableContainer(() => (
++        <div style={{ height: 320 }} className="selected-columns-col">
++            <AutoSizer>
++                {({ height, width }: { height: number; width: number }) => {
++                    return (
++                        <VirtualizedList
++                            height={height}
++                            rowCount={selectedColumns.length}
++                            rowRenderer={SortableSelectedColumnRenderer}
++                            rowHeight={rowContainerHeight}
++                            width={width}
++                        />
++                    )
++                }}
++            </AutoSizer>
++        </div>
++    ))
++
++    const handleSort = ({ oldIndex, newIndex }: { oldIndex: number; newIndex: number }): void => {
++        const newColumns = [...selectedColumns]
++        const [removed] = newColumns.splice(oldIndex, 1)
++        newColumns.splice(newIndex, 0, removed)
++        setColumns(newColumns)
++    }
++
+     return (
+         <Modal
++            id="column-configurator-modal"
+             centered
+             visible={modalVisible}
+-            title="Customize columns"
++            title="Configure columns"
+             onOk={save}
+             width={700}
+             bodyStyle={{ padding: '16px 16px 0 16px' }}
+@@ -112,12 +150,12 @@ function ColumnConfigurator({ immutableColumns, defaultColumns }: TableConfigPro
+                 <Row>
+                     <Space style={{ flexGrow: 1 }} align="start">
+                         <Button className="text-blue" onClick={() => resetColumns(defaultColumns)}>
+-                            Reset to default
++                            Reset to defaults
+                         </Button>
+                     </Space>
+                     <Space>
+                         <Button className="text-blue" type="text" onClick={hideModal}>
+-                            Cancel
++                            Close
+                         </Button>
+                         <Button type="primary" onClick={save}>
+                             Save
+@@ -126,46 +164,60 @@ function ColumnConfigurator({ immutableColumns, defaultColumns }: TableConfigPro
+                 </Row>
+             }
+         >
+-            <Row gutter={16} className="mt">
+-                <Col xs={24} sm={12}>
+-                    <h3 className="l3">Available columns</h3>
+-                    <div style={{ height: 320 }}>
+-                        <AutoSizer>
+-                            {({ height, width }: { height: number; width: number }) => {
+-                                return (
+-                                    <TaxonomicFilter
+-                                        height={height}
+-                                        width={width}
+-                                        taxonomicGroupTypes={[TaxonomicFilterGroupType.EventProperties]}
+-                                        value={undefined}
+-                                        onChange={(_, value) => value && selectColumn(String(value))}
+-                                        popoverEnabled={false}
+-                                        selectFirstItem={false}
+-                                    />
+-                                )
+-                            }}
+-                        </AutoSizer>
+-                    </div>
+-                </Col>
+-                <Col xs={24} sm={12}>
+-                    <h3 className="l3">Visible columns ({selectedColumns.length})</h3>
+-                    <div style={{ height: 320 }}>
+-                        <AutoSizer>
+-                            {({ height, width }: { height: number; width: number }) => {
+-                                return (
+-                                    <VirtualizedList
+-                                        height={height}
+-                                        rowCount={selectedColumns.length}
+-                                        rowRenderer={SelectedColumn}
+-                                        rowHeight={rowContainerHeight}
+-                                        width={width}
+-                                    />
+-                                )
+-                            }}
+-                        </AutoSizer>
+-                    </div>
+-                </Col>
+-            </Row>
++            <div className="main-content">
++                <Row gutter={16} className="lists">
++                    <Col xs={24} sm={12}>
++                        <h4 className="secondary uppercase text-muted">
++                            Visible columns ({selectedColumns.length}) - Drag to reorder
++                        </h4>
++                        <SortableColumnList
++                            helperClass="column-configurator-modal-sortable-container"
++                            onSortEnd={handleSort}
++                            distance={5}
++                            useDragHandle
++                            lockAxis="y"
++                        />
++                    </Col>
++                    <Col xs={24} sm={12}>
++                        <h4 className="secondary uppercase text-muted">Available columns</h4>
++                        <div style={{ height: 320 }}>
++                            <AutoSizer>
++                                {({ height, width }: { height: number; width: number }) => {
++                                    return (
++                                        <TaxonomicFilter
++                                            height={height}
++                                            width={width}
++                                            taxonomicGroupTypes={[TaxonomicFilterGroupType.EventProperties]}
++                                            value={undefined}
++                                            onChange={(_, value) => value && selectColumn(String(value))}
++                                            popoverEnabled={false}
++                                            selectFirstItem={false}
++                                        />
++                                    )
++                                }}
++                            </AutoSizer>
++                        </div>
++                    </Col>
++                </Row>
++                <LemonCheckbox
++                    label={
++                        <Tooltip
++                            title={
++                                !user?.is_staff
++                                    ? `You don't have permission to set default columns for all project members`
++                                    : undefined
++                            }
++                        >
++                            Save as default for all project members
++                        </Tooltip>
++                    }
++                    className="save-as-default-button mt"
++                    data-attr="events-table-save-columns-as-default-toggle"
++                    onChange={toggleSaveAsDefault}
++                    defaultChecked={false}
++                    disabled={!user?.is_staff}
++                />
++            </div>
+         </Modal>
+     )
+ }
+diff --git a/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.test.ts b/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.test.ts
+index 1c6717ee8e54b..d6d5d500c766e 100644
+--- a/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.test.ts
++++ b/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.test.ts
+@@ -2,6 +2,7 @@ import { columnConfiguratorLogic } from 'lib/components/ResizableTable/columnCon
+ import { expectLogic } from 'kea-test-utils'
+ import { initKeaTests } from '~/test/init'
+ import { tableConfigLogic } from 'lib/components/ResizableTable/tableConfigLogic'
++import { teamLogic } from 'scenes/teamLogic'
+ 
+ describe('the column configurator lets the user change which columns should be visible', () => {
+     let logic: ReturnType<typeof columnConfiguratorLogic.build>
+@@ -10,7 +11,7 @@ describe('the column configurator lets the user change which columns should be v
+ 
+     beforeEach(() => {
+         initKeaTests()
+-        logic = columnConfiguratorLogic({ selectedColumns })
++        logic = columnConfiguratorLogic({ selectedColumns, onSaveAsDefault: () => {} })
+         logic.mount()
+     })
+ 
+@@ -44,4 +45,23 @@ describe('the column configurator lets the user change which columns should be v
+             selectedColumns: ['a', 'b', 'ant', 'aardvark', 'added'],
+         })
+     })
++
++    it('sets toggle to save columns as default', async () => {
++        await expectLogic(logic, () => {
++            logic.actions.toggleSaveAsDefault()
++        }).toMatchValues({
++            saveAsDefault: true,
++        })
++    })
++
++    it.only('saves columns as default', async () => {
++        await expectLogic(logic, () => {
++            logic.actions.selectColumn('added')
++            logic.actions.toggleSaveAsDefault()
++            logic.actions.save()
++        }).toDispatchActions([
++            teamLogic.actionCreators.updateCurrentTeam({ live_events_columns: ['a', 'b', 'ant', 'aardvark', 'added'] }),
++            logic.actionCreators.toggleSaveAsDefault(),
++        ])
++    })
+ })
+diff --git a/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.ts b/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.ts
+index 0a94b16ce616f..b5c2adda2c561 100644
+--- a/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.ts
++++ b/frontend/src/lib/components/ResizableTable/columnConfiguratorLogic.ts
+@@ -1,6 +1,7 @@
+ import type { columnConfiguratorLogicType } from './columnConfiguratorLogicType'
+ import { tableConfigLogic } from 'lib/components/ResizableTable/tableConfigLogic'
+ import { kea } from 'kea'
++import { teamLogic } from 'scenes/teamLogic'
+ 
+ export interface ColumnConfiguratorLogicProps {
+     selectedColumns: string[] // the columns the table is currently displaying
+@@ -14,6 +15,8 @@ export const columnConfiguratorLogic = kea<columnConfiguratorLogicType>({
+         selectColumn: (column: string) => ({ column }),
+         unselectColumn: (column: string) => ({ column }),
+         resetColumns: (columns: string[]) => ({ columns }),
++        setColumns: (columns: string[]) => ({ columns }),
++        toggleSaveAsDefault: true,
+         save: true,
+     },
+     reducers: ({ props }) => ({
+@@ -23,12 +26,23 @@ export const columnConfiguratorLogic = kea<columnConfiguratorLogicType>({
+                 selectColumn: (state, { column }) => Array.from(new Set([...state, column])),
+                 unselectColumn: (state, { column }) => state.filter((c) => c !== column),
+                 resetColumns: (_, { columns }) => columns,
++                setColumns: (_, { columns }) => columns,
++            },
++        ],
++        saveAsDefault: [
++            false,
++            {
++                toggleSaveAsDefault: (state) => !state,
+             },
+         ],
+     }),
+-    listeners: ({ values }) => ({
++    listeners: ({ values, actions }) => ({
+         save: () => {
+             tableConfigLogic.actions.setSelectedColumns(values.selectedColumns)
++            if (values.saveAsDefault) {
++                teamLogic.actions.updateCurrentTeam({ live_events_columns: values.selectedColumns })
++                actions.toggleSaveAsDefault()
++            }
+         },
+     }),
+ })
+diff --git a/frontend/src/lib/components/ResizableTable/index.tsx b/frontend/src/lib/components/ResizableTable/index.tsx
+index c1c80167a1b08..debf7b8bc1c70 100644
+--- a/frontend/src/lib/components/ResizableTable/index.tsx
++++ b/frontend/src/lib/components/ResizableTable/index.tsx
+@@ -6,13 +6,10 @@ import ResizeObserver from 'resize-observer-polyfill'
+ import { RenderedCell } from 'rc-table/lib/interface'
+ import { getFullwidthColumnSize, getMinColumnWidth, parsePixelValue } from 'lib/utils/responsiveUtils'
+ import VirtualTableHeader from './VirtualTableHeader'
+-import { TableConfig as _TableConfig } from './TableConfig'
+ import { useBreakpoint } from 'lib/hooks/useBreakpoint'
+ 
+ import './index.scss'
+ 
+-export const TableConfig = _TableConfig
+-
+ export interface ResizableColumnType<RecordType> extends ColumnType<RecordType> {
+     title: string | JSX.Element
+     key?: string
+diff --git a/frontend/src/lib/components/ResizableTable/tableConfigLogic.test.ts b/frontend/src/lib/components/ResizableTable/tableConfigLogic.test.ts
+index 0527ec6103f22..29dbe17420ed2 100644
+--- a/frontend/src/lib/components/ResizableTable/tableConfigLogic.test.ts
++++ b/frontend/src/lib/components/ResizableTable/tableConfigLogic.test.ts
+@@ -1,7 +1,6 @@
+ import { tableConfigLogic } from 'lib/components/ResizableTable/tableConfigLogic'
+ import { expectLogic } from 'kea-test-utils'
+ import { initKeaTests } from '~/test/init'
+-import { router } from 'kea-router'
+ 
+ describe('tableConfigLogic', () => {
+     let logic: ReturnType<typeof tableConfigLogic.build>
+@@ -22,22 +21,6 @@ describe('tableConfigLogic', () => {
+         })
+     })
+ 
+-    describe('column choices are stored in the URL', () => {
+-        it('reads from the URL when present', async () => {
+-            router.actions.push(router.values.location.pathname, { tableColumns: ['egg', 'beans', 'toast'] })
+-            await expectLogic(logic).toMatchValues({
+-                selectedColumns: ['egg', 'beans', 'toast'],
+-            })
+-        })
+-
+-        it('writes to the URL when column config changes', async () => {
+-            await expectLogic(logic, () => {
+-                logic.actions.setSelectedColumns(['soup', 'bread', 'greens'])
+-            })
+-            expect(router.values.searchParams).toHaveProperty('tableColumns', ['soup', 'bread', 'greens'])
+-        })
+-    })
+-
+     it('can show modal', async () => {
+         await expectLogic(logic, () => logic.actions.showModal()).toMatchValues({
+             modalVisible: true,
+@@ -59,9 +42,9 @@ describe('tableConfigLogic', () => {
+         })
+     })
+ 
+-    it('sets table width to one more than column length to account for the button column', async () => {
++    it('sets table width to two more than column length to account for the Time and Actions column', async () => {
+         await expectLogic(logic, () => logic.actions.setSelectedColumns(['a', 'b'])).toMatchValues({
+-            tableWidth: 3,
++            tableWidth: 4,
+         })
+     })
+ })
+diff --git a/frontend/src/lib/components/ResizableTable/tableConfigLogic.ts b/frontend/src/lib/components/ResizableTable/tableConfigLogic.ts
+index aedae6a29e985..1c32ca36f10b4 100644
+--- a/frontend/src/lib/components/ResizableTable/tableConfigLogic.ts
++++ b/frontend/src/lib/components/ResizableTable/tableConfigLogic.ts
+@@ -1,6 +1,5 @@
+ import { kea } from 'kea'
+ import type { tableConfigLogicType } from './tableConfigLogicType'
+-import { router } from 'kea-router'
+ import { ColumnChoice } from '~/types'
+ 
+ export interface TableConfigLogicProps {
+@@ -26,7 +25,6 @@ export const tableConfigLogic = kea<tableConfigLogicType>({
+             false,
+             {
+                 showModal: () => true,
+-                save: () => false,
+                 hideModal: () => false,
+                 setSelectedColumns: () => false,
+             },
+@@ -36,41 +34,8 @@ export const tableConfigLogic = kea<tableConfigLogicType>({
+         tableWidth: [
+             (selectors) => [selectors.selectedColumns],
+             (selectedColumns: ColumnChoice): number => {
+-                return selectedColumns === 'DEFAULT' ? 7 : selectedColumns.length + 1
++                return selectedColumns === 'DEFAULT' ? 7 : selectedColumns.length + 2 // Time and Actions columns are appended by default at the end of the columns (thus the `+ 2`)
+             },
+         ],
+     },
+-    urlToAction: ({ actions, values }) => ({
+-        '*': (_, searchParams) => {
+-            const columnsFromURL: string[] = searchParams.tableColumns
+-            // URL columns must be present, an array, and have content
+-            if (!columnsFromURL || !Array.isArray(columnsFromURL) || columnsFromURL.length === 0) {
+-                return
+-            }
+-
+-            const currentColumns: ColumnChoice = values.selectedColumns
+-
+-            const arrayEqualsInAnyOrder =
+-                columnsFromURL.length === currentColumns.length &&
+-                columnsFromURL.every((value) => currentColumns.includes(value))
+-
+-            // URL columns should be applied if the current columns are not set, or are not the same as the URL columns
+-            if (currentColumns === 'DEFAULT' || !arrayEqualsInAnyOrder) {
+-                actions.setSelectedColumns(columnsFromURL)
+-            }
+-        },
+-    }),
+-    actionToUrl: ({ values }) => ({
+-        setSelectedColumns: () => {
+-            return [
+-                router.values.location.pathname,
+-                {
+-                    ...router.values.searchParams,
+-                    tableColumns: values.selectedColumns,
+-                },
+-                router.values.hashParams,
+-                { replace: true },
+-            ]
+-        },
+-    }),
+ })
+diff --git a/frontend/src/scenes/events/EventsTable.tsx b/frontend/src/scenes/events/EventsTable.tsx
+index cbf7496662721..35365bfcea7d9 100644
+--- a/frontend/src/scenes/events/EventsTable.tsx
++++ b/frontend/src/scenes/events/EventsTable.tsx
+@@ -102,7 +102,11 @@ export function EventsTable({
+         highlightEvents,
+         months,
+     } = useValues(logic)
+-    const { tableWidth, selectedColumns } = useValues(tableConfigLogic({ startingColumns }))
++    const { tableWidth, selectedColumns } = useValues(
++        tableConfigLogic({
++            startingColumns: (currentTeam && currentTeam.live_events_columns) ?? startingColumns,
++        })
++    )
+ 
+     const {
+         fetchNextEvents,
+@@ -153,7 +157,7 @@ export function EventsTable({
+             }
+             return showLinkToPerson && event.person?.distinct_ids?.length ? (
+                 <Link to={urls.person(event.person.distinct_ids[0])}>
+-                    <PersonHeader withIcon person={event.person} />
++                    <PersonHeader noLink withIcon person={event.person} />
+                 </Link>
+             ) : (
+                 <PersonHeader withIcon person={event.person} />
+@@ -232,32 +236,54 @@ export function EventsTable({
+             selectedColumns === 'DEFAULT'
+                 ? [...defaultColumns]
+                 : selectedColumns.map(
+-                      (e, index): LemonTableColumn<EventsTableRowItem, keyof EventsTableRowItem | undefined> =>
+-                          defaultColumns.find((d) => d.key === e) || {
+-                              title: keyMapping['event'][e] ? keyMapping['event'][e].label : e,
+-                              key: e,
+-                              render: function render(_, item: EventsTableRowItem) {
+-                                  const { event } = item
+-                                  if (!event) {
+-                                      if (index === 0) {
+-                                          return newEventsRender(item, tableWidth)
+-                                      } else {
+-                                          return { props: { colSpan: 0 } }
++                      (e, index): LemonTableColumn<EventsTableRowItem, keyof EventsTableRowItem | undefined> => {
++                          const defaultColumn = defaultColumns.find((d) => d.key === e)
++                          if (defaultColumn) {
++                              return {
++                                  ...defaultColumn,
++                                  render: function render(_, item: EventsTableRowItem) {
++                                      const { event } = item
++                                      if (!event) {
++                                          if (index === 0) {
++                                              return newEventsRender(item, tableWidth)
++                                          } else {
++                                              return { props: { colSpan: 0 } }
++                                          }
++                                      }
++                                      if (defaultColumn.render) {
++                                          return defaultColumn.render(_, item, index)
+                                       }
+-                                  }
+-                                  if (linkPropertiesToFilters) {
+-                                      return (
+-                                          <FilterPropertyLink
+-                                              className="ph-no-capture "
+-                                              property={e}
+-                                              value={event.properties[e] as string}
+-                                              filters={{ properties }}
+-                                          />
+-                                      )
+-                                  }
+-                                  return <Property value={event.properties[e]} />
+-                              },
++                                      return { props: { colSpan: 0 } }
++                                  },
++                              }
++                          } else {
++                              return {
++                                  title: keyMapping['event'][e] ? keyMapping['event'][e].label : e,
++                                  key: e,
++                                  render: function render(_, item: EventsTableRowItem) {
++                                      const { event } = item
++                                      if (!event) {
++                                          if (index === 0) {
++                                              return newEventsRender(item, tableWidth)
++                                          } else {
++                                              return { props: { colSpan: 0 } }
++                                          }
++                                      }
++                                      if (linkPropertiesToFilters) {
++                                          return (
++                                              <FilterPropertyLink
++                                                  className="ph-no-capture "
++                                                  property={e}
++                                                  value={event.properties[e] as string}
++                                                  filters={{ properties }}
++                                              />
++                                          )
++                                      }
++                                      return <Property value={event.properties[e]} />
++                                  },
++                              }
+                           }
++                      }
+                   )
+         columnsSoFar.push({
+             title: 'Time',
+@@ -358,7 +384,7 @@ export function EventsTable({
+             })
+         }
+         return fixedColumns ? columnsSoFar.concat(fixedColumns) : columnsSoFar
+-    }, [selectedColumns])
++    }, [selectedColumns, tableWidth])
+ 
+     return (
+         <div data-attr="manage-events-table">
+diff --git a/frontend/src/scenes/organization/Settings/VerifiedDomains/__snapshots__/verifiedDomainsLogic.test.ts.snap b/frontend/src/scenes/organization/Settings/VerifiedDomains/__snapshots__/verifiedDomainsLogic.test.ts.snap
+index 47a361aef5e3a..00666bdcde5e6 100644
+--- a/frontend/src/scenes/organization/Settings/VerifiedDomains/__snapshots__/verifiedDomainsLogic.test.ts.snap
++++ b/frontend/src/scenes/organization/Settings/VerifiedDomains/__snapshots__/verifiedDomainsLogic.test.ts.snap
+@@ -54,6 +54,10 @@ Object {
+         "id": 997,
+         "ingested_event": true,
+         "is_demo": false,
++        "live_events_columns": Array [
++          "event",
++          "person",
++        ],
+         "name": "MockHog App + Marketing",
+         "organization": "ABCD",
+         "path_cleaning_filters": Array [],
+diff --git a/frontend/src/styles/global.scss b/frontend/src/styles/global.scss
+index 6210800576658..859503ec9333b 100644
+--- a/frontend/src/styles/global.scss
++++ b/frontend/src/styles/global.scss
+@@ -49,6 +49,7 @@ $_lifecycle_dormant: #f86234;
+     --brand-yellow: #f9bd2b;
+     --brand-red: #f54e00;
+     --bg-menu: #{$_bg_menu};
++    --bg-light-blue: #eef2ff;
+     --bg-mid: #f2f2f2;
+     --bg-side: #fafaf9;
+     --bg-depth: #0f0f0f;
+@@ -261,9 +262,11 @@ body strong {
+     min-height: 2.5rem;
+     gap: 0.5rem 1rem;
+     margin: 1.25rem 0 0.25rem;
++
+     @media screen and (min-width: $md) {
+         flex-wrap: nowrap;
+     }
++
+     .ant-form-item {
+         margin-bottom: 0 !important;
+     }
+@@ -388,6 +391,7 @@ mark {
+     overflow: hidden;
+     color: var(--muted-alt);
+     font-size: 0.8125rem;
++
+     &--danger {
+         color: var(--danger);
+         font-weight: 600;
+@@ -606,6 +610,7 @@ code.code {
+ .border-bottom {
+     border-bottom: 1px solid var(--border);
+ }
++
+ // Vendor-specific adjustments
+ 
+ input::-ms-clear {
+@@ -650,6 +655,7 @@ input::-ms-clear {
+     0% {
+         background-color: var(--yellow-lightest);
+     }
++
+     100% {
+         background-color: initial;
+     }
+@@ -661,6 +667,7 @@ input::-ms-clear {
+     0% {
+         transform: rotateZ(0deg);
+     }
++
+     100% {
+         transform: rotateZ(360deg);
+     }
+@@ -690,10 +697,12 @@ input::-ms-clear {
+     @extend .text-default;
+     font-weight: 500;
+     padding: 0;
++
+     b,
+     strong {
+         font-weight: 700;
+     }
++
+     button {
+         margin: 0 0.75rem;
+     }
+@@ -705,12 +714,15 @@ input::-ms-clear {
+     height: 1.5rem;
+     margin-right: 0.75rem;
+     font-size: 1.5rem;
++
+     .Toastify__toast--success & {
+         color: var(--toastify-color-success);
+     }
++
+     .Toastify__toast--warning & {
+         color: var(--toastify-color-warning);
+     }
++
+     .Toastify__toast--error & {
+         color: var(--toastify-color-error);
+     }
+@@ -752,12 +764,15 @@ input::-ms-clear {
+         height: 100%;
+         pointer-events: none;
+     }
++
+     &::before {
+         box-shadow: 16px 0 16px -16px rgba(0, 0, 0, 0.25) inset;
+     }
++
+     &::after {
+         box-shadow: -16px 0 16px -16px rgba(0, 0, 0, 0.25) inset;
+     }
++
+     &.scrollable--right::after,
+     &.scrollable--left::before {
+         opacity: 1;
+@@ -796,6 +811,7 @@ input::-ms-clear {
+         .caption {
+             color: var(--danger);
+         }
++
+         input[type='password'],
+         input[type='text'] {
+             border-color: var(--danger) !important;
+@@ -822,6 +838,7 @@ input::-ms-clear {
+ .ant-btn-primary.btn-danger {
+     background-color: var(--danger) !important;
+     border-color: var(--danger) !important;
++
+     &:disabled {
+         background-color: lighten($_danger, 20%) !important;
+         color: lighten(#fff, 20%) !important;
+@@ -856,6 +873,7 @@ input::-ms-clear {
+ .btn-lg-2x {
+     font-size: 1.5rem !important;
+     line-height: 1 !important;
++
+     svg {
+         width: 1.5rem !important;
+         height: 1.5rem !important;
+@@ -873,6 +891,7 @@ input::-ms-clear {
+     &.ant-btn {
+         padding-top: 1.3rem !important;
+     }
++
+     &:not(.ant-btn-primary) {
+         color: var(--primary);
+     }
+@@ -918,38 +937,48 @@ input::-ms-clear {
+     color: #fff;
+     font-size: 0.75rem;
+     line-height: 1.5rem;
++
+     code {
+         color: inherit;
+         font-size: inherit;
+     }
++
+     &.warning div {
+         height: auto;
+         background: var(--danger);
+     }
++
+     &.tricolor {
+         cursor: pointer;
++
+         div:nth-child(1) {
+             background: var(--brand-blue);
+         }
++
+         div:nth-child(2) {
+             background: var(--brand-red);
+         }
++
+         div:nth-child(3) {
+             background: var(--brand-yellow);
+         }
++
+         span {
+             cursor: text;
+         }
+     }
++
+     div {
+         flex-basis: 0;
+         flex-grow: 1;
+         height: 1.5rem;
+         text-align: center;
+     }
++
+     span {
+         display: none;
+     }
++
+     button {
+         border: none;
+         background: transparent;
+@@ -961,15 +990,19 @@ input::-ms-clear {
+         font-weight: bold;
+         cursor: pointer;
+     }
++
+     @media screen and (min-width: 750px) {
+         font-size: 1rem;
+         line-height: 2rem;
++
+         div {
+             height: 2rem;
+         }
++
+         span {
+             display: inline;
+         }
++
+         button {
+             width: 2rem;
+             height: 2rem;
+@@ -991,6 +1024,7 @@ input::-ms-clear {
+     height: 100%;
+     top: 0;
+     left: 0;
++
+     .overlay--danger & {
+         background: repeating-linear-gradient(
+             -45deg,
+@@ -1084,6 +1118,7 @@ body {
+     h4 {
+         color: var(--text-default);
+     }
++
+     h5 {
+         font-size: 11px;
+         font-weight: 600;
+@@ -1093,6 +1128,7 @@ body {
+         margin-bottom: 0.25rem;
+         line-height: 2;
+     }
++
+     // AntD uses its own border color for the bottom of tab lists, but we want to use `var(--border)`
+     .ant-tabs-top,
+     .ant-tabs-bottom {
+@@ -1103,26 +1139,33 @@ body {
+             }
+         }
+     }
++
+     .ant-dropdown {
+         border-radius: var(--radius);
+     }
++
+     .ant-dropdown-menu {
+         border-radius: var(--radius);
+     }
++
+     .ant-modal-content {
+         box-shadow: var(--shadow-elevation);
+     }
++
+     .ant-form-item-label {
+         > label {
+             font-weight: 600;
++
+             .ant-form-item-optional {
+                 font-weight: 400;
+                 color: var(--muted);
+             }
+         }
+     }
++
+     .ant-form-item {
+         margin-bottom: 1rem;
++
+         &:last-child {
+             margin-bottom: 0;
+         }
+@@ -1146,6 +1189,7 @@ body {
+     &.over-table {
+         display: block;
+         background: rgba(0, 0, 0, 0.1);
++
+         td {
+             display: block;
+         }
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+index ca03e18acf15b..903710a94d1ab 100644
+--- a/frontend/src/types.ts
++++ b/frontend/src/types.ts
+@@ -239,6 +239,7 @@ export interface TeamType extends TeamBasicType {
+     person_display_name_properties: string[]
+     has_group_types: boolean
+     primary_dashboard: number // Dashboard shown on the project homepage
++    live_events_columns: string[] | null // Custom columns shown on the Live Events page
+ 
+     // Uses to exclude person properties from correlation analysis results, for
+     // example can be used to exclude properties that have trivial causation
+diff --git a/latest_migrations.manifest b/latest_migrations.manifest
+index 37449746839e6..5e5836cc5fa38 100644
+--- a/latest_migrations.manifest
++++ b/latest_migrations.manifest
+@@ -3,7 +3,7 @@ auth: 0012_alter_user_first_name_max_length
+ axes: 0006_remove_accesslog_trusted
+ contenttypes: 0002_remove_content_type_name
+ ee: 0012_migrate_tags_v2
+-posthog: 0241_subscription
++posthog: 0242_team_live_events_columns
+ rest_hooks: 0002_swappable_hook_model
+ sessions: 0001_initial
+ social_django: 0010_uid_db_index
+diff --git a/posthog/api/team.py b/posthog/api/team.py
+index 6640a1484a0b4..35c5713bae6bc 100644
+--- a/posthog/api/team.py
++++ b/posthog/api/team.py
+@@ -76,6 +76,7 @@ class Meta:
+             "access_control",
+             "has_group_types",
+             "primary_dashboard",
++            "live_events_columns",
+         )
+         read_only_fields = (
+             "id",
+diff --git a/posthog/api/test/__snapshots__/test_dashboard.ambr b/posthog/api/test/__snapshots__/test_dashboard.ambr
+index 7dff98ed3234c..eb556163ffa79 100644
+--- a/posthog/api/test/__snapshots__/test_dashboard.ambr
++++ b/posthog/api/test/__snapshots__/test_dashboard.ambr
+@@ -46,6 +46,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -105,6 +106,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -191,6 +193,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -273,6 +276,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -398,6 +402,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -566,6 +571,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -604,6 +610,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -642,6 +649,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -680,6 +688,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -718,6 +727,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -790,6 +800,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -929,6 +940,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1078,6 +1090,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1196,6 +1209,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1355,6 +1369,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1453,6 +1468,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1655,6 +1671,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1771,6 +1788,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1853,6 +1871,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -1918,6 +1937,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2046,6 +2066,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2145,6 +2166,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2280,6 +2302,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2386,6 +2409,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2498,6 +2522,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2626,6 +2651,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2698,6 +2724,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2814,6 +2841,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -2896,6 +2924,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3002,6 +3031,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3139,6 +3169,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3231,6 +3262,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3359,6 +3391,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3431,6 +3464,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3566,6 +3600,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3604,6 +3639,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3669,6 +3705,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3797,6 +3834,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -3869,6 +3907,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -4060,6 +4099,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -4166,6 +4206,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -4312,6 +4353,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+@@ -4384,6 +4426,7 @@
+          "posthog_team"."timezone",
+          "posthog_team"."data_attributes",
+          "posthog_team"."person_display_name_properties",
++         "posthog_team"."live_events_columns",
+          "posthog_team"."primary_dashboard_id",
+          "posthog_team"."correlation_config",
+          "posthog_team"."session_recording_retention_period_days",
+diff --git a/posthog/migrations/0242_team_live_events_columns.py b/posthog/migrations/0242_team_live_events_columns.py
+new file mode 100644
+index 0000000000000..84feed0a5a4af
+--- /dev/null
++++ b/posthog/migrations/0242_team_live_events_columns.py
+@@ -0,0 +1,21 @@
++# Generated by Django 3.2.13 on 2022-06-14 15:34
++
++import django.contrib.postgres.fields
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    dependencies = [
++        ("posthog", "0241_subscription"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="team",
++            name="live_events_columns",
++            field=django.contrib.postgres.fields.ArrayField(
++                base_field=models.CharField(max_length=200), blank=True, null=True, size=None
++            ),
++        ),
++    ]
+diff --git a/posthog/models/team/team.py b/posthog/models/team/team.py
+index e34bb0bb38491..737957d4996e6 100644
+--- a/posthog/models/team/team.py
++++ b/posthog/models/team/team.py
+@@ -111,6 +111,7 @@ class Team(UUIDClassicModel):
+     timezone: models.CharField = models.CharField(max_length=240, choices=TIMEZONES, default="UTC")
+     data_attributes: models.JSONField = models.JSONField(default=get_default_data_attributes)
+     person_display_name_properties: ArrayField = ArrayField(models.CharField(max_length=400), null=True, blank=True)
++    live_events_columns: ArrayField = ArrayField(models.CharField(max_length=200), null=True, blank=True)
+ 
+     primary_dashboard: models.ForeignKey = models.ForeignKey(
+         "posthog.Dashboard", on_delete=models.SET_NULL, null=True, related_name="primary_dashboard_teams"
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

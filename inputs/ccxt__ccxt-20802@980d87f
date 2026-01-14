@@ -1,0 +1,122 @@
+  Task-ID: ccxt__ccxt-20802@980d87f
+  Please checkout to this commit first: e34212db9dd6aeff7d652f38f5ce34ddc916f59f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Okx fetch_ohlcv candles/history candles automatic switch issue
+### Operating System
+
+Windows 10
+
+### Programming Languages
+
+_No response_
+
+### CCXT Version
+
+4.2.9
+
+### Description
+
+Okx states that limit is 300 for live candles, and 100 for history candles
+And api may return 1440 live candles
+
+If i query live candles started from 1200 candles back i expect to get 300 live candles, not 100 history ones
+
+since = self.exchange.milliseconds() - 1200 * self.exchange.parse_timeframe('5m')
+klines = self.exchange.fetch_ohlcv(symbol='BTCUSDT', timeframe='5m', since=since, limit=300, params=params)
+
+Code returns only 100 results. But has to return 300.
+
+With this code i can get 300 candles only for last 1140 candles (This is 1440 - 300), not for 1440
+
+
+Why?
+
+Because in okx fetch_ohlcv limit substracted from available 1440 candles. 
+It has not to be substracted
+
+### Code
+okx:2080-2091
+```
+           if since is not None:
+            now = self.milliseconds()
+            difference = now - since
+            durationInMilliseconds = duration * 1000
+            # if the since timestamp is more than limit candles back in the past
+            # additional one bar for max offset to round the current day to UTC
+            calc = (1440 - limit - 1) * durationInMilliseconds
+            if difference > calc:
+                defaultType = 'HistoryCandles'
+            startTime = max(since - 1, 0)
+            request['before'] = startTime
+            request['after'] = self.sum(startTime, durationInMilliseconds * limit)`
+
+```
+
+calc = (1440 - limit - 1) * durationInMilliseconds
+has to be replaced to 
+calc = 1439 * durationInMilliseconds
+  </issue>
+  
+  <patch>
+  diff --git a/ts/src/okx.ts b/ts/src/okx.ts
+index d66a18cceae37..2caf1efbf5b28 100644
+--- a/ts/src/okx.ts
++++ b/ts/src/okx.ts
+@@ -2146,17 +2146,14 @@ export default class okx extends Exchange {
+         let defaultType = 'Candles';
+         if (since !== undefined) {
+             const now = this.milliseconds ();
+-            const difference = now - since;
+             const durationInMilliseconds = duration * 1000;
+-            // if the since timestamp is more than limit candles back in the past
+-            // additional one bar for max offset to round the current day to UTC
+-            const calc = (1440 - limit - 1) * durationInMilliseconds;
+-            if (difference > calc) {
++            // switch to history candles if since is past the cutoff for current candles
++            const historyBorder = now - (1440 * durationInMilliseconds);
++            if (since <= historyBorder) {
+                 defaultType = 'HistoryCandles';
+             }
+-            const startTime = Math.max (since - 1, 0);
+-            request['before'] = startTime;
+-            request['after'] = this.sum (startTime, durationInMilliseconds * limit);
++            request['before'] = since;
++            request['after'] = this.sum (since, durationInMilliseconds * limit);
+         }
+         const until = this.safeInteger (params, 'until');
+         if (until !== undefined) {
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

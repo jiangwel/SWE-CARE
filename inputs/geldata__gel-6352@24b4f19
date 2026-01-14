@@ -1,0 +1,1144 @@
+  Task-ID: geldata__gel-6352@24b4f19
+  Please checkout to this commit first: be6636687f63309c1e734f06498cedf2470848aa
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Implement auth for GraphQL and HTTP
+A user wants to expose the SQL protocol outside their VPC, but they can't because this would also expose GQL and HTTP protocols without access control. Implement RBAC on these protocols so that it is safe to expose outside the VPC.
+  </issue>
+  
+  <patch>
+  diff --git a/edb/lib/cfg.edgeql b/edb/lib/cfg.edgeql
+index 35c42249ea2..1a84d8b6a4e 100644
+--- a/edb/lib/cfg.edgeql
++++ b/edb/lib/cfg.edgeql
+@@ -38,7 +38,8 @@ CREATE ABSTRACT INHERITABLE ANNOTATION cfg::affects_compilation;
+ 
+ CREATE SCALAR TYPE cfg::memory EXTENDING std::anyscalar;
+ CREATE SCALAR TYPE cfg::AllowBareDDL EXTENDING enum<AlwaysAllow, NeverAllow>;
+-CREATE SCALAR TYPE cfg::ConnectionTransport EXTENDING enum<TCP, TCP_PG, HTTP>;
++CREATE SCALAR TYPE cfg::ConnectionTransport EXTENDING enum<
++    TCP, TCP_PG, HTTP, SIMPLE_HTTP>;
+ 
+ CREATE ABSTRACT TYPE cfg::ConfigObject EXTENDING std::BaseObject;
+ 
+diff --git a/edb/server/args.py b/edb/server/args.py
+index 63ad1477f31..12a8809def8 100644
+--- a/edb/server/args.py
++++ b/edb/server/args.py
+@@ -124,6 +124,7 @@ class ServerConnTransport(enum.StrEnum):
+     HTTP = "HTTP"
+     TCP = "TCP"
+     TCP_PG = "TCP_PG"
++    SIMPLE_HTTP = "SIMPLE_HTTP"
+ 
+ 
+ class ServerAuthMethods:
+@@ -150,6 +151,7 @@ def __str__(self):
+     ServerConnTransport.TCP: ServerAuthMethod.Scram,
+     ServerConnTransport.TCP_PG: ServerAuthMethod.Scram,
+     ServerConnTransport.HTTP: ServerAuthMethod.JWT,
++    ServerConnTransport.SIMPLE_HTTP: ServerAuthMethod.Scram,
+ })
+ 
+ 
+diff --git a/edb/server/protocol/auth_helpers.pyx b/edb/server/protocol/auth_helpers.pyx
+new file mode 100644
+index 00000000000..e2aef560f8f
+--- /dev/null
++++ b/edb/server/protocol/auth_helpers.pyx
+@@ -0,0 +1,219 @@
++#
++# This source file is part of the EdgeDB open source project.
++#
++# Copyright 2019-present MagicStack Inc. and the EdgeDB authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++"""Authentication code that is shared between HTTP and binary protocols"""
++
++from edgedb import scram
++
++import base64
++import hashlib
++import json
++import logging
++
++from jwcrypto import jwt
++
++from edb import errors
++from edb.common import debug
++
++from edb.server.protocol cimport args_ser
++
++
++cdef object logger = logging.getLogger('edb.server')
++
++
++def extract_token_from_auth_data(auth_data, method='bearer'):
++    header_value = auth_data.decode("ascii")
++    scheme, _, prefixed_token = header_value.partition(" ")
++    if scheme.lower() != method:
++        raise errors.AuthenticationError(
++            'authentication failed: unrecognized authentication scheme')
++
++    return prefixed_token.strip()
++
++
++def auth_jwt(tenant, prefixed_token, user, dbname: str):
++    if not prefixed_token:
++        raise errors.AuthenticationError(
++            'authentication failed: no authorization data provided')
++
++    token_version = 0
++    for prefix in ["nbwt1_", "nbwt_", "edbt1_", "edbt_"]:
++        encoded_token = prefixed_token.removeprefix(prefix)
++        if encoded_token != prefixed_token:
++            if prefix == "nbwt1_" or prefix == "edbt1_":
++                token_version = 1
++            break
++    else:
++        raise errors.AuthenticationError(
++            'authentication failed: malformed JWT')
++
++    role = tenant.get_roles().get(user)
++    if role is None:
++        raise errors.AuthenticationError('authentication failed')
++
++    skey = tenant.server.get_jws_key()
++
++    try:
++        token = jwt.JWT(
++            key=skey,
++            algs=["RS256", "ES256"],
++            jwt=encoded_token,
++        )
++    except jwt.JWException as e:
++        logger.debug('authentication failure', exc_info=True)
++        raise errors.AuthenticationError(
++            f'authentication failed: {e.args[0]}'
++        ) from None
++    except Exception as e:
++        logger.debug('authentication failure', exc_info=True)
++        raise errors.AuthenticationError(
++            f'authentication failed: cannot decode JWT'
++        ) from None
++
++    try:
++        claims = json.loads(token.claims)
++    except Exception as e:
++        raise errors.AuthenticationError(
++            f'authentication failed: malformed claims section in JWT'
++        ) from None
++
++    _check_jwt_authz(
++        tenant, claims, token_version, user, dbname)
++
++
++def _check_jwt_authz(tenant, claims, token_version, user, dbname: str):
++    # Check general key validity (e.g. whether it's a revoked key)
++    tenant.check_jwt(claims)
++
++    token_instances = None
++    token_roles = None
++    token_databases = None
++
++    if token_version == 1:
++        token_roles = _get_jwt_edb_scope(claims, "edb.r")
++        token_instances = _get_jwt_edb_scope(claims, "edb.i")
++        token_databases = _get_jwt_edb_scope(claims, "edb.d")
++    else:
++        namespace = "edgedb.server"
++        if not claims.get(f"{namespace}.any_role"):
++            token_roles = claims.get(f"{namespace}.roles")
++            if not isinstance(token_roles, list):
++                raise errors.AuthenticationError(
++                    f'authentication failed: malformed claims section in'
++                    f' JWT: expected a list in "{namespace}.roles"'
++                )
++
++    if (
++        token_instances is not None
++        and tenant.get_instance_name() not in token_instances
++    ):
++        raise errors.AuthenticationError(
++            'authentication failed: secret key does not authorize '
++            f'access to this instance')
++
++    if (
++        token_databases is not None
++        and dbname not in token_databases
++    ):
++        raise errors.AuthenticationError(
++            'authentication failed: secret key does not authorize '
++            f'access to database "{dbname}"')
++
++    if token_roles is not None and user not in token_roles:
++        raise errors.AuthenticationError(
++            'authentication failed: secret key does not authorize '
++            f'access in role "{user}"')
++
++
++def _get_jwt_edb_scope(claims, claim):
++    if not claims.get(f"{claim}.all"):
++        scope = claims.get(claim, [])
++        if not isinstance(scope, list):
++            raise errors.AuthenticationError(
++                f'authentication failed: malformed claims section in'
++                f' JWT: expected a list in "{claim}"'
++            )
++        return frozenset(scope)
++    else:
++        return None
++
++
++def scram_get_verifier(tenant, user):
++    roles = tenant.get_roles()
++
++    rolerec = roles.get(user)
++    if rolerec is not None:
++        verifier_string = rolerec['password']
++        if verifier_string is not None:
++            try:
++                verifier = scram.parse_verifier(verifier_string)
++            except ValueError:
++                raise errors.AuthenticationError(
++                    f'invalid SCRAM verifier for user {user!r}') from None
++            is_mock = False
++            return verifier, is_mock
++
++    # To avoid revealing the validity of the submitted user name,
++    # generate a mock verifier using a salt derived from the
++    # received user name and the cluster mock auth nonce.
++    # The same approach is taken by Postgres.
++    nonce = tenant.get_instance_data('mock_auth_nonce')
++    salt = hashlib.sha256(nonce.encode() + user.encode()).digest()
++
++    verifier = scram.SCRAMVerifier(
++        mechanism='SCRAM-SHA-256',
++        iterations=scram.DEFAULT_ITERATIONS,
++        salt=salt[:scram.DEFAULT_SALT_LENGTH],
++        stored_key=b'',
++        server_key=b'',
++    )
++    is_mock = True
++    return verifier, is_mock
++
++
++def scram_verify_password(password: str, verifier: object) -> bool:
++    """Check the given password against a verifier.
++
++    Returns True if the password is OK, False otherwise.
++    """
++
++    # adapted from edgedb-python's scram.verify_password but made to
++    # take a verifier object instead of a string
++
++    bpassword = scram.saslprep(password).encode('utf-8')
++    salted_password = scram.get_salted_password(
++        bpassword, verifier.salt, verifier.iterations)
++    computed_key = scram.get_server_key(salted_password)
++    return verifier.server_key == computed_key
++
++
++def auth_basic(tenant, prefixed_token: str, user: str):
++    # XXX: Better check?
++    try:
++        decoded = base64.b64decode(prefixed_token).decode('utf-8')
++    except ValueError:
++        raise errors.AuthenticationError(
++            'authentication failed: malformed authentication') from None
++    username, colon, password = decoded.partition(':')
++    if colon != ':':
++        raise errors.AuthenticationError(
++            'authentication failed: malformed authentication')
++
++    verifier, mock_auth = scram_get_verifier(tenant, username)
++    if not scram_verify_password(password, verifier) or mock_auth:
++        raise errors.AuthenticationError('authentication failed')
+diff --git a/edb/server/protocol/binary.pyx b/edb/server/protocol/binary.pyx
+index a404758b4a6..53f0f586d47 100644
+--- a/edb/server/protocol/binary.pyx
++++ b/edb/server/protocol/binary.pyx
+@@ -37,7 +37,6 @@ from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
+                          UINT32_MAX
+ 
+ import immutables
+-from jwcrypto import jwt
+ 
+ from edb import buildmeta
+ from edb import edgeql
+@@ -66,6 +65,8 @@ from edb.server import defines as edbdef
+ from edb.server.compiler import errormech
+ from edb.server.compiler import enums
+ from edb.server.compiler import sertypes
++
++from edb.server.protocol import auth_helpers
+ from edb.server.protocol import execute
+ from edb.server.protocol cimport frontend
+ from edb.server.pgcon cimport pgcon
+@@ -404,127 +405,18 @@ cdef class EdgeConnection(frontend.FrontendConnection):
+             self.tenant.remove_dbview(self._dbview)
+             self._dbview = None
+ 
+-    def _extract_token_from_auth_data(self, auth_data):
+-        header_value = auth_data.decode("ascii")
+-        scheme, _, prefixed_token = header_value.partition(" ")
+-        if scheme.lower() != "bearer":
+-            raise errors.AuthenticationError(
+-                'authentication failed: unrecognized authentication scheme')
+-
+-        return prefixed_token.strip()
+-
+     def _auth_jwt(self, user, database, params):
+         # token in the HTTP header has higher priority than
+         # the ClientHandshake message, under the scenario of
+         # binary protocol over HTTP
+         if self._auth_data:
+-            prefixed_token = self._extract_token_from_auth_data(
+-                self._auth_data
+-            )
++            prefixed_token = auth_helpers.extract_token_from_auth_data(
++                self._auth_data)
+         else:
+             prefixed_token = params.get('secret_key')
+ 
+-        if not prefixed_token:
+-            raise errors.AuthenticationError(
+-                'authentication failed: no authorization data provided')
+-
+-        token_version = 0
+-        for prefix in ["nbwt1_", "nbwt_", "edbt1_", "edbt_"]:
+-            encoded_token = prefixed_token.removeprefix(prefix)
+-            if encoded_token != prefixed_token:
+-                if prefix == "nbwt1_" or prefix == "edbt1_":
+-                    token_version = 1
+-                break
+-        else:
+-            raise errors.AuthenticationError(
+-                'authentication failed: malformed JWT')
+-
+-        role = self.tenant.get_roles().get(user)
+-        if role is None:
+-            raise errors.AuthenticationError('authentication failed')
+-
+-        skey = self.server.get_jws_key()
+-
+-        try:
+-            token = jwt.JWT(
+-                key=skey,
+-                algs=["RS256", "ES256"],
+-                jwt=encoded_token,
+-            )
+-        except jwt.JWException as e:
+-            logger.debug('authentication failure', exc_info=True)
+-            raise errors.AuthenticationError(
+-                f'authentication failed: {e.args[0]}'
+-            ) from None
+-        except Exception as e:
+-            logger.debug('authentication failure', exc_info=True)
+-            raise errors.AuthenticationError(
+-                f'authentication failed: cannot decode JWT'
+-            ) from None
+-
+-        try:
+-            claims = json.loads(token.claims)
+-        except Exception as e:
+-            raise errors.AuthenticationError(
+-                f'authentication failed: malformed claims section in JWT'
+-            ) from None
+-
+-        self._check_jwt_authz(claims, token_version, user, database)
+-
+-    def _check_jwt_authz(self, claims, token_version, user, dbname):
+-        # Check general key validity (e.g. whether it's a revoked key)
+-        self.tenant.check_jwt(claims)
+-
+-        token_instances = None
+-        token_roles = None
+-        token_databases = None
+-
+-        if token_version == 1:
+-            token_roles = self._get_jwt_edb_scope(claims, "edb.r")
+-            token_instances = self._get_jwt_edb_scope(claims, "edb.i")
+-            token_databases = self._get_jwt_edb_scope(claims, "edb.d")
+-        else:
+-            namespace = "edgedb.server"
+-            if not claims.get(f"{namespace}.any_role"):
+-                token_roles = claims.get(f"{namespace}.roles")
+-                if not isinstance(token_roles, list):
+-                    raise errors.AuthenticationError(
+-                        f'authentication failed: malformed claims section in'
+-                        f' JWT: expected a list in "{namespace}.roles"'
+-                    )
+-
+-        if (
+-            token_instances is not None
+-            and self.tenant.get_instance_name() not in token_instances
+-        ):
+-            raise errors.AuthenticationError(
+-                'authentication failed: secret key does not authorize '
+-                f'access to this instance')
+-
+-        if (
+-            token_databases is not None
+-            and dbname not in token_databases
+-        ):
+-            raise errors.AuthenticationError(
+-                'authentication failed: secret key does not authorize '
+-                f'access to database "{dbname}"')
+-
+-        if token_roles is not None and user not in token_roles:
+-            raise errors.AuthenticationError(
+-                'authentication failed: secret key does not authorize '
+-                f'access in role "{user}"')
+-
+-    def _get_jwt_edb_scope(self, claims, claim):
+-        if not claims.get(f"{claim}.all"):
+-            scope = claims.get(claim, [])
+-            if not isinstance(scope, list):
+-                raise errors.AuthenticationError(
+-                    f'authentication failed: malformed claims section in'
+-                    f' JWT: expected a list in "{claim}"'
+-                )
+-            return frozenset(scope)
+-        else:
+-            return None
++        return auth_helpers.auth_jwt(
++            self.tenant, prefixed_token, user, database)
+ 
+     cdef WriteBuffer _make_authentication_sasl_initial(self, list methods):
+         cdef WriteBuffer msg_buf
+diff --git a/edb/server/protocol/execute.pyx b/edb/server/protocol/execute.pyx
+index 87a1d965c42..104c75cf9d7 100644
+--- a/edb/server/protocol/execute.pyx
++++ b/edb/server/protocol/execute.pyx
+@@ -22,9 +22,14 @@ from typing import (
+     Optional,
+ )
+ 
++from edgedb import scram
++
+ import asyncio
++import base64
+ import decimal
++import hashlib
+ import json
++import logging
+ 
+ import immutables
+ 
+@@ -46,6 +51,8 @@ from edb.server.pgcon cimport pgcon
+ from edb.server.pgcon import errors as pgerror
+ 
+ 
++cdef object logger = logging.getLogger('edb.server')
++
+ cdef object FMT_NONE = compiler.OutputFormat.NONE
+ 
+ 
+diff --git a/edb/server/protocol/frontend.pyx b/edb/server/protocol/frontend.pyx
+index 12a6b9f2050..e79cb889135 100644
+--- a/edb/server/protocol/frontend.pyx
++++ b/edb/server/protocol/frontend.pyx
+@@ -18,7 +18,6 @@
+ 
+ 
+ import asyncio
+-import hashlib
+ import logging
+ import time
+ 
+@@ -29,6 +28,9 @@ from edb.common import debug
+ from edb.server import args as srvargs
+ from edb.server.pgcon import errors as pgerror
+ 
++from . import auth_helpers
++
++
+ DEF FLUSH_BUFFER_AFTER = 100_000
+ cdef object logger = logging.getLogger('edb.server')
+ 
+@@ -621,7 +623,8 @@ cdef class FrontendConnection(AbstractFrontendConnection):
+                     raise errors.BinaryProtocolError(
+                         f'client selected an invalid SASL authentication '
+                         f'mechanism')
+-                verifier, mock_auth = self._get_scram_verifier(user)
++                verifier, mock_auth = auth_helpers.scram_get_verifier(
++                    self.tenant, user)
+ 
+                 try:
+                     bare_offset, cb_flag, authzid, username, client_nonce = (
+@@ -699,35 +702,3 @@ cdef class FrontendConnection(AbstractFrontendConnection):
+                 self.flush()
+ 
+                 done = True
+-
+-    def _get_scram_verifier(self, user):
+-        roles = self.tenant.get_roles()
+-
+-        rolerec = roles.get(user)
+-        if rolerec is not None:
+-            verifier_string = rolerec['password']
+-            if verifier_string is not None:
+-                try:
+-                    verifier = scram.parse_verifier(verifier_string)
+-                except ValueError:
+-                    raise errors.AuthenticationError(
+-                        f'invalid SCRAM verifier for user {user!r}') from None
+-                is_mock = False
+-                return verifier, is_mock
+-
+-        # To avoid revealing the validity of the submitted user name,
+-        # generate a mock verifier using a salt derived from the
+-        # received user name and the cluster mock auth nonce.
+-        # The same approach is taken by Postgres.
+-        nonce = self.tenant.get_instance_data('mock_auth_nonce')
+-        salt = hashlib.sha256(nonce.encode() + user.encode()).digest()
+-
+-        verifier = scram.SCRAMVerifier(
+-            mechanism='SCRAM-SHA-256',
+-            iterations=scram.DEFAULT_ITERATIONS,
+-            salt=salt[:scram.DEFAULT_SALT_LENGTH],
+-            stored_key=b'',
+-            server_key=b'',
+-        )
+-        is_mock = True
+-        return verifier, is_mock
+diff --git a/edb/server/protocol/protocol.pyx b/edb/server/protocol/protocol.pyx
+index 5d0b463d42a..9a39eaf4600 100644
+--- a/edb/server/protocol/protocol.pyx
++++ b/edb/server/protocol/protocol.pyx
+@@ -37,15 +37,18 @@ from edb.common import markup
+ from edb.graphql import extension as graphql_ext
+ 
+ from edb.server import args as srvargs
++from edb.server import config
+ from edb.server.protocol cimport binary
+ from edb.server.protocol import binary
+ from edb.server.protocol import pg_ext
+ from edb.server import defines as edbdef
++from edb.server.dbview cimport dbview
+ # Without an explicit cimport of `pgproto.debug`, we
+ # can't cimport `protocol.binary` for some reason.
+ from edb.server.pgproto.debug cimport PG_DEBUG
+ 
+ from . import auth
++from . import auth_helpers
+ from . import edgeql_ext
+ from . import metrics
+ from . import server_info
+@@ -588,6 +591,12 @@ cdef class HttpProtocol:
+                 else:
+                     args = path_parts[3:]
+ 
++                if extname != 'auth':
++                    if not await self._check_http_auth(
++                        request, response, dbname
++                    ):
++                        return
++
+                 db = self.tenant.maybe_get_db(dbname=dbname)
+                 if db is None:
+                     return self._not_found(request, response)
+@@ -706,6 +715,52 @@ cdef class HttpProtocol:
+         response.status = http.HTTPStatus.BAD_REQUEST
+         response.close_connection = True
+ 
++    async def _check_http_auth(
++        self,
++        HttpRequest request,
++        HttpResponse response,
++        str dbname,
++    ):
++        dbindex: dbview.DatabaseIndex = self.tenant._dbindex
++
++        try:
++            user = 'edgedb'  # I guess?
++
++            authmethod = await self.tenant.get_auth_method(
++                user, srvargs.ServerConnTransport.SIMPLE_HTTP)
++            authmethod_name = authmethod._tspec.name.split('::')[1]
++
++            if authmethod_name == 'JWT':
++                if not self.is_tls:
++                    raise errors.AuthenticationError(
++                        'JWT HTTP auth must use HTTPS')
++                prefixed_token = auth_helpers.extract_token_from_auth_data(
++                    request.authorization)
++                auth_helpers.auth_jwt(self.tenant, prefixed_token, user, dbname)
++            elif authmethod_name == 'SCRAM':
++                if not self.is_tls:
++                    raise errors.AuthenticationError(
++                        'Basic HTTP auth must use HTTPS')
++
++                prefixed_token = auth_helpers.extract_token_from_auth_data(
++                    request.authorization, method='basic')
++                auth_helpers.auth_basic(self.tenant, prefixed_token, user)
++            elif authmethod_name == 'Trust':
++                pass
++            else:
++                raise errors.AuthenticationError('authentication failed')
++
++        except Exception as ex:
++            if debug.flags.server:
++                markup.dump(ex)
++
++            response.body = str(ex).encode()
++            response.status = http.HTTPStatus.BAD_REQUEST
++            response.close_connection = True
++            return False
++
++        return True
++
+ 
+ def get_request_url(request, is_tls):
+     request_url = request.url
+diff --git a/edb/testbase/http.py b/edb/testbase/http.py
+index 2c7f13b83a6..c56d0c63b26 100644
+--- a/edb/testbase/http.py
++++ b/edb/testbase/http.py
+@@ -106,6 +106,7 @@ def edgeql_query(
+                 req_data['globals'] = globals
+             req = urllib.request.Request(self.http_addr, method='POST')
+             req.add_header('Content-Type', 'application/json')
++            req.add_header('Authorization', self.make_auth_header())
+             response = urllib.request.urlopen(
+                 req, json.dumps(req_data).encode(), context=self.tls_context
+             )
+@@ -115,8 +116,12 @@ def edgeql_query(
+                 req_data['variables'] = json.dumps(variables)
+             if globals is not None:
+                 req_data['globals'] = json.dumps(globals)
+-            response = urllib.request.urlopen(
++            req = urllib.request.Request(
+                 f'{self.http_addr}/?{urllib.parse.urlencode(req_data)}',
++            )
++            req.add_header('Authorization', self.make_auth_header())
++            response = urllib.request.urlopen(
++                req,
+                 context=self.tls_context,
+             )
+             resp_data = json.loads(response.read())
+@@ -184,6 +189,7 @@ def graphql_query(self, query, *, operation_name=None,
+ 
+             req = urllib.request.Request(self.http_addr, method='POST')
+             req.add_header('Content-Type', 'application/json')
++            req.add_header('Authorization', self.make_auth_header())
+             response = urllib.request.urlopen(
+                 req, json.dumps(req_data).encode(), context=self.tls_context
+             )
+@@ -198,8 +204,12 @@ def graphql_query(self, query, *, operation_name=None,
+                 req_data['globals'] = json.dumps(deprecated_globals)
+             if variables is not None:
+                 req_data['variables'] = json.dumps(variables)
+-            response = urllib.request.urlopen(
++            req = urllib.request.Request(
+                 f'{self.http_addr}/?{urllib.parse.urlencode(req_data)}',
++            )
++            req.add_header('Authorization', self.make_auth_header())
++            response = urllib.request.urlopen(
++                req,
+                 context=self.tls_context,
+             )
+             resp_data = json.loads(response.read())
+diff --git a/edb/testbase/server.py b/edb/testbase/server.py
+index 4a181656703..58508e62160 100644
+--- a/edb/testbase/server.py
++++ b/edb/testbase/server.py
+@@ -24,6 +24,7 @@
+ 
+ import asyncio
+ import atexit
++import base64
+ import contextlib
+ import dataclasses
+ import functools
+@@ -121,6 +122,9 @@ def connect(self):
+         self.sock = self._context.wrap_socket(self.sock,
+                                               server_hostname=server_hostname)
+ 
++    def true_close(self):
++        self.close()
++
+ 
+ class StubbornHttpConnection(CustomSNI_HTTPSConnection):
+ 
+@@ -452,6 +456,7 @@ def http_con_json_request(
+         params: Optional[dict[str, str]] = None,
+         *,
+         prefix: Optional[str] = None,
++        headers: Optional[dict[str, str]] = None,
+         body: Any,
+         path: str = "",
+     ):
+@@ -461,7 +466,10 @@ def http_con_json_request(
+             method="POST",
+             body=json.dumps(body).encode(),
+             prefix=prefix,
+-            headers={"Content-Type": "application/json"},
++            headers={
++                "Content-Type": "application/json",
++                **(headers or {}),
++            },
+             path=path,
+         )
+ 
+@@ -531,6 +539,7 @@ async def init_cluster(
+ 
+     await cluster.start(port=0)
+     await cluster.set_test_config()
++    # await cluster.trust_http_connections()
+     await cluster.set_superuser_password('test')
+ 
+     if cleanup_atexit:
+@@ -722,6 +731,20 @@ def get_connect_args(
+                             secret_key=secret_key))
+         return conargs
+ 
++    @classmethod
++    def make_auth_header(
++        cls, user=edgedb_defines.EDGEDB_SUPERUSER, password=None
++    ):
++        # urllib *does* have actual support for basic auth but it is so much
++        # more annoying than just doing it yourself...
++        conargs = cls.get_connect_args(user=user, password=password)
++        username = conargs.get('user')
++        password = conargs.get('password')
++        key = f'{username}:{password}'.encode('ascii')
++        basic_header = f'Basic {base64.b64encode(key).decode("ascii")}'
++
++        return basic_header
++
+     @classmethod
+     def get_parallelism_granularity(cls):
+         if cls.PARALLELISM_GRANULARITY == 'default':
+@@ -772,10 +795,14 @@ async def assertRaisesRegexTx(self, exception, regex, msg=None, **kwargs):
+ 
+     @classmethod
+     @contextlib.contextmanager
+-    def http_con(cls, server=None):
++    def http_con(cls, server=None, keep_alive=True, server_hostname=None):
+         if server is None:
+             server = cls
+-        with super().http_con(server) as http_con:
++        with super().http_con(
++            server,
++            keep_alive=keep_alive,
++            server_hostname=server_hostname,
++        ) as http_con:
+             yield http_con
+ 
+     @property
+diff --git a/setup.py b/setup.py
+index fab1d3f26aa..225624f9939 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1015,6 +1015,14 @@ def _version():
+             include_dirs=EXT_INC_DIRS,
+         ),
+ 
++        setuptools_extension.Extension(
++            "edb.server.protocol.auth_helpers",
++            ["edb/server/protocol/auth_helpers.pyx"],
++            extra_compile_args=EXT_CFLAGS,
++            extra_link_args=EXT_LDFLAGS,
++            include_dirs=EXT_INC_DIRS,
++        ),
++
+         setuptools_extension.Extension(
+             "edb.server.protocol.notebook_ext",
+             ["edb/server/protocol/notebook_ext.pyx"],
+diff --git a/tests/test_http_edgeql.py b/tests/test_http_edgeql.py
+index eccccc1f225..de5077ab626 100644
+--- a/tests/test_http_edgeql.py
++++ b/tests/test_http_edgeql.py
+@@ -47,7 +47,11 @@ class TestHttpEdgeQL(tb.EdgeQLTestCase):
+     def test_http_edgeql_proto_errors_01(self):
+         with self.http_con() as con:
+             data, headers, status = self.http_con_request(
+-                con, {}, path='non-existant')
++                con, {}, path='non-existant',
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 404)
+             self.assertEqual(headers['connection'], 'close')
+@@ -58,7 +62,13 @@ def test_http_edgeql_proto_errors_01(self):
+ 
+     def test_http_edgeql_proto_errors_02(self):
+         with self.http_con() as con:
+-            data, headers, status = self.http_con_request(con, {})
++            data, headers, status = self.http_con_request(
++                con,
++                {},
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 400)
+             self.assertEqual(headers['connection'], 'close')
+@@ -71,7 +81,12 @@ def test_http_edgeql_proto_errors_03(self):
+         with self.http_con() as con:
+             con.send(b'blah\r\n\r\n\r\n\r\n')
+             data, headers, status = self.http_con_request(
+-                con, {'query': 'blah', 'variables': 'bazz'})
++                con,
++                {'query': 'blah', 'variables': 'bazz'},
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 400)
+             self.assertEqual(headers['connection'], 'close')
+@@ -382,6 +397,7 @@ def test_http_edgeql_decimal_params_01(self):
+ 
+         req = urllib.request.Request(self.http_addr, method='POST')
+         req.add_header('Content-Type', 'application/json')
++        req.add_header('Authorization', self.make_auth_header())
+         response = urllib.request.urlopen(
+             req, req_data, context=self.tls_context
+         )
+diff --git a/tests/test_http_graphql_query.py b/tests/test_http_graphql_query.py
+index ae49042da82..d279980a4e1 100644
+--- a/tests/test_http_graphql_query.py
++++ b/tests/test_http_graphql_query.py
+@@ -56,7 +56,12 @@ def test_graphql_http_keepalive_01(self):
+                         }
+                     '''
+                 }
+-                data, headers, status = self.http_con_request(con, req1_data)
++                data, headers, status = self.http_con_request(
++                    con, req1_data,
++                    headers={
++                        'Authorization': self.make_auth_header(),
++                    },
++                )
+                 self.assertEqual(status, 200)
+                 self.assertNotIn('connection', headers)
+                 self.assertEqual(
+@@ -76,7 +81,12 @@ def test_graphql_http_keepalive_01(self):
+                         }
+                     '''
+                 }
+-                data, headers, status = self.http_con_request(con, req2_data)
++                data, headers, status = self.http_con_request(
++                    con, req2_data,
++                    headers={
++                        'Authorization': self.make_auth_header(),
++                    },
++                )
+                 self.assertEqual(status, 200)
+                 self.assertNotIn('connection', headers)
+                 self.assertEqual(
+@@ -89,7 +99,11 @@ def test_graphql_http_keepalive_01(self):
+     def test_graphql_http_errors_01(self):
+         with self.http_con() as con:
+             data, headers, status = self.http_con_request(
+-                con, {}, path='non-existant')
++                con, {}, path='non-existant',
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 404)
+             self.assertEqual(headers['connection'], 'close')
+@@ -100,7 +114,12 @@ def test_graphql_http_errors_01(self):
+ 
+     def test_graphql_http_errors_02(self):
+         with self.http_con() as con:
+-            data, headers, status = self.http_con_request(con, {})
++            data, headers, status = self.http_con_request(
++                con, {},
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 400)
+             self.assertEqual(headers['connection'], 'close')
+@@ -112,7 +131,11 @@ def test_graphql_http_errors_02(self):
+     def test_graphql_http_errors_03(self):
+         with self.http_con() as con:
+             data, headers, status = self.http_con_request(
+-                con, {'query': 'blah', 'variables': 'bazz'})
++                con, {'query': 'blah', 'variables': 'bazz'},
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 400)
+             self.assertEqual(headers['connection'], 'close')
+@@ -125,7 +148,11 @@ def test_graphql_http_errors_04(self):
+         with self.http_con() as con:
+             con.send(b'blah\r\n\r\n\r\n\r\n')
+             data, headers, status = self.http_con_request(
+-                con, {'query': 'blah', 'variables': 'bazz'})
++                con, {'query': 'blah', 'variables': 'bazz'},
++                headers={
++                    'Authorization': self.make_auth_header(),
++                },
++            )
+ 
+             self.assertEqual(status, 400)
+             self.assertEqual(headers['connection'], 'close')
+diff --git a/tests/test_http_notebook.py b/tests/test_http_notebook.py
+index 92b75c3bec8..6e2ad34d96f 100644
+--- a/tests/test_http_notebook.py
++++ b/tests/test_http_notebook.py
+@@ -42,6 +42,7 @@ def run_queries(self, queries: List[str]):
+         req = urllib.request.Request(
+             self.http_addr, method='POST')  # type: ignore
+         req.add_header('Content-Type', 'application/json')
++        req.add_header('Authorization', self.make_auth_header())
+         response = urllib.request.urlopen(
+             req, json.dumps(req_data).encode(), context=self.tls_context
+         )
+@@ -161,7 +162,11 @@ def test_http_notebook_03(self):
+     def test_http_notebook_04(self):
+         req = urllib.request.Request(self.http_addr + '/status',
+                                      method='GET')
+-        response = urllib.request.urlopen(req, context=self.tls_context)
++        req.add_header('Authorization', self.make_auth_header())
++        response = urllib.request.urlopen(
++            req,
++            context=self.tls_context,
++        )
+         resp_data = json.loads(response.read())
+         self.assertEqual(resp_data, {'kind': 'status', 'status': 'OK'})
+ 
+diff --git a/tests/test_server_auth.py b/tests/test_server_auth.py
+index e35a2efdc1f..f66fe6bce68 100644
+--- a/tests/test_server_auth.py
++++ b/tests/test_server_auth.py
+@@ -46,6 +46,9 @@ async def test_server_auth_01(self):
+         if not self.has_create_role:
+             self.skipTest('create role is not supported by the backend')
+ 
++        await self.con.query('''
++            CREATE EXTENSION edgeql_http;
++        ''')
+         await self.con.query('''
+             CREATE SUPERUSER ROLE foo {
+                 SET password := 'foo-pass';
+@@ -61,12 +64,18 @@ async def test_server_auth_01(self):
+                 password='wrong',
+             )
+ 
++        # Test wrong password on http basic auth
++        body, _, code = await self._basic_http_request(None, 'foo', 'wrong')
++        self.assertEqual(code, 400, f"Wrong result: {body}")
++
+         # good password
+         conn = await self.connect(
+             user='foo',
+             password='foo-pass',
+         )
+         await conn.aclose()
++        body, _, code = await self._basic_http_request(None, 'foo', 'foo-pass')
++        self.assertEqual(code, 200, f"Wrong result: {body}")
+ 
+         await self.con.query('''
+             CONFIGURE INSTANCE INSERT Auth {
+@@ -237,6 +246,33 @@ async def test_long_role_name(self):
+             await self.con.execute(
+                 f'CREATE SUPERUSER ROLE myrole_{"x" * s_def.MAX_NAME_LENGTH};')
+ 
++    async def _basic_http_request(
++        self, server, user, password, db='edgedb',
++    ):
++        with self.http_con(server, keep_alive=False) as con:
++            return self.http_con_request(
++                con,
++                path=f'/db/{db}/edgeql',
++                params=dict(query='select 1'),
++                headers=dict(
++                    Authorization=self.make_auth_header(user, password),
++                ),
++            )
++
++    async def _jwt_http_request(self, server, sk, db='edgedb', proto='edgeql'):
++        with self.http_con(server, keep_alive=False) as con:
++            return self.http_con_request(
++                con,
++                path=f'/db/{db}/{proto}',
++                # ... the graphql ones will produce an error, but that's
++                # still a 200
++                params=dict(query='select 1'),
++                headers=dict(Authorization=f'bearer {sk}'),
++            )
++
++    def _jwt_gql_request(self, server, sk):
++        return self._jwt_http_request(server, sk, proto='graphql')
++
+     @unittest.skipIf(
+         "EDGEDB_SERVER_MULTITENANT_CONFIG_FILE" in os.environ,
+         "cannot use CONFIGURE INSTANCE in multi-tenant mode",
+@@ -253,6 +289,14 @@ async def test_server_auth_jwt_1(self):
+             default_auth_method=args.ServerAuthMethod.JWT,
+             extra_args=["--instance-name=localtest"],
+         ) as sd:
++            base_sk = secretkey.generate_secret_key(jwk)
++            conn = await sd.connect(secret_key=base_sk)
++            await conn.execute('''
++                CREATE EXTENSION edgeql_http;
++                CREATE EXTENSION graphql;
++            ''')
++            await conn.aclose()
++
+             # bad secret keys
+             with self.assertRaisesRegex(
+                 edgedb.AuthenticationError,
+@@ -269,6 +313,23 @@ async def test_server_auth_jwt_1(self):
+             ):
+                 await sd.connect(secret_key=corrupt_sk)
+ 
++            body, _, code = await self._jwt_http_request(sd, corrupt_sk)
++            self.assertEqual(code, 400, f"Wrong result: {body}")
++            body, _, code = await self._jwt_gql_request(sd, corrupt_sk)
++            self.assertEqual(code, 400, f"Wrong result: {body}")
++
++            # Try to mess up the *signature* part of it
++            wrong_sk = sk[:-20] + ("1" if sk[-20] == "0" else "0") + sk[-20:]
++            with self.assertRaisesRegex(
++                edgedb.AuthenticationError,
++                'authentication failed: Verification failed',
++            ):
++                await sd.connect(secret_key=wrong_sk)
++
++            body, _, code = await self._jwt_http_request(
++                sd, corrupt_sk, db='non_existant')
++            self.assertEqual(code, 400, f"Wrong result: {body}")
++
+             good_keys = [
+                 [],
+                 [("roles", ["edgedb"])],
+@@ -283,6 +344,11 @@ async def test_server_auth_jwt_1(self):
+                     conn = await sd.connect(secret_key=sk)
+                     await conn.aclose()
+ 
++                    body, _, code = await self._jwt_http_request(sd, sk)
++                    self.assertEqual(code, 200, f"Wrong result: {body}")
++                    body, _, code = await self._jwt_gql_request(sd, sk)
++                    self.assertEqual(code, 200, f"Wrong result: {body}")
++
+             bad_keys = {
+                 (("roles", ("bad-role",)),):
+                     'secret key does not authorize access '
+@@ -305,6 +371,11 @@ async def test_server_auth_jwt_1(self):
+                     ):
+                         await sd.connect(secret_key=sk)
+ 
++                    body, _, code = await self._jwt_http_request(sd, sk)
++                    self.assertEqual(code, 400, f"Wrong result: {body}")
++                    body, _, code = await self._jwt_gql_request(sd, sk)
++                    self.assertEqual(code, 400, f"Wrong result: {body}")
++
+     @unittest.skipIf(
+         "EDGEDB_SERVER_MULTITENANT_CONFIG_FILE" in os.environ,
+         "cannot use CONFIGURE INSTANCE in multi-tenant mode",
+diff --git a/tests/test_server_proto.py b/tests/test_server_proto.py
+index e22541b2c0c..2ee7a53bc85 100644
+--- a/tests/test_server_proto.py
++++ b/tests/test_server_proto.py
+@@ -2276,8 +2276,13 @@ async def test_server_adjacent_extension_propagation(self):
+         else:
+             server_args['adjacent_to'] = self.con
+ 
++        headers = {
++            'Authorization': self.make_auth_header(),
++        }
++
+         async with tb.start_edgedb_server(**server_args) as sd:
+ 
++            print("SERVER", sd)
+             await self.con.execute("CREATE EXTENSION notebook;")
+ 
+             # First, ensure that the local server is aware of the new ext.
+@@ -2290,9 +2295,11 @@ async def test_server_adjacent_extension_propagation(self):
+                             http_con,
+                             path="notebook",
+                             body={"queries": ["SELECT 1"]},
++                            headers=headers,
+                         )
+ 
+-                        self.assertEqual(status, http.HTTPStatus.OK)
++                        self.assertEqual(
++                            status, http.HTTPStatus.OK, f"fuck: {response} {_}")
+                         self.assert_data_shape(
+                             response,
+                             {
+@@ -2315,6 +2322,7 @@ async def test_server_adjacent_extension_propagation(self):
+                             http_con,
+                             path="notebook",
+                             body={"queries": ["SELECT 1"]},
++                            headers=headers,
+                         )
+ 
+                         self.assertEqual(status, http.HTTPStatus.OK)
+@@ -2343,6 +2351,7 @@ async def test_server_adjacent_extension_propagation(self):
+                             http_con,
+                             path="notebook",
+                             body={"queries": ["SELECT 1"]},
++                            headers=headers,
+                         )
+ 
+                         self.assertEqual(status, http.HTTPStatus.NOT_FOUND)
+@@ -2357,6 +2366,7 @@ async def test_server_adjacent_extension_propagation(self):
+                             http_con,
+                             path="notebook",
+                             body={"queries": ["SELECT 1"]},
++                            headers=headers,
+                         )
+ 
+                         self.assertEqual(status, http.HTTPStatus.NOT_FOUND)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

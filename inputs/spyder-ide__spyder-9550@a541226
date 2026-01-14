@@ -1,0 +1,145 @@
+  Task-ID: spyder-ide__spyder-9550@a541226
+  Please checkout to this commit first: f0e625450c6fb74347eb474989f2cab1c4099977
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Overwritten file permissions on save
+## Description
+If one saves a file it a) cannot follow my symlink and b) removes my file permissions such that it's not executable anymore. In other words I think on each save the original file is deleted and replaced by a new one
+
+### What steps will reproduce the problem?
+Click save
+
+
+
+## Versions
+
+* Spyder version: 4.0.0b2 
+* Python version: 3.6.7
+* Qt version: 5.12.3
+* PyQt5 version: 5.12.2
+* Operating System: Linux 4.15.0-50-generic
+
+### Dependencies
+
+```
+pygments >=2.0     :  2.4.0 (OK)
+qdarkstyle >=2.6.4 :  2.6.8 (OK)
+sphinx >=0.6.6     :  2.0.1 (OK)
+psutil >=0.3       :  5.6.2 (OK)
+pyls >=0.19.0;<0.25:  0.24.0 (OK)
+nbconvert >=4.0    :  5.5.0 (OK)
+pandas >=0.13.1    :  0.23.4 (OK)
+numpy >=1.7        :  1.16.3 (OK)
+sympy >=0.7.3      :  1.1.1 (OK)
+cython >=0.21      :  0.26.1 (OK)
+qtconsole >=4.2.0  :  4.4.4 (OK)
+IPython >=4.0      :  7.5.0 (OK)
+matplotlib >=2.0.0 :  2.2.2 (OK)
+pylint >=0.25      :  2.3.1 (OK)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/spyder/utils/encoding.py b/spyder/utils/encoding.py
+index e75660f0e75..55df5cf9bc0 100644
+--- a/spyder/utils/encoding.py
++++ b/spyder/utils/encoding.py
+@@ -235,10 +235,25 @@ def write(text, filename, encoding='utf-8', mode='wb'):
+         with open(filename, mode) as textfile:
+             textfile.write(text)
+     else:
++        # Based in the solution at untitaker/python-atomicwrites#42
++        # Needed to fix file permissions overwritting
++        # See spyder-ide/spyder#9381
++        try:
++            FileNotFoundError
++        except NameError:  # Python 2
++            FileNotFoundError = OSError
++        try:
++            original_mode = os.stat(filename).st_mode
++        except FileNotFoundError:
++            # Creating a new file, emulate what os.open() does
++            umask = os.umask(0)
++            os.umask(umask)
++            original_mode = 0o777 & ~umask
+         with atomic_write(filename,
+                           overwrite=True,
+                           mode=mode) as textfile:
+             textfile.write(text)
++        os.chmod(filename, original_mode)
+     return encoding
+ 
+ 
+diff --git a/spyder/utils/tests/test_encoding.py b/spyder/utils/tests/test_encoding.py
+index e802e0fe6ba..ccb34249fb5 100644
+--- a/spyder/utils/tests/test_encoding.py
++++ b/spyder/utils/tests/test_encoding.py
+@@ -7,13 +7,33 @@
+ 
+ import pytest
+ import os
++import stat
+ 
+-from spyder.utils.encoding import is_text_file, get_coding
++from spyder.utils.encoding import is_text_file, get_coding, write
+ 
+ __location__ = os.path.realpath(os.path.join(os.getcwd(),
+                                              os.path.dirname(__file__)))
+ 
+ 
++def test_permissions(tmpdir):
++    """Check that file permissions are preserved."""
++    p_file = tmpdir.mkdir("permissions").join("permissions_text.txt")
++
++    # Write file and define execution permissions
++    write("Some text", str(p_file))
++    st = os.stat(p_file)
++    mode = st.st_mode | stat.S_IEXEC
++    os.chmod(p_file, mode)
++
++    old_mode = os.stat(p_file).st_mode
++
++    # Write the file and check permissions
++    write("Some text and more", str(p_file))
++    new_mode = os.stat(p_file).st_mode
++
++    assert old_mode == new_mode
++
++
+ def test_is_text_file(tmpdir):
+     p = tmpdir.mkdir("sub").join("random_text.txt")
+     p.write("Some random text")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

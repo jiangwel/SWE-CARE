@@ -1,0 +1,831 @@
+  Task-ID: Avaiga__taipy-585@f39ef98
+  Please checkout to this commit first: aaad0e9bc77a3d176e85708373dce1bb4ce31287
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  S3DataNode
+- [x] Implement a new predefined storage type "s3" in `DataNodeConfig`, to model a single data object stored on an S3 bucket.
+- [x] List and design the configuration attributes required.
+- [x] Implement the corresponding `S3DataNode` inheriting from the parent `DataNode` class.
+- [ ] Add reference manual documentation
+  </issue>
+  
+  <patch>
+  diff --git a/Pipfile b/Pipfile
+index 6239395ee6..31bde2f699 100644
+--- a/Pipfile
++++ b/Pipfile
+@@ -34,6 +34,7 @@ sqlalchemy = "==2.0.16"
+ toml = "==0.10"
+ twisted = "==23.8.0"
+ tzlocal = "==3.0"
++boto3 = "==1.29.1"
+ 
+ [dev-packages]
+ autopep8 = "*"
+@@ -73,6 +74,7 @@ types-python-dateutil = "*"
+ types-pytz = "*"
+ types-toml = ">=0.10.0"
+ types-tzlocal = "*"
++moto = ">=4.2.9"
+ 
+ [requires]
+ python_version = "3"
+diff --git a/setup.py b/setup.py
+index 40070572a8..dbf00906c5 100644
+--- a/setup.py
++++ b/setup.py
+@@ -60,6 +60,7 @@
+     "marshmallow>=3.20.1,<3.30",
+     "apispec[yaml]>=6.3,<7.0",
+     "apispec-webframeworks>=0.5.2,<0.6",
++    "boto3>=1.29.1",
+ ]
+ 
+ 
+diff --git a/taipy/core/config/__init__.py b/taipy/core/config/__init__.py
+index cea7bfd9a5..09cecb832c 100644
+--- a/taipy/core/config/__init__.py
++++ b/taipy/core/config/__init__.py
+@@ -54,6 +54,7 @@
+         ("configure_pickle_data_node", DataNodeConfig._configure_pickle),
+         ("configure_excel_data_node", DataNodeConfig._configure_excel),
+         ("configure_generic_data_node", DataNodeConfig._configure_generic),
++        ("configure_s3_object_data_node", DataNodeConfig._configure_s3_object),
+     ],
+ )
+ _inject_section(
+diff --git a/taipy/core/config/checkers/_data_node_config_checker.py b/taipy/core/config/checkers/_data_node_config_checker.py
+index ec11d62eb5..23f0bd56d1 100644
+--- a/taipy/core/config/checkers/_data_node_config_checker.py
++++ b/taipy/core/config/checkers/_data_node_config_checker.py
+@@ -44,7 +44,8 @@ def _check_storage_type(self, data_node_config_id: str, data_node_config: DataNo
+                 data_node_config._STORAGE_TYPE_KEY,
+                 data_node_config.storage_type,
+                 f"`{data_node_config._STORAGE_TYPE_KEY}` field of DataNodeConfig `{data_node_config_id}` must be"
+-                f" either csv, sql_table, sql, mongo_collection, pickle, excel, generic, json, parquet, or in_memory.",
++                f" either csv, sql_table, sql, mongo_collection, pickle, excel, generic, json, parquet, s3_object,"
++                f" or in_memory.",
+             )
+ 
+     def _check_scope(self, data_node_config_id: str, data_node_config: DataNodeConfig):
+diff --git a/taipy/core/config/config.schema.json b/taipy/core/config/config.schema.json
+index 1ea361a931..2f98e3c805 100644
+--- a/taipy/core/config/config.schema.json
++++ b/taipy/core/config/config.schema.json
+@@ -99,7 +99,8 @@
+               "in_memory",
+               "generic",
+               "parquet",
+-              ""
++              "s3_object",
++              "",
+             ],
+             "default": "pickle"
+           },
+@@ -236,6 +237,30 @@
+             "description": "storage_type: parquet specific.Additional parameters when writing parquet files, default is an empty dictionary",
+             "type": "object"
+           },
++          "aws_access_key":{
++            "description": "storage_type: s3_object specific.Amazon Storage public key",
++            "type": "string"
++          },
++          "aws_secret_access_key":{
++            "description": "storage_type: s3_object specific.Amazon Storage secret key",
++            "type": "string"
++          },
++          "aws_s3_bucket_name":{
++            "description": "storage_type: s3_object specific.Name of Bucket",
++            "type": "string"
++          },
++          "aws_s3_object_key":{
++            "description": "storage_type: s3_object specific.File name",
++            "type": "string"
++          },
++          "aws_region":{
++            "description": "storage_type: s3_object specific.Bucket Location",
++            "type": "string"
++          },
++          "aws_s3_object_parameters":{
++            "description": "storage_type: s3_object specific.Additional parameters when accesing s3 object, default is an empty dictionary",
++            "type": "array"
++          },
+           "if": {
+             "properties": {
+               "storage_type": {
+@@ -282,6 +307,23 @@
+                 "required": [
+                   "db_name"
+                 ],
++            "else": {
++              "if": {
++                "properties": {
++                  "storage_type": {
++                    "enum": [
++                      "s3_object",
++                    ]
++                  }
++                }
++              },
++              "then": {
++                "required": [
++                  "aws_access_key",
++                  "aws_secret_access_key",
++                  "aws_s3_bucket_name",
++                  "aws_s3_object_key"
++                ],
+                 "if": {
+                   "properties": {
+                     "storage_type": {
+diff --git a/taipy/core/config/data_node_config.py b/taipy/core/config/data_node_config.py
+index c4f493dc84..5491c44824 100644
+--- a/taipy/core/config/data_node_config.py
++++ b/taipy/core/config/data_node_config.py
+@@ -35,8 +35,8 @@ class DataNodeConfig(Section):
+     Attributes:
+         id (str): Unique identifier of the data node config. It must be a valid Python variable name.
+         storage_type (str): Storage type of the data nodes created from the data node config. The possible values
+-            are : "csv", "excel", "pickle", "sql_table", "sql", "mongo_collection", "generic", "json", "parquet" and
+-            "in_memory".
++            are : "csv", "excel", "pickle", "sql_table", "sql", "mongo_collection", "generic", "json", "parquet",
++            "in_memory and "s3_object".
+             The default value is "pickle".
+             Note that the "in_memory" value can only be used when `JobConfig^`.mode is "standalone".
+         scope (Optional[Scope^]): The optional `Scope^` of the data nodes instantiated from the data node config.
+@@ -57,6 +57,8 @@ class DataNodeConfig(Section):
+     _STORAGE_TYPE_VALUE_GENERIC = "generic"
+     _STORAGE_TYPE_VALUE_JSON = "json"
+     _STORAGE_TYPE_VALUE_PARQUET = "parquet"
++    _STORAGE_TYPE_VALUE_S3_OBJECT = "s3_object"
++
+     _DEFAULT_STORAGE_TYPE = _STORAGE_TYPE_VALUE_PICKLE
+     _ALL_STORAGE_TYPES = [
+         _STORAGE_TYPE_VALUE_PICKLE,
+@@ -69,6 +71,7 @@ class DataNodeConfig(Section):
+         _STORAGE_TYPE_VALUE_GENERIC,
+         _STORAGE_TYPE_VALUE_JSON,
+         _STORAGE_TYPE_VALUE_PARQUET,
++        _STORAGE_TYPE_VALUE_S3_OBJECT,
+     ]
+ 
+     _EXPOSED_TYPE_KEY = "exposed_type"
+@@ -145,6 +148,13 @@ class DataNodeConfig(Section):
+     _OPTIONAL_COMPRESSION_PARQUET_PROPERTY = "compression"
+     _OPTIONAL_READ_KWARGS_PARQUET_PROPERTY = "read_kwargs"
+     _OPTIONAL_WRITE_KWARGS_PARQUET_PROPERTY = "write_kwargs"
++    # S3object
++    _REQUIRED_AWS_ACCESS_KEY_ID_PROPERTY = "aws_access_key"
++    _REQUIRED_AWS_SECRET_ACCESS_KEY_PROPERTY = "aws_secret_access_key"
++    _REQUIRED_AWS_STORAGE_BUCKET_NAME_PROPERTY = "aws_s3_bucket_name"
++    _REQUIRED_AWS_S3_OBJECT_KEY_PROPERTY = "aws_s3_object_key"
++    _OPTIONAL_AWS_REGION_PROPERTY = "aws_region"
++    _OPTIONAL_AWS_S3_OBJECT_PARAMETERS_PROPERTY = "aws_s3_object_parameters"
+ 
+     _REQUIRED_PROPERTIES: Dict[str, List] = {
+         _STORAGE_TYPE_VALUE_PICKLE: [],
+@@ -169,6 +179,13 @@ class DataNodeConfig(Section):
+         _STORAGE_TYPE_VALUE_GENERIC: [],
+         _STORAGE_TYPE_VALUE_JSON: [],
+         _STORAGE_TYPE_VALUE_PARQUET: [],
++
++        _STORAGE_TYPE_VALUE_S3_OBJECT: [
++            _REQUIRED_AWS_ACCESS_KEY_ID_PROPERTY,
++            _REQUIRED_AWS_SECRET_ACCESS_KEY_PROPERTY,
++            _REQUIRED_AWS_STORAGE_BUCKET_NAME_PROPERTY,
++            _REQUIRED_AWS_S3_OBJECT_KEY_PROPERTY,
++        ],
+     }
+ 
+     _OPTIONAL_PROPERTIES = {
+@@ -241,6 +258,10 @@ class DataNodeConfig(Section):
+             _OPTIONAL_WRITE_KWARGS_PARQUET_PROPERTY: None,
+             _OPTIONAL_EXPOSED_TYPE_PARQUET_PROPERTY: _DEFAULT_EXPOSED_TYPE,
+         },
++        _STORAGE_TYPE_VALUE_S3_OBJECT: {
++            _OPTIONAL_AWS_REGION_PROPERTY: None,
++            _OPTIONAL_AWS_S3_OBJECT_PARAMETERS_PROPERTY: None,
++        },
+     }
+ 
+     _SCOPE_KEY = "scope"
+@@ -380,8 +401,8 @@ def _set_default_configuration(
+         Parameters:
+             storage_type (str): The default storage type for all data node configurations.
+                 The possible values are *"pickle"* (the default value), *"csv"*, *"excel"*,
+-                *"sql"*, *"mongo_collection"*, *"in_memory"*, *"json"*, *"parquet"* or
+-                *"generic"*.
++                *"sql"*, *"mongo_collection"*, *"in_memory"*, *"json"*, *"parquet"*, *"generic"*,
++                or *"s3_object"*.
+             scope (Optional[Scope^]): The default scope for all data node configurations.<br/>
+                 The default value is `Scope.SCENARIO`.
+             validity_period (Optional[timedelta]): The duration since the last edit date for which the data node can be
+@@ -465,6 +486,7 @@ def _configure(
+             cls._STORAGE_TYPE_VALUE_GENERIC: cls._configure_generic,
+             cls._STORAGE_TYPE_VALUE_JSON: cls._configure_json,
+             cls._STORAGE_TYPE_VALUE_PARQUET: cls._configure_parquet,
++            cls._STORAGE_TYPE_VALUE_S3_OBJECT: cls._configure_s3_object,
+         }
+ 
+         if storage_type in cls._ALL_STORAGE_TYPES:
+@@ -1030,6 +1052,61 @@ def _configure_mongo_collection(
+             id, DataNodeConfig._STORAGE_TYPE_VALUE_MONGO_COLLECTION, scope, validity_period, **properties
+         )
+ 
++    @classmethod
++    def _configure_s3_object(
++        cls,
++        id: str,
++        aws_access_key: str,
++        aws_secret_access_key: str,
++        aws_s3_bucket_name: str,
++        aws_s3_object_key: str,
++        aws_region: Optional[str] = None,
++        aws_s3_object_parameters: Optional[Dict[str, Any]] = None,
++        scope: Optional[Scope] = None,
++        validity_period: Optional[timedelta] = None,
++        **properties,
++    ) -> "DataNodeConfig":
++        """Configure a new S3 object data node configuration.
++
++        Parameters:
++            id (str): The unique identifier of the new S3 Object data node configuration.
++            aws_access_key (str): Amazon Web Services ID for to identify account.
++            aws_secret_access_key (str): Amazon Web Services access key to authenticate programmatic requests.
++            aws_s3_bucket_name (str): The bucket in S3 to read from and to write the data to.
++            aws_region (Optional[str]): Self-contained geographic area where Amazon Web Services (AWS)
++                infrastructure is located.
++            aws_s3_object_parameters (Optional[dict[str, any]]): A dictionary of additional arguments to be passed
++                into AWS S3 bucket access string.
++            scope (Optional[Scope^]): The scope of the S3 Object data node configuration.<br/>
++                The default value is `Scope.SCENARIO`.
++            validity_period (Optional[timedelta]): The duration since the last edit date for which the data node can be
++                considered up-to-date. Once the validity period has passed, the data node is considered stale and
++                relevant tasks will run even if they are skippable (see the
++                [Task configs page](../core/config/task-config.md) for more details).
++                If *validity_period* is set to None, the data node is always up-to-date.
++            **properties (dict[str, any]): A keyworded variable length list of additional arguments.
++
++        Returns:
++            The new S3 object data node configuration.
++        """
++        properties.update(
++            {
++                cls._REQUIRED_AWS_ACCESS_KEY_ID_PROPERTY: aws_access_key,
++                cls._REQUIRED_AWS_SECRET_ACCESS_KEY_PROPERTY: aws_secret_access_key,
++                cls._REQUIRED_AWS_STORAGE_BUCKET_NAME_PROPERTY: aws_s3_bucket_name,
++                cls._REQUIRED_AWS_S3_OBJECT_KEY_PROPERTY: aws_s3_object_key,
++            }
++        )
++
++        if aws_region is not None:
++            properties[cls._OPTIONAL_AWS_REGION_PROPERTY] = aws_region
++        if aws_s3_object_parameters is not None:
++            properties[cls._OPTIONAL_AWS_S3_OBJECT_PARAMETERS_PROPERTY] = aws_s3_object_parameters
++
++        return cls.__configure(
++            id, DataNodeConfig._STORAGE_TYPE_VALUE_S3_OBJECT, scope, validity_period, **properties
++        )
++
+     @staticmethod
+     def __configure(
+         id: str,
+diff --git a/taipy/core/data/__init__.py b/taipy/core/data/__init__.py
+index ed9160ee5b..8d79f8cab1 100644
+--- a/taipy/core/data/__init__.py
++++ b/taipy/core/data/__init__.py
+@@ -21,3 +21,4 @@
+ from .pickle import PickleDataNode
+ from .sql import SQLDataNode
+ from .sql_table import SQLTableDataNode
++from .aws_s3 import S3ObjectDataNode
+diff --git a/taipy/core/data/aws_s3.py b/taipy/core/data/aws_s3.py
+new file mode 100644
+index 0000000000..44f0eebfc3
+--- /dev/null
++++ b/taipy/core/data/aws_s3.py
+@@ -0,0 +1,159 @@
++# Copyright 2023 Avaiga Private Limited
++#
++# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
++# the License. You may obtain a copy of the License at
++#
++#        http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
++# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
++# specific language governing permissions and limitations under the License.
++
++
++import boto3
++from datetime import datetime, timedelta
++from inspect import isclass
++from typing import Any, Dict, List, Optional, Set, Tuple, Union
++
++from taipy.config.common.scope import Scope
++
++from .._version._version_manager_factory import _VersionManagerFactory
++from ..exceptions.exceptions import InvalidCustomDocument, MissingRequiredProperty
++from .data_node import DataNode
++from .data_node_id import DataNodeId, Edit
++
++
++class S3ObjectDataNode(DataNode):
++    """Data Node object stored in an Amazon Web Service S3 Bucket.
++
++    Attributes:
++        config_id (str): Identifier of the data node configuration. It must be a valid Python
++            identifier.
++        scope (Scope^): The scope of this data node.
++        id (str): The unique identifier of this data node.
++        owner_id (str): The identifier of the owner (sequence_id, scenario_id, cycle_id) or
++            None.
++        parent_ids (Optional[Set[str]]): The identifiers of the parent tasks or `None`.
++        last_edit_date (datetime): The date and time of the last modification.
++        edits (List[Edit^]): The ordered list of edits for that job.
++        version (str): The string indicates the application version of the data node to instantiate. If not provided,
++            the current version is used.
++        validity_period (Optional[timedelta]): The duration implemented as a timedelta since the last edit date for
++            which the data node can be considered up-to-date. Once the validity period has passed, the data node is
++            considered stale and relevant tasks will run even if they are skippable (see the
++            [Task management page](../core/entities/task-mgt.md) for more details).
++            If _validity_period_ is set to `None`, the data node is always up-to-date.
++        edit_in_progress (bool): True if a task computing the data node has been submitted
++            and not completed yet. False otherwise.
++        editor_id (Optional[str]): The identifier of the user who is currently editing the data node.
++        editor_expiration_date (Optional[datetime]): The expiration date of the editor lock.
++        properties (dict[str, Any]): A dictionary of additional properties. Note that the
++            _properties_ parameter must at least contain an entry for _"aws_access_key"_ , _"aws_secret_access_key"_ ,
++            _aws_s3_bucket_name_ and _aws_s3_object_key_ :
++
++            - _"aws_access_key"_ `(str)`: Amazon Web Services ID for to identify account\n
++            - _"aws_secret_access_key"_ `(str)`: Amazon Web Services access key to authenticate programmatic requests.\n
++            - _"aws_region"_ `(Any)`: Self-contained geographic area where Amazon Web Services (AWS) infrastructure is
++                    located.\n
++            - _"aws_s3_bucket_name"_ `(str)`: unique identifier for a container that stores objects in Amazon Simple
++                    Storage Service (S3).\n
++            - _"aws_s3_object_key"_ `(str)`:  unique idntifier for the name of the object(file) that has to be read
++                    or written. \n
++            - _"aws _s3_object_parameters"_ `(str)`: A dictionary of additional arguments to be passed to interact with
++                    the AWS service\n
++
++    """
++
++    __STORAGE_TYPE = "s3_object"
++
++    __AWS_ACCESS_KEY_ID = "aws_access_key"
++    __AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
++    __AWS_STORAGE_BUCKET_NAME = "aws_s3_bucket_name"
++    __AWS_S3_OBJECT_KEY = "aws_s3_object_key"
++    __AWS_REGION = "aws_region"
++    __AWS_S3_OBJECT_PARAMETERS = "aws_s3_object_parameters"
++
++    _REQUIRED_PROPERTIES: List[str] = [
++        __AWS_ACCESS_KEY_ID,
++        __AWS_SECRET_ACCESS_KEY,
++        __AWS_STORAGE_BUCKET_NAME,
++        __AWS_S3_OBJECT_KEY,
++
++    ]
++
++    def __init__(
++        self,
++        config_id: str,
++        scope: Scope,
++        id: Optional[DataNodeId] = None,
++        owner_id: Optional[str] = None,
++        parent_ids: Optional[Set[str]] = None,
++        last_edit_date: Optional[datetime] = None,
++        edits: Optional[List[Edit]] = None,
++        version: str = None,
++        validity_period: Optional[timedelta] = None,
++        edit_in_progress: bool = False,
++        editor_id: Optional[str] = None,
++        editor_expiration_date: Optional[datetime] = None,
++        properties: Optional[Dict] = None,
++    ):
++        if properties is None:
++            properties = {}
++        required = self._REQUIRED_PROPERTIES
++        if missing := set(required) - set(properties.keys()):
++            raise MissingRequiredProperty(
++                f"The following properties " f"{', '.join(x for x in missing)} were not informed and are required."
++            )
++        super().__init__(
++            config_id,
++            scope,
++            id,
++            owner_id,
++            parent_ids,
++            last_edit_date,
++            edits,
++            version or _VersionManagerFactory._build_manager()._get_latest_version(),
++            validity_period,
++            edit_in_progress,
++            editor_id,
++            editor_expiration_date,
++            **properties,
++        )
++
++        self._s3_client = boto3.client(
++            's3',
++            aws_access_key_id=properties.get(self.__AWS_ACCESS_KEY_ID),
++            aws_secret_access_key=properties.get(self.__AWS_SECRET_ACCESS_KEY),
++        )
++
++        if not self._last_edit_date:
++            self._last_edit_date = datetime.now()
++
++        self._TAIPY_PROPERTIES.update(
++            {
++                self.__AWS_ACCESS_KEY_ID,
++                self.__AWS_SECRET_ACCESS_KEY,
++                self.__AWS_STORAGE_BUCKET_NAME,
++                self.__AWS_S3_OBJECT_KEY,
++                self.__AWS_REGION,
++                self.__AWS_S3_OBJECT_PARAMETERS,
++            }
++        )
++
++    @classmethod
++    def storage_type(cls) -> str:
++        return cls.__STORAGE_TYPE
++
++    def _read(self):
++        aws_s3_object = self._s3_client.get_object(
++            Bucket=self.properties[self.__AWS_STORAGE_BUCKET_NAME],
++            Key=self.properties[self.__AWS_S3_OBJECT_KEY],
++        )
++        return aws_s3_object['Body'].read().decode('utf-8')
++
++    def _write(self, data: Any):
++        self._s3_client.put_object(
++            Bucket=self.properties[self.__AWS_STORAGE_BUCKET_NAME],
++            Key=self.properties[self.__AWS_S3_OBJECT_KEY],
++            Body=data,
++        )
+diff --git a/tests/conftest.py b/tests/conftest.py
+index fa0218b2ee..6da9a3b50d 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -88,6 +88,7 @@ def _inject_core_sections():
+                 ("configure_pickle_data_node", DataNodeConfig._configure_pickle),
+                 ("configure_excel_data_node", DataNodeConfig._configure_excel),
+                 ("configure_generic_data_node", DataNodeConfig._configure_generic),
++                ("configure_s3_object_data_node", DataNodeConfig._configure_s3_object),
+             ],
+         )
+         _inject_section(
+diff --git a/tests/core/config/checkers/test_data_node_config_checker.py b/tests/core/config/checkers/test_data_node_config_checker.py
+index 5285d7d79e..2fc189d752 100644
+--- a/tests/core/config/checkers/test_data_node_config_checker.py
++++ b/tests/core/config/checkers/test_data_node_config_checker.py
+@@ -88,7 +88,7 @@ def test_check_storage_type(self, caplog):
+         assert len(Config._collector.errors) == 1
+         expected_error_message = (
+             "`storage_type` field of DataNodeConfig `new` must be either csv, sql_table,"
+-            " sql, mongo_collection, pickle, excel, generic, json, parquet, or in_memory."
++            " sql, mongo_collection, pickle, excel, generic, json, parquet, s3_object, or in_memory."
+             ' Current value of property `storage_type` is "bar".'
+         )
+         assert expected_error_message in caplog.text
+@@ -170,6 +170,19 @@ def test_check_storage_type(self, caplog):
+         ]
+         assert all(message in caplog.text for message in expected_error_messages)
+ 
++        config._sections[DataNodeConfig.name]["new"].storage_type = "s3_object"
++        with pytest.raises(SystemExit):
++            Config._collector = IssueCollector()
++            Config.check()
++        assert len(Config._collector.errors) == 4
++        expected_error_messages = [
++            "DataNodeConfig `new` is missing the required property `aws_access_key` for type `s3_object`.",
++            "DataNodeConfig `new` is missing the required property `aws_secret_access_key` for type `s3_object`.",
++            "DataNodeConfig `new` is missing the required property `aws_s3_bucket_name` for type `s3_object`.",
++            "DataNodeConfig `new` is missing the required property `aws_s3_object_key` for type `s3_object`.",
++        ]
++        assert all(message in caplog.text for message in expected_error_messages)
++
+     def test_check_properties_of_sqlite_engine(self, caplog):
+         config = Config._applied_config
+         Config._compile_configs()
+@@ -353,6 +366,17 @@ def test_check_required_properties(self, caplog):
+         Config.check()
+         assert len(Config._collector.errors) == 0
+ 
++        config._sections[DataNodeConfig.name]["new"].storage_type = "s3_object"
++        config._sections[DataNodeConfig.name]["new"].properties = {
++            "aws_access_key": "access_key",
++            "aws_secret_access_key": "secret_acces_key",
++            "aws_s3_bucket_name": "s3_bucket_name",
++            "aws_s3_object_key": "s3_object_key",
++        }
++        Config._collector = IssueCollector()
++        Config.check()
++        assert len(Config._collector.errors) == 0
++
+         config._sections[DataNodeConfig.name]["new"].storage_type = "excel"
+         Config._collector = IssueCollector()
+         Config.check()
+diff --git a/tests/core/config/test_config.py b/tests/core/config/test_config.py
+index 407d2d83b0..b0aa5fefa7 100644
+--- a/tests/core/config/test_config.py
++++ b/tests/core/config/test_config.py
+@@ -105,3 +105,19 @@ def test_configure_mongo_data_node(self):
+         )
+         Config.configure_mongo_collection_data_node(a, b, c, d, e, f, g, h, extra_args, scope, vp, property=k)
+         assert len(Config.data_nodes) == 2
++
++    def test_configure_s3_object_data_node(self):
++        a, b, c, d, e, f, extra_args, scope, vp, k = (
++            "foo",
++            "access_key",
++            "secret_acces_key",
++            "s3_bucket_name",
++            "s3_object_key",
++            None,
++            {"foo": "bar"},
++            Scope.SCENARIO,
++            timedelta(1),
++            "qux",
++        )
++        Config.configure_s3_object_data_node(a, b, c, d, e, f, extra_args, scope, vp, property=k)
++        assert len(Config.data_nodes) == 2
+diff --git a/tests/core/config/test_configure_default_config.py b/tests/core/config/test_configure_default_config.py
+index ec9e9278e0..eed9d21dd3 100644
+--- a/tests/core/config/test_configure_default_config.py
++++ b/tests/core/config/test_configure_default_config.py
+@@ -41,6 +41,12 @@ def test_set_default_data_node_configuration():
+     assert data_node4.scope == Scope.SCENARIO
+     assert data_node4.validity_period == timedelta(1)
+ 
++    Config.set_default_data_node_configuration("s3_object", validity_period=timedelta(1))
++    data_node5 = Config.configure_data_node(id="input_data5")
++    assert data_node5.storage_type == "s3_object"
++    assert data_node5.scope == Scope.SCENARIO
++    assert data_node5.validity_period == timedelta(1)
++
+ 
+ def test_set_default_data_node_configuration_replace_old_default_config():
+     Config.set_default_data_node_configuration(
+@@ -580,3 +586,73 @@ def test_set_default_mongo_collection_data_node_configuration():
+     assert dn3.db_extra_args == {"default": "default"}
+     assert dn3.scope == Scope.GLOBAL
+     assert dn3.validity_period == timedelta(1)
++
++
++def test_set_default_s3_object_data_node_configuration():
++    Config.set_default_data_node_configuration(
++        storage_type="s3_object",
++        aws_access_key="default_access_key",
++        aws_secret_access_key="default_secret_acces_key",
++        aws_s3_bucket_name="default_bucket_name",
++        aws_s3_object_key="default_object_key",
++        aws_region="",
++        aws_s3_object_parameters={"default": "default"},
++        scope=Scope.GLOBAL,
++        validity_period=timedelta(2),
++    )
++
++    # Config with generic config_data_node without storage_type
++    # should return the default DataNode
++    dn1 = Config.configure_data_node(id="dn1")
++    assert dn1.storage_type == "s3_object"
++    assert dn1.aws_access_key == "default_access_key"
++    assert dn1.aws_secret_access_key == "default_secret_acces_key"
++    assert dn1.aws_s3_bucket_name == "default_bucket_name"
++    assert dn1.aws_s3_object_key == "default_object_key"
++    assert dn1.aws_region == ""
++    assert dn1.aws_s3_object_parameters == {"default": "default"}
++    assert dn1.scope == Scope.GLOBAL
++    assert dn1.validity_period == timedelta(2)
++
++    # Config with generic config_data_node without storage_type
++    # with custom properties
++    dn2 = Config.configure_data_node(
++        id="dn2",
++        aws_access_key="custom_access_key_2",
++        aws_secret_access_key="custom_secret_acces_key_2",
++        aws_s3_bucket_name="custom_bucket_name_2",
++        aws_s3_object_key="custom_object_key_2",
++    )
++    assert dn2.storage_type == "s3_object"
++    assert dn2.aws_access_key == "custom_access_key_2"
++    assert dn2.aws_secret_access_key == "custom_secret_acces_key_2"
++    assert dn2.aws_s3_bucket_name == "custom_bucket_name_2"
++    assert dn2.aws_s3_object_key == "custom_object_key_2"
++    assert dn2.aws_region == ""
++    assert dn2.aws_s3_object_parameters == {"default": "default"}
++    assert dn2.scope == Scope.GLOBAL
++    assert dn2.validity_period == timedelta(2)
++
++    # Config a datanode with specific "storage_type" = "s3_object"
++    # should use properties from the default datanode
++    dn3 = Config.configure_data_node(
++        id="dn3",
++        storage_type="s3_object",
++        aws_access_key="custom_access_key_3",
++        aws_secret_access_key="custom_secret_acces_key_3",
++        aws_s3_bucket_name="custom_bucket_name_3",
++        aws_s3_object_key="custom_object_key_3",
++        aws_region="",
++        aws_s3_object_parameters={"default": "default"},
++        scope=Scope.GLOBAL,
++        validity_period=timedelta(1),
++    )
++    assert dn3.storage_type == "s3_object"
++    assert dn3.aws_access_key == "custom_access_key_3"
++    assert dn3.aws_secret_access_key == "custom_secret_acces_key_3"
++    assert dn3.aws_s3_bucket_name == "custom_bucket_name_3"
++    assert dn3.aws_s3_object_key == "custom_object_key_3"
++    assert dn3.aws_region == ""
++    assert dn3.aws_s3_object_parameters == {"default": "default"}
++    assert dn3.scope == Scope.GLOBAL
++    assert dn3.validity_period == timedelta(1)
+diff --git a/tests/core/config/test_data_node_config.py b/tests/core/config/test_data_node_config.py
+index 34aba1f3dd..8d3365b9e2 100644
+--- a/tests/core/config/test_data_node_config.py
++++ b/tests/core/config/test_data_node_config.py
+@@ -93,6 +93,19 @@ def test_data_node_config_default_parameter():
+     assert mongo_dn_cfg.db_driver == ""
+     assert mongo_dn_cfg.validity_period is None
+ 
++    aws_s3_object_dn_cfg = Config.configure_data_node(
++        "data_node_11", "s3_object", aws_access_key="test", aws_secret_access_key="test_secret",
++        aws_s3_bucket_name="test_bucket", aws_s3_object_key="test_file.txt"
++    )
++    assert aws_s3_object_dn_cfg.scope == Scope.SCENARIO
++    assert aws_s3_object_dn_cfg.aws_access_key == "test"
++    assert aws_s3_object_dn_cfg.aws_secret_access_key == "test_secret"
++    assert aws_s3_object_dn_cfg.aws_s3_bucket_name == "test_bucket"
++    assert aws_s3_object_dn_cfg.aws_s3_object_key == "test_file.txt"
++    assert aws_s3_object_dn_cfg.aws_region is None
++    assert aws_s3_object_dn_cfg.aws_s3_object_parameters is None
++    assert aws_s3_object_dn_cfg.validity_period is None
++
+ 
+ def test_data_node_config_check(caplog):
+     data_node_config = Config.configure_data_node("data_nodes1", "pickle")
+@@ -114,7 +127,7 @@ def test_data_node_config_check(caplog):
+         Config.check()
+     expected_error_message = (
+         "`storage_type` field of DataNodeConfig `data_nodes` must be either csv, sql_table,"
+-        " sql, mongo_collection, pickle, excel, generic, json, parquet, or in_memory. Current"
++        " sql, mongo_collection, pickle, excel, generic, json, parquet, s3_object, or in_memory. Current"
+         ' value of property `storage_type` is "bar".'
+     )
+     assert expected_error_message in caplog.text
+@@ -136,7 +149,7 @@ def test_data_node_config_check(caplog):
+         Config.check()
+     expected_error_message = (
+         "`storage_type` field of DataNodeConfig `data_nodes` must be either csv, sql_table,"
+-        " sql, mongo_collection, pickle, excel, generic, json, parquet, or in_memory."
++        " sql, mongo_collection, pickle, excel, generic, json, parquet, s3_object, or in_memory."
+         ' Current value of property `storage_type` is "bar".'
+     )
+     assert expected_error_message in caplog.text
+diff --git a/tests/core/data/test_aws_s3_data_node.py b/tests/core/data/test_aws_s3_data_node.py
+new file mode 100644
+index 0000000000..3042768c6f
+--- /dev/null
++++ b/tests/core/data/test_aws_s3_data_node.py
+@@ -0,0 +1,93 @@
++# Copyright 2023 Avaiga Private Limited
++#
++# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
++# the License. You may obtain a copy of the License at
++#
++#        http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
++# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
++# specific language governing permissions and limitations under the License.
++
++import os
++from dataclasses import dataclass
++from unittest.mock import patch
++
++import boto3
++from moto import mock_s3
++import pytest
++
++from taipy.core.data.data_node_id import DataNodeId
++from taipy.core.data.aws_s3 import S3ObjectDataNode
++from taipy.core.exceptions.exceptions import InvalidCustomDocument, MissingRequiredProperty
++from taipy.config.common.scope import Scope
++
++
++class TestS3ObjectDataNode:
++    __properties = [
++        {
++            "aws_access_key": "testing",
++            "aws_secret_access_key": "testing",
++            "aws_s3_bucket_name": "taipy",
++            "aws_s3_object_key": " taipy-object",
++            "aws_region": "us-east-1",
++            "aws_s3_object_parameters": {},
++        }
++    ]
++
++    @mock_s3
++    @pytest.mark.parametrize("properties", __properties)
++    def test_create(self, properties):
++        aws_s3_object_dn = S3ObjectDataNode(
++            "foo_bar_aws_s3",
++            Scope.SCENARIO,
++            properties=properties,
++        )
++        assert isinstance(aws_s3_object_dn, S3ObjectDataNode)
++        assert aws_s3_object_dn.storage_type() == "s3_object"
++        assert aws_s3_object_dn.config_id == "foo_bar_aws_s3"
++        assert aws_s3_object_dn.scope == Scope.SCENARIO
++        assert aws_s3_object_dn.id is not None
++        assert aws_s3_object_dn.owner_id is None
++        assert aws_s3_object_dn.job_ids == []
++        assert aws_s3_object_dn.is_ready_for_reading
++
++    @mock_s3
++    @pytest.mark.parametrize('data', [('Hello, write world!'), ])
++    @pytest.mark.parametrize("properties", __properties)
++    def test_write(self, properties, data):
++        bucket_name = properties["aws_s3_bucket_name"]
++        # Create an S3 client
++        s3_client = boto3.client('s3')
++        # Create a bucket
++        s3_client.create_bucket(Bucket=bucket_name)
++        # Assign a name to the object
++        object_key = properties["aws_s3_object_key"]
++        # Create Taipy S3ObjectDataNode
++        aws_s3_object_dn = S3ObjectDataNode("foo_aws_s3", Scope.SCENARIO, properties=properties)
++        # Put an object in the bucket with Taipy
++        aws_s3_object_dn._write(data)
++        # Read the object with boto3
++        response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
++
++        assert response['Body'].read().decode('utf-8') == "Hello, write world!"
++
++    @mock_s3
++    @pytest.mark.parametrize('data', [('Hello, read world!'), ])
++    @pytest.mark.parametrize("properties", __properties)
++    def test_read(self, properties, data):
++        bucket_name = properties["aws_s3_bucket_name"]
++        # Create an S3 client
++        client = boto3.client('s3')
++        # Create a bucket
++        client.create_bucket(Bucket=bucket_name)
++        # Put an object in the bucket with boto3
++        object_key = properties["aws_s3_object_key"]
++        object_body = 'Hello, read world!'
++        client.put_object(Body=object_body, Bucket=bucket_name, Key=object_key)
++        # Create Taipy S3ObjectDataNode
++        aws_s3_object_dn = S3ObjectDataNode("foo_aws_s3", Scope.SCENARIO, properties=properties)
++        # Read the Object from bucket with Taipy
++        response = aws_s3_object_dn._read()
++
++        assert response == data
+diff --git a/tests/core/test_core.py b/tests/core/test_core.py
+index ef8b84dfcc..83ee8d9e9d 100644
+--- a/tests/core/test_core.py
++++ b/tests/core/test_core.py
+@@ -31,7 +31,7 @@ def test_run_core_trigger_config_check(self, caplog):
+                 core.run()
+         expected_error_message = (
+             "`storage_type` field of DataNodeConfig `d0` must be either csv, sql_table,"
+-            " sql, mongo_collection, pickle, excel, generic, json, parquet, or in_memory."
++            " sql, mongo_collection, pickle, excel, generic, json, parquet, s3_object, or in_memory."
+             ' Current value of property `storage_type` is "toto".'
+         )
+         assert expected_error_message in caplog.text
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

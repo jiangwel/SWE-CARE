@@ -1,0 +1,250 @@
+  Task-ID: scipy__scipy-22405@c7d7e39
+  Please checkout to this commit first: abcbaec60d654f6362731216eb025db2a0d37e40
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: `scipy.stats.zmap` returns incorrect values for complex dtype `compare`
+### Describe your issue.
+
+In SciPy 1.15, `scipy.stats.zmap` returns incorrect values when given complex dtype `compare`. It seems that the mean and variance of `compare` are computed using only the real part.
+
+### Reproducing Code Example
+
+In SciPy 1.15.1,
+
+```py
+>>> scipy.stats.zmap([1, 2, 3, 4], [1, 1j, -1, -1j])
+/.../.pyenv/versions/3.11.11/lib/python3.11/site-packages/scipy/_lib/array_api_compat/numpy/_aliases.py:116: ComplexWarning: Casting complex values to real discards the imaginary part
+  return np.array(obj, copy=copy, dtype=dtype, **kwargs)
+/.../.pyenv/versions/3.11.11/lib/python3.11/site-packages/scipy/_lib/_array_api.py:182: ComplexWarning: Casting complex values to real discards the imaginary part
+  array = np.asanyarray(array, order=order, dtype=dtype)
+array([1.41421356+0.j, 2.82842712+0.j, 4.24264069+0.j, 5.65685425+0.j])
+```
+
+In SciPy 1.14.1 (Expected),
+
+```py
+>>> scipy.stats.zmap([1, 2, 3, 4], [1, 1j, -1, -1j])
+array([1.+0.j, 2.+0.j, 3.+0.j, 4.+0.j])
+```
+
+### SciPy/NumPy/Python version and system information
+
+```shell
+OS             : Linux-5.4.0-193-generic-x86_64-with-glibc2.31
+Python Version : 3.11.11
+NumPy Version  : 2.2.2
+SciPy Version  : 1.15.1
+```
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/_lib/_array_api.py b/scipy/_lib/_array_api.py
+index 75a9edee50d3..9cf8ddc9e625 100644
+--- a/scipy/_lib/_array_api.py
++++ b/scipy/_lib/_array_api.py
+@@ -555,7 +555,7 @@ def xp_take_along_axis(arr: Array,
+ def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp=None):
+     xp = array_namespace(*args) if xp is None else xp
+ 
+-    args = [(xp.asarray(arg) if arg is not None else arg) for arg in args]
++    args = [(_asarray(arg, subok=True) if arg is not None else arg) for arg in args]
+     args_not_none = [arg for arg in args if arg is not None]
+ 
+     # determine minimum dtype
+@@ -579,7 +579,12 @@ def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp
+ 
+     # determine result shape
+     shapes = {arg.shape for arg in args_not_none}
+-    shape = np.broadcast_shapes(*shapes) if len(shapes) != 1 else args_not_none[0].shape
++    try:
++        shape = (np.broadcast_shapes(*shapes) if len(shapes) != 1
++                 else args_not_none[0].shape)
++    except ValueError as e:
++        message = "Array shapes are incompatible for broadcasting."
++        raise ValueError(message) from e
+ 
+     out = []
+     for arg in args:
+@@ -591,7 +596,8 @@ def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp
+         # Even if two arguments need broadcasting, this is faster than
+         # `broadcast_arrays`, especially since we've already determined `shape`
+         if arg.shape != shape:
+-            arg = xp.broadcast_to(arg, shape)
++            kwargs = {'subok': True} if is_numpy(xp) else {}
++            arg = xp.broadcast_to(arg, shape, **kwargs)
+ 
+         # convert dtype/copy only if needed
+         if (arg.dtype != dtype) or ensure_writeable:
+diff --git a/scipy/_lib/_util.py b/scipy/_lib/_util.py
+index 713d311a9e36..3c865f38d21a 100644
+--- a/scipy/_lib/_util.py
++++ b/scipy/_lib/_util.py
+@@ -948,11 +948,14 @@ def _contains_nan(
+     if xp is None:
+         xp = array_namespace(a)
+ 
+-    inexact = (xp.isdtype(a.dtype, "real floating")
+-               or xp.isdtype(a.dtype, "complex floating"))
+-    if inexact:
+-        # Faster and less memory-intensive than xp.any(xp.isnan(a))
++    if xp.isdtype(a.dtype, "real floating"):
++        # Faster and less memory-intensive than xp.any(xp.isnan(a)), and unlike other
++        # reductions, `max`/`min` won't return NaN unless there is a NaN in the data.
+         contains_nan = xp.isnan(xp.max(a))
++    elif xp.isdtype(a.dtype, "complex floating"):
++        # Typically `real` and `imag` produce views; otherwise, `xp.any(xp.isnan(a))`
++        # would be more efficient.
++        contains_nan = xp.isnan(xp.max(xp.real(a))) | xp.isnan(xp.max(xp.imag(a)))
+     elif is_numpy(xp) and np.issubdtype(a.dtype, object):
+         contains_nan = False
+         for el in a.ravel():
+diff --git a/scipy/stats/_stats_py.py b/scipy/stats/_stats_py.py
+index 5522cc6bf587..7a70ffc0fbec 100644
+--- a/scipy/stats/_stats_py.py
++++ b/scipy/stats/_stats_py.py
+@@ -61,7 +61,7 @@
+ from ._resampling import (MonteCarloMethod, PermutationMethod, BootstrapMethod,
+                           monte_carlo_test, permutation_test, bootstrap,
+                           _batch_generator)
+-from ._axis_nan_policy import (_axis_nan_policy_factory, _broadcast_arrays,
++from ._axis_nan_policy import (_axis_nan_policy_factory,
+                                _broadcast_concatenate, _broadcast_shapes,
+                                _broadcast_array_shapes_remove_axis, SmallSampleWarning,
+                                too_small_1d_not_omit, too_small_1d_omit,
+@@ -75,10 +75,12 @@
+     _asarray,
+     array_namespace,
+     is_numpy,
++    is_array_api_strict,
+     xp_size,
+     xp_moveaxis_to_end,
+     xp_sign,
+     xp_vector_norm,
++    xp_broadcast_promote,
+ )
+ from scipy._lib import array_api_extra as xpx
+ from scipy._lib.deprecation import _deprecated
+@@ -10772,21 +10774,7 @@ def _xp_mean(x, /, *, axis=None, weights=None, keepdims=False, nan_policy='propa
+                          or (weights is not None and xp_size(weights) == 0)):
+         return gmean(x, weights=weights, axis=axis, keepdims=keepdims)
+ 
+-    # handle non-broadcastable inputs
+-    if weights is not None and x.shape != weights.shape:
+-        try:
+-            x, weights = _broadcast_arrays((x, weights), xp=xp)
+-        except (ValueError, RuntimeError) as e:
+-            message = "Array shapes are incompatible for broadcasting."
+-            raise ValueError(message) from e
+-
+-    # convert integers to the default float of the array library
+-    if not xp.isdtype(x.dtype, 'real floating'):
+-        dtype = xp.asarray(1.).dtype
+-        x = xp.asarray(x, dtype=dtype)
+-    if weights is not None and not xp.isdtype(weights.dtype, 'real floating'):
+-        dtype = xp.asarray(1.).dtype
+-        weights = xp.asarray(weights, dtype=dtype)
++    x, weights = xp_broadcast_promote(x, weights, force_floating=True)
+ 
+     # handle the special case of zero-sized arrays
+     message = (too_small_1d_not_omit if (x.ndim == 1 or axis is None)
+@@ -10822,7 +10810,10 @@ def _xp_mean(x, /, *, axis=None, weights=None, keepdims=False, nan_policy='propa
+ 
+     # Perform the mean calculation itself
+     if weights is None:
+-        return xp.mean(x, axis=axis, keepdims=keepdims)
++        if is_array_api_strict(xp) and xp.isdtype(x.dtype, 'complex floating'):
++            weights = xp.ones_like(x)
++        else:
++            return xp.mean(x, axis=axis, keepdims=keepdims)
+ 
+     norm = xp.sum(weights, axis=axis)
+     wsum = xp.sum(x * weights, axis=axis)
+@@ -10863,7 +10854,9 @@ def _xp_var(x, /, *, axis=None, correction=0, keepdims=False, nan_policy='propag
+     mean = _xp_mean(x, keepdims=True, **kwargs)
+     x = _asarray(x, dtype=mean.dtype, subok=True)
+     x_mean = _demean(x, mean, axis, xp=xp)
+-    var = _xp_mean(x_mean**2, keepdims=keepdims, **kwargs)
++    x_mean_conj = (xp.conj(x_mean) if xp.isdtype(x_mean.dtype, 'complex floating')
++                   else x_mean)  # crossref data-apis/array-api#824
++    var = _xp_mean(x_mean * x_mean_conj, keepdims=keepdims, **kwargs)
+ 
+     if correction != 0:
+         if axis is None:
+diff --git a/scipy/stats/tests/test_stats.py b/scipy/stats/tests/test_stats.py
+index dfb43894afc3..534ed8d38986 100644
+--- a/scipy/stats/tests/test_stats.py
++++ b/scipy/stats/tests/test_stats.py
+@@ -3120,6 +3120,11 @@ def test_degenerate_input(self, xp):
+             res = stats.zmap(scores, compare)
+         xp_assert_equal(res, ref)
+ 
++    def test_complex_gh22404(self, xp):
++        res = stats.zmap(xp.asarray([1, 2, 3, 4]), xp.asarray([1, 1j, -1, -1j]))
++        ref = xp.asarray([1.+0.j, 2.+0.j, 3.+0.j, 4.+0.j])
++        xp_assert_close(res, ref)
++
+ 
+ class TestMedianAbsDeviation:
+     def setup_class(self):
+@@ -9443,6 +9448,13 @@ def test_integer(self, xp):
+         xp_assert_equal(_xp_mean(x), _xp_mean(y))
+         xp_assert_equal(_xp_mean(y, weights=x), _xp_mean(y, weights=y))
+ 
++    def test_complex_gh22404(self, xp):
++        rng = np.random.default_rng(90359458245906)
++        x, y, wx, wy = rng.random((4, 20))
++        res = _xp_mean(xp.asarray(x + y*1j), weights=xp.asarray(wx + wy*1j))
++        ref = np.average(x + y*1j, weights=wx + wy*1j)
++        xp_assert_close(res, xp.asarray(ref))
++
+ 
+ @skip_xp_backends('jax.numpy', reason='JAX arrays do not support item assignment')
+ class TestXP_Var:
+@@ -9545,6 +9557,13 @@ def test_integer(self, xp):
+         y = xp.arange(10.)
+         xp_assert_equal(_xp_var(x), _xp_var(y))
+ 
++    def test_complex_gh22404(self, xp):
++        rng = np.random.default_rng(90359458245906)
++        x, y = rng.random((2, 20))
++        res = _xp_var(xp.asarray(x + y*1j))
++        ref = np.var(x + y*1j)
++        xp_assert_close(res, xp.asarray(ref), check_dtype=False)
++
+ 
+ def test_chk_asarray(xp):
+     rng = np.random.default_rng(2348923425434)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

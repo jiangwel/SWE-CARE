@@ -1,0 +1,167 @@
+  Task-ID: encode__starlette-1349@54d89af
+  Please checkout to this commit first: f12c92a21500d484b3d48f965bb605c1bbe193bc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Insufficient input validation of content-type 'multipart/form-data'
+### Checklist
+
+- [x] The bug is reproducible against the latest release and/or `master`.
+- [x] There are no similar issues or pull requests to fix it yet.
+
+### Describe the bug
+
+Not actually a bug, but insufficient input validation.
+
+### To reproduce
+
+Provide POST input (e.g. with postman) with content-type 'multipart/form-data' but without _boundary_ parameter.
+
+### Expected behavior
+
+Shall return 4xx error code. According to rfc7578 boundary is a required parameter.
+
+### Actual behavior
+
+_None_ boundary is passed to multipart library and an exception is raised there.
+
+### Debugging material
+
+```
+TypeError: can't concat NoneType to bytes
+  File "starlette/middleware/trustedhost.py", line 51, in __call__
+    await self.app(scope, receive, send)
+  File "starlette/middleware/sessions.py", line 75, in __call__
+    await self.app(scope, receive, send_wrapper)
+  File "cpms/middleware.py", line 55, in __call__
+    await self.app(scope, receive, send)
+  File "starlette/middleware/authentication.py", line 48, in __call__
+    await self.app(scope, receive, send)
+  File "starlette/exceptions.py", line 82, in __call__
+    raise exc from None
+  File "starlette/exceptions.py", line 71, in __call__
+    await self.app(scope, receive, sender)
+  File "starlette/routing.py", line 582, in __call__
+    await route.handle(scope, receive, send)
+  File "starlette/routing.py", line 243, in handle
+    await self.app(scope, receive, send)
+  File "starlette/routing.py", line 54, in app
+    response = await func(request)
+  File "starlette/authentication.py", line 69, in async_wrapper
+    return await func(*args, **kwargs)
+  File "cpms/views/files.py", line 90, in decorator
+    return await endpoint(request)
+  File "cpms/views/files.py", line 133, in upload_files
+    for f_name, f_value in (await request.form()).items():
+  File "starlette/requests.py", line 240, in form
+    self._form = await multipart_parser.parse()
+  File "starlette/formparsers.py", line 181, in parse
+    parser = multipart.MultipartParser(boundary, callbacks)
+  File "multipart/multipart.py", line 1042, in __init__
+    self.boundary = b'\r\n--' + boundary
+```
+
+### Environment
+
+- OS: OpenBSD 6.7
+- Python version: 3.7.9
+- Starlette version: 0.14.1
+
+### Additional context
+
+The problem occurs due insufficient checking of the input on line 166 of starlette/formparsers.py
+`      boundary = params.get(b"boundary")`
+
+It is better to replace it with:
+`      boundary = params[b"boundary"]`
+so exception at early stage will be raised.
+
+Or make an additional input validation.
+```
+      boundary = params.get(b"boundary")
+      if not boundary:
+          raise HTTPException(status_code=400)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/starlette/formparsers.py b/starlette/formparsers.py
+index decaf0bfd..fd1949229 100644
+--- a/starlette/formparsers.py
++++ b/starlette/formparsers.py
+@@ -159,7 +159,7 @@ async def parse(self) -> FormData:
+         charset = params.get(b"charset", "utf-8")
+         if type(charset) == bytes:
+             charset = charset.decode("latin-1")
+-        boundary = params.get(b"boundary")
++        boundary = params[b"boundary"]
+ 
+         # Callbacks dictionary.
+         callbacks = {
+diff --git a/tests/test_formparsers.py b/tests/test_formparsers.py
+index 05f0f053c..56f5555c2 100644
+--- a/tests/test_formparsers.py
++++ b/tests/test_formparsers.py
+@@ -1,6 +1,8 @@
+ import os
+ import typing
+ 
++import pytest
++
+ from starlette.formparsers import UploadFile, _user_safe_decode
+ from starlette.requests import Request
+ from starlette.responses import JSONResponse
+@@ -386,3 +388,20 @@ def test_user_safe_decode_helper():
+ def test_user_safe_decode_ignores_wrong_charset():
+     result = _user_safe_decode(b"abc", "latin-8")
+     assert result == "abc"
++
++
++def test_missing_boundary_parameter(test_client_factory):
++    client = test_client_factory(app)
++    with pytest.raises(KeyError, match='boundary') as exc:
++        client.post(
++            "/",
++            data=(
++                # file
++                b'Content-Disposition: form-data; name="file"; filename="\xe6\x96\x87\xe6\x9b\xb8.txt"\r\n'  # noqa: E501
++                b"Content-Type: text/plain\r\n\r\n"
++                b"<file content>\r\n"
++            ),
++            headers={
++                "Content-Type": "multipart/form-data; charset=utf-8"
++            },
++        )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,275 @@
+  Task-ID: ansible__ansible-58383@531e457
+  Please checkout to this commit first: 7e22c7482e85cc98e14c4cdbc8b8ffb543917425
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  win_domain_user not idempotent for setting passwords
+##### SUMMARY
+win_domain_user always returns changed if a password is specified.
+
+##### ISSUE TYPE
+- Bug Report
+
+##### COMPONENT NAME
+win_domain_user
+
+##### ANSIBLE VERSION
+```paste below
+ansible 2.8.1
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = ['/home/user/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/lib/python3.7/site-packages/ansible
+  executable location = /usr/bin/ansible
+  python version = 3.7.3 (default, Mar 26 2019, 21:43:19) [GCC 8.2.1 20181127]
+```
+
+##### CONFIGURATION
+
+##### OS / ENVIRONMENT
+
+ArchLinux
+
+##### STEPS TO REPRODUCE
+```yaml
+- name: Set AD User Password
+      win_domain_user:
+        name: '{{ user_name }}'
+        password: '{{ password }}'
+        state: present
+- name: Set AD User Password again
+      win_domain_user:
+        name: '{{ user_name }}'
+        password: '{{ password }}'
+        state: present
+```
+
+##### EXPECTED RESULTS
+The 2nd task to show as not changed.
+
+##### ACTUAL RESULTS
+The 2nd task shows as changed, even though the password was already set.
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/58246-win_domain_user-idempotency.yaml b/changelogs/fragments/58246-win_domain_user-idempotency.yaml
+new file mode 100644
+index 00000000000000..9e7c16f2f53477
+--- /dev/null
++++ b/changelogs/fragments/58246-win_domain_user-idempotency.yaml
+@@ -0,0 +1,3 @@
++---
++bugfixes:
++  - "win_domain_user - Allow to only set password when it actually changed (https://github.com/ansible/ansible/issues/58246)"
+diff --git a/lib/ansible/modules/windows/win_domain_user.ps1 b/lib/ansible/modules/windows/win_domain_user.ps1
+index def9c1e08b0ccd..1011ab296ade48 100644
+--- a/lib/ansible/modules/windows/win_domain_user.ps1
++++ b/lib/ansible/modules/windows/win_domain_user.ps1
+@@ -4,6 +4,109 @@
+ 
+ #Requires -Module Ansible.ModuleUtils.Legacy
+ 
++Function Test-Credential {
++    param(
++        [String]$Username,
++        [String]$Password,
++        [String]$Domain = $null,
++        $LOGON32_PROVIDER = 0, # Default
++        $LOGON32_LOGON_TYPE = 3 # NetworkLogon
++    )
++    if (($Username.ToCharArray()) -contains [char]'@') {
++        # UserPrincipalName
++        $Username = ($Username -split '@')[0]
++        $Domain = ($Username -split '@')[1]
++    } elseif (($Username.ToCharArray()) -contains [char]'\') {
++        # Pre Win2k Account Name
++        $Username = ($Username -split '\')[0]
++        $Domain = ($Username -split '\')[1]
++    } else {
++        # No domain provided, so maybe local user?
++    }
++    $null = $Domain # Make CI-Check happy...
++
++    # More information about LogonUser at https://docs.microsoft.com/en-us/windows/desktop/api/winbase/nf-winbase-logonusera
++    $platform_util = @'
++using System;
++using System.Runtime.InteropServices;
++using System.ComponentModel;
++using System.Security;
++namespace Ansible
++{
++    public class WinUserPInvoke
++    {
++        const int LOGON32_LOGON_NETWORK           = 3;
++        const int LOGON32_PROVIDER_DEFAULT        = 0; // Negotiate if domain == null and username not upn else NTLM
++        const int LOGON32_PROVIDER_WINNT40        = 2; // Negotiate
++        const int LOGON32_PROVIDER_WINNT50        = 3; // NTLM
++        // Refere to: https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/18d8fbe8-a967-4f1c-ae50-99ca8e491d2d
++        static int[] success_codes = new int[] {
++            0x0000052F,  // ERROR_ACCOUNT_RESTRICTION
++            0x00000530,  // ERROR_INVALID_LOGON_HOURS
++            0x00000531,  // ERROR_INVALID_WORKSTATION
++            0x00000569   // ERROR_LOGON_TYPE_GRANTED
++        };
++        static int[] failed_codes = new int[] {
++            0x0000052E,  // ERROR_LOGON_FAILURE - the user or pass was incorrect
++            0x00000006,  // ERROR_INVALID_HANDLE - the handle is invalid
++            0x00000532   // ERROR_PASSWORD_EXPIRED - The password has exired
++        };
++        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
++        internal static extern bool LogonUser(String username, String domain, IntPtr password,
++            int logonType, int logonProvider, out IntPtr token);
++        [DllImport("kernel32.dll", SetLastError = true)]
++        internal static extern bool CloseHandle(
++            IntPtr hObject);
++        public static bool TestCredential(string userName, SecureString password, string domainName = null)
++        {
++            IntPtr tokenHandle = IntPtr.Zero;
++            IntPtr passwordPtr = IntPtr.Zero;
++            bool returnValue   = false;
++            int err_code = 0;
++
++            // Marshal the SecureString to unmanaged memory.
++            passwordPtr = Marshal.SecureStringToGlobalAllocUnicode(password);
++
++            // Pass LogonUser the decrypted copy of the password.
++            returnValue = LogonUser(userName, domainName, passwordPtr,
++                                    LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT,
++                                    out tokenHandle);
++            // Perform cleanup whether or not the call succeeded.
++            // Secure delete the plaintext password from memory.
++            Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
++            // We don't need the token, so close it again.
++            CloseHandle(tokenHandle);
++            if (returnValue || !(tokenHandle == IntPtr.Zero)) {
++                return true;
++            } else {
++                err_code = Marshal.GetLastWin32Error();
++                if (Array.Exists(success_codes, element => element == err_code)) {
++                    return true;
++                } else if (Array.Exists(failed_codes, element => element == err_code)) {
++                    return false;
++                } else {
++                    throw new System.ComponentModel.Win32Exception(err_code);
++                }
++            }
++        }
++    }
++}
++'@
++    if ($null -ne $Username) {
++        $original_tmp = $env:TMP
++        $env:TMP = $_remote_tmp
++        Add-Type -TypeDefinition $platform_util
++        $env:TMP = $original_tmp
++
++        # Todo: Make sure $UserName is always in UPN format.
++        # Than $Domain can be $null
++        $logon_res = [Ansible.WinUserPInvoke]::TestCredential($Username, (ConvertTo-SecureString $Password -AsPlainText -Force), $Domain)
++        return $logon_res
++    } else {
++        return $false
++    }
++}
++
+ try {
+     Import-Module ActiveDirectory
+  }
+@@ -23,7 +126,7 @@ $check_mode = Get-AnsibleParam -obj $params -name "_ansible_check_mode" -default
+ 
+ # Module control parameters
+ $state = Get-AnsibleParam -obj $params -name "state" -type "str" -default "present" -validateset "present","absent","query"
+-$update_password = Get-AnsibleParam -obj $params -name "update_password" -type "str" -default "always" -validateset "always","on_create"
++$update_password = Get-AnsibleParam -obj $params -name "update_password" -type "str" -default "always" -validateset "always","on_create","when_changed"
+ $groups_action = Get-AnsibleParam -obj $params -name "groups_action" -type "str" -default "replace" -validateset "add","remove","replace"
+ $domain_username = Get-AnsibleParam -obj $params -name "domain_username" -type "str"
+ $domain_password = Get-AnsibleParam -obj $params -name "domain_password" -type "str" -failifempty ($null -ne $domain_username)
+@@ -104,12 +207,32 @@ If ($state -eq 'present') {
+     }
+ 
+     # Set the password if required
+-    If ($password -and (($new_user -and $update_password -eq "on_create") -or $update_password -eq "always")) {
+-        $secure_password = ConvertTo-SecureString $password -AsPlainText -Force
+-        Set-ADAccountPassword -Identity $username -Reset:$true -Confirm:$false -NewPassword $secure_password -WhatIf:$check_mode @extra_args
+-        $user_obj = Get-ADUser -Identity $username -Properties * @extra_args
+-        $result.password_updated = $true
+-        $result.changed = $true
++    If (
++        (
++            $password
++        ) -and (
++            (
++                $new_user -and $update_password -eq "on_create"
++            ) -or (
++                $update_password -in @("always"; "when_changed")
++            )
++        )
++    ) {
++        If (-not $new_user) { # Don't uncecessary check if the credentials works, if we know it doesn't.
++            $test_new_credentials = Test-Credential -Username $username -Password $password
++        } else {
++            $test_new_credentials = $false
++        }
++        If ($test_new_credentials -and ($update_password -ne "always")) {
++            $result.password_updated = $false
++            $result.changed = $false
++        } Else {
++            $secure_password = ConvertTo-SecureString $password -AsPlainText -Force
++            Set-ADAccountPassword -Identity $username -Reset:$true -Confirm:$false -NewPassword $secure_password -WhatIf:$check_mode @extra_args
++            $user_obj = Get-ADUser -Identity $username -Properties * @extra_args
++            $result.password_updated = $true
++            $result.changed = $true
++        }
+     }
+ 
+     # Configure password policies
+diff --git a/lib/ansible/modules/windows/win_domain_user.py b/lib/ansible/modules/windows/win_domain_user.py
+index de88643b7c490a..01ef07c9632665 100644
+--- a/lib/ansible/modules/windows/win_domain_user.py
++++ b/lib/ansible/modules/windows/win_domain_user.py
+@@ -75,11 +75,9 @@
+     description:
+       - C(always) will update passwords if they differ.
+       - C(on_create) will only set the password for newly created users.
+-      - Note that C(always) will always report an Ansible status of 'changed'
+-        because we cannot determine whether the new password differs from
+-        the old password.
++      - C(when_changed) will only set the password when it differs.
+     type: str
+-    choices: [ always, on_create ]
++    choices: [ always, on_create, when_changed ]
+     default: always
+   password_expired:
+     description:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

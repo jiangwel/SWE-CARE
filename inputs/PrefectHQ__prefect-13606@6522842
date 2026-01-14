@@ -1,0 +1,305 @@
+  Task-ID: PrefectHQ__prefect-13606@6522842
+  Please checkout to this commit first: 5394b022d55d38a3696ed4c5903ef18774392b5f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add confirmation when deleting a Prefect profile from the CLI
+### First check
+
+- [X] I added a descriptive title to this issue.
+- [X] I used the GitHub search to find a similar request and didn't find it.
+- [X] I searched the Prefect documentation for this feature.
+
+### Prefect Version
+
+2.x
+
+### Describe the current behavior
+
+Deleting a profile takes place immediately (eg `prefect profile delete my-profile`)
+
+### Describe the proposed behavior
+
+It's nice for destructive actions to require confirmation, either an interactive prompt or a `-y` flag for automated access.
+
+### Example Use
+
+`prefect profile delete my-profile -y`
+
+### Additional context
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/src/prefect/cli/block.py b/src/prefect/cli/block.py
+index b63a83db23ac..514226fbb5ad 100644
+--- a/src/prefect/cli/block.py
++++ b/src/prefect/cli/block.py
+@@ -217,6 +217,11 @@ async def block_delete(
+     async with get_client() as client:
+         if slug is None and block_id is not None:
+             try:
++                if not typer.confirm(
++                    (f"Are you sure you want to delete block with id {block_id!r}?"),
++                    default=False,
++                ):
++                    exit_with_error("Deletion aborted.")
+                 await client.delete_block_document(block_id)
+                 exit_with_success(f"Deleted Block '{block_id}'.")
+             except ObjectNotFound:
+@@ -231,6 +236,11 @@ async def block_delete(
+                 block_document = await client.read_block_document_by_name(
+                     block_document_name, block_type_slug, include_secrets=False
+                 )
++                if not typer.confirm(
++                    (f"Are you sure you want to delete block with slug {slug!r}?"),
++                    default=False,
++                ):
++                    exit_with_error("Deletion aborted.")
+                 await client.delete_block_document(block_document.id)
+                 exit_with_success(f"Deleted Block '{slug}'.")
+             except ObjectNotFound:
+@@ -368,6 +378,11 @@ async def blocktype_delete(
+     async with get_client() as client:
+         try:
+             block_type = await client.read_block_type_by_slug(slug)
++            if not typer.confirm(
++                (f"Are you sure you want to delete automation with id {id!r}?"),
++                default=False,
++            ):
++                exit_with_error("Deletion aborted.")
+             await client.delete_block_type(block_type.id)
+             exit_with_success(f"Deleted Block Type '{slug}'.")
+         except ObjectNotFound:
+diff --git a/src/prefect/cli/cloud/webhook.py b/src/prefect/cli/cloud/webhook.py
+index a6031679d4ac..73133c80426f 100644
+--- a/src/prefect/cli/cloud/webhook.py
++++ b/src/prefect/cli/cloud/webhook.py
+@@ -13,6 +13,7 @@
+ from prefect.cli.cloud import cloud_app, confirm_logged_in
+ from prefect.cli.root import app
+ from prefect.client.cloud import get_cloud_client
++from prefect.exceptions import ObjectNotFound
+ from prefect.settings import PREFECT_API_URL
+ 
+ webhook_app = PrefectTyper(
+@@ -184,14 +185,18 @@ async def delete(webhook_id: UUID):
+     """
+     confirm_logged_in()
+ 
+-    confirm_delete = typer.confirm(
+-        "Are you sure you want to delete it? This cannot be undone."
+-    )
+-
+-    if not confirm_delete:
+-        return
++    if not typer.confirm(
++        (f"Are you sure you want to delete webhook with id '{webhook_id!s}'?"),
++        default=False,
++    ):
++        exit_with_error("Deletion aborted.")
+ 
+     # The /webhooks API lives inside the /accounts/{id}/workspaces/{id} routing tree
+     async with get_cloud_client(host=PREFECT_API_URL.value()) as client:
+-        await client.request("DELETE", f"/webhooks/{webhook_id}")
+-        app.console.print(f"Successfully deleted webhook {webhook_id}")
++        try:
++            await client.request("DELETE", f"/webhooks/{webhook_id}")
++            app.console.print(f"Successfully deleted webhook {webhook_id}")
++        except ObjectNotFound:
++            exit_with_error(f"Webhook with id '{webhook_id!s}' not found.")
++        except Exception as exc:
++            exit_with_error(f"Error deleting webhook: {exc}")
+diff --git a/src/prefect/cli/concurrency_limit.py b/src/prefect/cli/concurrency_limit.py
+index 4dced52942bc..4a4438800db1 100644
+--- a/src/prefect/cli/concurrency_limit.py
++++ b/src/prefect/cli/concurrency_limit.py
+@@ -4,6 +4,7 @@
+ import textwrap
+ 
+ import pendulum
++import typer
+ 
+ try:
+     from rich.console import Group
+@@ -152,6 +153,13 @@ async def delete(tag: str):
+ 
+     async with get_client() as client:
+         try:
++            if not typer.confirm(
++                (
++                    f"Are you sure you want to delete concurrency limit with tag {tag!r}?"
++                ),
++                default=False,
++            ):
++                exit_with_error("Deletion aborted.")
+             await client.delete_concurrency_limit_by_tag(tag=tag)
+         except ObjectNotFound:
+             exit_with_error(f"No concurrency limit found for the tag: {tag}")
+diff --git a/src/prefect/cli/deployment.py b/src/prefect/cli/deployment.py
+index d0e4a5713f08..e94cce277b24 100644
+--- a/src/prefect/cli/deployment.py
++++ b/src/prefect/cli/deployment.py
+@@ -920,6 +920,13 @@ async def delete(
+     async with get_client() as client:
+         if name is None and deployment_id is not None:
+             try:
++                if not typer.confirm(
++                    (
++                        f"Are you sure you want to delete deployment with id {deployment_id!r}?"
++                    ),
++                    default=False,
++                ):
++                    exit_with_error("Deletion aborted.")
+                 await client.delete_deployment(deployment_id)
+                 exit_with_success(f"Deleted deployment '{deployment_id}'.")
+             except ObjectNotFound:
+@@ -927,6 +934,11 @@ async def delete(
+         elif name is not None:
+             try:
+                 deployment = await client.read_deployment_by_name(name)
++                if not typer.confirm(
++                    (f"Are you sure you want to delete deployment with name {name!r}?"),
++                    default=False,
++                ):
++                    exit_with_error("Deletion aborted.")
+                 await client.delete_deployment(deployment.id)
+                 exit_with_success(f"Deleted deployment '{name}'.")
+             except ObjectNotFound:
+diff --git a/src/prefect/cli/flow_run.py b/src/prefect/cli/flow_run.py
+index db9a992f572b..a8aa37ef7e51 100644
+--- a/src/prefect/cli/flow_run.py
++++ b/src/prefect/cli/flow_run.py
+@@ -184,6 +184,11 @@ async def delete(id: UUID):
+     """
+     async with get_client() as client:
+         try:
++            if not typer.confirm(
++                (f"Are you sure you want to delete flow run with id {id!r}?"),
++                default=False,
++            ):
++                exit_with_error("Deletion aborted.")
+             await client.delete_flow_run(id)
+         except ObjectNotFound:
+             exit_with_error(f"Flow run '{id}' not found!")
+diff --git a/src/prefect/cli/global_concurrency_limit.py b/src/prefect/cli/global_concurrency_limit.py
+index 8f3716cc7104..572f7e2811ab 100644
+--- a/src/prefect/cli/global_concurrency_limit.py
++++ b/src/prefect/cli/global_concurrency_limit.py
+@@ -151,7 +151,7 @@ async def delete_global_concurrency_limit(
+         name (str): The name of the global concurrency limit to delete.
+     """
+     if not typer.confirm(
+-        f"Are you sure you want to delete global concurrency limit {name!r}?",
++        f"Are you sure you want to delete global concurrency limit with name {name!r}?",
+         default=False,
+     ):
+         exit_with_error("Deletion aborted.")
+diff --git a/src/prefect/cli/profile.py b/src/prefect/cli/profile.py
+index a937e7c3cf2f..2b6af777f1d1 100644
+--- a/src/prefect/cli/profile.py
++++ b/src/prefect/cli/profile.py
+@@ -180,7 +180,11 @@ def delete(name: str):
+             f"Profile {name!r} is the active profile. You must switch profiles before"
+             " it can be deleted."
+         )
+-
++    if not typer.confirm(
++        (f"Are you sure you want to delete profile with name {name!r}?"),
++        default=False,
++    ):
++        exit_with_error("Deletion aborted.")
+     profiles.remove_profile(name)
+ 
+     verb = "Removed"
+diff --git a/src/prefect/cli/work_pool.py b/src/prefect/cli/work_pool.py
+index 88d68e53d064..9e57f88e093f 100644
+--- a/src/prefect/cli/work_pool.py
++++ b/src/prefect/cli/work_pool.py
+@@ -494,6 +494,11 @@ async def delete(
+     """
+     async with get_client() as client:
+         try:
++            if not typer.confirm(
++                (f"Are you sure you want to delete work pool with name {name!r}?"),
++                default=False,
++            ):
++                exit_with_error("Deletion aborted.")
+             await client.delete_work_pool(work_pool_name=name)
+         except ObjectNotFound as exc:
+             exit_with_error(exc)
+diff --git a/src/prefect/cli/work_queue.py b/src/prefect/cli/work_queue.py
+index 8832275bcd03..5aad0ebae02e 100644
+--- a/src/prefect/cli/work_queue.py
++++ b/src/prefect/cli/work_queue.py
+@@ -576,6 +576,11 @@ async def delete(
+     )
+     async with get_client() as client:
+         try:
++            if not typer.confirm(
++                (f"Are you sure you want to delete automation {name!r}?"),
++                default=False,
++            ):
++                exit_with_error("Deletion aborted.")
+             await client.delete_work_queue_by_id(id=queue_id)
+         except ObjectNotFound:
+             if pool:
+diff --git a/src/prefect/client/cloud.py b/src/prefect/client/cloud.py
+index 9e9ebfa984b1..ae4b5c4a4ce1 100644
+--- a/src/prefect/client/cloud.py
++++ b/src/prefect/client/cloud.py
+@@ -10,7 +10,7 @@
+ import prefect.settings
+ from prefect.client.base import PrefectHttpxAsyncClient
+ from prefect.client.schemas import Workspace
+-from prefect.exceptions import PrefectException
++from prefect.exceptions import ObjectNotFound, PrefectException
+ from prefect.settings import (
+     PREFECT_API_KEY,
+     PREFECT_CLOUD_API_URL,
+@@ -121,8 +121,10 @@ async def request(self, method, route, **kwargs):
+                 status.HTTP_403_FORBIDDEN,
+             ):
+                 raise CloudUnauthorizedError
++            elif exc.response.status_code == status.HTTP_404_NOT_FOUND:
++                raise ObjectNotFound(http_exc=exc) from exc
+             else:
+-                raise exc
++                raise
+ 
+         if res.status_code == status.HTTP_204_NO_CONTENT:
+             return
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

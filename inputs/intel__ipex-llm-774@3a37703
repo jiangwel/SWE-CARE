@@ -1,0 +1,238 @@
+  Task-ID: intel__ipex-llm-774@3a37703
+  Please checkout to this commit first: 9548fa22db245a4ed9ea594dc9df4a98ae128289
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  refactor the optimizer initialization process in python api
+1.  add *set_model()* to optimizer 
+Currently the model could only be set to optimizer during creation. That means we can't reuse an optimizer for different models.  Creating optimizer may be time consuming sometimes. 
+1. add *prepare_input()* to optimizer
+Currently optimizer takes a long time to create and initialize.  The reason is loading input and caching takes time. We could warp this part of work into one function  and name it something like prepare_input/load_input, and allow user to train different models on the same set of input data. and it won't be confusing why initialization takes so long.
+  </issue>
+  
+  <patch>
+  diff --git a/pyspark/dl/optim/optimizer.py b/pyspark/dl/optim/optimizer.py
+index 4a769e5edb3..b282b8f77d8 100644
+--- a/pyspark/dl/optim/optimizer.py
++++ b/pyspark/dl/optim/optimizer.py
+@@ -188,6 +188,14 @@ def setvalidation(self, batch_size, val_rdd, trigger, val_method=["Top1Accuracy"
+         callBigDlFunc(self.bigdl_type, "setValidation", self.value, batch_size,
+                       trigger, val_rdd, val_method)
+ 
++    def setmodel(self, model):
++        """
++        Set model. 
++
++        :param model: new model
++        """
++        self.value.setModel(model.value)
++
+     def setcheckpoint(self, checkpoint_trigger,
+                       checkpoint_path, isOverWrite=True):
+         """
+diff --git a/pyspark/test/simple_integration_test.py b/pyspark/test/simple_integration_test.py
+index 7a12262e4cb..aa2dda2e04b 100644
+--- a/pyspark/test/simple_integration_test.py
++++ b/pyspark/test/simple_integration_test.py
+@@ -55,6 +55,11 @@ def gen_rand_sample():
+         trainingData = self.sc.parallelize(range(0, data_len)).map(
+             lambda i: gen_rand_sample())
+ 
++        model_test = Sequential()
++        l1_test = Linear(3, 1, "Xavier").set_name("linear1_test")
++        self.assertEqual("linear1_test", l1_test.name())
++        model_test.add(l1_test)
++
+         model = Sequential()
+         l1 = Linear(FEATURES_DIM, 1, "Xavier").set_name("linear1")
+         self.assertEqual("linear1", l1.name())
+@@ -64,7 +69,7 @@ def gen_rand_sample():
+                  "learningRateDecay": 0.0002,
+                  "learingRateSchedule": Poly(0.5, int((data_len/batch_size)*epoch_num))}  # noqa
+         optimizer = Optimizer(
+-            model=model,
++            model=model_test,
+             training_rdd=trainingData,
+             criterion=MSECriterion(),
+             optim_method="sgd",
+@@ -77,6 +82,10 @@ def gen_rand_sample():
+             trigger=EveryEpoch(),
+             val_method=["Top1Accuracy"]
+         )
++
++        optimizer.optimize()
++
++        optimizer.setmodel(model=model)
+         tmp_dir = tempfile.mkdtemp()
+         optimizer.setcheckpoint(SeveralIteration(1), tmp_dir)
+         train_summary = TrainSummary(log_dir=tmp_dir,
+@@ -88,12 +97,12 @@ def gen_rand_sample():
+         optimizer.set_val_summary(val_summary)
+ 
+         trained_model = optimizer.optimize()
+-
+         lr_result = train_summary.read_scalar("LearningRate")
+         top1_result = val_summary.read_scalar("Top1Accuracy")
+ 
+         # TODO: add result validation
+         parameters = trained_model.parameters()
++
+         self.assertIsNotNone(parameters["linear1"])
+         print("parameters %s" % parameters["linear1"])
+         predict_result = trained_model.predict(trainingData)
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/dataset/DataSet.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/dataset/DataSet.scala
+index ae9889039ab..42b15fb3408 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/dataset/DataSet.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/dataset/DataSet.scala
+@@ -172,7 +172,6 @@ trait DistributedDataSet[T] extends AbstractDataSet[T, RDD[T]] {
+       preDataSet.originRDD().mapPartitions(_ => Iterator
+         .single(broadcast.value.cloneTransformer())
+       ).setName("Cached Transformer").persist()
+-    cachedTransformer.count()
+ 
+     new DistributedDataSet[C] {
+       override def size(): Long = preDataSet.size()
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/DistriOptimizer.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/DistriOptimizer.scala
+index 5539d94f491..bc0db735dbe 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/DistriOptimizer.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/DistriOptimizer.scala
+@@ -677,6 +677,10 @@ class DistriOptimizer[T: ClassTag] (
+ 
+   private var models: RDD[DistriOptimizer.Cache[T]] = null
+ 
++  import DistriOptimizer._
++  logger.info("Loading and caching data ...")
++  dataset.originRDD().cache().count()
++
+   /**
+    * Clean some internal states, so this or other optimizers can run optimize again
+    *
+@@ -702,10 +706,10 @@ class DistriOptimizer[T: ClassTag] (
+     val coresPerNode = Engine.coreNumber()
+ 
+     val partitionNum = dataset.originRDD().partitions.length
+-    val size = model.getParameters()._1.nElement()
++    val size = _model.getParameters()._1.nElement()
+     val parameters = AllReduceParameter.newParameter(partitionNum, size)
+ 
+-    models = DistriOptimizer.initThreadModels(model, dataset, criterion, state,
++    models = DistriOptimizer.initThreadModels(_model, dataset, criterion, state,
+       nodeNumber, coresPerNode, checkSingleton, parameters, validationMethods)
+ 
+     if (checkpointPath.isDefined) {
+@@ -766,7 +770,7 @@ class DistriOptimizer[T: ClassTag] (
+               state = T.load(stateFile)
+               DistriOptimizer.logger.info("Recover from last snapshot")
+             } else {
+-              newModel = model
++              newModel = _model
+               DistriOptimizer.logger.info("Recover from origin model")
+             }
+             optimMethod.clearHistory(state)
+@@ -782,12 +786,12 @@ class DistriOptimizer[T: ClassTag] (
+ 
+     val trainedModel = DistriOptimizer.getModel(models, parameters)
+ 
+-    nn.Utils.copyModule(trainedModel, model)
++    nn.Utils.copyModule(trainedModel, _model)
+ 
+     // Reset some internal states, so this or other optimizers can run optimize again
+     clearState()
+ 
+-    model
++    _model
+   }
+ 
+   private def getLatestFile(path: String, fileName: String): String = {
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/Optimizer.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/Optimizer.scala
+index 9e517bde379..1d60e6227c9 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/Optimizer.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/optim/Optimizer.scala
+@@ -44,6 +44,7 @@ abstract class Optimizer[T: ClassTag, D](
+   protected val dataset: DataSet[D],
+     protected val criterion: Criterion[T])(implicit ev : TensorNumeric[T])
+ {
++  protected var _model: Module[T] = model
+   protected var state: Table = T()
+   protected var optimMethod: OptimMethod[T] = new SGD[T]()
+   protected var endWhen: Trigger = Trigger.maxIteration(100)
+@@ -172,6 +173,16 @@ abstract class Optimizer[T: ClassTag, D](
+     this
+   }
+ 
++  /**
++   * Set a model to the optimizer
++   *
++   * @param model new model
++   */
++  def setModel(model: Module[T]): this.type = {
++    this._model = model
++    this
++  }
++
+   /**
+    * Set a state(learning rate, epochs...) to the optimizer
+    *
+diff --git a/spark/dl/src/test/scala/com/intel/analytics/bigdl/optim/DistriOptimizerSpec.scala b/spark/dl/src/test/scala/com/intel/analytics/bigdl/optim/DistriOptimizerSpec.scala
+index 9f4228c02c6..2a202225602 100644
+--- a/spark/dl/src/test/scala/com/intel/analytics/bigdl/optim/DistriOptimizerSpec.scala
++++ b/spark/dl/src/test/scala/com/intel/analytics/bigdl/optim/DistriOptimizerSpec.scala
+@@ -169,6 +169,25 @@ class DistriOptimizerSpec extends FlatSpec with Matchers with BeforeAndAfter {
+     result2(Array(1)) should be(1.0 +- 5e-2)
+   }
+ 
++  "Train with MSE and SGD" should "be trained with good result after reset model" in {
++    var mm = cre
++    val optimizer = new DistriOptimizer[Double](mm, dataSet, new MSECriterion[Double]())
++      .setState(T("learningRate" -> 20.0))
++      .setEndWhen(Trigger.maxEpoch(5))
++    optimizer.optimize()
++
++    mm = mse
++    mm.getParameters()._1.fill(0.125)
++    optimizer.setModel(mm)
++    val model = optimizer.optimize()
++
++    val result1 = model.forward(input1).asInstanceOf[Tensor[Double]]
++    result1(Array(1)) should be(0.0 +- 5e-2)
++
++    val result2 = model.forward(input2).asInstanceOf[Tensor[Double]]
++    result2(Array(1)) should be(1.0 +- 5e-2)
++  }
++
+   it should "be same compare to ref optimizer" in {
+     RandomGenerator.RNG.setSeed(10)
+     val optimizer = new DistriOptimizer(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

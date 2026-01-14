@@ -1,0 +1,251 @@
+  Task-ID: qutebrowser__qutebrowser-3590@872cff2
+  Please checkout to this commit first: f7074b80d0a68eec6fdfd13f2f82acc94ff2951e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Re-enter insert/passthrough mode after temporarily leaving it
+Qutebrowser shouldn't change modes unless the user wants to. As an example of when this occurs, when you're in `passthrough` mode, saving an image by *right click* > *save* will return you to `normal` mode instead of `passthrough`.
+
+Maybe it's possible to have each command, that potentially changes the active mode, restore the previous mode before exit. Either by not storing the state anywhere and passing it as arguments (like in functional programming):
+
+	def my_command(qb_state, ...): # qb_state: current state of qutebrowser, incl. current mode
+		... # do something
+		return qb_state
+
+Or like this:
+
+	def my_command(qb_state, ...):
+		prev_mode = qb_state.mode
+		... # do something
+		qb_state.mode = prev_mode
+		return
+
+Either way, since only one command is executed at a time, the call stack would do all the work. 
+
+Commands, that change tabs, would leave the state alone, allowing each tab to have its own state.
+  </issue>
+  
+  <patch>
+  diff --git a/qutebrowser/keyinput/modeman.py b/qutebrowser/keyinput/modeman.py
+index e32830f50de..585742d36b2 100644
+--- a/qutebrowser/keyinput/modeman.py
++++ b/qutebrowser/keyinput/modeman.py
+@@ -115,6 +115,7 @@ class ModeManager(QObject):
+     Attributes:
+         mode: The mode we're currently in.
+         _win_id: The window ID of this ModeManager
++        _prev_mode: mode before a prompt poped up
+         _parsers: A dictionary of modes and their keyparsers.
+         _forward_unbound_keys: If we should forward unbound keys.
+         _releaseevents_to_pass: A set of KeyEvents where the keyPressEvent was
+@@ -138,6 +139,7 @@ def __init__(self, win_id, parent=None):
+         super().__init__(parent)
+         self._win_id = win_id
+         self._parsers = {}
++        self._prev_mode = usertypes.KeyMode.normal
+         self.mode = usertypes.KeyMode.normal
+         self._releaseevents_to_pass = set()
+ 
+@@ -247,6 +249,11 @@ def enter(self, mode, reason=None, only_if_normal=False):
+                 return
+             log.modes.debug("Overriding mode {}.".format(self.mode))
+             self.left.emit(self.mode, mode, self._win_id)
++        if mode in prompt_modes:
++            # save previous mode when being prompted
++            self._prev_mode = self.mode
++        else:
++            self._prev_mode = usertypes.KeyMode.normal
+         self.mode = mode
+         self.entered.emit(mode, self._win_id)
+ 
+@@ -266,7 +273,6 @@ def enter_mode(self, mode):
+                  usertypes.KeyMode.yesno, usertypes.KeyMode.prompt]:
+             raise cmdexc.CommandError(
+                 "Mode {} can't be entered manually!".format(mode))
+-
+         self.enter(m, 'command')
+ 
+     @pyqtSlot(usertypes.KeyMode, str, bool)
+@@ -294,6 +300,9 @@ def leave(self, mode, reason=None, maybe=False):
+         self.clear_keychain()
+         self.mode = usertypes.KeyMode.normal
+         self.left.emit(mode, self.mode, self._win_id)
++        if mode in [usertypes.KeyMode.prompt, usertypes.KeyMode.yesno]:
++            self.enter(self._prev_mode,
++                       reason='restore mode before {}'.format(mode.name))
+ 
+     @cmdutils.register(instance='mode-manager', name='leave-mode',
+                        not_modes=[usertypes.KeyMode.normal], scope='window')
+diff --git a/qutebrowser/mainwindow/mainwindow.py b/qutebrowser/mainwindow/mainwindow.py
+index 05482a1d534..18b349d5df3 100644
+--- a/qutebrowser/mainwindow/mainwindow.py
++++ b/qutebrowser/mainwindow/mainwindow.py
+@@ -484,6 +484,7 @@ def _connect_signals(self):
+         self.tabbed_browser.cur_fullscreen_requested.connect(status.maybe_hide)
+ 
+         # command input / completion
++        mode_manager.entered.connect(self.tabbed_browser.on_mode_entered)
+         mode_manager.left.connect(self.tabbed_browser.on_mode_left)
+         cmd.clear_completion_selection.connect(
+             completion_obj.on_clear_completion_selection)
+diff --git a/qutebrowser/mainwindow/tabbedbrowser.py b/qutebrowser/mainwindow/tabbedbrowser.py
+index 8cee355244c..389cc1dc45b 100644
+--- a/qutebrowser/mainwindow/tabbedbrowser.py
++++ b/qutebrowser/mainwindow/tabbedbrowser.py
+@@ -631,6 +631,16 @@ def on_icon_changed(self, tab, icon):
+         if config.val.tabs.tabs_are_windows:
+             self.window().setWindowIcon(icon)
+ 
++    @pyqtSlot(usertypes.KeyMode)
++    def on_mode_entered(self, mode):
++        """Save input mode when tabs.mode_on_change = restore."""
++        input_modes = [usertypes.KeyMode.insert, usertypes.KeyMode.passthrough]
++        if (mode in input_modes and
++                config.val.tabs.mode_on_change == 'restore'):
++            tab = self.currentWidget()
++            if tab and tab is not None:
++                tab.data.input_mode = mode
++
+     @pyqtSlot(usertypes.KeyMode)
+     def on_mode_left(self, mode):
+         """Give focus to current tab if command mode was left."""
+@@ -642,13 +652,15 @@ def on_mode_left(self, mode):
+             if widget is None:
+                 return
+             widget.setFocus()
++        elif config.val.tabs.mode_on_change == 'restore':
++            tab = self.currentWidget()
++            if tab and tab is not None:
++                tab.data.input_mode = usertypes.KeyMode.normal
+ 
+     @pyqtSlot(int)
+     def on_current_changed(self, idx):
+         """Set last-focused-tab and leave hinting mode when focus changed."""
+         mode_on_change = config.val.tabs.mode_on_change
+-        modes_to_save = [usertypes.KeyMode.insert,
+-                         usertypes.KeyMode.passthrough]
+         if idx == -1 or self.shutting_down:
+             # closing the last tab (before quitting) or shutting down
+             return
+@@ -657,26 +669,29 @@ def on_current_changed(self, idx):
+             log.webview.debug("on_current_changed got called with invalid "
+                               "index {}".format(idx))
+             return
+-        if self._now_focused is not None and mode_on_change == 'restore':
+-            current_mode = modeman.instance(self._win_id).mode
+-            if current_mode not in modes_to_save:
+-                current_mode = usertypes.KeyMode.normal
+-            self._now_focused.data.input_mode = current_mode
+ 
+         log.modes.debug("Current tab changed, focusing {!r}".format(tab))
+         tab.setFocus()
+ 
++        prompt_modes = [usertypes.KeyMode.prompt, usertypes.KeyMode.yesno]
+         modes_to_leave = [usertypes.KeyMode.hint, usertypes.KeyMode.caret]
+-        if mode_on_change != 'persist':
+-            modes_to_leave += modes_to_save
++
++        mm_instance = modeman.instance(self._win_id)
++        current_mode = mm_instance.mode
++        log.modes.debug("{}: mode before tab change: {}."
++                        .format(mode_on_change, current_mode.name))
++        if mode_on_change == 'normal':
++            modes_to_leave += [usertypes.KeyMode.insert,
++                               usertypes.KeyMode.passthrough]
+         for mode in modes_to_leave:
+             modeman.leave(self._win_id, mode, 'tab changed', maybe=True)
+-        if mode_on_change == 'restore':
+-            modeman.enter(self._win_id, tab.data.input_mode,
+-                          'restore input mode for tab')
++        if mode_on_change == 'restore' and current_mode not in prompt_modes:
++            modeman.enter(self._win_id, tab.data.input_mode, 'restore')
+         if self._now_focused is not None:
+             objreg.register('last-focused-tab', self._now_focused, update=True,
+                             scope='window', window=self._win_id)
++        log.modes.debug("{}: mode after tab change: {}."
++                        .format(mode_on_change, mm_instance.mode.name))
+         self._now_focused = tab
+         self.current_tab_changed.emit(tab)
+         QTimer.singleShot(0, self._update_window_title)
+diff --git a/tests/end2end/features/keyinput.feature b/tests/end2end/features/keyinput.feature
+index ee5b667e8f2..db21831b623 100644
+--- a/tests/end2end/features/keyinput.feature
++++ b/tests/end2end/features/keyinput.feature
+@@ -162,3 +162,44 @@ Feature: Keyboard input
+         And I press the key "c"
+         Then the message "foo 3" should be shown
+         And the message "foo 3" should be shown
++
++    # :test all tabs.mode_on_change modes
++
++    Scenario: mode on change normal
++        Given I set tabs.mode_on_change to normal
++        And I clean up open tabs
++        When I open about:blank
++        And I run :enter-mode insert
++        And I open about:blank in a new tab
++        Then "Entering mode KeyMode.insert (reason: command)" should be logged
++        And "Leaving mode KeyMode.insert (reason: tab changed)" should be logged
++        And "normal: mode before tab change: insert." should be logged
++        And "normal: mode after tab change: normal." should be logged
++
++    Scenario: mode on change persist
++        Given I set tabs.mode_on_change to persist
++        And I clean up open tabs
++        When I open about:blank
++        And I run :enter-mode insert
++        And I open about:blank in a new tab
++        Then "Entering mode KeyMode.insert (reason: command)" should be logged
++        And "persist: mode before tab change: insert." should be logged
++        And "persist: mode after tab change: insert." should be logged
++
++    Scenario: mode on change restore
++        Given I set tabs.mode_on_change to restore
++        And I clean up open tabs
++        When I open about:blank
++        And I run :enter-mode insert
++        And I open about:blank in a new tab
++        And I run :enter-mode passthrough
++        And I run :tab-focus 1
++        Then "Entering mode KeyMode.insert (reason: command)" should be logged
++        And "restore: mode before tab change: insert." should be logged
++        And "Entering mode KeyMode.normal (reason: restore)" should be logged
++        And "restore: mode after tab change: normal." should be logged
++        And "Entering mode KeyMode.passthrough (reason: command)" should be logged
++        And "restore: mode before tab change: passthrough." should be logged
++        And "Entering mode KeyMode.insert (reason: restore)" should be logged
++        And "restore: mode after tab change: insert." should be logged
++
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

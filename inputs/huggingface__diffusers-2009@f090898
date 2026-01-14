@@ -1,0 +1,948 @@
+  Task-ID: huggingface__diffusers-2009@f090898
+  Please checkout to this commit first: 3be489182ef2a1170d425327a7cb69dff460b461
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Please create simple way to load new embeddings on Stable Diffusion Pipeline
+**Is your feature request related to a problem? Please describe.**
+It is frustrating to load Textual Inversion embeddings on SD pipelines, adds bloat to the code. It would be good if we could just `pipeline.load_embeddings` and add new embeddings ad-hoc to the pipeline.
+
+**Describe the solution you'd like**
+I would like to implement a method on Stable Diffusion pipelines to let people `load_embeddings` and append them to ones from the text encoder and tokenizer, something like:
+- `pipeline.load_embeddings({"emb1": "emb1.ckpt"})`, then
+- Embedding is loaded and appended to the embedding matrix of text encoder. Token is added to tokenizer.
+- Predictions work with the new token smoothly.
+
+We could even hack a way to load tokens with multiple embedding columns, alike to what we can do on Auto1111.
+
+**Describe alternatives you've considered**
+- Do that by hand every single time, but then if would bloat my code and wouldn't benefit the Diffusers community
+- Don't use textual inversion at all, but this would be no-fun.
+
+
+**Additional context**
+I can implement it and open a PR if you approve the idea.
+  </issue>
+  
+  <patch>
+  diff --git a/src/diffusers/__init__.py b/src/diffusers/__init__.py
+index a1e736671be7..b2554dd9cf35 100644
+--- a/src/diffusers/__init__.py
++++ b/src/diffusers/__init__.py
+@@ -32,6 +32,7 @@
+ except OptionalDependencyNotAvailable:
+     from .utils.dummy_pt_objects import *  # noqa F403
+ else:
++    from .loaders import TextualInversionLoaderMixin
+     from .models import (
+         AutoencoderKL,
+         ControlNetModel,
+diff --git a/src/diffusers/loaders.py b/src/diffusers/loaders.py
+index 31fdc46d9e1b..b8eaef5b940a 100644
+--- a/src/diffusers/loaders.py
++++ b/src/diffusers/loaders.py
+@@ -13,13 +13,12 @@
+ # limitations under the License.
+ import os
+ from collections import defaultdict
+-from typing import Callable, Dict, Union
++from typing import Callable, Dict, List, Optional, Union
+ 
+ import torch
++from transformers import PreTrainedModel, PreTrainedTokenizer
+ 
+-from .models.attention_processor import LoRAAttnProcessor
+-from .models.modeling_utils import _get_model_file
+-from .utils import DIFFUSERS_CACHE, HF_HUB_OFFLINE, deprecate, is_safetensors_available, logging
++from .utils import DIFFUSERS_CACHE, HF_HUB_OFFLINE, _get_model_file, deprecate, is_safetensors_available, logging
+ 
+ 
+ if is_safetensors_available():
+@@ -32,6 +31,9 @@
+ LORA_WEIGHT_NAME = "pytorch_lora_weights.bin"
+ LORA_WEIGHT_NAME_SAFE = "pytorch_lora_weights.safetensors"
+ 
++TEXT_INVERSION_NAME = "learned_embeds.bin"
++TEXT_INVERSION_NAME_SAFE = "learned_embeds.safetensors"
++
+ 
+ class AttnProcsLayers(torch.nn.Module):
+     def __init__(self, state_dict: Dict[str, torch.Tensor]):
+@@ -123,13 +125,6 @@ def load_attn_procs(self, pretrained_model_name_or_path_or_dict: Union[str, Dict
+          It is required to be logged in (`huggingface-cli login`) when you want to use private or [gated
+          models](https://huggingface.co/docs/hub/models-gated#gated-models).
+ 
+-        </Tip>
+-
+-        <Tip>
+-
+-        Activate the special ["offline-mode"](https://huggingface.co/diffusers/installation.html#offline-mode) to use
+-        this method in a firewalled environment.
+-
+         </Tip>
+         """
+ 
+@@ -159,6 +154,8 @@ def load_attn_procs(self, pretrained_model_name_or_path_or_dict: Union[str, Dict
+             "framework": "pytorch",
+         }
+ 
++        from .models.attention_processor import LoRAAttnProcessor
++
+         model_file = None
+         if not isinstance(pretrained_model_name_or_path_or_dict, dict):
+             # Let's first try to load .safetensors weights
+@@ -292,5 +289,397 @@ def save_function(weights, filename):
+ 
+         # Save the model
+         save_function(state_dict, os.path.join(save_directory, weight_name))
+-
+         logger.info(f"Model weights saved in {os.path.join(save_directory, weight_name)}")
++
++
++class TextualInversionLoaderMixin:
++    r"""
++    Mixin class for adding textual inversion tokens and embeddings to the tokenizer and text encoder with method:
++    - [`~TextualInversionLoaderMixin.load_textual_inversion_embeddings`]
++    - [`~TextualInversionLoaderMixin.add_textual_inversion_embedding`]
++    """
++
++    def maybe_convert_prompt(self, prompt: Union[str, List[str]], tokenizer: "PreTrainedTokenizer"):
++        if not isinstance(prompt, List):
++            prompts = [prompt]
++        else:
++            prompts = prompt
++
++        prompts = [self._maybe_convert_prompt(p, tokenizer) for p in prompts]
++
++        if not isinstance(prompt, List):
++            return prompts[0]
++
++        return prompts
++
++    def _maybe_convert_prompt(self, prompt: str, tokenizer: "PreTrainedTokenizer"):
++        tokens = tokenizer.tokenize(prompt)
++        if not any(t in tokenizer.added_tokens_encoder for t in tokens):
++            return prompt
++
++        for token in tokens:
++            if token in tokenizer.added_tokens_encoder:
++                replacement = token
++                i = 1
++                while f"{token}_{i}" in tokenizer.added_tokens_encoder:
++                    replacement += f"{token}_{i}"
++                    i += 1
++
++                prompt = prompt.replace(token, replacement)
++
++        return prompt
++
++    def load_textual_inversion(
++        self, pretrained_model_name_or_path: Union[str, Dict[str, torch.Tensor]], token: Optional[str] = None, **kwargs
++    ):
++        r"""
++        Load textual inversion embeddings into the text encoder of stable diffusion pipelines.
++
++        <Tip warning={true}>
++
++            This function is experimental and might change in the future.
++
++        </Tip>
++
++        Parameters:
++
++        </Tip>
++
++        Parameters:
++             pretrained_model_name_or_path (`str` or `os.PathLike`):
++                Can be either:
++
++                    - A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
++                      Valid model ids should have an organization name, like `google/ddpm-celebahq-256`.
++                    - A path to a *directory* containing model weights saved using [`~ModelMixin.save_config`], e.g.,
++                      `./my_model_directory/`.
++            cache_dir (`Union[str, os.PathLike]`, *optional*):
++                Path to a directory in which a downloaded pretrained model configuration should be cached if the
++                standard cache should not be used.
++            force_download (`bool`, *optional*, defaults to `False`):
++                Whether or not to force the (re-)download of the model weights and configuration files, overriding the
++                cached versions if they exist.
++            resume_download (`bool`, *optional*, defaults to `False`):
++                Whether or not to delete incompletely received files. Will attempt to resume the download if such a
++                file exists.
++            proxies (`Dict[str, str]`, *optional*):
++                A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
++                'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
++            local_files_only(`bool`, *optional*, defaults to `False`):
++                Whether or not to only look at local files (i.e., do not try to download the model).
++            use_auth_token (`str` or *bool*, *optional*):
++                The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
++                when running `diffusers-cli login` (stored in `~/.huggingface`).
++            revision (`str`, *optional*, defaults to `"main"`):
++                The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
++                git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
++                identifier allowed by git.
++            subfolder (`str`, *optional*, defaults to `""`):
++                In case the relevant files are located inside a subfolder of the model repo (either remote in
++                huggingface.co or downloaded locally), you can specify the folder name here.
++
++            mirror (`str`, *optional*):
++                Mirror source to accelerate downloads in China. If you are from China and have an accessibility
++                problem, you can set this option to resolve it. Note that we do not guarantee the timeliness or safety.
++                Please refer to the mirror site for more information.
++
++        <Tip>
++
++         It is required to be logged in (`huggingface-cli login`) when you want to use private or [gated
++         models](https://huggingface.co/docs/hub/models-gated#gated-models).
++
++        </Tip>
++        """
++        self._validate_method_call(self.load_textual_inversion)
++
++        cache_dir = kwargs.pop("cache_dir", DIFFUSERS_CACHE)
++        force_download = kwargs.pop("force_download", False)
++        resume_download = kwargs.pop("resume_download", False)
++        proxies = kwargs.pop("proxies", None)
++        local_files_only = kwargs.pop("local_files_only", HF_HUB_OFFLINE)
++        use_auth_token = kwargs.pop("use_auth_token", None)
++        revision = kwargs.pop("revision", None)
++        subfolder = kwargs.pop("subfolder", None)
++        weight_name = kwargs.pop("weight_name", None)
++        use_safetensors = kwargs.pop("use_safetensors", None)
++
++        if use_safetensors and not is_safetensors_available():
++            raise ValueError(
++                "`use_safetensors`=True but safetensors is not installed. Please install safetensors with `pip install safetenstors"
++            )
++
++        allow_pickle = False
++        if use_safetensors is None:
++            use_safetensors = is_safetensors_available()
++            allow_pickle = True
++
++        user_agent = {
++            "file_type": "text_inversion",
++            "framework": "pytorch",
++        }
++
++        # 1. Load textual inversion file
++        model_file = None
++        # Let's first try to load .safetensors weights
++        if (use_safetensors and weight_name is None) or (
++            weight_name is not None and weight_name.endswith(".safetensors")
++        ):
++            try:
++                model_file = _get_model_file(
++                    pretrained_model_name_or_path,
++                    weights_name=weight_name or TEXT_INVERSION_NAME_SAFE,
++                    cache_dir=cache_dir,
++                    force_download=force_download,
++                    resume_download=resume_download,
++                    proxies=proxies,
++                    local_files_only=local_files_only,
++                    use_auth_token=use_auth_token,
++                    revision=revision,
++                    subfolder=subfolder,
++                    user_agent=user_agent,
++                )
++                state_dict = safetensors.torch.load_file(model_file, device="cpu")
++            except Exception as e:
++                if not allow_pickle:
++                    raise e
++
++                model_file = None
++                pass
++
++        if model_file is None:
++            model_file = _get_model_file(
++                pretrained_model_name_or_path,
++                weights_name=weight_name or TEXT_INVERSION_NAME,
++                cache_dir=cache_dir,
++                force_download=force_download,
++                resume_download=resume_download,
++                proxies=proxies,
++                local_files_only=local_files_only,
++                use_auth_token=use_auth_token,
++                revision=revision,
++                subfolder=subfolder,
++                user_agent=user_agent,
++            )
++            state_dict = torch.load(model_file, map_location="cpu")
++
++        # 2. Load token and embedding correcly from file
++        if isinstance(state_dict, torch.Tensor):
++            if token is None:
++                raise ValueError(
++                    "You are trying to load a textual inversion embedding that has been saved as a PyTorch tensor. Make sure to pass the name of the corresponding token in this case: `token=...`."
++                )
++            embedding = state_dict
++        elif len(state_dict) == 1:
++            # diffusers
++            loaded_token, embedding = next(iter(state_dict.items()))
++        elif "string_to_param" in state_dict:
++            # A1111
++            loaded_token = self._extract_token_from_dict(state_dict)
++            embedding = self._extract_embedding_from_dict(state_dict)
++
++        if token is not None and loaded_token != token:
++            logger.warn(f"The loaded token: {loaded_token} is overwritten by the passed token {token}.")
++        else:
++            token = loaded_token
++
++        embedding = embedding.to(dtype=self.text_encoder.dtype, device=self.text_encoder.device)
++
++        # 3. Make sure we don't mess up the tokenizer or text encoder
++        vocab = self.tokenizer.get_vocab()
++        if token in vocab:
++            raise ValueError(
++                f"Token {token} already in tokenizer vocabulary. Please choose a different token name or remove {token} and embedding from the tokenizer and text encoder."
++            )
++        elif f"{token}_1" in vocab:
++            multi_vector_tokens = [token]
++            i = 1
++            while f"{token}_{i}" in self.tokenizer.added_tokens_encoder:
++                multi_vector_tokens.append(f"{token}_{i}")
++                i += 1
++
++            raise ValueError(
++                f"Multi-vector Token {token} already in tokenizer vocabulary. Please choose a different token name or remove the {multi_vector_tokens} and embedding from the tokenizer and text encoder."
++            )
++
++        is_multi_vector = len(embedding.shape) > 1 and embedding.shape[0] > 1
++
++        if is_multi_vector:
++            tokens = [token] + [f"{token}_{i}" for i in range(1, embedding.shape[0])]
++            embeddings = [e for e in embedding]
++        else:
++            tokens = [token]
++            embeddings = [embedding] if len(embedding.shape) > 1 else [embedding[0]]
++
++        # add tokens and get ids
++        self.tokenizer.add_tokens(tokens)
++        token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
++
++        # resize token embeddings and set new embeddings
++        self.text_encoder.resize_token_embeddings(len(self.tokenizer))
++        for token_id, embedding in zip(token_ids, embeddings):
++            self.text_encoder.get_input_embeddings().weight.data[token_id] = embedding
++
++        logger.info("Loaded textual inversion embedding for {token}.")
++
++    # TODO(to discuss) think we can remove this one
++    def load_textual_inversion_embeddings(
++        self, embedding_path_dict_or_list: Union[Dict[str, str], List[Dict[str, str]]], allow_replacement: bool = False
++    ):
++        r"""
++        Loads textual inversion embeddings and adds them to the tokenizer's vocabulary and the text encoder's
++        embeddings.
++
++        Arguments:
++            embeddings_path_dict_or_list (`Dict[str, str]` or `List[str]`):
++                Dictionary of token to embedding path or List of embedding paths to embedding dictionaries. The
++                dictionary must have the following keys:
++                    - `token`: name of the token to be added to the tokenizers' vocabulary
++                    - `embedding`: path to the embedding of the token to be added to the text encoder's embedding
++                      matrix
++                The list must contain paths to embedding dictionaries where the keys are the tokens and the values are
++                the embeddings (same as above dictionary definition).
++
++        Returns:
++            None
++        """
++        # Validate that inheriting class instance contains required attributes
++        self._validate_method_call(self.load_textual_inversion_embeddings)
++
++        if isinstance(embedding_path_dict_or_list, dict):
++            for token, embedding_path in embedding_path_dict_or_list.items():
++                # check if token in tokenizer vocab
++                if token in self.tokenizer.get_vocab():
++                    if allow_replacement:
++                        logger.info(
++                            f"Token {token} already in tokenizer vocabulary. Overwriting existing token and embedding"
++                            " with the new one."
++                        )
++                    else:
++                        raise ValueError(
++                            f"Token {token} already in tokenizer vocabulary. Please choose a different token name or set `allow_replacement=True`."
++                        )
++
++                embedding_dict = torch.load(embedding_path, map_location=self.text_encoder.device)
++                embedding = self._extract_embedding_from_dict(embedding_dict)
++
++                self.add_textual_inversion_embedding(token, embedding)
++
++        elif isinstance(embedding_path_dict_or_list, list):
++            for embedding_path in embedding_path_dict_or_list:
++                embedding_dict = torch.load(embedding_path, map_location=self.text_encoder.device)
++                token = self._extract_token_from_dict(embedding_dict)
++                embedding = self._extract_embedding_from_dict(embedding_dict)
++
++                # check if token in tokenizer vocab
++                if token in self.tokenizer.get_vocab():
++                    if allow_replacement:
++                        logger.info(
++                            f"Token {token} already in tokenizer vocabulary. Overwriting existing token and embedding"
++                            " with the new one."
++                        )
++                    else:
++                        raise ValueError(
++                            f"Token {token} already in tokenizer vocabulary. Please choose a different token name."
++                        )
++                self.add_textual_inversion_embedding(token, embedding)
++
++    # TODO(to discuss) think we can remove this one
++    def add_textual_inversion_embedding(self, token: str, embedding: torch.Tensor):
++        r"""
++        Adds a token to the tokenizer's vocabulary and an embedding to the text encoder's embedding matrix.
++
++        Arguments:
++            token (`str`):
++                The token to be added to the tokenizers' vocabulary
++            embedding (`torch.Tensor`):
++                The embedding of the token to be added to the text encoder's embedding matrix
++        """
++        # NOTE: Not clear to me that we intend for this to be a public/exposed method.
++        # Validate that inheriting class instance contains required attributes
++        self._validate_method_call(self.load_textual_inversion_embeddings)
++
++        embedding = embedding.to(self.text_encoder.dtype)
++
++        if token in self.tokenizer.get_vocab():
++            # If user has allowed replacement and the token exists, we only need to
++            # extract the existing id and update the embedding
++            token_id = self.tokenizer.convert_tokens_to_ids(token)
++            self.text_encoder.get_input_embeddings().weight.data[token_id] = embedding
++        else:
++            # If the token does not exist, we add it to the tokenizer, then resize and update the
++            # text encoder acccordingly
++            self.tokenizer.add_tokens([token])
++
++            token_id = self.tokenizer.convert_tokens_to_ids(token)
++            # NOTE: len() does't start at 0, so we shouldn't need to +1
++            # since we already updated the tokenizer and it's new length
++            # should be old length + 1
++            self.text_encoder.resize_token_embeddings(len(self.tokenizer))
++            self.text_encoder.get_input_embeddings().weight.data[token_id] = embedding
++
++    def _extract_embedding_from_dict(self, embedding_dict: Dict[str, str]) -> torch.Tensor:
++        r"""
++        Extracts the embedding from the embedding dictionary.
++
++        Arguments:
++            embedding_dict (`Dict[str, str]`):
++                The embedding dictionary loaded from the embedding path
++
++        Returns:
++            embedding (`torch.Tensor`):
++                The embedding to be added to the text encoder's embedding matrix
++        """
++        # auto1111 embedding case
++        if "string_to_param" in embedding_dict:
++            embedding_dict = embedding_dict["string_to_param"]
++            embedding = embedding_dict["*"]
++            return embedding
++
++        return list(embedding_dict.values())[0]
++
++    def _extract_token_from_dict(self, embedding_dict: Dict[str, str]) -> str:
++        r"""
++        Extracts the token from the embedding dictionary.
++
++        Arguments:
++            embedding_dict (`Dict[str, str]`):
++                The embedding dictionary loaded from the embedding path
++
++        Returns:
++            token (`str`):
++                The token to be added to the tokenizers' vocabulary
++        """
++        # auto1111 embedding case
++        if "string_to_param" in embedding_dict:
++            token = embedding_dict["name"]
++            return token
++
++        return list(embedding_dict.keys())[0]
++
++    def _validate_method_call(self, method: Callable):
++        r"""
++        Validates that the method is being called from a class instance that has the required attributes.
++
++        Arguments:
++            method (`function`):
++                The class's method being called
++
++        Raises:
++            ValueError:
++                If the method is being called from a class instance that does not have the required attributes, the
++                method will not be callable.
++
++        Returns:
++            None
++        """
++        if not hasattr(self, "tokenizer") or not isinstance(self.tokenizer, PreTrainedTokenizer):
++            raise ValueError(
++                f"{self.__class__.__name__} requires `self.tokenizer` of type `PreTrainedTokenizer` for calling"
++                f" `{method.__name__}`"
++            )
++
++        if not hasattr(self, "text_encoder") or not isinstance(self.text_encoder, PreTrainedModel):
++            raise ValueError(
++                f"{self.__class__.__name__} requires `self.text_encoder` of type `PreTrainedModel` for calling"
++                f" `{method.__name__}`"
++            )
+diff --git a/src/diffusers/models/modeling_utils.py b/src/diffusers/models/modeling_utils.py
+index e51b40ce4509..a48fdeba6027 100644
+--- a/src/diffusers/models/modeling_utils.py
++++ b/src/diffusers/models/modeling_utils.py
+@@ -16,27 +16,22 @@
+ 
+ import inspect
+ import os
+-import warnings
+ from functools import partial
+ from typing import Callable, List, Optional, Tuple, Union
+ 
+ import torch
+-from huggingface_hub import hf_hub_download
+-from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
+-from packaging import version
+-from requests import HTTPError
+ from torch import Tensor, device
+ 
+ from .. import __version__
+ from ..utils import (
+     CONFIG_NAME,
+-    DEPRECATED_REVISION_ARGS,
+     DIFFUSERS_CACHE,
+     FLAX_WEIGHTS_NAME,
+     HF_HUB_OFFLINE,
+-    HUGGINGFACE_CO_RESOLVE_ENDPOINT,
+     SAFETENSORS_WEIGHTS_NAME,
+     WEIGHTS_NAME,
++    _add_variant,
++    _get_model_file,
+     is_accelerate_available,
+     is_safetensors_available,
+     is_torch_version,
+@@ -144,15 +139,6 @@ def load(module: torch.nn.Module, prefix=""):
+     return error_msgs
+ 
+ 
+-def _add_variant(weights_name: str, variant: Optional[str] = None) -> str:
+-    if variant is not None:
+-        splits = weights_name.split(".")
+-        splits = splits[:-1] + [variant] + splits[-1:]
+-        weights_name = ".".join(splits)
+-
+-    return weights_name
+-
+-
+ class ModelMixin(torch.nn.Module):
+     r"""
+     Base class for all models.
+@@ -782,121 +768,3 @@ def num_parameters(self, only_trainable: bool = False, exclude_embeddings: bool
+             return sum(p.numel() for p in non_embedding_parameters if p.requires_grad or not only_trainable)
+         else:
+             return sum(p.numel() for p in self.parameters() if p.requires_grad or not only_trainable)
+-
+-
+-def _get_model_file(
+-    pretrained_model_name_or_path,
+-    *,
+-    weights_name,
+-    subfolder,
+-    cache_dir,
+-    force_download,
+-    proxies,
+-    resume_download,
+-    local_files_only,
+-    use_auth_token,
+-    user_agent,
+-    revision,
+-    commit_hash=None,
+-):
+-    pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+-    if os.path.isfile(pretrained_model_name_or_path):
+-        return pretrained_model_name_or_path
+-    elif os.path.isdir(pretrained_model_name_or_path):
+-        if os.path.isfile(os.path.join(pretrained_model_name_or_path, weights_name)):
+-            # Load from a PyTorch checkpoint
+-            model_file = os.path.join(pretrained_model_name_or_path, weights_name)
+-            return model_file
+-        elif subfolder is not None and os.path.isfile(
+-            os.path.join(pretrained_model_name_or_path, subfolder, weights_name)
+-        ):
+-            model_file = os.path.join(pretrained_model_name_or_path, subfolder, weights_name)
+-            return model_file
+-        else:
+-            raise EnvironmentError(
+-                f"Error no file named {weights_name} found in directory {pretrained_model_name_or_path}."
+-            )
+-    else:
+-        # 1. First check if deprecated way of loading from branches is used
+-        if (
+-            revision in DEPRECATED_REVISION_ARGS
+-            and (weights_name == WEIGHTS_NAME or weights_name == SAFETENSORS_WEIGHTS_NAME)
+-            and version.parse(version.parse(__version__).base_version) >= version.parse("0.17.0")
+-        ):
+-            try:
+-                model_file = hf_hub_download(
+-                    pretrained_model_name_or_path,
+-                    filename=_add_variant(weights_name, revision),
+-                    cache_dir=cache_dir,
+-                    force_download=force_download,
+-                    proxies=proxies,
+-                    resume_download=resume_download,
+-                    local_files_only=local_files_only,
+-                    use_auth_token=use_auth_token,
+-                    user_agent=user_agent,
+-                    subfolder=subfolder,
+-                    revision=revision or commit_hash,
+-                )
+-                warnings.warn(
+-                    f"Loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'` is deprecated. Loading instead from `revision='main'` with `variant={revision}`. Loading model variants via `revision='{revision}'` will be removed in diffusers v1. Please use `variant='{revision}'` instead.",
+-                    FutureWarning,
+-                )
+-                return model_file
+-            except:  # noqa: E722
+-                warnings.warn(
+-                    f"You are loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'`. This behavior is deprecated and will be removed in diffusers v1. One should use `variant='{revision}'` instead. However, it appears that {pretrained_model_name_or_path} currently does not have a {_add_variant(weights_name, revision)} file in the 'main' branch of {pretrained_model_name_or_path}. \n The Diffusers team and community would be very grateful if you could open an issue: https://github.com/huggingface/diffusers/issues/new with the title '{pretrained_model_name_or_path} is missing {_add_variant(weights_name, revision)}' so that the correct variant file can be added.",
+-                    FutureWarning,
+-                )
+-        try:
+-            # 2. Load model file as usual
+-            model_file = hf_hub_download(
+-                pretrained_model_name_or_path,
+-                filename=weights_name,
+-                cache_dir=cache_dir,
+-                force_download=force_download,
+-                proxies=proxies,
+-                resume_download=resume_download,
+-                local_files_only=local_files_only,
+-                use_auth_token=use_auth_token,
+-                user_agent=user_agent,
+-                subfolder=subfolder,
+-                revision=revision or commit_hash,
+-            )
+-            return model_file
+-
+-        except RepositoryNotFoundError:
+-            raise EnvironmentError(
+-                f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
+-                "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
+-                "token having permission to this repo with `use_auth_token` or log in with `huggingface-cli "
+-                "login`."
+-            )
+-        except RevisionNotFoundError:
+-            raise EnvironmentError(
+-                f"{revision} is not a valid git identifier (branch name, tag name or commit id) that exists for "
+-                "this model name. Check the model page at "
+-                f"'https://huggingface.co/{pretrained_model_name_or_path}' for available revisions."
+-            )
+-        except EntryNotFoundError:
+-            raise EnvironmentError(
+-                f"{pretrained_model_name_or_path} does not appear to have a file named {weights_name}."
+-            )
+-        except HTTPError as err:
+-            raise EnvironmentError(
+-                f"There was a specific connection error when trying to load {pretrained_model_name_or_path}:\n{err}"
+-            )
+-        except ValueError:
+-            raise EnvironmentError(
+-                f"We couldn't connect to '{HUGGINGFACE_CO_RESOLVE_ENDPOINT}' to load this model, couldn't find it"
+-                f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
+-                f" directory containing a file named {weights_name} or"
+-                " \nCheckout your internet connection or see how to run the library in"
+-                " offline mode at 'https://huggingface.co/docs/diffusers/installation#offline-mode'."
+-            )
+-        except EnvironmentError:
+-            raise EnvironmentError(
+-                f"Can't load the model for '{pretrained_model_name_or_path}'. If you were trying to load it from "
+-                "'https://huggingface.co/models', make sure you don't have a local directory with the same name. "
+-                f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
+-                f"containing a file named {weights_name}"
+-            )
+diff --git a/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py b/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
+index 81b2cfa9bc3e..2e9935c1bd5e 100644
+--- a/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
++++ b/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
+@@ -20,6 +20,7 @@
+ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+ 
+ from ...configuration_utils import FrozenDict
++from ...loaders import TextualInversionLoaderMixin
+ from ...models import AutoencoderKL, UNet2DConditionModel
+ from ...schedulers import KarrasDiffusionSchedulers
+ from ...utils import (
+@@ -52,7 +53,7 @@
+ """
+ 
+ 
+-class StableDiffusionPipeline(DiffusionPipeline):
++class StableDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
+     r"""
+     Pipeline for text-to-image generation using Stable Diffusion.
+ 
+@@ -315,6 +316,10 @@ def _encode_prompt(
+             batch_size = prompt_embeds.shape[0]
+ 
+         if prompt_embeds is None:
++            # textual inversion: procecss multi-vector tokens if necessary
++            if isinstance(self, TextualInversionLoaderMixin):
++                prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
++
+             text_inputs = self.tokenizer(
+                 prompt,
+                 padding="max_length",
+@@ -375,6 +380,10 @@ def _encode_prompt(
+             else:
+                 uncond_tokens = negative_prompt
+ 
++            # textual inversion: procecss multi-vector tokens if necessary
++            if isinstance(self, TextualInversionLoaderMixin):
++                uncond_tokens = self.maybe_convert_prompt(uncond_tokens, self.tokenizer)
++
+             max_length = prompt_embeds.shape[1]
+             uncond_input = self.tokenizer(
+                 uncond_tokens,
+diff --git a/src/diffusers/utils/__init__.py b/src/diffusers/utils/__init__.py
+index d803b053be71..2cd256aeb8b8 100644
+--- a/src/diffusers/utils/__init__.py
++++ b/src/diffusers/utils/__init__.py
+@@ -37,6 +37,8 @@
+ from .dynamic_modules_utils import get_class_from_dynamic_module
+ from .hub_utils import (
+     HF_HUB_OFFLINE,
++    _add_variant,
++    _get_model_file,
+     extract_commit_hash,
+     http_user_agent,
+ )
+diff --git a/src/diffusers/utils/dummy_pt_objects.py b/src/diffusers/utils/dummy_pt_objects.py
+index 700a3080fa11..be4b15cfa23a 100644
+--- a/src/diffusers/utils/dummy_pt_objects.py
++++ b/src/diffusers/utils/dummy_pt_objects.py
+@@ -675,6 +675,21 @@ def from_pretrained(cls, *args, **kwargs):
+         requires_backends(cls, ["torch"])
+ 
+ 
++class TextualInversionLoaderMixin(metaclass=DummyObject):
++    _backends = ["torch"]
++
++    def __init__(self, *args, **kwargs):
++        requires_backends(self, ["torch"])
++
++    @classmethod
++    def from_config(cls, *args, **kwargs):
++        requires_backends(cls, ["torch"])
++
++    @classmethod
++    def from_pretrained(cls, *args, **kwargs):
++        requires_backends(cls, ["torch"])
++
++
+ class EMAModel(metaclass=DummyObject):
+     _backends = ["torch"]
+ 
+diff --git a/src/diffusers/utils/hub_utils.py b/src/diffusers/utils/hub_utils.py
+index 916b18d35e7e..511763ec6687 100644
+--- a/src/diffusers/utils/hub_utils.py
++++ b/src/diffusers/utils/hub_utils.py
+@@ -18,16 +18,30 @@
+ import re
+ import sys
+ import traceback
++import warnings
+ from pathlib import Path
+ from typing import Dict, Optional, Union
+ from uuid import uuid4
+ 
+-from huggingface_hub import HfFolder, ModelCard, ModelCardData, whoami
++from huggingface_hub import HfFolder, ModelCard, ModelCardData, hf_hub_download, whoami
+ from huggingface_hub.file_download import REGEX_COMMIT_HASH
+-from huggingface_hub.utils import is_jinja_available
++from huggingface_hub.utils import (
++    EntryNotFoundError,
++    RepositoryNotFoundError,
++    RevisionNotFoundError,
++    is_jinja_available,
++)
++from packaging import version
++from requests import HTTPError
+ 
+ from .. import __version__
+-from .constants import DIFFUSERS_CACHE, HUGGINGFACE_CO_RESOLVE_ENDPOINT
++from .constants import (
++    DEPRECATED_REVISION_ARGS,
++    DIFFUSERS_CACHE,
++    HUGGINGFACE_CO_RESOLVE_ENDPOINT,
++    SAFETENSORS_WEIGHTS_NAME,
++    WEIGHTS_NAME,
++)
+ from .import_utils import (
+     ENV_VARS_TRUE_VALUES,
+     _flax_version,
+@@ -215,3 +229,130 @@ def move_cache(old_cache_dir: Optional[str] = None, new_cache_dir: Optional[str]
+             f"There was a problem when trying to write in your cache folder ({DIFFUSERS_CACHE}). Please, ensure "
+             "the directory exists and can be written to."
+         )
++
++
++def _add_variant(weights_name: str, variant: Optional[str] = None) -> str:
++    if variant is not None:
++        splits = weights_name.split(".")
++        splits = splits[:-1] + [variant] + splits[-1:]
++        weights_name = ".".join(splits)
++
++    return weights_name
++
++
++def _get_model_file(
++    pretrained_model_name_or_path,
++    *,
++    weights_name,
++    subfolder,
++    cache_dir,
++    force_download,
++    proxies,
++    resume_download,
++    local_files_only,
++    use_auth_token,
++    user_agent,
++    revision,
++    commit_hash=None,
++):
++    pretrained_model_name_or_path = str(pretrained_model_name_or_path)
++    if os.path.isfile(pretrained_model_name_or_path):
++        return pretrained_model_name_or_path
++    elif os.path.isdir(pretrained_model_name_or_path):
++        if os.path.isfile(os.path.join(pretrained_model_name_or_path, weights_name)):
++            # Load from a PyTorch checkpoint
++            model_file = os.path.join(pretrained_model_name_or_path, weights_name)
++            return model_file
++        elif subfolder is not None and os.path.isfile(
++            os.path.join(pretrained_model_name_or_path, subfolder, weights_name)
++        ):
++            model_file = os.path.join(pretrained_model_name_or_path, subfolder, weights_name)
++            return model_file
++        else:
++            raise EnvironmentError(
++                f"Error no file named {weights_name} found in directory {pretrained_model_name_or_path}."
++            )
++    else:
++        # 1. First check if deprecated way of loading from branches is used
++        if (
++            revision in DEPRECATED_REVISION_ARGS
++            and (weights_name == WEIGHTS_NAME or weights_name == SAFETENSORS_WEIGHTS_NAME)
++            and version.parse(version.parse(__version__).base_version) >= version.parse("0.17.0")
++        ):
++            try:
++                model_file = hf_hub_download(
++                    pretrained_model_name_or_path,
++                    filename=_add_variant(weights_name, revision),
++                    cache_dir=cache_dir,
++                    force_download=force_download,
++                    proxies=proxies,
++                    resume_download=resume_download,
++                    local_files_only=local_files_only,
++                    use_auth_token=use_auth_token,
++                    user_agent=user_agent,
++                    subfolder=subfolder,
++                    revision=revision or commit_hash,
++                )
++                warnings.warn(
++                    f"Loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'` is deprecated. Loading instead from `revision='main'` with `variant={revision}`. Loading model variants via `revision='{revision}'` will be removed in diffusers v1. Please use `variant='{revision}'` instead.",
++                    FutureWarning,
++                )
++                return model_file
++            except:  # noqa: E722
++                warnings.warn(
++                    f"You are loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'`. This behavior is deprecated and will be removed in diffusers v1. One should use `variant='{revision}'` instead. However, it appears that {pretrained_model_name_or_path} currently does not have a {_add_variant(weights_name, revision)} file in the 'main' branch of {pretrained_model_name_or_path}. \n The Diffusers team and community would be very grateful if you could open an issue: https://github.com/huggingface/diffusers/issues/new with the title '{pretrained_model_name_or_path} is missing {_add_variant(weights_name, revision)}' so that the correct variant file can be added.",
++                    FutureWarning,
++                )
++        try:
++            # 2. Load model file as usual
++            model_file = hf_hub_download(
++                pretrained_model_name_or_path,
++                filename=weights_name,
++                cache_dir=cache_dir,
++                force_download=force_download,
++                proxies=proxies,
++                resume_download=resume_download,
++                local_files_only=local_files_only,
++                use_auth_token=use_auth_token,
++                user_agent=user_agent,
++                subfolder=subfolder,
++                revision=revision or commit_hash,
++            )
++            return model_file
++
++        except RepositoryNotFoundError:
++            raise EnvironmentError(
++                f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
++                "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
++                "token having permission to this repo with `use_auth_token` or log in with `huggingface-cli "
++                "login`."
++            )
++        except RevisionNotFoundError:
++            raise EnvironmentError(
++                f"{revision} is not a valid git identifier (branch name, tag name or commit id) that exists for "
++                "this model name. Check the model page at "
++                f"'https://huggingface.co/{pretrained_model_name_or_path}' for available revisions."
++            )
++        except EntryNotFoundError:
++            raise EnvironmentError(
++                f"{pretrained_model_name_or_path} does not appear to have a file named {weights_name}."
++            )
++        except HTTPError as err:
++            raise EnvironmentError(
++                f"There was a specific connection error when trying to load {pretrained_model_name_or_path}:\n{err}"
++            )
++        except ValueError:
++            raise EnvironmentError(
++                f"We couldn't connect to '{HUGGINGFACE_CO_RESOLVE_ENDPOINT}' to load this model, couldn't find it"
++                f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
++                f" directory containing a file named {weights_name} or"
++                " \nCheckout your internet connection or see how to run the library in"
++                " offline mode at 'https://huggingface.co/docs/diffusers/installation#offline-mode'."
++            )
++        except EnvironmentError:
++            raise EnvironmentError(
++                f"Can't load the model for '{pretrained_model_name_or_path}'. If you were trying to load it from "
++                "'https://huggingface.co/models', make sure you don't have a local directory with the same name. "
++                f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
++                f"containing a file named {weights_name}"
++            )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

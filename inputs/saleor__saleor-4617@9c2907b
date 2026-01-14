@@ -1,0 +1,677 @@
+  Task-ID: saleor__saleor-4617@9c2907b
+  Please checkout to this commit first: 1943069ece044de3412b5679a964174cdbb03eeb
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Refactoring of password recovery system
+Proposed changes:
+
+- we don't have mutations for password recovery and account activation
+- mutation which reset password should also return JWT token so user don't need to pass login/password twice (usually after password change user want to access page)
+- for password recovery we are encoding user pk (`urlsafe_base64_encode(force_bytes(user.pk))`) which is not good practice (exposing database ids ). Much better would be using account email for that.
+- mutation for password reset should have url for recovery view as additional field - GraphQL API does not know how routing in PWA looks like so backend cant ATM attach valid URL ino emai
+
+Contact me if you need more background for why we need to include those changes
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index fb273958faf..d7900565722 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -46,10 +46,11 @@ All notable, unreleased changes to this project will be documented in this file.
+ - Users cannot add multiple times the same product into a collection anymore - #4518 by @NyanKiyoshi
+ - Enterprise-grade attributes management - #4351 by @dominik-zeglen and @NyanKiyoshi
+ - Refetch attribute list after closing modal - #4615 by @dominik-zeglen
+-- Add ability to toggle visible columns in product list - #4608 by @dominik-zeglen 
++- Add ability to toggle visible columns in product list - #4608 by @dominik-zeglen
+ - Serialize empty URL as string when creating menu items - #4616 by @maarcingebala
+ - Fix bulk actions - #4618 by @dominik-zeglen
+ - Remove dashboard 2.0 files - #4631 by @dominik-zeglen
++- Refactoring of password recovery system - #4617 by @fowczarek
+ 
+ ## 2.8.0
+ 
+diff --git a/saleor/account/emails.py b/saleor/account/emails.py
+index 21080b9c8ab..14872df01f8 100644
+--- a/saleor/account/emails.py
++++ b/saleor/account/emails.py
+@@ -1,3 +1,5 @@
++from urllib.parse import urlencode
++
+ from django.conf import settings
+ from django.urls import reverse
+ from templated_email import send_templated_mail
+@@ -8,25 +10,39 @@
+ from ..core.utils import build_absolute_uri
+ 
+ 
+-@app.task
+-def send_password_reset_email(context, recipient, user_id):
+-    reset_url = build_absolute_uri(
+-        reverse(
+-            "account:reset-password-confirm",
+-            kwargs={"uidb64": context["uid"], "token": context["token"]},
+-        )
+-    )
++def _send_password_reset_email(reset_url, recipient_email, user_id):
+     context = get_email_base_context()
+     context["reset_url"] = reset_url
+     send_templated_mail(
+         template_name="account/password_reset",
+         from_email=settings.DEFAULT_FROM_EMAIL,
+-        recipient_list=[recipient],
++        recipient_list=[recipient_email],
+         context=context,
+     )
+     account_events.customer_password_reset_link_sent_event(user_id=user_id)
+ 
+ 
++@app.task
++def send_password_reset_email(context, recipient, user_id):
++    reset_url = build_absolute_uri(
++        reverse(
++            "account:reset-password-confirm",
++            kwargs={"uidb64": context["uid"], "token": context["token"]},
++        )
++    )
++    _send_password_reset_email(reset_url, recipient, user_id)
++
++
++@app.task
++def send_password_reset_email_with_url(redirect_url, recipient_email, token, user_id):
++    params = urlencode({"email": recipient_email, "token": token})
++    reset_url = "%(redirect_url)s?%(params)s" % {
++        "redirect_url": redirect_url,
++        "params": params,
++    }
++    _send_password_reset_email(reset_url, recipient_email, user_id)
++
++
+ @app.task
+ def send_account_delete_confirmation_email(token, recipient_email):
+     delete_url = build_absolute_uri(
+diff --git a/saleor/graphql/account/mutations/base.py b/saleor/graphql/account/mutations/base.py
+index b4e1955dbc7..7009775c5b7 100644
+--- a/saleor/graphql/account/mutations/base.py
++++ b/saleor/graphql/account/mutations/base.py
+@@ -1,10 +1,12 @@
++from urllib.parse import urlparse
++
+ import graphene
+ from django.conf import settings
++from django.contrib.auth import password_validation
+ from django.contrib.auth.tokens import default_token_generator
+ from django.core.exceptions import ObjectDoesNotExist, ValidationError
+ from django.db import transaction
+-from django.utils.encoding import force_bytes
+-from django.utils.http import urlsafe_base64_encode
++from django.http.request import validate_host
+ from graphql_jwt.exceptions import PermissionDenied
+ 
+ from ....account import emails, events as account_events, models
+@@ -14,9 +16,11 @@
+ from ...core.mutations import (
+     BaseMutation,
+     ClearMetaBaseMutation,
++    CreateToken,
+     ModelDeleteMutation,
+     ModelMutation,
+     UpdateMetaBaseMutation,
++    validation_error_to_error_type,
+ )
+ 
+ BILLING_ADDRESS_FIELD = "default_billing_address"
+@@ -24,16 +28,11 @@
+ INVALID_TOKEN = "Invalid or expired token."
+ 
+ 
+-def send_user_password_reset_email(user, site):
+-    context = {
+-        "email": user.email,
+-        "uid": urlsafe_base64_encode(force_bytes(user.pk)),
+-        "token": default_token_generator.make_token(user),
+-        "site_name": site.name,
+-        "domain": site.domain,
+-        "protocol": "https" if settings.ENABLE_SSL else "http",
+-    }
+-    emails.send_password_reset_email.delay(context, user.email, user.pk)
++def send_user_password_reset_email(redirect_url, user):
++    token = default_token_generator.make_token(user)
++    emails.send_password_reset_email_with_url.delay(
++        redirect_url, user.email, token, user.pk
++    )
+ 
+ 
+ def can_edit_address(user, address):
+@@ -49,20 +48,12 @@ def can_edit_address(user, address):
+     )
+ 
+ 
+-class SetPasswordInput(graphene.InputObjectType):
+-    token = graphene.String(
+-        description="A one-time token required to set the password.", required=True
+-    )
+-    password = graphene.String(description="Password", required=True)
+-
++class SetPassword(CreateToken):
++    user = graphene.Field(User, description="An user instance with new password.")
+ 
+-class SetPassword(ModelMutation):
+     class Arguments:
+-        id = graphene.ID(
+-            description="ID of a user to set password whom.", required=True
+-        )
+-        input = SetPasswordInput(
+-            description="Fields required to set password.", required=True
++        token = graphene.String(
++            description="A one-time token required to set the password.", required=True
+         )
+ 
+     class Meta:
+@@ -70,21 +61,35 @@ class Meta:
+             "Sets the user's password from the token sent by email "
+             "using the RequestPasswordReset mutation."
+         )
+-        model = models.User
+ 
+     @classmethod
+-    def clean_input(cls, info, instance, data):
+-        cleaned_input = super().clean_input(info, instance, data)
+-        token = cleaned_input.pop("token")
+-        if not default_token_generator.check_token(instance, token):
+-            raise ValidationError({"token": INVALID_TOKEN})
+-        return cleaned_input
++    def mutate(cls, root, info, **data):
++        email = data["email"]
++        password = data["password"]
++        token = data["token"]
++
++        try:
++            cls._set_password_for_user(email, password, token)
++        except ValidationError as e:
++            errors = validation_error_to_error_type(e)
++            return cls(errors=errors)
++        return super().mutate(root, info, **data)
+ 
+     @classmethod
+-    def save(cls, info, instance, cleaned_input):
+-        instance.set_password(cleaned_input["password"])
+-        instance.save(update_fields=["password"])
+-        account_events.customer_password_reset_event(user=instance)
++    def _set_password_for_user(cls, email, password, token):
++        try:
++            user = models.User.objects.get(email=email)
++        except ObjectDoesNotExist:
++            raise ValidationError({"email": "User doesn't exist"})
++        if not default_token_generator.check_token(user, token):
++            raise ValidationError({"token": INVALID_TOKEN})
++        try:
++            password_validation.validate_password(password, user)
++        except ValidationError as error:
++            raise ValidationError({"password": error.messages})
++        user.set_password(password)
++        user.save(update_fields=["password"])
++        account_events.customer_password_reset_event(user=user)
+ 
+ 
+ class RequestPasswordReset(BaseMutation):
+@@ -93,6 +98,13 @@ class Arguments:
+             required=True,
+             description="Email of the user that will be used for password recovery.",
+         )
++        redirect_url = graphene.String(
++            required=True,
++            description=(
++                "Url of storefront view which allow user reset password, "
++                "sent by email. Url in RFC 1808 format.",
++            ),
++        )
+ 
+     class Meta:
+         description = "Sends an email with the account password modification link."
+@@ -100,12 +112,21 @@ class Meta:
+     @classmethod
+     def perform_mutation(cls, _root, info, **data):
+         email = data["email"]
++        redirect_url = data["redirect_url"]
++
++        parsed_url = urlparse(redirect_url)
++        if not validate_host(parsed_url.netloc, settings.ALLOWED_STOREFRONT_HOSTS):
++            raise ValidationError(
++                {
++                    "redirectUrl": "%s this is not valid storefront address."
++                    % parsed_url.netloc
++                }
++            )
+         try:
+             user = models.User.objects.get(email=email)
+         except ObjectDoesNotExist:
+             raise ValidationError({"email": "User with this email doesn't exist"})
+-        site = info.context.site
+-        send_user_password_reset_email(user, site)
++        send_user_password_reset_email(redirect_url, user)
+         return RequestPasswordReset()
+ 
+ 
+diff --git a/saleor/graphql/account/mutations/deprecated_account.py b/saleor/graphql/account/mutations/deprecated_account.py
+index 2824d2fdb54..96b99982997 100644
+--- a/saleor/graphql/account/mutations/deprecated_account.py
++++ b/saleor/graphql/account/mutations/deprecated_account.py
+@@ -6,7 +6,8 @@
+ from ...account.enums import AddressTypeEnum
+ from ...account.types import Address, AddressInput, User
+ from ...core.mutations import BaseMutation, ModelMutation
+-from .base import BaseCustomerCreate, UserAddressInput, send_user_password_reset_email
++from .base import BaseCustomerCreate, UserAddressInput
++from .deprecated_staff import send_user_password_reset_email
+ 
+ 
+ class CustomerRegisterInput(graphene.InputObjectType):
+diff --git a/saleor/graphql/account/mutations/deprecated_staff.py b/saleor/graphql/account/mutations/deprecated_staff.py
+index 7a0f5e732e3..acead96e737 100644
+--- a/saleor/graphql/account/mutations/deprecated_staff.py
++++ b/saleor/graphql/account/mutations/deprecated_staff.py
+@@ -1,9 +1,24 @@
+ import graphene
++from django.conf import settings
++from django.contrib.auth.tokens import default_token_generator
+ from django.core.exceptions import ObjectDoesNotExist, ValidationError
++from django.utils.encoding import force_bytes
++from django.utils.http import urlsafe_base64_encode
+ 
+-from ....account import models
++from ....account import emails, models
+ from ...core.mutations import BaseMutation
+-from .base import send_user_password_reset_email
++
++
++def send_user_password_reset_email(user, site):
++    context = {
++        "email": user.email,
++        "uid": urlsafe_base64_encode(force_bytes(user.pk)),
++        "token": default_token_generator.make_token(user),
++        "site_name": site.name,
++        "domain": site.domain,
++        "protocol": "https" if settings.ENABLE_SSL else "http",
++    }
++    emails.send_password_reset_email.delay(context, user.email, user.pk)
+ 
+ 
+ class PasswordReset(BaseMutation):
+diff --git a/saleor/graphql/schema.graphql b/saleor/graphql/schema.graphql
+index 5490d13e7aa..50b15e16679 100644
+--- a/saleor/graphql/schema.graphql
++++ b/saleor/graphql/schema.graphql
+@@ -1946,8 +1946,8 @@ type Mutations {
+   checkoutClearMetadata(id: ID!, input: MetaPath!): CheckoutClearStoredMeta
+   checkoutUpdatePrivateMetadata(id: ID!, input: MetaInput!): CheckoutUpdatePrivateMeta
+   checkoutClearPrivateMetadata(id: ID!, input: MetaPath!): CheckoutClearStoredPrivateMeta
+-  requestPasswordReset(email: String!): RequestPasswordReset
+-  setPassword(id: ID!, input: SetPasswordInput!): SetPassword
++  requestPasswordReset(email: String!, redirectUrl: String!): RequestPasswordReset
++  setPassword(token: String!, email: String!, password: String!): SetPassword
+   userUpdateMetadata(id: ID!, input: MetaInput!): UserUpdateMeta
+   userClearStoredMetadata(id: ID!, input: MetaPath!): UserClearStoredMeta
+   accountAddressCreate(input: AddressInput!, type: AddressTypeEnum): AccountAddressCreate
+@@ -3089,15 +3089,11 @@ input SeoInput {
+ }
+ 
+ type SetPassword {
+-  errors: [Error!]
++  token: String
++  errors: [Error]!
+   user: User
+ }
+ 
+-input SetPasswordInput {
+-  token: String!
+-  password: String!
+-}
+-
+ type ShippingMethod implements Node {
+   id: ID!
+   name: String!
+diff --git a/saleor/settings.py b/saleor/settings.py
+index b8f0057d409..2bfd4c7fb97 100644
+--- a/saleor/settings.py
++++ b/saleor/settings.py
+@@ -41,6 +41,10 @@ def get_bool_from_env(name, default_value):
+ )
+ MANAGERS = ADMINS
+ 
++ALLOWED_STOREFRONT_HOSTS = get_list(
++    os.environ.get("ALLOWED_STOREFRONT_HOSTS", "localhost,127.0.0.1")
++)
++
+ INTERNAL_IPS = get_list(os.environ.get("INTERNAL_IPS", "127.0.0.1"))
+ 
+ # Some cloud providers (Heroku) export REDIS_URL variable instead of CACHE_URL
+diff --git a/tests/api/test_account.py b/tests/api/test_account.py
+index 6c34243eae7..7d2678ac712 100644
+--- a/tests/api/test_account.py
++++ b/tests/api/test_account.py
+@@ -9,6 +9,7 @@
+ from django.contrib.auth.tokens import default_token_generator
+ from django.core.exceptions import ValidationError
+ from django.core.files import File
++from django.core.validators import URLValidator
+ from django.shortcuts import reverse
+ from freezegun import freeze_time
+ from prices import Money
+@@ -1341,36 +1342,32 @@ def test_staff_update_errors(staff_user, customer_user, admin_user):
+     StaffUpdate.clean_is_active(False, customer_user, staff_user)
+ 
+ 
+-def test_set_password(user_api_client, customer_user):
+-    query = """
+-    mutation SetPassword($id: ID!, $token: String!, $password: String!) {
+-        setPassword(id: $id, input: {token: $token, password: $password}) {
++SET_PASSWORD_MUTATION = """
++    mutation SetPassword($email: String!, $token: String!, $password: String!) {
++        setPassword(email: $email, token: $token, password: $password) {
+             errors {
+-                    field
+-                    message
+-                }
+-                user {
+-                    id
+-                }
++                field
++                message
++            }
++            user {
++                id
+             }
++            token
+         }
+-    """
+-    id = graphene.Node.to_global_id("User", customer_user.id)
++    }
++"""
++
++
++def test_set_password(user_api_client, customer_user):
+     token = default_token_generator.make_token(customer_user)
+     password = "spanish-inquisition"
+ 
+-    # check invalid token
+-    variables = {"id": id, "password": password, "token": "nope"}
+-    response = user_api_client.post_graphql(query, variables)
+-    content = get_graphql_content(response)
+-    errors = content["data"]["setPassword"]["errors"]
+-    assert errors[0]["message"] == INVALID_TOKEN
+-
+-    variables["token"] = token
+-    response = user_api_client.post_graphql(query, variables)
++    variables = {"email": customer_user.email, "password": password, "token": token}
++    response = user_api_client.post_graphql(SET_PASSWORD_MUTATION, variables)
+     content = get_graphql_content(response)
+     data = content["data"]["setPassword"]
+     assert data["user"]["id"]
++    assert data["token"]
+ 
+     customer_user.refresh_from_db()
+     assert customer_user.check_password(password)
+@@ -1380,29 +1377,43 @@ def test_set_password(user_api_client, customer_user):
+     assert password_resent_event.user == customer_user
+ 
+ 
+-@patch("saleor.account.emails.send_password_reset_email.delay")
+-def test_request_password_reset_email_for_staff(
+-    send_password_reset_mock, staff_api_client
+-):
+-    query = """
+-    mutation RequestPasswordReset($email: String!) {
+-        requestPasswordReset(email: $email) {
+-            errors {
+-                field
+-                message
+-            }
+-        }
+-    }
+-    """
+-    variables = {"email": staff_api_client.user.email}
+-    response = staff_api_client.post_graphql(query, variables)
++def test_set_password_invalid_token(user_api_client, customer_user):
++    variables = {"email": customer_user.email, "password": "pass", "token": "token"}
++    response = user_api_client.post_graphql(SET_PASSWORD_MUTATION, variables)
+     content = get_graphql_content(response)
+-    data = content["data"]["requestPasswordReset"]
+-    assert data == {"errors": []}
+-    assert send_password_reset_mock.call_count == 1
+-    send_password_reset_mock.assert_called_once_with(
+-        ANY, staff_api_client.user.email, staff_api_client.user.pk
++    errors = content["data"]["setPassword"]["errors"]
++    assert errors[0]["message"] == INVALID_TOKEN
++
++
++def test_set_password_invalid_email(user_api_client):
++    variables = {"email": "fake@example.com", "password": "pass", "token": "token"}
++    response = user_api_client.post_graphql(SET_PASSWORD_MUTATION, variables)
++    content = get_graphql_content(response)
++    errors = content["data"]["setPassword"]["errors"]
++    assert len(errors) == 1
++    assert errors[0]["field"] == "email"
++
++
++def test_set_password_invalid_password(user_api_client, customer_user, settings):
++    settings.AUTH_PASSWORD_VALIDATORS = [
++        {
++            "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
++            "OPTIONS": {"min_length": 5},
++        },
++        {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
++    ]
++
++    token = default_token_generator.make_token(customer_user)
++    variables = {"email": customer_user.email, "password": "1234", "token": token}
++    response = user_api_client.post_graphql(SET_PASSWORD_MUTATION, variables)
++    content = get_graphql_content(response)
++    errors = content["data"]["setPassword"]["errors"]
++    assert len(errors) == 2
++    assert (
++        errors[0]["message"]
++        == "This password is too short. It must contain at least 5 characters."
+     )
++    assert errors[1]["message"] == "This password is entirely numeric."
+ 
+ 
+ @patch("saleor.account.emails.send_password_reset_email.delay")
+@@ -1829,9 +1840,26 @@ def test_address_validator_with_country_area(user_api_client):
+ """
+ 
+ 
++@patch("saleor.account.emails._send_password_reset_email")
++def test_deprecated_account_reset_password(
++    send_password_reset_mock, user_api_client, customer_user
++):
++    # we have no user with given email
++    variables = {"email": "non-existing-email@email.com"}
++    response = user_api_client.post_graphql(CUSTOMER_PASSWORD_RESET_MUTATION, variables)
++    get_graphql_content(response)
++    assert not send_password_reset_mock.called
++
++    variables = {"email": customer_user.email}
++    response = user_api_client.post_graphql(CUSTOMER_PASSWORD_RESET_MUTATION, variables)
++    get_graphql_content(response)
++    assert send_password_reset_mock.called
++    assert send_password_reset_mock.mock_calls[0][1][1] == customer_user.email
++
++
+ REQUEST_PASSWORD_RESET_MUTATION = """
+-    mutation RequestPasswordReset($email: String!) {
+-        requestPasswordReset(email: $email) {
++    mutation RequestPasswordReset($email: String!, $redirectUrl: String!) {
++        requestPasswordReset(email: $email, redirectUrl: $redirectUrl) {
+             errors {
+                 field
+                 message
+@@ -1841,24 +1869,106 @@ def test_address_validator_with_country_area(user_api_client):
+ """
+ 
+ 
+-@pytest.mark.parametrize(
+-    "query", [CUSTOMER_PASSWORD_RESET_MUTATION, REQUEST_PASSWORD_RESET_MUTATION]
+-)
+-@patch("saleor.account.emails.send_password_reset_email.delay")
++@patch("saleor.account.emails._send_password_reset_email")
+ def test_account_reset_password(
+-    send_password_reset_mock, user_api_client, customer_user, query
++    send_password_reset_email_mock, user_api_client, customer_user
+ ):
+-    # we have no user with given email
+-    variables = {"email": "non-existing-email@email.com"}
+-    response = user_api_client.post_graphql(query, variables)
+-    get_graphql_content(response)
+-    assert not send_password_reset_mock.called
++    variables = {"email": customer_user.email, "redirectUrl": "https://www.example.com"}
++    response = user_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert not data["errors"]
++    assert send_password_reset_email_mock.called
++    send_password_reset_email_mock.assert_called_once_with(
++        ANY, user_api_client.user.email, user_api_client.user.pk
++    )
++    url = send_password_reset_email_mock.mock_calls[0][1][0]
++    url_validator = URLValidator()
++    url_validator(url)
+ 
+-    variables = {"email": customer_user.email}
+-    response = user_api_client.post_graphql(query, variables)
+-    get_graphql_content(response)
+-    assert send_password_reset_mock.called
+-    assert send_password_reset_mock.mock_calls[0][1][1] == customer_user.email
++
++@patch("saleor.account.emails._send_password_reset_email")
++def test_request_password_reset_email_for_staff(
++    send_password_reset_email_mock, staff_api_client
++):
++    redirect_url = "https://www.example.com"
++    variables = {"email": staff_api_client.user.email, "redirectUrl": redirect_url}
++    response = staff_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert not data["errors"]
++    assert send_password_reset_email_mock.call_count == 1
++    send_password_reset_email_mock.assert_called_once_with(
++        ANY, staff_api_client.user.email, staff_api_client.user.pk
++    )
++    url = send_password_reset_email_mock.mock_calls[0][1][0]
++    url_validator = URLValidator()
++    url_validator(url)
++
++
++@patch("saleor.account.emails._send_password_reset_email")
++def test_account_reset_password_invalid_email(
++    send_password_reset_email_mock, user_api_client
++):
++    variables = {
++        "email": "non-existing-email@email.com",
++        "redirectUrl": "https://www.example.com",
++    }
++    response = user_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert len(data["errors"]) == 1
++    assert not send_password_reset_email_mock.called
++
++
++@patch("saleor.account.emails._send_password_reset_email")
++def test_account_reset_password_storefront_hosts_not_allowed(
++    send_password_reset_email_mock, user_api_client, customer_user
++):
++    variables = {"email": customer_user.email, "redirectUrl": "https://www.fake.com"}
++    response = user_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert len(data["errors"]) == 1
++    assert not send_password_reset_email_mock.called
++
++
++@patch("saleor.account.emails._send_password_reset_email")
++def test_account_reset_password_all_storefront_hosts_not_allowed(
++    send_password_reset_email_mock, user_api_client, customer_user, settings
++):
++    settings.ALLOWED_STOREFRONT_HOSTS = ["*"]
++    variables = {"email": customer_user.email, "redirectUrl": "https://www.test.com"}
++    response = user_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert not data["errors"]
++    assert send_password_reset_email_mock.called
++    send_password_reset_email_mock.assert_called_once_with(
++        ANY, user_api_client.user.email, user_api_client.user.pk
++    )
++    url = send_password_reset_email_mock.mock_calls[0][1][0]
++    url_validator = URLValidator()
++    url_validator(url)
++
++
++@patch("saleor.account.emails._send_password_reset_email")
++def test_account_reset_password_subdomain(
++    send_password_reset_email_mock, user_api_client, customer_user, settings
++):
++    settings.ALLOWED_STOREFRONT_HOSTS = [".example.com"]
++    variables = {"email": customer_user.email, "redirectUrl": "https://sub.example.com"}
++    response = user_api_client.post_graphql(REQUEST_PASSWORD_RESET_MUTATION, variables)
++    content = get_graphql_content(response)
++    data = content["data"]["requestPasswordReset"]
++    assert not data["errors"]
++    assert send_password_reset_email_mock.called
++    send_password_reset_email_mock.assert_called_once_with(
++        ANY, user_api_client.user.email, user_api_client.user.pk
++    )
++    url = send_password_reset_email_mock.mock_calls[0][1][0]
++    url_validator = URLValidator()
++    url_validator(url)
+ 
+ 
+ CUSTOMER_ADDRESS_CREATE_MUTATION = """
+diff --git a/tests/settings.py b/tests/settings.py
+index 026f6ebd2f6..a1093e4b43e 100644
+--- a/tests/settings.py
++++ b/tests/settings.py
+@@ -6,6 +6,8 @@
+ 
+ SECRET_KEY = "NOTREALLY"
+ 
++ALLOWED_STOREFRONT_HOSTS = ["www.example.com"]
++
+ DEFAULT_CURRENCY = "USD"
+ 
+ TIME_ZONE = "America/Chicago"
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

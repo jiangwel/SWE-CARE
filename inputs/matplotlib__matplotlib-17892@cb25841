@@ -1,0 +1,133 @@
+  Task-ID: matplotlib__matplotlib-17892@cb25841
+  Please checkout to this commit first: ec0132f66170dabc6352ba79d839b1dd9eb02157
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Earlier validation of color inputs
+<!--To help us understand and resolve your issue, please fill out the form to the best of your ability.-->
+<!--You can feel free to delete the sections that do not apply.-->
+
+### Bug report
+
+**Bug summary**
+
+Currently Line2D only validates `color` at draw time, which can lead to somewhat confusing errors when working interactively.  (Likely the same argument applies to facecolor, edgecolor, markerfacecolor, markeredgecolor, other artists, etc.)
+
+**Code for reproduction**
+
+At an IPython interactive console.
+```
+plt.plot([1, 2], c="foobar")
+```
+
+**Actual outcome**
+
+The bad color causes an asynchronous traceback to be shown at draw time, and the figure is stuck in a bad state, partially drawn, because the error occurs in the middle of the draw loop; further attempts at drawing on the same figure fail in the same way because the "bad" Line2D artist is still among the children.  In theory one could probably fix that with something like `plt.gca().lines[-1].remove()` to remove the "bad" artist, but that requires rather involved knowledge of the architecture, especially when the figure window is not actually showing anything.
+
+**Expected outcome**
+
+An immediate exception and traceback, as one would get e.g. with `plt.plot([1, 2], lw="foobar")`.
+
+Note that we can't *store* the validated color immediately (because of currently awkward semantics about when Cn colors get resolved), but whether a certain input is a valid color does not depend on the current color cycle.
+
+Labeling as good first issue because I *think* it's just a matter of adding validation calls in a few places, but I didn't actually try :)
+
+**Matplotlib version**
+<!--Please specify your platform and versions of the relevant libraries you are using:-->
+  * Operating system: fedora
+  * Matplotlib version: master
+  * Matplotlib backend (`print(matplotlib.get_backend())`): qt5agg
+  * Python version: 38
+  * Jupyter version (if applicable):
+  * Other libraries: 
+
+<!--Please tell us how you installed matplotlib and python e.g., from source, pip, conda-->
+<!--If you installed from conda, please specify which channel you used if not the default-->
+  </issue>
+  
+  <patch>
+  diff --git a/lib/matplotlib/cbook/__init__.py b/lib/matplotlib/cbook/__init__.py
+index dd8b6aed9b8a..cf29b569eb1d 100644
+--- a/lib/matplotlib/cbook/__init__.py
++++ b/lib/matplotlib/cbook/__init__.py
+@@ -2242,7 +2242,7 @@ def type_name(tp):
+                     type_name(type(v))))
+ 
+ 
+-def _check_in_list(_values, **kwargs):
++def _check_in_list(_values, _print_supported_values=True, **kwargs):
+     """
+     For each *key, value* pair in *kwargs*, check that *value* is in *_values*;
+     if not, raise an appropriate ValueError.
+@@ -2254,9 +2254,13 @@ def _check_in_list(_values, **kwargs):
+     values = _values
+     for k, v in kwargs.items():
+         if v not in values:
+-            raise ValueError(
+-                "{!r} is not a valid value for {}; supported values are {}"
+-                .format(v, k, ', '.join(map(repr, values))))
++            if _print_supported_values:
++                raise ValueError(
++                    "{!r} is not a valid value for {}; supported values are {}"
++                    .format(v, k, ', '.join(map(repr, values))))
++            else:
++                raise ValueError(
++                    "{!r} is not a valid value for {}".format(v, k))
+ 
+ 
+ def _check_shape(_shape, **kwargs):
+diff --git a/lib/matplotlib/lines.py b/lib/matplotlib/lines.py
+index 6efb42d0e8ef..ae7d271d1f3a 100644
+--- a/lib/matplotlib/lines.py
++++ b/lib/matplotlib/lines.py
+@@ -14,6 +14,7 @@
+ from .artist import Artist, allow_rasterization
+ from .cbook import (
+     _to_unmasked_float_array, ls_mapper, ls_mapper_r, STEP_LOOKUP_MAP)
++from .colors import is_color_like, get_named_colors_mapping
+ from .markers import MarkerStyle
+ from .path import Path
+ from .transforms import (
+@@ -1039,6 +1040,9 @@ def set_color(self, color):
+         ----------
+         color : color
+         """
++        if not is_color_like(color):
++            cbook._check_in_list(get_named_colors_mapping(),
++                                 _print_supported_values=False, color=color)
+         self._color = color
+         self.stale = True
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

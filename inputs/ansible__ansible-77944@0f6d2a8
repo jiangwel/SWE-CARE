@@ -1,0 +1,463 @@
+  Task-ID: ansible__ansible-77944@0f6d2a8
+  Please checkout to this commit first: 9767cda50746f79ba435be1e025e5b6cf487ed74
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Preserve add_host/group_by data on inventory refresh
+##### SUMMARY
+Since `add_host` and `group_by` actions only modify the runtime inventory, hosts/groups/vars added by them don't survive a `meta: refresh_inventory` call (since that call completely clears the runtime inventory). 
+
+##### ISSUE TYPE
+- Feature Idea
+
+##### COMPONENT NAME
+InventoryManager
+
+##### ADDITIONAL INFORMATION
+After some internal discussion, the general consensus seemed to be that this behavior is an undesirable default. The `add_host` and `group_by` actions should manage a more persistent state independent of the runtime inventory, then apply their changes to the running inventory. When a `meta: refresh_inventory` occurs, the normal dynamic inventory clear/refresh should happen, then reapply the add_host/group_by state. This should probably be the default behavior, but a config switch or a different `meta` action (or an arg to it) to emulate the current behavior could also be created if necessary.
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/inventory/manager.py b/lib/ansible/inventory/manager.py
+index c55bbe615d7998..d5955b02182813 100644
+--- a/lib/ansible/inventory/manager.py
++++ b/lib/ansible/inventory/manager.py
+@@ -166,6 +166,9 @@ def __init__(self, loader, sources=None, parse=True, cache=True):
+         if parse:
+             self.parse_sources(cache=cache)
+ 
++        self._cached_dynamic_hosts = []
++        self._cached_dynamic_grouping = []
++
+     @property
+     def localhost(self):
+         return self._inventory.localhost
+@@ -343,6 +346,10 @@ def refresh_inventory(self):
+         self.clear_caches()
+         self._inventory = InventoryData()
+         self.parse_sources(cache=False)
++        for host in self._cached_dynamic_hosts:
++            self.add_dynamic_host(host, {})
++        for host in self._cached_dynamic_grouping:
++            self.add_dynamic_group(host, {})
+ 
+     def _match_list(self, items, pattern_str):
+         # compile patterns
+@@ -648,3 +655,93 @@ def remove_restriction(self):
+ 
+     def clear_pattern_cache(self):
+         self._pattern_cache = {}
++
++    def add_dynamic_host(self, host_info, result_item):
++        '''
++        Helper function to add a new host to inventory based on a task result.
++        '''
++
++        changed = False
++        if not result_item:
++            self._cached_dynamic_hosts.append(host_info)
++
++        if host_info:
++            host_name = host_info.get('host_name')
++
++            # Check if host in inventory, add if not
++            if host_name not in self.hosts:
++                self.add_host(host_name, 'all')
++                changed = True
++            new_host = self.hosts.get(host_name)
++
++            # Set/update the vars for this host
++            new_host_vars = new_host.get_vars()
++            new_host_combined_vars = combine_vars(new_host_vars, host_info.get('host_vars', dict()))
++            if new_host_vars != new_host_combined_vars:
++                new_host.vars = new_host_combined_vars
++                changed = True
++
++            new_groups = host_info.get('groups', [])
++            for group_name in new_groups:
++                if group_name not in self.groups:
++                    group_name = self._inventory.add_group(group_name)
++                    changed = True
++                new_group = self.groups[group_name]
++                if new_group.add_host(self.hosts[host_name]):
++                    changed = True
++
++            # reconcile inventory, ensures inventory rules are followed
++            if changed:
++                self.reconcile_inventory()
++
++            result_item['changed'] = changed
++
++    def add_dynamic_group(self, host, result_item):
++        '''
++        Helper function to add a group (if it does not exist), and to assign the
++        specified host to that group.
++        '''
++
++        changed = False
++
++        if not result_item:
++            self._cached_dynamic_grouping.append(host)
++
++        # the host here is from the executor side, which means it was a
++        # serialized/cloned copy and we'll need to look up the proper
++        # host object from the master inventory
++        real_host = self.hosts.get(host.name)
++        if real_host is None:
++            if host.name == self.localhost.name:
++                real_host = self.localhost
++            else:
++                raise AnsibleError('%s cannot be matched in inventory' % host.name)
++        group_name = result_item.get('add_group')
++        parent_group_names = result_item.get('parent_groups', [])
++
++        if group_name not in self.groups:
++            group_name = self.add_group(group_name)
++
++        for name in parent_group_names:
++            if name not in self.groups:
++                # create the new group and add it to inventory
++                self.add_group(name)
++                changed = True
++
++        group = self._inventory.groups[group_name]
++        for parent_group_name in parent_group_names:
++            parent_group = self.groups[parent_group_name]
++            new = parent_group.add_child_group(group)
++            if new and not changed:
++                changed = True
++
++        if real_host not in group.get_hosts():
++            changed = group.add_host(real_host)
++
++        if group not in real_host.get_groups():
++            changed = real_host.add_group(group)
++
++        if changed:
++            self.reconcile_inventory()
++
++        result_item['changed'] = changed
+diff --git a/lib/ansible/plugins/strategy/__init__.py b/lib/ansible/plugins/strategy/__init__.py
+index 9c9846a997f0bb..57247ba0a485e4 100644
+--- a/lib/ansible/plugins/strategy/__init__.py
++++ b/lib/ansible/plugins/strategy/__init__.py
+@@ -43,7 +43,7 @@
+ from ansible.executor.task_result import TaskResult
+ from ansible.executor.task_queue_manager import CallbackSend
+ from ansible.module_utils.six import string_types
+-from ansible.module_utils._text import to_text, to_native
++from ansible.module_utils._text import to_text
+ from ansible.module_utils.connection import Connection, ConnectionError
+ from ansible.playbook.conditional import Conditional
+ from ansible.playbook.handler import Handler
+@@ -697,11 +697,14 @@ def search_handler_blocks_by_name(handler_name, handler_blocks):
+                     if 'add_host' in result_item:
+                         # this task added a new host (add_host module)
+                         new_host_info = result_item.get('add_host', dict())
+-                        self._add_host(new_host_info, result_item)
++                        self._inventory.add_dynamic_host(new_host_info, result_item)
++                        # ensure host is available for subsequent plays
++                        if result_item.get('changed') and new_host_info['host_name'] not in self._hosts_cache_all:
++                            self._hosts_cache_all.append(new_host_info['host_name'])
+ 
+                     elif 'add_group' in result_item:
+                         # this task added a new group (group_by module)
+-                        self._add_group(original_host, result_item)
++                        self._inventory.add_dynamic_group(original_host, result_item)
+ 
+                     if 'add_host' in result_item or 'add_group' in result_item:
+                         item_vars = _get_item_vars(result_item, original_task)
+@@ -871,92 +874,6 @@ def _wait_on_pending_results(self, iterator):
+ 
+         return ret_results
+ 
+-    def _add_host(self, host_info, result_item):
+-        '''
+-        Helper function to add a new host to inventory based on a task result.
+-        '''
+-
+-        changed = False
+-
+-        if host_info:
+-            host_name = host_info.get('host_name')
+-
+-            # Check if host in inventory, add if not
+-            if host_name not in self._inventory.hosts:
+-                self._inventory.add_host(host_name, 'all')
+-                self._hosts_cache_all.append(host_name)
+-                changed = True
+-            new_host = self._inventory.hosts.get(host_name)
+-
+-            # Set/update the vars for this host
+-            new_host_vars = new_host.get_vars()
+-            new_host_combined_vars = combine_vars(new_host_vars, host_info.get('host_vars', dict()))
+-            if new_host_vars != new_host_combined_vars:
+-                new_host.vars = new_host_combined_vars
+-                changed = True
+-
+-            new_groups = host_info.get('groups', [])
+-            for group_name in new_groups:
+-                if group_name not in self._inventory.groups:
+-                    group_name = self._inventory.add_group(group_name)
+-                    changed = True
+-                new_group = self._inventory.groups[group_name]
+-                if new_group.add_host(self._inventory.hosts[host_name]):
+-                    changed = True
+-
+-            # reconcile inventory, ensures inventory rules are followed
+-            if changed:
+-                self._inventory.reconcile_inventory()
+-
+-            result_item['changed'] = changed
+-
+-    def _add_group(self, host, result_item):
+-        '''
+-        Helper function to add a group (if it does not exist), and to assign the
+-        specified host to that group.
+-        '''
+-
+-        changed = False
+-
+-        # the host here is from the executor side, which means it was a
+-        # serialized/cloned copy and we'll need to look up the proper
+-        # host object from the master inventory
+-        real_host = self._inventory.hosts.get(host.name)
+-        if real_host is None:
+-            if host.name == self._inventory.localhost.name:
+-                real_host = self._inventory.localhost
+-            else:
+-                raise AnsibleError('%s cannot be matched in inventory' % host.name)
+-        group_name = result_item.get('add_group')
+-        parent_group_names = result_item.get('parent_groups', [])
+-
+-        if group_name not in self._inventory.groups:
+-            group_name = self._inventory.add_group(group_name)
+-
+-        for name in parent_group_names:
+-            if name not in self._inventory.groups:
+-                # create the new group and add it to inventory
+-                self._inventory.add_group(name)
+-                changed = True
+-
+-        group = self._inventory.groups[group_name]
+-        for parent_group_name in parent_group_names:
+-            parent_group = self._inventory.groups[parent_group_name]
+-            new = parent_group.add_child_group(group)
+-            if new and not changed:
+-                changed = True
+-
+-        if real_host not in group.get_hosts():
+-            changed = group.add_host(real_host)
+-
+-        if group not in real_host.get_groups():
+-            changed = real_host.add_group(group)
+-
+-        if changed:
+-            self._inventory.reconcile_inventory()
+-
+-        result_item['changed'] = changed
+-
+     def _copy_included_file(self, included_file):
+         '''
+         A proven safe and performant way to create a copy of an included file
+diff --git a/test/integration/targets/refresh_inventory/aliases b/test/integration/targets/refresh_inventory/aliases
+new file mode 100644
+index 00000000000000..13e01f0c9477e3
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/aliases
+@@ -0,0 +1,2 @@
++shippable/posix/group1
++context/controller
+diff --git a/test/integration/targets/refresh_inventory/inventory.yml b/test/integration/targets/refresh_inventory/inventory.yml
+new file mode 120000
+index 00000000000000..59df9c51aede41
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/inventory.yml
+@@ -0,0 +1 @@
++./inventory_old.yml
+\ No newline at end of file
+diff --git a/test/integration/targets/refresh_inventory/inventory_new.yml b/test/integration/targets/refresh_inventory/inventory_new.yml
+new file mode 100644
+index 00000000000000..6d6dec7c000a64
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/inventory_new.yml
+@@ -0,0 +1,8 @@
++all:
++  hosts:
++    two:
++      parity: even
++    three:
++      parity: odd
++    four:
++      parity: even
+diff --git a/test/integration/targets/refresh_inventory/inventory_old.yml b/test/integration/targets/refresh_inventory/inventory_old.yml
+new file mode 100644
+index 00000000000000..42d9bdd7a514f8
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/inventory_old.yml
+@@ -0,0 +1,8 @@
++all:
++  hosts:
++    one:
++      parity: odd
++    two:
++      parity: even
++    three:
++      parity: odd
+diff --git a/test/integration/targets/refresh_inventory/refresh.yml b/test/integration/targets/refresh_inventory/refresh.yml
+new file mode 100644
+index 00000000000000..05312485ebf149
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/refresh.yml
+@@ -0,0 +1,38 @@
++- hosts: all
++  gather_facts: false
++  tasks:
++    - block:
++      - name: check initial state
++        assert:
++          that:
++            - "'one' in ansible_play_hosts"
++            - "'two' in ansible_play_hosts"
++            - "'three' in ansible_play_hosts"
++            - "'four' not in ansible_play_hosts"
++        run_once: true
++
++      - name: change symlink
++        file: src=./inventory_new.yml dest=./inventory.yml state=link force=yes follow=false
++        delegate_to: localhost
++        run_once: true
++
++      - name: refresh the inventory to new source
++        meta: refresh_inventory
++
++      always:
++        - name: revert symlink, invenotry was already reread or failed
++          file: src=./inventory_old.yml dest=./inventory.yml state=link force=yes follow=false
++          delegate_to: localhost
++          run_once: true
++
++- hosts: all
++  gather_facts: false
++  tasks:
++      - name: check refreshed state
++        assert:
++          that:
++            - "'one' not in ansible_play_hosts"
++            - "'two' in ansible_play_hosts"
++            - "'three' in ansible_play_hosts"
++            - "'four' in ansible_play_hosts"
++        run_once: true
+diff --git a/test/integration/targets/refresh_inventory/refresh_preserve_dynamic.yml b/test/integration/targets/refresh_inventory/refresh_preserve_dynamic.yml
+new file mode 100644
+index 00000000000000..a24c76d70cc359
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/refresh_preserve_dynamic.yml
+@@ -0,0 +1,65 @@
++- hosts: all
++  gather_facts: false
++  tasks:
++      - name: check initial state
++        assert:
++          that:
++            - "'one' in ansible_play_hosts"
++            - "'two' in ansible_play_hosts"
++            - "'three' in ansible_play_hosts"
++            - "'four' not in ansible_play_hosts"
++        run_once: true
++
++      - name: add a host
++        add_host:
++          name: yolo
++          parity: null
++
++      - name: group em
++        group_by:
++          key: parity
++
++- hosts: all
++  gather_facts: false
++  tasks:
++    - name: test and ensure we restore symlink
++      run_once: true
++      block:
++      - name: check added host state
++        assert:
++          that:
++            - "'yolo' in ansible_play_hosts"
++            - "'two' in groups['even']"
++            - "'three' in groups['odd']"
++
++      - name: change symlink
++        file: src=./inventory_new.yml dest=./inventory.yml state=link force=yes follow=false
++        delegate_to: localhost
++
++      - name: refresh the inventory to new source
++        meta: refresh_inventory
++
++      always:
++        - name: revert symlink, invenotry was already reread or failed
++          file: src=./inventory_old.yml dest=./inventory.yml state=link force=yes follow=false
++          delegate_to: localhost
++
++- hosts: all
++  gather_facts: false
++  tasks:
++      - name: check refreshed state
++        assert:
++          that:
++            - "'one' not in ansible_play_hosts"
++            - "'two' in ansible_play_hosts"
++            - "'three' in ansible_play_hosts"
++            - "'four' in ansible_play_hosts"
++        run_once: true
++
++      - name: check added host state
++        assert:
++          that:
++            - "'yolo' in ansible_play_hosts"
++            - "'two' in groups['even']"
++            - "'three' in groups['odd']"
++        run_once: true
+diff --git a/test/integration/targets/refresh_inventory/runme.sh b/test/integration/targets/refresh_inventory/runme.sh
+new file mode 100755
+index 00000000000000..c4a5df4a48eae2
+--- /dev/null
++++ b/test/integration/targets/refresh_inventory/runme.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/env bash
++
++set -eux
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

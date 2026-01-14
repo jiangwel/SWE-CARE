@@ -1,0 +1,308 @@
+  Task-ID: pydantic__pydantic-2262@b539d3e
+  Please checkout to this commit first: 13a5c7d676167b415080de5e6e6a74bea095b239
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BaseModel.schema() fails when using generic types
+# Bug
+## Version
+Output of `python -c "import pydantic.utils; print(pydantic.utils.version_info())"`:
+```
+  pydantic version: 1.5.1
+            pydantic compiled: True
+                 install path: C:\Users\adrian\miniconda3\envs\sangl-butler\Lib\site-packages\pydantic
+               python version: 3.8.1 (default, Mar  2 2020, 13:06:26) [MSC v.1916 64 bit (AMD64)]
+                     platform: Windows-10-10.0.18362-SP0
+     optional deps. installed: ['typing-extensions', 'email-validator']
+
+```
+## Description
+Hi there!
+
+I want to write a generic type, that behaves like the type it extends, but injects fields into the model with ``__modify_schema__``. So my approach was to use a generic class to use it like that:
+
+```py
+from pydantic import BaseModel
+
+class MyModel(BaseModel):
+   my_field: FieldThatModifiesModel[str] = "Default value"
+
+````
+The field should completely behave like the type var.
+
+However, when I use a generic type in my model, I can't retrieve the model anymore.
+See the code below (taken from the docs):
+## Example
+```py
+from pydantic import BaseModel, ValidationError
+from pydantic.fields import ModelField
+from typing import TypeVar, Generic
+
+AgedType = TypeVar('AgedType')
+QualityType = TypeVar('QualityType')
+
+# This is not a pydantic model, it's an arbitrary generic class
+class TastingModel(Generic[AgedType, QualityType]):
+    def __init__(self, name: str, aged: AgedType, quality: QualityType):
+        self.name = name
+        self.aged = aged
+        self.quality = quality
+
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    # You don't need to add the "ModelField", but it will help your
+    # editor give you completion and catch errors
+    def validate(cls, v, field: ModelField):
+        if not isinstance(v, cls):
+            # The value is not even a TastingModel
+            raise TypeError('Invalid value')
+        if not field.sub_fields:
+            # Generic parameters were not provided so we don't try to validate
+            # them and just return the value as is
+            return v
+        aged_f = field.sub_fields[0]
+        quality_f = field.sub_fields[1]
+        errors = []
+        # Here we don't need the validated value, but we want the errors
+        valid_value, error = aged_f.validate(v.aged, {}, loc='aged')
+        if error:
+            errors.append(error)
+        # Here we don't need the validated value, but we want the errors
+        valid_value, error = quality_f.validate(v.quality, {}, loc='quality')
+        if error:
+            errors.append(error)
+        if errors:
+            raise ValidationError(errors, cls)
+        # Validation passed without errors, return the same instance received
+        return v
+
+class Model(BaseModel):
+    # for wine, "aged" is an int with years, "quality" is a float
+    wine: TastingModel[int, float]
+    # for cheese, "aged" is a bool, "quality" is a str
+    cheese: TastingModel[bool, str]
+    # for thing, "aged" is a Any, "quality" is Any
+    thing: TastingModel
+
+print(Model.schema())
+"""
+Traceback (most recent call last):
+  File ".../generic_type.py", line 54, in <module>
+    print(Model.schema())
+  File "pydantic\main.py", line 556, in pydantic.main.BaseModel.schema
+  File "pydantic\schema.py", line 132, in pydantic.schema.model_schema
+  File "pydantic\schema.py", line 455, in pydantic.schema.model_process_schema
+  File "pydantic\schema.py", line 491, in pydantic.schema.model_type_schema
+  File "pydantic\schema.py", line 185, in pydantic.schema.field_schema
+  File "pydantic\schema.py", line 411, in pydantic.schema.field_type_schema
+AssertionError: 10
+"""
+```
+  </issue>
+  
+  <patch>
+  diff --git a/changes/2262-maximberg.md b/changes/2262-maximberg.md
+new file mode 100644
+index 00000000000..0911c71d0a4
+--- /dev/null
++++ b/changes/2262-maximberg.md
+@@ -0,0 +1 @@
++Support generating schema for Generic fields. 
+\ No newline at end of file
+diff --git a/pydantic/schema.py b/pydantic/schema.py
+index cf4dc4c7b88..2b5fe8f1e83 100644
+--- a/pydantic/schema.py
++++ b/pydantic/schema.py
+@@ -11,6 +11,7 @@
+     Callable,
+     Dict,
+     FrozenSet,
++    Generic,
+     Iterable,
+     List,
+     Optional,
+@@ -27,6 +28,7 @@
+ 
+ from .fields import (
+     SHAPE_FROZENSET,
++    SHAPE_GENERIC,
+     SHAPE_ITERABLE,
+     SHAPE_LIST,
+     SHAPE_MAPPING,
+@@ -481,7 +483,7 @@ def field_type_schema(
+             sub_schema = sub_schema[0]  # type: ignore
+         f_schema = {'type': 'array', 'items': sub_schema}
+     else:
+-        assert field.shape == SHAPE_SINGLETON, field.shape
++        assert field.shape in {SHAPE_SINGLETON, SHAPE_GENERIC}, field.shape
+         f_schema, f_definitions, f_nested_models = field_singleton_schema(
+             field,
+             by_alias=by_alias,
+@@ -496,7 +498,10 @@ def field_type_schema(
+ 
+     # check field type to avoid repeated calls to the same __modify_schema__ method
+     if field.type_ != field.outer_type_:
+-        modify_schema = getattr(field.outer_type_, '__modify_schema__', None)
++        if field.shape == SHAPE_GENERIC:
++            modify_schema = getattr(field.type_, '__modify_schema__', None)
++        else:
++            modify_schema = getattr(field.outer_type_, '__modify_schema__', None)
+         if modify_schema:
+             modify_schema(f_schema)
+     return f_schema, definitions, nested_models
+@@ -828,6 +833,11 @@ def field_singleton_schema(  # noqa: C901 (ignore complexity)
+         schema_ref = get_schema_ref(model_name, ref_prefix, ref_template, schema_overrides)
+         return schema_ref, definitions, nested_models
+ 
++    # For generics with no args
++    args = get_args(field_type)
++    if args is not None and not args and Generic in field_type.__bases__:
++        return f_schema, definitions, nested_models
++
+     raise ValueError(f'Value not declarable with JSON Schema, field: {field}')
+ 
+ 
+diff --git a/pydantic/typing.py b/pydantic/typing.py
+index 8f8cbac927c..241c3bf36ba 100644
+--- a/pydantic/typing.py
++++ b/pydantic/typing.py
+@@ -92,7 +92,7 @@ def evaluate_forwardref(type_: ForwardRef, globalns: Any, localns: Any) -> Any:
+     if sys.version_info < (3, 7):
+ 
+         def get_args(t: Type[Any]) -> Tuple[Any, ...]:
+-            """Simplest get_args compatability layer possible.
++            """Simplest get_args compatibility layer possible.
+ 
+             The Python 3.6 typing module does not have `_GenericAlias` so
+             this won't work for everything. In particular this will not
+@@ -106,7 +106,7 @@ def get_args(t: Type[Any]) -> Tuple[Any, ...]:
+         from typing import _GenericAlias
+ 
+         def get_args(t: Type[Any]) -> Tuple[Any, ...]:
+-            """Compatability version of get_args for python 3.7.
++            """Compatibility version of get_args for python 3.7.
+ 
+             Mostly compatible with the python 3.8 `typing` module version
+             and able to handle almost all use cases.
+diff --git a/tests/test_schema.py b/tests/test_schema.py
+index 3566716233e..f4f4b5b5d31 100644
+--- a/tests/test_schema.py
++++ b/tests/test_schema.py
+@@ -7,7 +7,21 @@
+ from enum import Enum, IntEnum
+ from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
+ from pathlib import Path
+-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, NewType, Optional, Set, Tuple, Union
++from typing import (
++    Any,
++    Callable,
++    Dict,
++    FrozenSet,
++    Generic,
++    Iterable,
++    List,
++    NewType,
++    Optional,
++    Set,
++    Tuple,
++    TypeVar,
++    Union,
++)
+ from uuid import UUID
+ 
+ import pytest
+@@ -2149,3 +2163,58 @@ class Model(BaseModel):
+         f'{module_2.__name__}__MyEnum',
+         f'{module_2.__name__}__MyModel',
+     }
++
++
++@pytest.mark.skipif(
++    sys.version_info < (3, 7), reason='schema generation for generic fields is not available in python < 3.7'
++)
++def test_schema_for_generic_field():
++    T = TypeVar('T')
++
++    class GenModel(Generic[T]):
++        def __init__(self, data: Any):
++            self.data = data
++
++        @classmethod
++        def __get_validators__(cls):
++            yield cls.validate
++
++        @classmethod
++        def validate(cls, v: Any):
++            return v
++
++    class Model(BaseModel):
++        data: GenModel[str]
++        data1: GenModel
++
++    assert Model.schema() == {
++        'title': 'Model',
++        'type': 'object',
++        'properties': {
++            'data': {'title': 'Data', 'type': 'string'},
++            'data1': {
++                'title': 'Data1',
++            },
++        },
++        'required': ['data', 'data1'],
++    }
++
++    class GenModelModified(GenModel, Generic[T]):
++        @classmethod
++        def __modify_schema__(cls, field_schema):
++            field_schema.pop('type', None)
++            field_schema.update(anyOf=[{'type': 'string'}, {'type': 'array', 'items': {'type': 'string'}}])
++
++    class ModelModified(BaseModel):
++        data: GenModelModified[str]
++        data1: GenModelModified
++
++    assert ModelModified.schema() == {
++        'title': 'ModelModified',
++        'type': 'object',
++        'properties': {
++            'data': {'title': 'Data', 'anyOf': [{'type': 'string'}, {'type': 'array', 'items': {'type': 'string'}}]},
++            'data1': {'title': 'Data1', 'anyOf': [{'type': 'string'}, {'type': 'array', 'items': {'type': 'string'}}]},
++        },
++        'required': ['data', 'data1'],
++    }
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

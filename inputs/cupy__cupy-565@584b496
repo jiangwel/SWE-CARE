@@ -1,0 +1,226 @@
+  Task-ID: cupy__cupy-565@584b496
+  Please checkout to this commit first: 529fc8338e9e5ed7f4cea322d886fcb6838dd291
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  csrmm2 crashes when using transa=True
+When running the following code
+```
+import numpy as np
+import scipy.sparse as sp
+
+from chainer import cuda
+
+import cupy
+import cupy.sparse
+
+def main():
+    x = np.random.uniform(-1, 1, (4, 3)).astype(np.float32)
+    x = cuda.to_gpu(x)
+    W = sp.csr_matrix(np.random.uniform(-1, 1, (2, 3))).astype(np.float32)
+    W = cupy.sparse.csr_matrix(W)
+
+    y = cupy.cusparse.csrmm2(W, x.T).T
+
+    gx = cupy.cusparse.csrmm2(W, y.T, transa=True).T  # This does not work
+
+if __name__ == '__main__':
+    main()
+```
+cupy crashes with the error:
+```
+Traceback (most recent call last):
+  File "main.py", line 23, in <module>
+    main()
+  File "main.py", line 20, in main
+    gx = cupy.cusparse.csrmm2(W, y.T, transa=True).T
+  File "/home/tommi/.pyenv/versions/cupy-dev/lib/python3.4/site-packages/cupy-2.0.0rc1-py3.4-linux-x86_64.egg/cupy/cusparse.py", line 205, in csrmm2
+    b.data.ptr, ldb, beta.data, c.data.ptr, ldc)
+  File "/home/tommi/.pyenv/versions/cupy-dev/lib/python3.4/site-packages/cupy-2.0.0rc1-py3.4-linux-x86_64.egg/cupy/cusparse.py", line 52, in _call_cusparse
+    return f(*args)
+  File "cupy/cuda/cusparse.pyx", line 347, in cupy.cuda.cusparse.scsrmm2
+  File "cupy/cuda/cusparse.pyx", line 357, in cupy.cuda.cusparse.scsrmm2
+  File "cupy/cuda/cusparse.pyx", line 229, in cupy.cuda.cusparse.check_status
+cupy.cuda.cusparse.CuSparseError: CUSPARSE_STATUS_INVALID_VALUE
+```
+This can be fixed by replacing the crashing line with `gx = cupy.cusparse.csrmm2(W.T, y.T).T`, so there appears to be a bug.
+
+I am using cupy 2.0.0rc1 and CUDA 8.0.
+  </issue>
+  
+  <patch>
+  diff --git a/cupy/cusparse.py b/cupy/cusparse.py
+index 927068e4b7d..b51aa514b27 100644
+--- a/cupy/cusparse.py
++++ b/cupy/cusparse.py
+@@ -143,7 +143,8 @@ def csrmm(a, b, c=None, alpha=1, beta=0, transa=False):
+     beta = numpy.array(beta, a.dtype).ctypes
+     _call_cusparse(
+         'csrmm', a.dtype,
+-        handle, _transpose_flag(transa), m, n, k, a.nnz,
++        handle, _transpose_flag(transa),
++        a.shape[0], n, a.shape[1], a.nnz,
+         alpha.data, a._descr.descriptor, a.data.data.ptr,
+         a.indptr.data.ptr, a.indices.data.ptr,
+         b.data.ptr, ldb, beta.data, c.data.ptr, ldc)
+@@ -160,6 +161,8 @@ def csrmm2(a, b, c=None, alpha=1.0, beta=0.0, transa=False, transb=False):
+     where :math:`o_a` and :math:`o_b` are transpose functions when ``transa``
+     and ``tranb`` are ``True`` respectively. And they are identity functions
+     otherwise.
++    It is forbidden that both ``transa`` and ``transb`` are ``True`` in
++    cuSPARSE specification.
+ 
+     Args:
+         a (cupy.sparse.csr): Sparse matrix A.
+@@ -177,10 +180,11 @@ def csrmm2(a, b, c=None, alpha=1.0, beta=0.0, transa=False, transb=False):
+     assert a.ndim == b.ndim == 2
+     assert b.flags.f_contiguous
+     assert c is None or c.flags.f_contiguous
++    assert not (transa and transb)
+ 
+     a_shape = a.shape if not transa else a.shape[::-1]
+     b_shape = b.shape if not transb else b.shape[::-1]
+-    if a_shape[1] != b.shape[0]:
++    if a_shape[1] != b_shape[0]:
+         raise ValueError('dimension mismatch')
+ 
+     handle = device.get_cusparse_handle()
+@@ -199,7 +203,7 @@ def csrmm2(a, b, c=None, alpha=1.0, beta=0.0, transa=False, transb=False):
+     beta = numpy.array(beta, a.dtype).ctypes
+     _call_cusparse(
+         'csrmm2', a.dtype,
+-        handle, op_a, op_b, m, n, k, a.nnz,
++        handle, op_a, op_b, a.shape[0], n, a.shape[1], a.nnz,
+         alpha.data, a._descr.descriptor, a.data.data.ptr,
+         a.indptr.data.ptr, a.indices.data.ptr,
+         b.data.ptr, ldb, beta.data, c.data.ptr, ldc)
+diff --git a/tests/cupy_tests/test_cusparse.py b/tests/cupy_tests/test_cusparse.py
+new file mode 100644
+index 00000000000..8ca4a9f6403
+--- /dev/null
++++ b/tests/cupy_tests/test_cusparse.py
+@@ -0,0 +1,91 @@
++import unittest
++
++import numpy
++try:
++    import scipy.sparse
++except ImportError:
++    pass
++
++import cupy
++from cupy import testing
++
++
++@testing.parameterize(*testing.product({
++    'dtype': [numpy.float32, numpy.float64],
++    'transa': [True, False],
++}))
++@testing.with_requires('scipy')
++class TestCsrmm(unittest.TestCase):
++
++    alpha = 0.5
++    beta = 0.25
++
++    def setUp(self):
++        self.op_a = scipy.sparse.random(2, 3, density=0.5, dtype=self.dtype)
++        if self.transa:
++            self.a = self.op_a.T
++        else:
++            self.a = self.op_a
++        self.b = numpy.random.uniform(-1, 1, (3, 4)).astype(self.dtype)
++        self.c = numpy.random.uniform(-1, 1, (2, 4)).astype(self.dtype)
++
++    def test_csrmm(self):
++        a = cupy.sparse.csr_matrix(self.a)
++        b = cupy.array(self.b, order='f')
++        y = cupy.cusparse.csrmm(a, b, alpha=self.alpha, transa=self.transa)
++        expect = self.alpha * (self.op_a.dot(self.b))
++        testing.assert_array_almost_equal(y, expect)
++
++    def test_csrmm_with_c(self):
++        a = cupy.sparse.csr_matrix(self.a)
++        b = cupy.array(self.b, order='f')
++        c = cupy.array(self.c, order='f')
++        y = cupy.cusparse.csrmm(
++            a, b, c=c, alpha=self.alpha, beta=self.beta, transa=self.transa)
++        expect = self.alpha * (self.op_a.dot(self.b)) + self.beta * self.c
++        self.assertIs(y, c)
++        testing.assert_array_almost_equal(y, expect)
++
++
++@testing.parameterize(*testing.product({
++    'dtype': [numpy.float32, numpy.float64],
++    'trans': [(False, False), (True, False), (False, True)],
++}))
++@testing.with_requires('scipy')
++class TestCsrmm2(unittest.TestCase):
++
++    alpha = 0.5
++    beta = 0.25
++
++    def setUp(self):
++        self.transa, self.transb = self.trans
++        self.op_a = scipy.sparse.random(2, 3, density=0.5, dtype=self.dtype)
++        if self.transa:
++            self.a = self.op_a.T
++        else:
++            self.a = self.op_a
++        self.op_b = numpy.random.uniform(-1, 1, (3, 4)).astype(self.dtype)
++        if self.transb:
++            self.b = self.op_b.T
++        else:
++            self.b = self.op_b
++        self.c = numpy.random.uniform(-1, 1, (2, 4)).astype(self.dtype)
++
++    def test_csrmm2(self):
++        a = cupy.sparse.csr_matrix(self.a)
++        b = cupy.array(self.b, order='f')
++        y = cupy.cusparse.csrmm2(
++            a, b, alpha=self.alpha, transa=self.transa, transb=self.transb)
++        expect = self.alpha * (self.op_a.dot(self.op_b))
++        testing.assert_array_almost_equal(y, expect)
++
++    def test_csrmm2_with_c(self):
++        a = cupy.sparse.csr_matrix(self.a)
++        b = cupy.array(self.b, order='f')
++        c = cupy.array(self.c, order='f')
++        y = cupy.cusparse.csrmm2(
++            a, b, c=c, alpha=self.alpha, beta=self.beta,
++            transa=self.transa, transb=self.transb)
++        expect = self.alpha * (self.op_a.dot(self.op_b)) + self.beta * self.c
++        self.assertIs(y, c)
++        testing.assert_array_almost_equal(y, expect)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

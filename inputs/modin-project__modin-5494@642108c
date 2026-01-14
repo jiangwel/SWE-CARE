@@ -1,0 +1,363 @@
+  Task-ID: modin-project__modin-5494@642108c
+  Please checkout to this commit first: 8b40350f77662ee9edd0837adec8a7388257577b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [PERF] compute `dtypes` when performing binary operations
+It should be possible and beneficial to compute `dtypes` when doing binary operations without remote calls so other subsequent operations, which require `dypes` to be known, do not perform the remote calls to compute it.
+
+Here are some examples when we can compute/pass known dtypes to the core dataframe.
+
+1. `left_df + right_df`, leftleft_df.dtypes and right_df.dtypes are known and equal to each other
+2. `left_df + 1`, left_df.dtypes is known, dtype of 1 is int.
+  </issue>
+  
+  <patch>
+  diff --git a/modin/core/dataframe/algebra/binary.py b/modin/core/dataframe/algebra/binary.py
+index 2d9645aeaca..be2964e38d9 100644
+--- a/modin/core/dataframe/algebra/binary.py
++++ b/modin/core/dataframe/algebra/binary.py
+@@ -19,11 +19,98 @@
+ from .operator import Operator
+ 
+ 
++def coerce_int_to_float64(dtype: np.dtype) -> np.dtype:
++    """
++    Coerce dtype to float64 if it is a variant of integer.
++
++    If dtype is integer, function returns float64 datatype.
++    If not, returns the datatype argument itself.
++
++    Parameters
++    ----------
++    dtype : np.dtype
++        NumPy datatype.
++
++    Returns
++    -------
++    dtype : np.dtype
++        Returns float64 for all int datatypes or returns the datatype itself
++        for other types.
++
++    Notes
++    -----
++    Used to precompute datatype in case of division in pandas.
++    """
++    if dtype in np.sctypes["int"] + np.sctypes["uint"]:
++        return np.dtype(np.float64)
++    else:
++        return dtype
++
++
++def compute_dtypes_common_cast(first, second) -> np.dtype:
++    """
++    Precompute data types for binary operations by finding common type between operands.
++
++    Parameters
++    ----------
++    first : PandasQueryCompiler
++        First operand for which the binary operation would be performed later.
++    second : PandasQueryCompiler
++        Second operand for which the binary operation would be performed later.
++
++    Returns
++    -------
++    dtypes
++        The pandas series with precomputed dtypes.
++
++    Notes
++    -----
++    The dtypes of the operands are supposed to be known.
++    """
++    dtypes_first = dict(zip(first.columns, first._modin_frame._dtypes))
++    dtypes_second = dict(zip(second.columns, second._modin_frame._dtypes))
++    columns_first = set(first.columns)
++    columns_second = set(second.columns)
++    common_columns = columns_first.intersection(columns_second)
++    mismatch_columns = columns_first.union(columns_second) - common_columns
++    # If at least one column doesn't match, the result of the non matching column would be nan.
++    nan_dtype = np.dtype(type(np.nan))
++    dtypes = pandas.Series(
++        [
++            pandas.core.dtypes.cast.find_common_type(
++                [
++                    dtypes_first[x],
++                    dtypes_second[x],
++                ]
++            )
++            for x in common_columns
++        ],
++        index=common_columns,
++    )
++    dtypes = pandas.concat(
++        [
++            dtypes,
++            pandas.Series(
++                [nan_dtype] * (len(mismatch_columns)),
++                index=mismatch_columns,
++            ),
++        ]
++    )
++    dtypes = dtypes.sort_index()
++    return dtypes
++
++
+ class Binary(Operator):
+     """Builder class for Binary operator."""
+ 
+     @classmethod
+-    def register(cls, func, join_type="outer", labels="replace"):
++    def register(
++        cls,
++        func,
++        join_type="outer",
++        labels="replace",
++        how_compute_dtypes=None,
++    ):
+         """
+         Build template binary operator.
+ 
+@@ -36,6 +123,14 @@ def register(cls, func, join_type="outer", labels="replace"):
+         labels : {"keep", "replace", "drop"}, default: "replace"
+             Whether keep labels from left Modin DataFrame, replace them with labels
+             from joined DataFrame or drop altogether to make them be computed lazily later.
++        how_compute_dtypes : {"common_cast", "float","bool", None}, default: None
++            How dtypes should be inferred.
++                * If "common_cast", casts to common dtype of operand columns.
++                * If "float", performs type casting by finding common dtype.
++                   If the common dtype is any of the integer types, perform type casting to float.
++                   Used in case of truediv.
++                * If "bool", dtypes would be a boolean series with same size as that of operands.
++                * If ``None``, do not infer new dtypes (they will be computed manually once accessed).
+ 
+         Returns
+         -------
+@@ -96,13 +191,28 @@ def caller(
+                         )
+                     )
+                 else:
++                    if (
++                        other._modin_frame._dtypes is not None
++                        and query_compiler._modin_frame._dtypes is not None
++                    ):
++                        if how_compute_dtypes == "bool":
++                            dtypes = pandas.Series(
++                                [np.dtype(bool)] * len(other._modin_frame._dtypes)
++                            )
++                        if how_compute_dtypes == "common_cast":
++                            dtypes = compute_dtypes_common_cast(query_compiler, other)
++                        elif how_compute_dtypes == "float":
++                            dtypes = compute_dtypes_common_cast(query_compiler, other)
++                            dtypes = dtypes.apply(coerce_int_to_float64)
+                     return query_compiler.__constructor__(
+                         query_compiler._modin_frame.n_ary_op(
+                             lambda x, y: func(x, y, *args, **kwargs),
+                             [other._modin_frame],
+                             join_type=join_type,
++                            dtypes=dtypes,
+                         )
+                     )
++
+             else:
+                 # TODO: it's possible to chunk the `other` and broadcast them to partitions
+                 # accordingly, in that way we will be able to use more efficient `._modin_frame.map()`
+diff --git a/modin/core/dataframe/pandas/dataframe/dataframe.py b/modin/core/dataframe/pandas/dataframe/dataframe.py
+index 07067ef83f4..795888ab021 100644
+--- a/modin/core/dataframe/pandas/dataframe/dataframe.py
++++ b/modin/core/dataframe/pandas/dataframe/dataframe.py
+@@ -2815,7 +2815,12 @@ def _copartition(self, axis, other, how, sort, force_repartition=False):
+ 
+     @lazy_metadata_decorator(apply_axis="both")
+     def n_ary_op(
+-        self, op, right_frames: list, join_type="outer", copartition_along_columns=True
++        self,
++        op,
++        right_frames: list,
++        join_type="outer",
++        copartition_along_columns=True,
++        dtypes=None,
+     ):
+         """
+         Perform an n-opary operation by joining with other Modin DataFrame(s).
+@@ -2831,6 +2836,9 @@ def n_ary_op(
+         copartition_along_columns : bool, default: True
+             Whether to perform copartitioning along columns or not.
+             For some ops this isn't needed (e.g., `fillna`).
++        dtypes : series, default: None
++            Dtypes of the resultant dataframe, this argument will be
++            received if the resultant dtypes of n-opary operation is precomputed.
+ 
+         Returns
+         -------
+@@ -2885,6 +2893,7 @@ def n_ary_op(
+             joined_columns,
+             row_lengths,
+             column_widths,
++            dtypes,
+         )
+ 
+     @lazy_metadata_decorator(apply_axis="both")
+diff --git a/modin/core/storage_formats/pandas/query_compiler.py b/modin/core/storage_formats/pandas/query_compiler.py
+index 25e91401aa2..732a98a64a8 100644
+--- a/modin/core/storage_formats/pandas/query_compiler.py
++++ b/modin/core/storage_formats/pandas/query_compiler.py
+@@ -375,34 +375,42 @@ def to_numpy(self, **kwargs):
+     # such that columns/rows that don't have an index on the other DataFrame
+     # result in NaN values.
+ 
+-    add = Binary.register(pandas.DataFrame.add)
+-    combine = Binary.register(pandas.DataFrame.combine)
+-    combine_first = Binary.register(pandas.DataFrame.combine_first)
+-    eq = Binary.register(pandas.DataFrame.eq)
+-    floordiv = Binary.register(pandas.DataFrame.floordiv)
+-    ge = Binary.register(pandas.DataFrame.ge)
+-    gt = Binary.register(pandas.DataFrame.gt)
+-    le = Binary.register(pandas.DataFrame.le)
+-    lt = Binary.register(pandas.DataFrame.lt)
+-    mod = Binary.register(pandas.DataFrame.mod)
+-    mul = Binary.register(pandas.DataFrame.mul)
+-    rmul = Binary.register(pandas.DataFrame.rmul)
+-    ne = Binary.register(pandas.DataFrame.ne)
+-    pow = Binary.register(pandas.DataFrame.pow)
+-    radd = Binary.register(pandas.DataFrame.radd)
+-    rfloordiv = Binary.register(pandas.DataFrame.rfloordiv)
+-    rmod = Binary.register(pandas.DataFrame.rmod)
+-    rpow = Binary.register(pandas.DataFrame.rpow)
+-    rsub = Binary.register(pandas.DataFrame.rsub)
+-    rtruediv = Binary.register(pandas.DataFrame.rtruediv)
+-    sub = Binary.register(pandas.DataFrame.sub)
+-    truediv = Binary.register(pandas.DataFrame.truediv)
+-    __and__ = Binary.register(pandas.DataFrame.__and__)
+-    __or__ = Binary.register(pandas.DataFrame.__or__)
+-    __rand__ = Binary.register(pandas.DataFrame.__rand__)
+-    __ror__ = Binary.register(pandas.DataFrame.__ror__)
+-    __rxor__ = Binary.register(pandas.DataFrame.__rxor__)
+-    __xor__ = Binary.register(pandas.DataFrame.__xor__)
++    add = Binary.register(pandas.DataFrame.add, how_compute_dtypes="common_cast")
++    combine = Binary.register(
++        pandas.DataFrame.combine, how_compute_dtypes="common_cast"
++    )
++    combine_first = Binary.register(
++        pandas.DataFrame.combine_first, how_compute_dtypes="bool"
++    )
++    eq = Binary.register(pandas.DataFrame.eq, how_compute_dtypes="bool")
++    floordiv = Binary.register(
++        pandas.DataFrame.floordiv, how_compute_dtypes="common_cast"
++    )
++    ge = Binary.register(pandas.DataFrame.ge, how_compute_dtypes="bool")
++    gt = Binary.register(pandas.DataFrame.gt, how_compute_dtypes="bool")
++    le = Binary.register(pandas.DataFrame.le, how_compute_dtypes="bool")
++    lt = Binary.register(pandas.DataFrame.lt, how_compute_dtypes="bool")
++    mod = Binary.register(pandas.DataFrame.mod, how_compute_dtypes="common_cast")
++    mul = Binary.register(pandas.DataFrame.mul, how_compute_dtypes="common_cast")
++    rmul = Binary.register(pandas.DataFrame.rmul, how_compute_dtypes="common_cast")
++    ne = Binary.register(pandas.DataFrame.ne, how_compute_dtypes="bool")
++    pow = Binary.register(pandas.DataFrame.pow, how_compute_dtypes="common_cast")
++    radd = Binary.register(pandas.DataFrame.radd, how_compute_dtypes="common_cast")
++    rfloordiv = Binary.register(
++        pandas.DataFrame.rfloordiv, how_compute_dtypes="common_cast"
++    )
++    rmod = Binary.register(pandas.DataFrame.rmod, how_compute_dtypes="common_cast")
++    rpow = Binary.register(pandas.DataFrame.rpow, how_compute_dtypes="common_cast")
++    rsub = Binary.register(pandas.DataFrame.rsub, how_compute_dtypes="common_cast")
++    rtruediv = Binary.register(pandas.DataFrame.rtruediv, how_compute_dtypes="float")
++    sub = Binary.register(pandas.DataFrame.sub, how_compute_dtypes="common_cast")
++    truediv = Binary.register(pandas.DataFrame.truediv, how_compute_dtypes="float")
++    __and__ = Binary.register(pandas.DataFrame.__and__, how_compute_dtypes="bool")
++    __or__ = Binary.register(pandas.DataFrame.__or__, how_compute_dtypes="bool")
++    __rand__ = Binary.register(pandas.DataFrame.__rand__, how_compute_dtypes="bool")
++    __ror__ = Binary.register(pandas.DataFrame.__ror__, how_compute_dtypes="bool")
++    __rxor__ = Binary.register(pandas.DataFrame.__rxor__, how_compute_dtypes="bool")
++    __xor__ = Binary.register(pandas.DataFrame.__xor__, how_compute_dtypes="bool")
+     df_update = Binary.register(
+         copy_df_for_func(pandas.DataFrame.update, display_name="update"),
+         join_type="left",
+diff --git a/modin/pandas/base.py b/modin/pandas/base.py
+index 0470182cb60..82a4f168801 100644
+--- a/modin/pandas/base.py
++++ b/modin/pandas/base.py
+@@ -1402,7 +1402,7 @@ def eq(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get equality of `BasePandasDataset` and `other`, element-wise (binary operator `eq`).
+         """
+-        return self._binary_op("eq", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("eq", other, axis=axis, level=level)
+ 
+     def explode(self, column, ignore_index: bool = False):  # noqa: PR01, RT01, D200
+         """
+@@ -1628,7 +1628,7 @@ def ge(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get greater than or equal comparison of `BasePandasDataset` and `other`, element-wise (binary operator `ge`).
+         """
+-        return self._binary_op("ge", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("ge", other, axis=axis, level=level)
+ 
+     def get(self, key, default=None):  # noqa: PR01, RT01, D200
+         """
+@@ -1644,7 +1644,7 @@ def gt(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get greater than comparison of `BasePandasDataset` and `other`, element-wise (binary operator `gt`).
+         """
+-        return self._binary_op("gt", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("gt", other, axis=axis, level=level)
+ 
+     def head(self, n=5):  # noqa: PR01, RT01, D200
+         """
+@@ -1793,13 +1793,13 @@ def le(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get less than or equal comparison of `BasePandasDataset` and `other`, element-wise (binary operator `le`).
+         """
+-        return self._binary_op("le", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("le", other, axis=axis, level=level)
+ 
+     def lt(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get less than comparison of `BasePandasDataset` and `other`, element-wise (binary operator `lt`).
+         """
+-        return self._binary_op("lt", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("lt", other, axis=axis, level=level)
+ 
+     @property
+     def loc(self):  # noqa: RT01, D200
+@@ -2040,7 +2040,7 @@ def ne(self, other, axis="columns", level=None):  # noqa: PR01, RT01, D200
+         """
+         Get Not equal comparison of `BasePandasDataset` and `other`, element-wise (binary operator `ne`).
+         """
+-        return self._binary_op("ne", other, axis=axis, level=level, dtypes=np.bool_)
++        return self._binary_op("ne", other, axis=axis, level=level)
+ 
+     def notna(self):  # noqa: RT01, D200
+         """
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

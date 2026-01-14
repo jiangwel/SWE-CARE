@@ -1,0 +1,157 @@
+  Task-ID: cupy__cupy-2872@158ac6a
+  Please checkout to this commit first: 06972b52781b76d5785c5ad1160afc8864593f6c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Signatures and behaviors of `argmax` and `argmin` are incompatible with NumPy
+First, for the signature: In CuPy the signature for `argmax()` and `argmin()` is 
+```python
+cupy.argm*(a, axis=None, dtype=None, out=None, keepdims=False)
+```
+But in NumPy it's 
+```python
+numpy.argm*(a, axis=None, out=None)
+```
+That is, `dtype` and `keepdims` should be removed.
+
+Second, for the behavior: In CuPy the `axis` could be a tuple, but in Numpy it can only be an integer:
+```python
+>>> import cupy as cp
+>>> a = cp.arange(60).reshape(3,4,5)
+>>> a.argmax(axis=(0,1))
+array([11, 11, 11, 11, 11], dtype=int64)
+>>> 
+>>> import numpy as np
+>>> a = np.arange(60).reshape(3,4,5)
+>>> a.argmax(axis=(0,1))
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+TypeError: 'tuple' object cannot be interpreted as an integer
+```
+
+I think both are easy to fix. Just add a few guards prior to calling the actual workhorses.
+  </issue>
+  
+  <patch>
+  diff --git a/cupy/core/_routines_statistics.pyx b/cupy/core/_routines_statistics.pyx
+index 6ebd5b070c9..c1f08cbfdad 100644
+--- a/cupy/core/_routines_statistics.pyx
++++ b/cupy/core/_routines_statistics.pyx
+@@ -206,13 +206,13 @@ nanmax = create_reduction_func(
+ 
+ cdef _argmin = create_reduction_func(
+     'cupy_argmin',
+-    ('?->q', 'B->q', 'h->q', 'H->q', 'i->q', 'I->q', 'l->q', 'L->q',
+-     'q->q', 'Q->q',
+-     ('e->q', (None, 'my_argmin_float(a, b)', None, None)),
+-     ('f->q', (None, 'my_argmin_float(a, b)', None, None)),
+-     ('d->q', (None, 'my_argmin_float(a, b)', None, None)),
+-     ('F->q', (None, 'my_argmin_float(a, b)', None, None)),
+-     ('D->q', (None, 'my_argmin_float(a, b)', None, None))),
++    tuple(['{}->{}'.format(d, r) for r in 'bhilq' for d in '?BhHiIlLqQ'])
++    + (
++        ('e->q', (None, 'my_argmin_float(a, b)', None, None)),
++        ('f->q', (None, 'my_argmin_float(a, b)', None, None)),
++        ('d->q', (None, 'my_argmin_float(a, b)', None, None)),
++        ('F->q', (None, 'my_argmin_float(a, b)', None, None)),
++        ('D->q', (None, 'my_argmin_float(a, b)', None, None))),
+     ('min_max_st<type_in0_raw>(in0, _J)', 'my_argmin(a, b)', 'out0 = a.index',
+      'min_max_st<type_in0_raw>'),
+     None, _min_max_preamble)
+@@ -220,13 +220,13 @@ cdef _argmin = create_reduction_func(
+ 
+ cdef _argmax = create_reduction_func(
+     'cupy_argmax',
+-    ('?->q', 'B->q', 'h->q', 'H->q', 'i->q', 'I->q', 'l->q', 'L->q',
+-     'q->q', 'Q->q',
+-     ('e->q', (None, 'my_argmax_float(a, b)', None, None)),
+-     ('f->q', (None, 'my_argmax_float(a, b)', None, None)),
+-     ('d->q', (None, 'my_argmax_float(a, b)', None, None)),
+-     ('F->q', (None, 'my_argmax_float(a, b)', None, None)),
+-     ('D->q', (None, 'my_argmax_float(a, b)', None, None))),
++    tuple(['{}->{}'.format(d, r) for r in 'bhilq' for d in '?BhHiIlLqQ'])
++    + (
++        ('e->q', (None, 'my_argmax_float(a, b)', None, None)),
++        ('f->q', (None, 'my_argmax_float(a, b)', None, None)),
++        ('d->q', (None, 'my_argmax_float(a, b)', None, None)),
++        ('F->q', (None, 'my_argmax_float(a, b)', None, None)),
++        ('D->q', (None, 'my_argmax_float(a, b)', None, None))),
+     ('min_max_st<type_in0_raw>(in0, _J)', 'my_argmax(a, b)', 'out0 = a.index',
+      'min_max_st<type_in0_raw>'),
+     None, _min_max_preamble)
+diff --git a/tests/cupy_tests/sorting_tests/test_search.py b/tests/cupy_tests/sorting_tests/test_search.py
+index 8f09de602f3..6373a0533f7 100644
+--- a/tests/cupy_tests/sorting_tests/test_search.py
++++ b/tests/cupy_tests/sorting_tests/test_search.py
+@@ -2,6 +2,7 @@
+ 
+ import numpy
+ 
++import cupy
+ from cupy import testing
+ 
+ 
+@@ -153,6 +154,30 @@ def test_argmin_zero_size_axis1(self, xp, dtype):
+         return a.argmin(axis=1)
+ 
+ 
++@testing.gpu
++@testing.parameterize(*testing.product({
++    'func': ['argmin', 'argmax'],
++    'is_module': [True, False],
++    'shape': [(3, 4), ()],
++}))
++class TestArgMinMaxDtype(unittest.TestCase):
++
++    @testing.for_dtypes(
++        dtypes=[numpy.int8, numpy.int16, numpy.int32, numpy.int64],
++        name='result_dtype')
++    @testing.for_all_dtypes(name='in_dtype')
++    def test_argminmax_dtype(self, in_dtype, result_dtype):
++        a = testing.shaped_random(self.shape, cupy, in_dtype)
++        if self.is_module:
++            func = getattr(cupy, self.func)
++            y = func(a, dtype=result_dtype)
++        else:
++            func = getattr(a, self.func)
++            y = func(dtype=result_dtype)
++        assert y.shape == ()
++        assert y.dtype == result_dtype
++
++
+ @testing.parameterize(
+     {'cond_shape': (2, 3, 4), 'x_shape': (2, 3, 4), 'y_shape': (2, 3, 4)},
+     {'cond_shape': (4,),      'x_shape': (2, 3, 4), 'y_shape': (2, 3, 4)},
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

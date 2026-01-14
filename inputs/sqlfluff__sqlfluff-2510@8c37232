@@ -1,0 +1,981 @@
+  Task-ID: sqlfluff__sqlfluff-2510@8c37232
+  Please checkout to this commit first: e072a98e3888ae46023ab01e272363bd5336b3e9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  L010: SQLFluff 0.9.1 (and later) capitalize columns named year/month when used as the second parameters in PARSE_DATE
+## Expected Behaviour
+When run on a SQL file containing a line like PARSE_DATE("%Y", year), SQLFluff should realize that year must be a variable rather than an SQL keyword this context and not request that it is capitalized.
+
+## Observed Behavior
+For this function year and month is treated like SQL keywords rather than column names when used in the second argument.
+
+## Steps to Reproduce
+(1). Generate a SQL file of the form:
+```sql
+SELECT
+    PARSE_DATE("%Y%m", CONCAT(year, month)) AS date
+FROM
+    model
+```
+(2). Set BigQuery as the dialect and run sqlfluff lint on this file.
+
+Output is:
+```
+L:   1 | P:  34 | L010 | Keywords must be upper case.
+L:   1 | P:  40 | L010 | Keywords must be upper case.
+```
+
+
+## Dialect
+BigQuery
+
+## Version
+SQLFluff version is 0.9.3 (although this is not an issue in SQLFluff 0.9.0).  Python version is 3.8.1.0.
+(I'm using DBT but the same issue occurs when not using dbt as a template).
+
+## Configuration
+```
+[sqlfluff]
+dialect = bigquery
+exclude_rules = L003,L008,L011,L014,L016,L029,L031,L034
+
+[sqlfluff:rules]
+max_line_length = 120
+comma_style = leading
+
+[sqlfluff:rules:L010]
+capitalisation_policy = upper
+
+[sqlfluff:rules:L030]
+capitalisation_policy = upper
+```
+  </issue>
+  
+  <patch>
+  diff --git a/requirements_dev.txt b/requirements_dev.txt
+index 7d2dac0a33a..5e13a794501 100644
+--- a/requirements_dev.txt
++++ b/requirements_dev.txt
+@@ -2,7 +2,8 @@
+ # code linting and formatting
+ flake8
+ flake8-docstrings
+-flake8-black
++# Black 22.1 has a fatal bug when used with flake8-black, so skip it for now.
++#flake8-black
+ # documentation checks
+ doc8
+ Pygments
+diff --git a/src/sqlfluff/dialects/dialect_ansi.py b/src/sqlfluff/dialects/dialect_ansi.py
+index 531cc66b925..8a2f5e2ff74 100644
+--- a/src/sqlfluff/dialects/dialect_ansi.py
++++ b/src/sqlfluff/dialects/dialect_ansi.py
+@@ -164,6 +164,8 @@
+     ]
+ )
+ 
++ansi_dialect.sets("date_part_function_name").update(["DATEADD"])
++
+ # Set Keywords
+ ansi_dialect.sets("unreserved_keywords").update(
+     [n.strip().upper() for n in ansi_unreserved_keywords.split("\n")]
+@@ -329,6 +331,14 @@
+             type="date_part",
+         )
+     ),
++    DatePartFunctionName=SegmentGenerator(
++        lambda dialect: RegexParser(
++            r"^(" + r"|".join(dialect.sets("date_part_function_name")) + r")$",
++            CodeSegment,
++            name="function_name_identifier",
++            type="function_name_identifier",
++        )
++    ),
+     QuotedIdentifierSegment=NamedParser(
+         "double_quote", CodeSegment, name="quoted_identifier", type="identifier"
+     ),
+@@ -1044,6 +1054,9 @@ class FunctionSegment(BaseSegment):
+     type = "function"
+     match_grammar = OneOf(
+         Sequence(
++            # Treat fucnctions which take date parts separately
++            # So those functions parse date parts as DatetimeUnitSegment
++            # rather than identifiers.
+             Sequence(
+                 Ref("DatePartFunctionNameSegment"),
+                 Bracketed(
+@@ -1057,7 +1070,7 @@ class FunctionSegment(BaseSegment):
+                         ),
+                     )
+                 ),
+-            )
++            ),
+         ),
+         Sequence(
+             Sequence(
+@@ -3464,7 +3477,7 @@ class DatePartFunctionNameSegment(BaseSegment):
+     """
+ 
+     type = "function_name"
+-    match_grammar = Sequence("DATEADD")
++    match_grammar = Ref("DatePartFunctionName")
+ 
+ 
+ @ansi_dialect.segment()
+diff --git a/src/sqlfluff/dialects/dialect_ansi_keywords.py b/src/sqlfluff/dialects/dialect_ansi_keywords.py
+index e9fc846fc28..68f83facb71 100644
+--- a/src/sqlfluff/dialects/dialect_ansi_keywords.py
++++ b/src/sqlfluff/dialects/dialect_ansi_keywords.py
+@@ -181,7 +181,6 @@
+ DATABASE
+ DATABASES
+ DATE
+-DATEADD
+ DATETIME
+ DATETIME_INTERVAL_CODE
+ DATETIME_INTERVAL_PRECISION
+diff --git a/src/sqlfluff/dialects/dialect_bigquery.py b/src/sqlfluff/dialects/dialect_bigquery.py
+index c5719a5d5d2..6b54cfa4971 100644
+--- a/src/sqlfluff/dialects/dialect_bigquery.py
++++ b/src/sqlfluff/dialects/dialect_bigquery.py
+@@ -152,7 +152,6 @@
+ 
+ bigquery_dialect.replace(
+     FunctionContentsExpressionGrammar=OneOf(
+-        Ref("DatetimeUnitSegment"),
+         Sequence(
+             Ref("ExpressionSegment"),
+             Sequence(OneOf("IGNORE", "RESPECT"), "NULLS", optional=True),
+@@ -205,6 +204,29 @@
+     ["MICROSECOND", "DAYOFWEEK", "ISOWEEK", "ISOYEAR"]
+ )
+ 
++bigquery_dialect.sets("date_part_function_name").clear()
++bigquery_dialect.sets("date_part_function_name").update(
++    [
++        "DATE_ADD",
++        "DATE_SUB",
++        "DATE_DIFF",
++        "DATE_TRUNC",
++        "DATETIME_ADD",
++        "DATETIME_SUB",
++        "DATETIME_DIFF",
++        "DATETIME_TRUNC",
++        "TIME_ADD",
++        "TIME_SUB",
++        "TIME_DIFF",
++        "TIME_TRUNC",
++        "TIMESTAMP_ADD",
++        "TIMESTAMP_SUB",
++        "TIMESTAMP_DIFF",
++        "TIMESTAMP_TRUNC",
++    ]
++)
++
++
+ # In BigQuery, UNNEST() returns a "value table".
+ # https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#value_tables
+ bigquery_dialect.sets("value_table_functions").update(["unnest"])
+@@ -365,23 +387,44 @@ class FunctionSegment(BaseSegment):
+     """
+ 
+     type = "function"
+-    match_grammar = Sequence(
++    match_grammar = OneOf(
+         Sequence(
+-            AnyNumberOf(
+-                Ref("FunctionNameSegment"),
+-                max_times=1,
+-                min_times=1,
+-                exclude=OneOf(
+-                    Ref("ValuesClauseSegment"),
++            # Treat fucnctions which take date parts separately
++            # So those functions parse date parts as DatetimeUnitSegment
++            # rather than identifiers.
++            Sequence(
++                Ref("DatePartFunctionNameSegment"),
++                Bracketed(
++                    Delimited(
++                        Ref("DatetimeUnitSegment"),
++                        # Ref("IntervalExpressionSegment"),
++                        Ref(
++                            "FunctionContentsGrammar",
++                            ephemeral_name="FunctionContentsGrammar",
++                        ),
++                    ),
+                 ),
+             ),
+-            Bracketed(
+-                Ref(
+-                    "FunctionContentsGrammar",
+-                    # The brackets might be empty for some functions...
+-                    optional=True,
+-                    ephemeral_name="FunctionContentsGrammar",
+-                )
++        ),
++        Sequence(
++            Sequence(
++                AnyNumberOf(
++                    Ref("FunctionNameSegment"),
++                    max_times=1,
++                    min_times=1,
++                    exclude=OneOf(
++                        Ref("DatePartFunctionNameSegment"),
++                        Ref("ValuesClauseSegment"),
++                    ),
++                ),
++                Bracketed(
++                    Ref(
++                        "FunctionContentsGrammar",
++                        # The brackets might be empty for some functions...
++                        optional=True,
++                        ephemeral_name="FunctionContentsGrammar",
++                    )
++                ),
+             ),
+             # Functions returning ARRYS in BigQuery can have optional
+             # OFFSET or ORDINAL clauses
+@@ -415,8 +458,8 @@ class FunctionSegment(BaseSegment):
+                 ),
+                 optional=True,
+             ),
++            Ref("PostFunctionGrammar", optional=True),
+         ),
+-        Ref("PostFunctionGrammar", optional=True),
+     )
+ 
+ 
+diff --git a/src/sqlfluff/dialects/dialect_bigquery_keywords.py b/src/sqlfluff/dialects/dialect_bigquery_keywords.py
+index e378eb98343..c6e47ba9286 100644
+--- a/src/sqlfluff/dialects/dialect_bigquery_keywords.py
++++ b/src/sqlfluff/dialects/dialect_bigquery_keywords.py
+@@ -130,7 +130,6 @@
+ DATA
+ DATABASE
+ DATE
+-DATEADD
+ DATETIME
+ DECLARE
+ DELETE
+diff --git a/src/sqlfluff/dialects/dialect_exasol.py b/src/sqlfluff/dialects/dialect_exasol.py
+index 91521b69d47..fe6fdbe7046 100644
+--- a/src/sqlfluff/dialects/dialect_exasol.py
++++ b/src/sqlfluff/dialects/dialect_exasol.py
+@@ -56,6 +56,19 @@
+ exasol_dialect.sets("system_parameters").clear()
+ exasol_dialect.sets("system_parameters").update(SYSTEM_PARAMETERS)
+ 
++exasol_dialect.sets("date_part_function_name").clear()
++exasol_dialect.sets("date_part_function_name").update(
++    [
++        "ADD_DAYS",
++        "ADD_HOURS",
++        "ADD_MINUTES",
++        "ADD_MONTHS",
++        "ADD_SECONDS",
++        "ADD_WEEKS",
++        "ADD_YEARS",
++    ]
++)
++
+ exasol_dialect.insert_lexer_matchers(
+     [
+         RegexLexer("lua_nested_quotes", r"\[={1,3}\[.*\]={1,3}\]", CodeSegment),
+@@ -3431,76 +3444,6 @@ class FunctionWhileLoopSegment(BaseSegment):
+     )
+ 
+ 
+-@exasol_dialect.segment(replace=True)
+-class FunctionSegment(BaseSegment):
+-    """A scalar or aggregate function.
+-
+-    Maybe in the future we should distinguish between
+-    aggregate functions and other functions. For now
+-    we treat them the same because they look the same
+-    for our purposes.
+-    """
+-
+-    type = "function"
+-    match_grammar = OneOf(
+-        Sequence(
+-            Sequence(
+-                Ref("DatePartFunctionNameSegment"),
+-                Bracketed(
+-                    Ref(
+-                        "FunctionContentsGrammar",
+-                        # The brackets might be empty for some functions...
+-                        optional=True,
+-                        ephemeral_name="FunctionContentsGrammar",
+-                    ),
+-                ),
+-            ),
+-            Ref("PostFunctionGrammar", optional=True),
+-        ),
+-        Sequence(
+-            Sequence(
+-                AnyNumberOf(
+-                    Ref("FunctionNameSegment"),
+-                    max_times=1,
+-                    min_times=1,
+-                    exclude=OneOf(
+-                        Ref("ValuesClauseSegment"),
+-                    ),
+-                ),
+-                Bracketed(
+-                    Ref(
+-                        "FunctionContentsGrammar",
+-                        # The brackets might be empty for some functions...
+-                        optional=True,
+-                        ephemeral_name="FunctionContentsGrammar",
+-                    )
+-                ),
+-            ),
+-            Ref("PostFunctionGrammar", optional=True),
+-        ),
+-    )
+-
+-
+-@exasol_dialect.segment(replace=True)
+-class DatePartFunctionNameSegment(BaseSegment):
+-    """DATEADD function name segment.
+-
+-    Need to be able to specify this as type function_name
+-    so that linting rules identify it properly
+-    """
+-
+-    type = "function_name"
+-    match_grammar = OneOf(
+-        "ADD_DAYS",
+-        "ADD_HOURS",
+-        "ADD_MINUTES",
+-        "ADD_MONTHS",
+-        "ADD_SECONDS",
+-        "ADD_WEEKS",
+-        "ADD_YEARS",
+-    )
+-
+-
+ @exasol_dialect.segment()
+ class DropFunctionStatementSegment(BaseSegment):
+     """A `DROP FUNCTION` statement with CASCADE and RESTRICT option.
+diff --git a/src/sqlfluff/dialects/dialect_exasol_keywords.py b/src/sqlfluff/dialects/dialect_exasol_keywords.py
+index 84d146c0dcc..3c7a82d758a 100644
+--- a/src/sqlfluff/dialects/dialect_exasol_keywords.py
++++ b/src/sqlfluff/dialects/dialect_exasol_keywords.py
+@@ -474,13 +474,6 @@
+     "ACCESS",
+     "ACOS",
+     "ADAPTER",
+-    "ADD_DAYS",
+-    "ADD_HOURS",
+-    "ADD_MINUTES",
+-    "ADD_MONTHS",
+-    "ADD_SECONDS",
+-    "ADD_WEEKS",
+-    "ADD_YEARS",
+     "ADMIN",
+     "ALIGN",
+     "ALWAYS",
+diff --git a/src/sqlfluff/dialects/dialect_postgres.py b/src/sqlfluff/dialects/dialect_postgres.py
+index b1d2f3e7102..7983f123688 100644
+--- a/src/sqlfluff/dialects/dialect_postgres.py
++++ b/src/sqlfluff/dialects/dialect_postgres.py
+@@ -175,6 +175,11 @@
+     ]
+ )
+ 
++# Postgres doesn't have a dateadd function
++# Also according to https://www.postgresql.org/docs/14/functions-datetime.html
++# It quotes dateparts. So don't need this.
++postgres_dialect.sets("date_part_function_name").clear()
++
+ postgres_dialect.add(
+     JsonOperatorSegment=NamedParser(
+         "json_operator", SymbolSegment, name="json_operator", type="binary_operator"
+@@ -2963,40 +2968,6 @@ class StatementSegment(BaseSegment):
+     match_grammar = ansi_dialect.get_segment("StatementSegment").match_grammar.copy()
+ 
+ 
+-@postgres_dialect.segment(replace=True)
+-class FunctionSegment(BaseSegment):
+-    """A scalar or aggregate function.
+-
+-    Maybe in the future we should distinguish between
+-    aggregate functions and other functions. For now
+-    we treat them the same because they look the same
+-    for our purposes.
+-    """
+-
+-    type = "function"
+-    match_grammar = Sequence(
+-        Sequence(
+-            AnyNumberOf(
+-                Ref("FunctionNameSegment"),
+-                max_times=1,
+-                min_times=1,
+-                exclude=OneOf(
+-                    Ref("ValuesClauseSegment"),
+-                ),
+-            ),
+-            Bracketed(
+-                Ref(
+-                    "FunctionContentsGrammar",
+-                    # The brackets might be empty for some functions...
+-                    optional=True,
+-                    ephemeral_name="FunctionContentsGrammar",
+-                )
+-            ),
+-        ),
+-        Ref("PostFunctionGrammar", optional=True),
+-    )
+-
+-
+ @postgres_dialect.segment(replace=True)
+ class CreateTriggerStatementSegment(BaseSegment):
+     """Create Trigger Statement.
+diff --git a/src/sqlfluff/dialects/dialect_postgres_keywords.py b/src/sqlfluff/dialects/dialect_postgres_keywords.py
+index 1c730bc26d6..bea0306eef8 100644
+--- a/src/sqlfluff/dialects/dialect_postgres_keywords.py
++++ b/src/sqlfluff/dialects/dialect_postgres_keywords.py
+@@ -220,7 +220,6 @@ def get_keywords(keyword_list, keyword_type):
+     ("DATABASE", "non-reserved"),
+     ("DATALINK", "not-keyword"),
+     ("DATE", "not-keyword"),
+-    ("DATEADD", "not-keyword"),
+     ("DATERANGE", "non-reserved-(cannot-be-function-or-type)"),
+     ("DATETIME_INTERVAL_CODE", "not-keyword"),
+     ("DATETIME_INTERVAL_PRECISION", "not-keyword"),
+diff --git a/src/sqlfluff/dialects/dialect_redshift.py b/src/sqlfluff/dialects/dialect_redshift.py
+index 6d6150f49d8..0165261ee41 100644
+--- a/src/sqlfluff/dialects/dialect_redshift.py
++++ b/src/sqlfluff/dialects/dialect_redshift.py
+@@ -45,6 +45,8 @@
+ redshift_dialect.sets("bare_functions").clear()
+ redshift_dialect.sets("bare_functions").update(["current_date", "sysdate"])
+ 
++redshift_dialect.sets("date_part_function_name").update(["DATEADD", "DATEDIFF"])
++
+ redshift_dialect.replace(WellKnownTextGeometrySegment=Nothing())
+ 
+ 
+@@ -135,28 +137,6 @@ class DatatypeSegment(BaseSegment):
+     )
+ 
+ 
+-@redshift_dialect.segment(replace=True)
+-class DatePartFunctionNameSegment(BaseSegment):
+-    """DATEADD function name segment.
+-
+-    Override to support DATEDIFF as well
+-    """
+-
+-    type = "function_name"
+-    match_grammar = OneOf("DATEADD", "DATEDIFF")
+-
+-
+-@redshift_dialect.segment(replace=True)
+-class FunctionSegment(BaseSegment):
+-    """A scalar or aggregate function.
+-
+-    Revert back to the ANSI definition to support ignore nulls
+-    """
+-
+-    type = "function"
+-    match_grammar = ansi_dialect.get_segment("FunctionSegment").match_grammar.copy()
+-
+-
+ @redshift_dialect.segment()
+ class ColumnEncodingSegment(BaseSegment):
+     """ColumnEncoding segment.
+diff --git a/src/sqlfluff/dialects/dialect_redshift_keywords.py b/src/sqlfluff/dialects/dialect_redshift_keywords.py
+index 955532c983f..816a800228b 100644
+--- a/src/sqlfluff/dialects/dialect_redshift_keywords.py
++++ b/src/sqlfluff/dialects/dialect_redshift_keywords.py
+@@ -320,8 +320,6 @@
+ DATASHARE
+ DATASHARES
+ DATE
+-DATEADD
+-DATEDIFF
+ DATEFORMAT
+ DATETIME_INTERVAL_CODE
+ DATETIME_INTERVAL_PRECISION
+diff --git a/src/sqlfluff/dialects/dialect_snowflake_keywords.py b/src/sqlfluff/dialects/dialect_snowflake_keywords.py
+index da7337b87fc..86008050762 100644
+--- a/src/sqlfluff/dialects/dialect_snowflake_keywords.py
++++ b/src/sqlfluff/dialects/dialect_snowflake_keywords.py
+@@ -155,7 +155,6 @@
+ DATA_RETENTION_TIME_IN_DAYS
+ DATABASES
+ DATE
+-DATEADD
+ DEFAULT
+ DEFAULT_DDL_COLLATION
+ DEFERRABLE
+diff --git a/src/sqlfluff/dialects/dialect_tsql.py b/src/sqlfluff/dialects/dialect_tsql.py
+index 477fd5187fb..feef1442bbf 100644
+--- a/src/sqlfluff/dialects/dialect_tsql.py
++++ b/src/sqlfluff/dialects/dialect_tsql.py
+@@ -84,6 +84,11 @@
+     ]
+ )
+ 
++tsql_dialect.sets("date_part_function_name").clear()
++tsql_dialect.sets("date_part_function_name").update(
++    ["DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATENAME"]
++)
++
+ tsql_dialect.insert_lexer_matchers(
+     [
+         RegexLexer(
+@@ -1907,6 +1912,9 @@ class FunctionSegment(BaseSegment):
+     type = "function"
+     match_grammar = OneOf(
+         Sequence(
++            # Treat fucnctions which take date parts separately
++            # So those functions parse date parts as DatetimeUnitSegment
++            # rather than identifiers.
+             Ref("DatePartFunctionNameSegment"),
+             Bracketed(
+                 Delimited(
+@@ -2809,17 +2817,6 @@ class SetClauseSegment(BaseSegment):
+     )
+ 
+ 
+-@tsql_dialect.segment(replace=True)
+-class DatePartFunctionNameSegment(BaseSegment):
+-    """DATEADD function name segment.
+-
+-    Override to support DATEDIFF as well
+-    """
+-
+-    type = "function_name"
+-    match_grammar = OneOf("DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATENAME")
+-
+-
+ @tsql_dialect.segment()
+ class PrintStatementSegment(BaseSegment):
+     """PRINT statement segment."""
+diff --git a/src/sqlfluff/dialects/dialect_tsql_keywords.py b/src/sqlfluff/dialects/dialect_tsql_keywords.py
+index 86eab01b913..0e69c5be2dd 100644
+--- a/src/sqlfluff/dialects/dialect_tsql_keywords.py
++++ b/src/sqlfluff/dialects/dialect_tsql_keywords.py
+@@ -219,12 +219,8 @@
+     "CYCLE",
+     "DATA_COMPRESSION",
+     "DATE",
+-    "DATEADD",
+-    "DATEDIFF",
+-    "DATEDIFF_BIG",
+     "DATEFIRST",
+     "DATEFORMAT",
+-    "DATENAME",
+     "DEADLOCK_PRIORITY",
+     "DENSE_RANK",
+     "DETERMINISTIC",
+diff --git a/test/fixtures/dialects/ansi/select_simple_h.yml b/test/fixtures/dialects/ansi/select_simple_h.yml
+index 3076692b7b9..e567afb1957 100644
+--- a/test/fixtures/dialects/ansi/select_simple_h.yml
++++ b/test/fixtures/dialects/ansi/select_simple_h.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 0bccea565479963e10b2dfe8b6dcfc64a92a48620a06e13892f4f4bbe86778b2
++_hash: 14e310ccc1dc5d6db25e47b23071fdeac75eb56caefa5919f14f40b925bf02e3
+ file:
+   statement:
+     select_statement:
+@@ -12,7 +12,7 @@ file:
+         select_clause_element:
+           function:
+             function_name:
+-              keyword: DATEADD
++              function_name_identifier: DATEADD
+             bracketed:
+             - start_bracket: (
+             - date_part: DAY
+diff --git a/test/fixtures/dialects/bigquery/bigquery_parameters.sql b/test/fixtures/dialects/bigquery/bigquery_parameters.sql
+index b9e5a0fa5bf..de60e96cfe6 100644
+--- a/test/fixtures/dialects/bigquery/bigquery_parameters.sql
++++ b/test/fixtures/dialects/bigquery/bigquery_parameters.sql
+@@ -3,5 +3,6 @@ select "1" from x where y = @z_test1;
+ select datetime_trunc(@z2, week);
+ select datetime_trunc(@_ab, week);
+ select datetime_trunc(@a, week);
++select parse_date("%Y%m", year); -- this should parse year as an identifier
+ select "1" from x where y = ?;
+ select concat("1", ?);
+diff --git a/test/fixtures/dialects/bigquery/bigquery_parameters.yml b/test/fixtures/dialects/bigquery/bigquery_parameters.yml
+index e272bb0c4f9..40b5c61842a 100644
+--- a/test/fixtures/dialects/bigquery/bigquery_parameters.yml
++++ b/test/fixtures/dialects/bigquery/bigquery_parameters.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 8b4182cab29420b979f3ca6afdcae30fba683f05856ee2cf739ef2882294fa2a
++_hash: db073f3949d48e88743f299e76a8c4f62df0837de1ae9708e474e534290290a4
+ file:
+ - statement:
+     select_statement:
+@@ -79,6 +79,24 @@ file:
+               date_part: week
+               end_bracket: )
+ - statement_terminator: ;
++- statement:
++    select_statement:
++      select_clause:
++        keyword: select
++        select_clause_element:
++          function:
++            function_name:
++              function_name_identifier: parse_date
++            bracketed:
++            - start_bracket: (
++            - expression:
++                literal: '"%Y%m"'
++            - comma: ','
++            - expression:
++                column_reference:
++                  identifier: year
++            - end_bracket: )
++- statement_terminator: ;
+ - statement:
+     select_statement:
+       select_clause:
+diff --git a/test/fixtures/dialects/exasol/Add_Days.yml b/test/fixtures/dialects/exasol/Add_Days.yml
+index 856e6c77b74..846a4effdef 100644
+--- a/test/fixtures/dialects/exasol/Add_Days.yml
++++ b/test/fixtures/dialects/exasol/Add_Days.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 462a1619d04fbcf97e7e8a254f0e84d3d1e5ccf5f3c02b6194e4d0f0d5164d66
++_hash: 39c9240b5e800aaa46cc5bd81460c6b976d9430c2c621f4c478e9f7d8f34a36b
+ file:
+   statement:
+     select_statement:
+@@ -12,7 +12,7 @@ file:
+       - select_clause_element:
+           function:
+             function_name:
+-              keyword: ADD_DAYS
++              function_name_identifier: ADD_DAYS
+             bracketed:
+             - start_bracket: (
+             - expression:
+@@ -28,7 +28,7 @@ file:
+       - select_clause_element:
+           function:
+             function_name:
+-              keyword: ADD_DAYS
++              function_name_identifier: ADD_DAYS
+             bracketed:
+             - start_bracket: (
+             - expression:
+diff --git a/test/fixtures/dialects/postgres/postgres_select.sql b/test/fixtures/dialects/postgres/postgres_select.sql
+index e429ea33811..2edd7cf66bc 100644
+--- a/test/fixtures/dialects/postgres/postgres_select.sql
++++ b/test/fixtures/dialects/postgres/postgres_select.sql
+@@ -1,5 +1,6 @@
+ SELECT timestamp with time zone '2005-04-02 12:00:00-07' + interval '1 day';
+ 
++-- DATEADD is not a function in postgres so this should parse day as column name
+ SELECT DATEADD(day, -2, current_date);
+ 
+ SELECT timestamptz '2013-07-01 12:00:00' - timestamptz '2013-03-01 12:00:00';
+diff --git a/test/fixtures/dialects/redshift/select_dateadd.yml b/test/fixtures/dialects/redshift/select_dateadd.yml
+index b3a42abf08e..95e50ab4e71 100644
+--- a/test/fixtures/dialects/redshift/select_dateadd.yml
++++ b/test/fixtures/dialects/redshift/select_dateadd.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 52378e745575637b0dbca19e4e4a4f8d096aefd8d3ad1aa4314f4410031323e6
++_hash: 598e7eaaacee9b64342a206a9c1f7af5c5cf619f84a89b8f7b5747b522c748cc
+ file:
+   statement:
+     select_statement:
+@@ -12,7 +12,7 @@ file:
+         select_clause_element:
+           function:
+             function_name:
+-              keyword: dateadd
++              function_name_identifier: dateadd
+             bracketed:
+             - start_bracket: (
+             - date_part: month
+diff --git a/test/fixtures/dialects/snowflake/snowflake_datetime_intervals.yml b/test/fixtures/dialects/snowflake/snowflake_datetime_intervals.yml
+index b579cb22d04..5376dc1b49e 100644
+--- a/test/fixtures/dialects/snowflake/snowflake_datetime_intervals.yml
++++ b/test/fixtures/dialects/snowflake/snowflake_datetime_intervals.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: d0d9c3dcc4bbd0a2f3d911e2a68f38050dcb23a319ff4fd6a419a888d5103813
++_hash: 9c1d4b73adfbb46d347dc14df9531b505a57c9865e40d79064db04bb9aed82af
+ file:
+ - statement:
+     select_statement:
+@@ -12,7 +12,7 @@ file:
+         select_clause_element:
+           function:
+             function_name:
+-              keyword: DATEADD
++              function_name_identifier: DATEADD
+             bracketed:
+             - start_bracket: (
+             - date_part: NANOSECONDS
+diff --git a/test/fixtures/dialects/tsql/functions_a.yml b/test/fixtures/dialects/tsql/functions_a.yml
+index ae84e11930f..0c4e51119e9 100644
+--- a/test/fixtures/dialects/tsql/functions_a.yml
++++ b/test/fixtures/dialects/tsql/functions_a.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: b0ab733eeb69dd6144fea2c316576014d968b8fbb71b5696384fee49a45fa450
++_hash: 7fe5e4b983011fd90f3ccda59abb9331f668758dd7ab8a6deecd9ba91864c854
+ file:
+ - batch:
+     statement:
+@@ -81,7 +81,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEADD
++                function_name_identifier: DATEADD
+               bracketed:
+               - start_bracket: (
+               - date_part: month
+diff --git a/test/fixtures/dialects/tsql/select_date_functions.yml b/test/fixtures/dialects/tsql/select_date_functions.yml
+index 22026c752e2..78da4339f13 100644
+--- a/test/fixtures/dialects/tsql/select_date_functions.yml
++++ b/test/fixtures/dialects/tsql/select_date_functions.yml
+@@ -3,7 +3,7 @@
+ # computed by SQLFluff when running the tests. Please run
+ # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
+ # altering SQL files.
+-_hash: 0132c9967315b48174b809cccd11d1880bc4810179b3096a4be7780bf6dc878b
++_hash: 818d4638dcf988381d63e7393545018cb6d77a369501e6e6421bbf727aef2a0c
+ file:
+   batch:
+     statement:
+@@ -17,7 +17,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: day
+@@ -67,7 +67,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: year
+@@ -82,7 +82,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: quarter
+@@ -97,7 +97,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: month
+@@ -112,7 +112,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: dayofyear
+@@ -127,7 +127,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: day
+@@ -142,7 +142,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: week
+@@ -157,7 +157,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: hour
+@@ -172,7 +172,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: minute
+@@ -187,7 +187,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: second
+@@ -202,7 +202,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: millisecond
+@@ -217,7 +217,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF
++                function_name_identifier: DATEDIFF
+               bracketed:
+               - start_bracket: (
+               - date_part: microsecond
+@@ -232,7 +232,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEDIFF_BIG
++                function_name_identifier: DATEDIFF_BIG
+               bracketed:
+               - start_bracket: (
+               - date_part: microsecond
+@@ -247,7 +247,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEADD
++                function_name_identifier: DATEADD
+               bracketed:
+               - start_bracket: (
+               - date_part: year
+@@ -262,7 +262,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATEADD
++                function_name_identifier: DATEADD
+               bracketed:
+               - start_bracket: (
+               - date_part: year
+@@ -279,7 +279,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATENAME
++                function_name_identifier: DATENAME
+               bracketed:
+                 start_bracket: (
+                 date_part: year
+@@ -291,7 +291,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATENAME
++                function_name_identifier: DATENAME
+               bracketed:
+                 start_bracket: (
+                 date_part: month
+@@ -303,7 +303,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATENAME
++                function_name_identifier: DATENAME
+               bracketed:
+                 start_bracket: (
+                 date_part: day
+@@ -315,7 +315,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATENAME
++                function_name_identifier: DATENAME
+               bracketed:
+                 start_bracket: (
+                 date_part: dayofyear
+@@ -327,7 +327,7 @@ file:
+         - select_clause_element:
+             function:
+               function_name:
+-                keyword: DATENAME
++                function_name_identifier: DATENAME
+               bracketed:
+                 start_bracket: (
+                 date_part: weekday
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

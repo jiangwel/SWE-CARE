@@ -1,0 +1,1005 @@
+  Task-ID: apache__airflow-24663@259c193
+  Please checkout to this commit first: 45b11d4ed1412c00ebf32a03ab5ea3a06274f208
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Create `SqlToSlackOperator`
+### Body
+
+Currently we have `SnowflakeToSlackOperator` & `PrestoToSlackOperator`.
+This task is to create a generic `SqlToSlackOperator` to be compatible with all hooks that has `get_pandas_df` function.
+The new operator should be in `providers/slack/transfers/sql_to_slack.py`, once completed we can also deprecate `SnowflakeToSlackOperator` & `PrestoToSlackOperator`.
+
+A good resource for reference can be `SqlToS3Operator` which the first part of the operator (running query and creating dataframe should be identical), the 2nd part of creating the slack message should be very similar to what the current operators do.
+
+
+
+### Committer
+
+- [X] I acknowledge that I am a maintainer/committer of the Apache Airflow project.
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/providers/presto/transfers/presto_to_slack.py b/airflow/providers/presto/transfers/presto_to_slack.py
+index 6dd0ecb3ab137..647a8d1ce7d58 100644
+--- a/airflow/providers/presto/transfers/presto_to_slack.py
++++ b/airflow/providers/presto/transfers/presto_to_slack.py
+@@ -15,21 +15,17 @@
+ # specific language governing permissions and limitations
+ # under the License.
+ 
++import warnings
+ from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Sequence, Union
+ 
+-from pandas import DataFrame
+-from tabulate import tabulate
+-
+ from airflow.exceptions import AirflowException
+-from airflow.models import BaseOperator
+-from airflow.providers.presto.hooks.presto import PrestoHook
+-from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
++from airflow.providers.slack.transfers.sql_to_slack import SqlToSlackOperator
+ 
+ if TYPE_CHECKING:
+-    from airflow.utils.context import Context
++    pass
+ 
+ 
+-class PrestoToSlackOperator(BaseOperator):
++class PrestoToSlackOperator(SqlToSlackOperator):
+     """
+     Executes a single SQL statement in Presto and sends the results to Slack. The results of the query are
+     rendered into the 'slack_message' parameter as a Pandas dataframe using a JINJA variable called '{{
+@@ -47,11 +43,12 @@ class PrestoToSlackOperator(BaseOperator):
+         You can use the default JINJA variable {{ results_df }} to access the pandas dataframe containing the
+         SQL results
+     :param presto_conn_id: destination presto connection
+-    :param slack_conn_id: The connection id for Slack
++    :param slack_conn_id: The connection id for Slack. Mutually exclusive with 'slack_token'
+     :param results_df_name: The name of the JINJA template's dataframe variable, default is 'results_df'
+     :param parameters: The parameters to pass to the SQL query
+     :param slack_token: The token to use to authenticate to Slack. If this is not provided, the
+-        'webhook_token' attribute needs to be specified in the 'Extra' JSON field against the slack_conn_id
++        'webhook_token' attribute needs to be specified in the 'Extra' JSON field against the slack_conn_id.py
++        Mutually exclusive with 'slack_conn_id'
+     :param slack_channel: The channel to send message. Override default from Slack connection.
+     """
+ 
+@@ -66,14 +63,13 @@ def __init__(
+         sql: str,
+         slack_message: str,
+         presto_conn_id: str = 'presto_default',
+-        slack_conn_id: str = 'slack_default',
++        slack_conn_id: Optional[str] = None,
+         results_df_name: str = 'results_df',
+         parameters: Optional[Union[Iterable, Mapping]] = None,
+         slack_token: Optional[str] = None,
+         slack_channel: Optional[str] = None,
+         **kwargs,
+     ) -> None:
+-        super().__init__(**kwargs)
+ 
+         self.presto_conn_id = presto_conn_id
+         self.sql = sql
+@@ -84,58 +80,24 @@ def __init__(
+         self.results_df_name = results_df_name
+         self.slack_channel = slack_channel
+ 
+-    def _get_query_results(self) -> DataFrame:
+-        presto_hook = self._get_presto_hook()
+-
+-        self.log.info('Running SQL query: %s', self.sql)
+-        df = presto_hook.get_pandas_df(self.sql, parameters=self.parameters)
+-        return df
+-
+-    def _render_and_send_slack_message(self, context, df) -> None:
+-        # Put the dataframe into the context and render the JINJA template fields
+-        context[self.results_df_name] = df
+-        self.render_template_fields(context)
+-
+-        slack_hook = self._get_slack_hook()
+-        self.log.info('Sending slack message: %s', self.slack_message)
+-        slack_hook.execute()
++        warnings.warn(
++            """
++            PrestoToSlackOperator is deprecated.
++            Please use `airflow.providers.slack.transfers.sql_to_slack.SqlToSlackOperator`.
++            """,
++            DeprecationWarning,
++            stacklevel=2,
++        )
+ 
+-    def _get_presto_hook(self) -> PrestoHook:
+-        return PrestoHook(presto_conn_id=self.presto_conn_id)
+ 
+-    def _get_slack_hook(self) -> SlackWebhookHook:
+-        return SlackWebhookHook(
+-            http_conn_id=self.slack_conn_id,
+-            message=self.slack_message,
+-            webhook_token=self.slack_token,
++        super().__init__(
++            sql=self.sql,
++            sql_conn_id=self.presto_conn_id,
++            slack_conn_id=self.slack_conn_id,
++            slack_webhook_token=self.slack_token,
++            slack_message=self.slack_message,
+             slack_channel=self.slack_channel,
++            results_df_name=self.results_df_name,
++            parameters=self.parameters,
++            **kwargs,
+         )
+-
+-    def render_template_fields(self, context, jinja_env=None) -> None:
+-        # If this is the first render of the template fields, exclude slack_message from rendering since
+-        # the presto results haven't been retrieved yet.
+-        if self.times_rendered == 0:
+-            fields_to_render: Iterable[str] = filter(lambda x: x != 'slack_message', self.template_fields)
+-        else:
+-            fields_to_render = self.template_fields
+-
+-        if not jinja_env:
+-            jinja_env = self.get_template_env()
+-
+-        # Add the tabulate library into the JINJA environment
+-        jinja_env.filters['tabulate'] = tabulate
+-
+-        self._do_render_template_fields(self, fields_to_render, context, jinja_env, set())
+-        self.times_rendered += 1
+-
+-    def execute(self, context: 'Context') -> None:
+-        if not self.sql.strip():
+-            raise AirflowException("Expected 'sql' parameter is missing.")
+-        if not self.slack_message.strip():
+-            raise AirflowException("Expected 'slack_message' parameter is missing.")
+-
+-        df = self._get_query_results()
+-
+-        self._render_and_send_slack_message(context, df)
+-
+-        self.log.debug('Finished sending Presto data to Slack')
+diff --git a/airflow/providers/slack/provider.yaml b/airflow/providers/slack/provider.yaml
+index ba06c7673b4ff..5b79f6a9d1cf6 100644
+--- a/airflow/providers/slack/provider.yaml
++++ b/airflow/providers/slack/provider.yaml
+@@ -57,6 +57,12 @@ hooks:
+       - airflow.providers.slack.hooks.slack
+       - airflow.providers.slack.hooks.slack_webhook
+ 
++transfers:
++  - source-integration-name: SQL
++    target-integration-name: Slack
++    python-module: airflow.providers.slack.transfers.sql_to_slack
++    how-to-guide: /docs/apache-airflow-providers-slack/operators/sql_to_slack.rst
++
+ hook-class-names:  # deprecated - to be removed after providers add dependency on Airflow 2.2.0+
+   - airflow.providers.slack.hooks.slack_webhook.SlackWebhookHook
+ 
+diff --git a/airflow/providers/slack/transfers/__init__.py b/airflow/providers/slack/transfers/__init__.py
+new file mode 100644
+index 0000000000000..13a83393a9124
+--- /dev/null
++++ b/airflow/providers/slack/transfers/__init__.py
+@@ -0,0 +1,16 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
+diff --git a/airflow/providers/slack/transfers/sql_to_slack.py b/airflow/providers/slack/transfers/sql_to_slack.py
+new file mode 100644
+index 0000000000000..0147f87a4de4e
+--- /dev/null
++++ b/airflow/providers/slack/transfers/sql_to_slack.py
+@@ -0,0 +1,166 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Sequence, Union
++
++from pandas import DataFrame
++from tabulate import tabulate
++
++from airflow.exceptions import AirflowException
++from airflow.hooks.base import BaseHook
++from airflow.hooks.dbapi import DbApiHook
++from airflow.models import BaseOperator
++from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
++
++if TYPE_CHECKING:
++    from airflow.utils.context import Context
++
++
++class SqlToSlackOperator(BaseOperator):
++    """
++    Executes an SQL statement in a given SQL connection and sends the results to Slack. The results of the
++    query are rendered into the 'slack_message' parameter as a Pandas dataframe using a JINJA variable called
++    '{{ results_df }}'. The 'results_df' variable name can be changed by specifying a different
++    'results_df_name' parameter. The Tabulate library is added to the JINJA environment as a filter to
++    allow the dataframe to be rendered nicely. For example, set 'slack_message' to {{ results_df |
++    tabulate(tablefmt="pretty", headers="keys") }} to send the results to Slack as an ascii rendered table.
++
++    .. seealso::
++        For more information on how to use this operator, take a look at the guide:
++        :ref:`howto/operator:SqlToSlackOperator`
++
++    :param sql: The SQL statement to execute on Snowflake (templated)
++    :param slack_message: The templated Slack message to send with the data returned from Snowflake.
++        You can use the default JINJA variable {{ results_df }} to access the pandas dataframe containing the
++        SQL results
++    :param sql_conn_id: Reference to
++        :ref:`Snowflake connection id<howto/connection:snowflake>`
++    :param slack_conn_id: The connection id for Slack. Mutually exclusive with 'slack_webhook_token'
++    :param slack_webhook_token: The token to use to authenticate to Slack. If this is not provided, the
++        'slack_conn_id' attribute needs to be specified in the 'Extra' JSON field.
++         Mutually exclusive with 'slack_conn_id'.
++    :param slack_channel: The channel to send message. Override default from Slack connection.
++    :param results_df_name: The name of the JINJA template's dataframe variable, default is 'results_df'
++    :param parameters: The parameters to pass to the SQL query
++    """
++
++    template_fields: Sequence[str] = ('sql', 'slack_message')
++    template_ext: Sequence[str] = ('.sql', '.jinja', '.j2')
++    template_fields_renderers = {"sql": "sql", "slack_message": "jinja"}
++    times_rendered = 0
++
++    def __init__(
++        self,
++        *,
++        sql: str,
++        sql_conn_id: str,
++        slack_conn_id: Optional[str] = None,
++        slack_webhook_token: Optional[str] = None,
++        slack_channel: Optional[str] = None,
++        slack_message: str,
++        results_df_name: str = 'results_df',
++        parameters: Optional[Union[Iterable, Mapping]] = None,
++        **kwargs,
++    ) -> None:
++
++        super().__init__(**kwargs)
++
++        self.sql_conn_id = sql_conn_id
++        self.sql = sql
++        self.parameters = parameters
++        self.slack_conn_id = slack_conn_id
++        self.slack_webhook_token = slack_webhook_token
++        self.slack_channel = slack_channel
++        self.slack_message = slack_message
++        self.results_df_name = results_df_name
++        self.kwargs = kwargs
++
++        if not self.slack_conn_id and not self.slack_webhook_token:
++            raise AirflowException(
++                "SqlToSlackOperator requires either a `slack_conn_id` or a `slack_webhook_token` argument"
++            )
++
++        if self.slack_conn_id and self.slack_webhook_token:
++            raise AirflowException("Cannot pass both `slack_conn_id` and `slack_webhook_token` arguments")
++
++    def _get_hook(self) -> DbApiHook:
++        self.log.debug("Get connection for %s", self.sql_conn_id)
++        conn = BaseHook.get_connection(self.sql_conn_id)
++        hook = conn.get_hook(hook_params=self.kwargs)
++        if not callable(getattr(hook, 'get_pandas_df', None)):
++            raise AirflowException(
++                "This hook is not supported. The hook class must have get_pandas_df method."
++            )
++        return hook
++
++    def _get_query_results(self) -> DataFrame:
++        sql_hook = self._get_hook()
++
++        self.log.info('Running SQL query: %s', self.sql)
++        df = sql_hook.get_pandas_df(self.sql, parameters=self.parameters)
++        return df
++
++    def _render_and_send_slack_message(self, context, df) -> None:
++        # Put the dataframe into the context and render the JINJA template fields
++        context[self.results_df_name] = df
++        self.render_template_fields(context)
++
++        slack_hook = self._get_slack_hook()
++        self.log.info('Sending slack message: %s', self.slack_message)
++        slack_hook.execute()
++
++    def _get_slack_hook(self) -> SlackWebhookHook:
++        if self.slack_conn_id:
++            return SlackWebhookHook(
++                http_conn_id=self.slack_conn_id, message=self.slack_message, channel=self.slack_channel
++            )
++        elif self.slack_webhook_token:
++            return SlackWebhookHook(
++                message=self.slack_message, webhook_token=self.slack_webhook_token, channel=self.slack_channel
++            )
++        else:
++            raise AirflowException("Could not initiate SlackWebhookHook")
++
++    def render_template_fields(self, context, jinja_env=None) -> None:
++        # If this is the first render of the template fields, exclude slack_message from rendering since
++        # the snowflake results haven't been retrieved yet.
++        if self.times_rendered == 0:
++            fields_to_render: Iterable[str] = filter(lambda x: x != 'slack_message', self.template_fields)
++        else:
++            fields_to_render = self.template_fields
++
++        if not jinja_env:
++            jinja_env = self.get_template_env()
++
++        # Add the tabulate library into the JINJA environment
++        jinja_env.filters['tabulate'] = tabulate
++
++        self._do_render_template_fields(self, fields_to_render, context, jinja_env, set())
++        self.times_rendered += 1
++
++    def execute(self, context: 'Context') -> None:
++        if not isinstance(self.sql, str):
++            raise AirflowException("Expected 'sql' parameter should be a string.")
++        if self.sql is None or self.sql.strip() == "":
++            raise AirflowException("Expected 'sql' parameter is missing.")
++        if self.slack_message is None or self.slack_message.strip() == "":
++            raise AirflowException("Expected 'slack_message' parameter is missing.")
++
++        df = self._get_query_results()
++        self._render_and_send_slack_message(context, df)
++
++        self.log.debug('Finished sending SQL data to Slack')
+diff --git a/airflow/providers/snowflake/transfers/snowflake_to_slack.py b/airflow/providers/snowflake/transfers/snowflake_to_slack.py
+index 2c6138e58edc9..34d5eb114c5ae 100644
+--- a/airflow/providers/snowflake/transfers/snowflake_to_slack.py
++++ b/airflow/providers/snowflake/transfers/snowflake_to_slack.py
+@@ -15,21 +15,17 @@
+ # specific language governing permissions and limitations
+ # under the License.
+ 
++import warnings
+ from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Sequence, Union
+ 
+-from pandas import DataFrame
+-from tabulate import tabulate
+-
+ from airflow.exceptions import AirflowException
+-from airflow.models import BaseOperator
+-from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
+-from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
++from airflow.providers.slack.transfers.sql_to_slack import SqlToSlackOperator
+ 
+ if TYPE_CHECKING:
+-    from airflow.utils.context import Context
++    pass
+ 
+ 
+-class SnowflakeToSlackOperator(BaseOperator):
++class SnowflakeToSlackOperator(SqlToSlackOperator):
+     """
+     Executes an SQL statement in Snowflake and sends the results to Slack. The results of the query are
+     rendered into the 'slack_message' parameter as a Pandas dataframe using a JINJA variable called '{{
+@@ -48,7 +44,7 @@ class SnowflakeToSlackOperator(BaseOperator):
+         SQL results
+     :param snowflake_conn_id: Reference to
+         :ref:`Snowflake connection id<howto/connection:snowflake>`
+-    :param slack_conn_id: The connection id for Slack
++    :param slack_conn_id: The connection id for Slack. Mutually exclusive with 'slack_token'
+     :param results_df_name: The name of the JINJA template's dataframe variable, default is 'results_df'
+     :param parameters: The parameters to pass to the SQL query
+     :param warehouse: The Snowflake virtual warehouse to use to run the SQL query
+@@ -56,7 +52,8 @@ class SnowflakeToSlackOperator(BaseOperator):
+     :param schema: The schema to run the SQL against in Snowflake
+     :param role: The role to use when connecting to Snowflake
+     :param slack_token: The token to use to authenticate to Slack. If this is not provided, the
+-        'webhook_token' attribute needs to be specified in the 'Extra' JSON field against the slack_conn_id
++        'webhook_token' attribute needs to be specified in the 'Extra' JSON field against the slack_conn_id.
++        Mutually exclusive with 'slack_conn_id'
+     """
+ 
+     template_fields: Sequence[str] = ('sql', 'slack_message')
+@@ -70,7 +67,7 @@ def __init__(
+         sql: str,
+         slack_message: str,
+         snowflake_conn_id: str = 'snowflake_default',
+-        slack_conn_id: str = 'slack_default',
++        slack_conn_id: Optional[str] = None,
+         results_df_name: str = 'results_df',
+         parameters: Optional[Union[Iterable, Mapping]] = None,
+         warehouse: Optional[str] = None,
+@@ -80,7 +77,6 @@ def __init__(
+         slack_token: Optional[str] = None,
+         **kwargs,
+     ) -> None:
+-        super().__init__(**kwargs)
+ 
+         self.snowflake_conn_id = snowflake_conn_id
+         self.sql = sql
+@@ -94,62 +90,26 @@ def __init__(
+         self.slack_message = slack_message
+         self.results_df_name = results_df_name
+ 
+-    def _get_query_results(self) -> DataFrame:
+-        snowflake_hook = self._get_snowflake_hook()
+-
+-        self.log.info('Running SQL query: %s', self.sql)
+-        df = snowflake_hook.get_pandas_df(self.sql, parameters=self.parameters)
+-        return df
+-
+-    def _render_and_send_slack_message(self, context, df) -> None:
+-        # Put the dataframe into the context and render the JINJA template fields
+-        context[self.results_df_name] = df
+-        self.render_template_fields(context)
+-
+-        slack_hook = self._get_slack_hook()
+-        self.log.info('Sending slack message: %s', self.slack_message)
+-        slack_hook.execute()
++        warnings.warn(
++            """
++            SnowflakeToSlackOperator is deprecated.
++            Please use `airflow.providers.slack.transfers.sql_to_slack.SqlToSlackOperator`.
++            """,
++            DeprecationWarning,
++            stacklevel=2,
++        )
+ 
+-    def _get_snowflake_hook(self) -> SnowflakeHook:
+-        return SnowflakeHook(
+-            snowflake_conn_id=self.snowflake_conn_id,
+-            warehouse=self.warehouse,
+-            database=self.database,
++        super().__init__(
++            sql=self.sql,
++            sql_conn_id=self.snowflake_conn_id,
++            slack_conn_id=self.slack_conn_id,
++            slack_webhook_token=self.slack_token,
++            slack_message=self.slack_message,
++            results_df_name=self.results_df_name,
++            parameters=self.parameters,
+             role=self.role,
++            warehouse=self.warehouse,
+             schema=self.schema,
++            database=self.database,
++            **kwargs,
+         )
+-
+-    def _get_slack_hook(self) -> SlackWebhookHook:
+-        return SlackWebhookHook(
+-            http_conn_id=self.slack_conn_id, message=self.slack_message, webhook_token=self.slack_token
+-        )
+-
+-    def render_template_fields(self, context, jinja_env=None) -> None:
+-        # If this is the first render of the template fields, exclude slack_message from rendering since
+-        # the snowflake results haven't been retrieved yet.
+-        if self.times_rendered == 0:
+-            fields_to_render: Iterable[str] = filter(lambda x: x != 'slack_message', self.template_fields)
+-        else:
+-            fields_to_render = self.template_fields
+-
+-        if not jinja_env:
+-            jinja_env = self.get_template_env()
+-
+-        # Add the tabulate library into the JINJA environment
+-        jinja_env.filters['tabulate'] = tabulate
+-
+-        self._do_render_template_fields(self, fields_to_render, context, jinja_env, set())
+-        self.times_rendered += 1
+-
+-    def execute(self, context: 'Context') -> None:
+-        if not isinstance(self.sql, str):
+-            raise AirflowException("Expected 'sql' parameter should be a string.")
+-        if self.sql is None or self.sql.strip() == "":
+-            raise AirflowException("Expected 'sql' parameter is missing.")
+-        if self.slack_message is None or self.slack_message.strip() == "":
+-            raise AirflowException("Expected 'slack_message' parameter is missing.")
+-
+-        df = self._get_query_results()
+-        self._render_and_send_slack_message(context, df)
+-
+-        self.log.debug('Finished sending Snowflake data to Slack')
+diff --git a/docs/apache-airflow-providers-slack/index.rst b/docs/apache-airflow-providers-slack/index.rst
+index 87b299c2f79b7..354219e02bb00 100644
+--- a/docs/apache-airflow-providers-slack/index.rst
++++ b/docs/apache-airflow-providers-slack/index.rst
+@@ -21,13 +21,23 @@
+ 
+ Content
+ -------
++.. toctree::
++    :hidden:
++    :caption: System tests
+ 
++    System Tests <_api/tests/system/providers/slack/index>
+ .. toctree::
+     :maxdepth: 1
+     :caption: Guides
+ 
+     How-to Guide <operators/slack_operator_howto_guide>
+ 
++.. toctree::
++    :maxdepth: 1
++    :caption: Guides
++
++    SqlToSlackOperator types <operators/transfer/sql_to_slack>
++
+ .. toctree::
+     :maxdepth: 1
+     :caption: References
+diff --git a/docs/apache-airflow-providers-slack/operators/sql_to_slack.rst b/docs/apache-airflow-providers-slack/operators/sql_to_slack.rst
+new file mode 100644
+index 0000000000000..35b31c788c4da
+--- /dev/null
++++ b/docs/apache-airflow-providers-slack/operators/sql_to_slack.rst
+@@ -0,0 +1,38 @@
++ .. Licensed to the Apache Software Foundation (ASF) under one
++    or more contributor license agreements.  See the NOTICE file
++    distributed with this work for additional information
++    regarding copyright ownership.  The ASF licenses this file
++    to you under the Apache License, Version 2.0 (the
++    "License"); you may not use this file except in compliance
++    with the License.  You may obtain a copy of the License at
++
++ ..   http://www.apache.org/licenses/LICENSE-2.0
++
++ .. Unless required by applicable law or agreed to in writing,
++    software distributed under the License is distributed on an
++    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++    KIND, either express or implied.  See the License for the
++    specific language governing permissions and limitations
++    under the License.
++
++.. _howto/operator:SqlToSlackOperator:
++
++SqlToSlackOperator
++========================
++
++Use the :class:`~airflow.providers.slack.transfers.sql_to_slack` to post messages to predefined Slack
++channels.
++
++Using the Operator
++^^^^^^^^^^^^^^^^^^
++
++This operator will execute a custom query in the provided SQL connection and publish a Slack message that can be formatted
++and contain the resulting dataset (e.g. ASCII formatted dataframe).
++
++An example usage of the SqlToSlackOperator is as follows:
++
++.. exampleinclude:: /../../tests/system/providers/slack/example_sql_to_slack.py
++    :language: python
++    :dedent: 4
++    :start-after: [START howto_operator_sql_to_slack]
++    :end-before: [END howto_operator_sql_to_slack]
+diff --git a/tests/providers/presto/transfers/test_presto_to_slack.py b/tests/providers/presto/transfers/test_presto_to_slack.py
+index 78aa2867ec375..2d5c70cd7f02e 100644
+--- a/tests/providers/presto/transfers/test_presto_to_slack.py
++++ b/tests/providers/presto/transfers/test_presto_to_slack.py
+@@ -41,9 +41,8 @@ def _construct_operator(**kwargs):
+         operator = PrestoToSlackOperator(task_id=TEST_DAG_ID, **kwargs)
+         return operator
+ 
+-    @mock.patch('airflow.providers.presto.transfers.presto_to_slack.PrestoHook')
+-    @mock.patch('airflow.providers.presto.transfers.presto_to_slack.SlackWebhookHook')
+-    def test_hooks_and_rendering(self, mock_slack_hook_class, mock_presto_hook_class):
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_hooks_and_rendering_with_slack_conn(self, mock_slack_hook_class):
+         operator_args = {
+             'presto_conn_id': 'presto_connection',
+             'slack_conn_id': 'slack_connection',
+@@ -51,27 +50,51 @@ def test_hooks_and_rendering(self, mock_slack_hook_class, mock_presto_hook_class
+             'results_df_name': 'xxxx',
+             'parameters': ['1', '2', '3'],
+             'slack_message': 'message: {{ ds }}, {{ xxxx }}',
+-            'slack_token': 'test_token',
+             'slack_channel': 'my_channel',
+             'dag': self.example_dag,
+         }
+         presto_to_slack_operator = self._construct_operator(**operator_args)
+-        presto_hook = mock_presto_hook_class.return_value
+-        presto_hook.get_pandas_df.return_value = '1234'
++        mock_dbapi_hook = mock.Mock()
++        presto_to_slack_operator._get_hook = mock_dbapi_hook
++
++        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
++        get_pandas_df_mock.return_value = '1234'
++
+         slack_webhook_hook = mock_slack_hook_class.return_value
+         presto_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+ 
+-        mock_presto_hook_class.assert_called_once_with(
+-            presto_conn_id='presto_connection',
++        mock_slack_hook_class.assert_called_once_with(
++            http_conn_id='slack_connection', message='message: 2022-01-01, 1234', channel='my_channel'
+         )
+ 
+-        presto_hook.get_pandas_df.assert_called_once_with('sql 2022-01-01', parameters=['1', '2', '3'])
++        slack_webhook_hook.execute.assert_called_once()
++
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_hooks_and_rendering_with_slack_webhook(self, mock_slack_hook_class):
++        operator_args = {
++            'presto_conn_id': 'presto_connection',
++            'sql': "sql {{ ds }}",
++            'results_df_name': 'xxxx',
++            'parameters': ['1', '2', '3'],
++            'slack_message': 'message: {{ ds }}, {{ xxxx }}',
++            'slack_token': 'test_token',
++            'slack_channel': 'my_channel',
++            'dag': self.example_dag,
++        }
++        presto_to_slack_operator = self._construct_operator(**operator_args)
++        mock_dbapi_hook = mock.Mock()
++        presto_to_slack_operator._get_hook = mock_dbapi_hook
++
++        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
++        get_pandas_df_mock.return_value = '1234'
++
++        slack_webhook_hook = mock_slack_hook_class.return_value
++        presto_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+ 
+         mock_slack_hook_class.assert_called_once_with(
+-            http_conn_id='slack_connection',
+             message='message: 2022-01-01, 1234',
+             webhook_token='test_token',
+-            slack_channel='my_channel',
++            channel='my_channel',
+         )
+ 
+         slack_webhook_hook.execute.assert_called_once()
+diff --git a/tests/providers/slack/transfers/__init__.py b/tests/providers/slack/transfers/__init__.py
+new file mode 100644
+index 0000000000000..217e5db960782
+--- /dev/null
++++ b/tests/providers/slack/transfers/__init__.py
+@@ -0,0 +1,17 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
+diff --git a/tests/providers/slack/transfers/test_sql_to_slack.py b/tests/providers/slack/transfers/test_sql_to_slack.py
+new file mode 100644
+index 0000000000000..3b8e2373b1402
+--- /dev/null
++++ b/tests/providers/slack/transfers/test_sql_to_slack.py
+@@ -0,0 +1,113 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++from unittest import mock
++
++import pandas as pd
++import pytest
++
++from airflow.exceptions import AirflowException
++from airflow.models import DAG
++from airflow.providers.slack.transfers.sql_to_slack import SqlToSlackOperator
++from airflow.utils import timezone
++
++TEST_DAG_ID = 'sql_to_slack_unit_test'
++TEST_TASK_ID = 'sql_to_slack_unit_test_task'
++DEFAULT_DATE = timezone.datetime(2017, 1, 1)
++
++
++class TestSqlToSlackOperator:
++    def setup_method(self):
++        self.example_dag = DAG(TEST_DAG_ID, start_date=DEFAULT_DATE)
++
++    @staticmethod
++    def _construct_operator(**kwargs):
++        operator = SqlToSlackOperator(task_id=TEST_TASK_ID, **kwargs)
++        return operator
++
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_rendering_and_message_execution(self, mock_slack_hook_class):
++        mock_dbapi_hook = mock.Mock()
++
++        test_df = pd.DataFrame({'a': '1', 'b': '2'}, index=[0, 1])
++        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
++        get_pandas_df_mock.return_value = test_df
++
++        operator_args = {
++            'sql_conn_id': 'snowflake_connection',
++            'slack_conn_id': 'slack_connection',
++            'slack_message': 'message: {{ ds }}, {{ results_df }}',
++            'slack_channel': '#test',
++            'sql': "sql {{ ds }}",
++            'dag': self.example_dag,
++        }
++        sql_to_slack_operator = self._construct_operator(**operator_args)
++
++        slack_webhook_hook = mock_slack_hook_class.return_value
++        sql_to_slack_operator._get_hook = mock_dbapi_hook
++        sql_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
++
++        # Test that the Slack hook is instantiated with the right parameters
++        mock_slack_hook_class.assert_called_once_with(
++            http_conn_id='slack_connection', message=f'message: 2017-01-01, {test_df}', channel='#test'
++        )
++
++        # Test that the Slack hook's execute method gets run once
++        slack_webhook_hook.execute.assert_called_once()
++
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_duplicated_slack_parameters_provided_exception_thrown(self, mock_slack_hook_class):
++        operator_args = {
++            'sql_conn_id': 'snowflake_connection',
++            'slack_conn_id': 'slack_connection',
++            'slack_message': 'message: {{ ds }}, {{ xxxx }}',
++            'sql': "sql {{ ds }}",
++            'slack_webhook_token': 'test_token',
++        }
++        with pytest.raises(AirflowException):
++            self._construct_operator(**operator_args)
++
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_rendering_custom_df_name_message_execution(self, mock_slack_hook_class):
++        mock_dbapi_hook = mock.Mock()
++
++        test_df = pd.DataFrame({'a': '1', 'b': '2'}, index=[0, 1])
++        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
++        get_pandas_df_mock.return_value = test_df
++
++        operator_args = {
++            'sql_conn_id': 'snowflake_connection',
++            'slack_conn_id': 'slack_connection',
++            'slack_message': 'message: {{ ds }}, {{ testing }}',
++            'slack_channel': '#test',
++            'sql': "sql {{ ds }}",
++            'results_df_name': 'testing',
++            'dag': self.example_dag,
++        }
++        sql_to_slack_operator = self._construct_operator(**operator_args)
++
++        slack_webhook_hook = mock_slack_hook_class.return_value
++        sql_to_slack_operator._get_hook = mock_dbapi_hook
++        sql_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
++
++        # Test that the Slack hook is instantiated with the right parameters
++        mock_slack_hook_class.assert_called_once_with(
++            http_conn_id='slack_connection', message=f'message: 2017-01-01, {test_df}', channel='#test'
++        )
++
++        # Test that the Slack hook's execute method gets run once
++        slack_webhook_hook.execute.assert_called_once()
+diff --git a/tests/providers/snowflake/transfers/test_snowflake_to_slack.py b/tests/providers/snowflake/transfers/test_snowflake_to_slack.py
+index f4a28bd7cc040..06dbfa082202a 100644
+--- a/tests/providers/snowflake/transfers/test_snowflake_to_slack.py
++++ b/tests/providers/snowflake/transfers/test_snowflake_to_slack.py
+@@ -20,6 +20,7 @@
+ from airflow.models import DAG
+ from airflow.providers.snowflake.transfers.snowflake_to_slack import SnowflakeToSlackOperator
+ from airflow.utils import timezone
++from tests.test_utils.config import conf_vars
+ from tests.test_utils.db import clear_db_runs
+ 
+ TEST_DAG_ID = 'snowflake_to_slack_unit_test'
+@@ -38,15 +39,14 @@ def teardown_method(self):
+ 
+     @staticmethod
+     def _construct_operator(**kwargs):
+-        operator = SnowflakeToSlackOperator(task_id=TEST_DAG_ID, **kwargs)
+-        return operator
++        with conf_vars({('operators', 'allow_illegal_arguments'): 'True'}):
++            operator = SnowflakeToSlackOperator(task_id=TEST_DAG_ID, **kwargs)
++            return operator
+ 
+-    @mock.patch('airflow.providers.snowflake.transfers.snowflake_to_slack.SnowflakeHook')
+-    @mock.patch('airflow.providers.snowflake.transfers.snowflake_to_slack.SlackWebhookHook')
+-    def test_hooks_and_rendering(self, mock_slack_hook_class, mock_snowflake_hook_class):
++    @mock.patch('airflow.providers.slack.transfers.sql_to_slack.SlackWebhookHook')
++    def test_hooks_and_rendering(self, mock_slack_hook_class):
+         operator_args = {
+             'snowflake_conn_id': 'snowflake_connection',
+-            'slack_conn_id': 'slack_connection',
+             'sql': "sql {{ ds }}",
+             'results_df_name': 'xxxx',
+             'warehouse': 'test_warehouse',
+@@ -60,29 +60,34 @@ def test_hooks_and_rendering(self, mock_slack_hook_class, mock_snowflake_hook_cl
+         }
+         snowflake_to_slack_operator = self._construct_operator(**operator_args)
+ 
+-        snowflake_hook = mock_snowflake_hook_class.return_value
+-        snowflake_hook.get_pandas_df.return_value = '1234'
+-        slack_webhook_hook = mock_slack_hook_class.return_value
++        # snowflake_hook = mock_snowflake_hook_class.return_value
++        # snowflake_hook.get_pandas_df.return_value = '1234'
++        # slack_webhook_hook = mock_slack_hook_class.return_value
++        mock_dbapi_hook = mock.Mock()
++        snowflake_to_slack_operator._get_hook = mock_dbapi_hook
++
++        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
++        get_pandas_df_mock.return_value = '1234'
+ 
+         snowflake_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+ 
+         # Test that the Snowflake hook is instantiated with the right parameters
+-        mock_snowflake_hook_class.assert_called_once_with(
+-            database='test_database',
+-            role='test_role',
+-            schema='test_schema',
+-            snowflake_conn_id='snowflake_connection',
+-            warehouse='test_warehouse',
+-        )
++        # mock_snowflake_hook_class.assert_called_once_with(
++        #     database='test_database',
++        #     role='test_role',
++        #     schema='test_schema',
++        #     snowflake_conn_id='snowflake_connection',
++        #     warehouse='test_warehouse',
++        # )
+ 
+         # Test that the get_pandas_df method is executed on the Snowflake hook with the pre-rendered sql and
+         # correct params
+-        snowflake_hook.get_pandas_df.assert_called_once_with('sql 2017-01-01', parameters=['1', '2', '3'])
++        # snowflake_hook.get_pandas_df.assert_called_once_with('sql 2017-01-01', parameters=['1', '2', '3'])
+ 
+         # Test that the Slack hook is instantiated with the right parameters
+         mock_slack_hook_class.assert_called_once_with(
+-            http_conn_id='slack_connection', message='message: 2017-01-01, 1234', webhook_token='test_token'
++            message='message: 2017-01-01, 1234', webhook_token='test_token', channel=None
+         )
+ 
+         # Test that the Slack hook's execute method gets run once
+-        slack_webhook_hook.execute.assert_called_once()
++        # slack_webhook_hook.execute.assert_called_once()
+diff --git a/tests/system/providers/slack/__init__.py b/tests/system/providers/slack/__init__.py
+new file mode 100644
+index 0000000000000..13a83393a9124
+--- /dev/null
++++ b/tests/system/providers/slack/__init__.py
+@@ -0,0 +1,16 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
+diff --git a/tests/system/providers/slack/example_sql_to_slack.py b/tests/system/providers/slack/example_sql_to_slack.py
+new file mode 100644
+index 0000000000000..24a4c55ab1dbe
+--- /dev/null
++++ b/tests/system/providers/slack/example_sql_to_slack.py
+@@ -0,0 +1,55 @@
++#
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++"""
++Example DAG using SqlToSlackOperator.
++"""
++
++import os
++from datetime import datetime
++
++from airflow import models
++from airflow.providers.slack.transfers.sql_to_slack import SqlToSlackOperator
++
++PRESTO_TABLE = os.environ.get("PRESTO_TABLE", "test_table")
++SQL_CONN_ID = 'presto_default'
++ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
++DAG_ID = "example_sql_to_slack"
++
++with models.DAG(
++    dag_id=DAG_ID,
++    schedule_interval='@once',  # Override to match your needs
++    start_date=datetime(2022, 1, 1),
++    catchup=False,
++    tags=["example"],
++) as dag:
++    # [START howto_operator_sql_to_slack]
++    SqlToSlackOperator(
++        task_id="presto_to_slack",
++        sql_conn_id=SQL_CONN_ID,
++        sql=f"SELECT col FROM {PRESTO_TABLE}",
++        slack_channel="my_channel",
++        slack_conn_id='slack_default',
++        slack_message="message: {{ ds }}, {{ results_df }}",
++    )
++    # [END howto_operator_sql_to_slack]
++
++
++from tests.system.utils import get_test_run  # noqa: E402
++
++# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
++test_run = get_test_run(dag)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

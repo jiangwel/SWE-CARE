@@ -1,0 +1,1478 @@
+  Task-ID: ansible__ansible-33909@d516d5b
+  Please checkout to this commit first: 5578193ae4f6caa5a28c831449911645eef12e68
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [NETCONF] Refactor IOSXR modules to support netconf plugin
+##### ISSUE TYPE
+<!--- Pick one below and delete the rest: -->
+ - Feature Idea
+
+
+##### COMPONENT NAME
+iosxr
+
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes below -->
+```
+2.5
+```
+
+
+
+##### OS / ENVIRONMENT
+macOS
+
+##### SUMMARY
+Refactor module codes to use netconf plugin:
+
+- [x] iosxr_banner 
+- [x] iosxr_logging
+- [x] iosxr_interface
+- [x] iosxr_system
+- [x] iosxr_user
+- [ ] ~iosxr_facts~
+
+Note: iosxr_config, iosxr_command and iosxr_netconf shall support `cli` only.
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/module_utils/network/common/netconf.py b/lib/ansible/module_utils/network/common/netconf.py
+index 218bedc79f983b..234d125830e855 100644
+--- a/lib/ansible/module_utils/network/common/netconf.py
++++ b/lib/ansible/module_utils/network/common/netconf.py
+@@ -77,7 +77,11 @@ def parse_rpc_error(self, rpc_error):
+ 
+             warnings = []
+             for error in error_list:
+-                message = error.find('./nc:error-message', NS_MAP).text
++                try:
++                    message = error.find('./nc:error-message', NS_MAP).text
++                except Exception:
++                    message = error.find('./nc:error-info', NS_MAP).text
++
+                 severity = error.find('./nc:error-severity', NS_MAP).text
+ 
+                 if severity == 'warning' and self.ignore_warning:
+diff --git a/lib/ansible/module_utils/network/iosxr/iosxr.py b/lib/ansible/module_utils/network/iosxr/iosxr.py
+index 805acf85129215..3946c07c07c1a3 100644
+--- a/lib/ansible/module_utils/network/iosxr/iosxr.py
++++ b/lib/ansible/module_utils/network/iosxr/iosxr.py
+@@ -62,7 +62,9 @@
+     'M:TYPE_NSMAP': {"idx": "urn:ietf:params:xml:ns:yang:iana-if-type"},
+     'ETHERNET_NSMAP': {None: "http://openconfig.net/yang/interfaces/ethernet"},
+     'CETHERNET_NSMAP': {None: "http://cisco.com/ns/yang/Cisco-IOS-XR-drivers-media-eth-cfg"},
+-    'INTERFACE-CONFIGURATIONS_NSMAP': {None: "http://cisco.com/ns/yang/Cisco-IOS-XR-ifmgr-cfg"}
++    'INTERFACE-CONFIGURATIONS_NSMAP': {None: "http://cisco.com/ns/yang/Cisco-IOS-XR-ifmgr-cfg"},
++    'INFRA-STATISTICS_NSMAP': {None: "http://cisco.com/ns/yang/Cisco-IOS-XR-infra-statsd-oper"},
++    'INTERFACE-PROPERTIES_NSMAP': {None: "http://cisco.com/ns/yang/Cisco-IOS-XR-ifmgr-oper"},
+ }
+ 
+ iosxr_provider_spec = {
+@@ -253,7 +255,11 @@ def build_xml(container, xmap=None, params=None, opcode=None):
+ 
+ 
+ def etree_find(root, node):
+-    element = etree.fromstring(root).find('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++    try:
++        element = etree.fromstring(root).find('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++    except Exception:
++        element = etree.fromstring(etree.tostring(root)).find('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++
+     if element is not None:
+         return element
+ 
+@@ -261,7 +267,11 @@ def etree_find(root, node):
+ 
+ 
+ def etree_findall(root, node):
+-    element = etree.fromstring(root).findall('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++    try:
++        element = etree.fromstring(root).findall('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++    except Exception:
++        element = etree.fromstring(etree.tostring(root)).findall('.//' + to_bytes(node, errors='surrogate_then_replace').strip())
++
+     if element is not None:
+         return element
+ 
+@@ -336,6 +346,17 @@ def commit_config(module, comment=None, confirmed=False, confirm_timeout=None, p
+     return reply
+ 
+ 
++def get_oper(module, filter=None):
++    global _DEVICE_CONFIGS
++
++    conn = get_connection(module)
++
++    if filter is not None:
++        response = conn.get(filter)
++
++    return to_bytes(etree.tostring(response), errors='surrogate_then_replace').strip()
++
++
+ def get_config(module, config_filter=None, source='running'):
+     global _DEVICE_CONFIGS
+ 
+@@ -370,7 +391,8 @@ def load_config(module, command_filter, commit=False, replace=False,
+         # conn.discard_changes()
+ 
+         try:
+-            conn.edit_config(command_filter)
++            for filter in to_list(command_filter):
++                conn.edit_config(filter)
+ 
+             candidate = get_config(module, source='candidate', config_filter=nc_get_filter)
+             diff = get_config_diff(module, running, candidate)
+diff --git a/lib/ansible/modules/network/iosxr/iosxr_banner.py b/lib/ansible/modules/network/iosxr/iosxr_banner.py
+index 108e2b66efbcc5..8e9f81999b8369 100644
+--- a/lib/ansible/modules/network/iosxr/iosxr_banner.py
++++ b/lib/ansible/modules/network/iosxr/iosxr_banner.py
+@@ -68,14 +68,29 @@
+ 
+ RETURN = """
+ commands:
+-  description: The list of configuration mode commands to send to the device
+-  returned: always
++  description: The list of configuration mode commands sent to device with transport C(cli)
++  returned: always (empty list when no commands to send)
+   type: list
+   sample:
+     - banner login
+     - this is my login banner
+     - that contains a multiline
+     - string
++
++xml:
++  description: NetConf rpc xml sent to device with transport C(netconf)
++  returned: always (empty list when no xml rpc to send)
++  type: list
++  version_added: 2.5
++  sample:
++    - '<config xmlns:xc="urn:ietf:params:xml:ns:netconf:base:1.0">
++            <banners xmlns="http://cisco.com/ns/yang/Cisco-IOS-XR-infra-infra-cfg">
++                <banner xc:operation="merge">
++                  <banner-name>motd</banner-name>
++                  <banner-text>Ansible banner example</banner-text>
++                </banner>
++            </banners>
++        </config>'
+ """
+ 
+ import re
+@@ -83,9 +98,9 @@
+ 
+ from ansible.module_utils.basic import AnsibleModule
+ from ansible.module_utils.network.iosxr.iosxr import get_config, load_config
+-from ansible.module_utils.network.iosxr.iosxr import iosxr_argument_spec, discard_config
+-from ansible.module_utils.network.iosxr.iosxr import build_xml, is_cliconf, is_netconf
+-from ansible.module_utils.network.iosxr.iosxr import etree_find
++from ansible.module_utils.network.iosxr.iosxr import iosxr_argument_spec
++from ansible.module_utils.network.iosxr.iosxr import build_xml, is_cliconf
++from ansible.module_utils.network.iosxr.iosxr import etree_find, is_netconf
+ 
+ 
+ class ConfigBase(object):
+@@ -162,7 +177,7 @@ def __init__(self, module):
+             ('a:text', {'xpath': 'banner/banner-text', 'operation': 'edit'})
+         ])
+ 
+-    def map_obj_to_commands(self):
++    def map_obj_to_xml_rpc(self):
+         state = self._module.params['state']
+         _get_filter = build_xml('banners', xmap=self._banners_meta, params=self._module.params, opcode="filter")
+ 
+@@ -180,7 +195,7 @@ def map_obj_to_commands(self):
+         elif state == 'present':
+             opcode = 'merge'
+ 
+-        self._result['commands'] = []
++        self._result['xml'] = []
+         if opcode:
+             _edit_filter = build_xml('banners', xmap=self._banners_meta, params=self._module.params, opcode=opcode)
+ 
+@@ -189,7 +204,7 @@ def map_obj_to_commands(self):
+                 diff = load_config(self._module, _edit_filter, commit=commit, running=running, nc_get_filter=_get_filter)
+ 
+                 if diff:
+-                    self._result['commands'] = _edit_filter
++                    self._result['xml'] = _edit_filter
+                     if self._module._diff:
+                         self._result['diff'] = dict(prepared=diff)
+ 
+@@ -197,7 +212,7 @@ def map_obj_to_commands(self):
+ 
+     def run(self):
+         self.map_params_to_obj()
+-        self.map_obj_to_commands()
++        self.map_obj_to_xml_rpc()
+ 
+         return self._result
+ 
+@@ -219,8 +234,10 @@ def main():
+                            required_if=required_if,
+                            supports_check_mode=True)
+ 
++    config_object = None
+     if is_cliconf(module):
+-        module.deprecate(msg="cli support for 'iosxr_banner' is deprecated. Use transport netconf instead", version="4 releases from v2.5")
++        module.deprecate(msg="cli support for 'iosxr_banner' is deprecated. Use transport netconf instead",
++                         version="4 releases from v2.5")
+         config_object = CliConfiguration(module)
+     elif is_netconf(module):
+         config_object = NCConfiguration(module)
+diff --git a/lib/ansible/modules/network/iosxr/iosxr_interface.py b/lib/ansible/modules/network/iosxr/iosxr_interface.py
+index 14832fe3c24475..5aeb26ce18fcb2 100644
+--- a/lib/ansible/modules/network/iosxr/iosxr_interface.py
++++ b/lib/ansible/modules/network/iosxr/iosxr_interface.py
+@@ -17,34 +17,47 @@
+ ---
+ module: iosxr_interface
+ version_added: "2.4"
+-author: "Ganesh Nalawade (@ganeshrn)"
++author:
++    - "Ganesh Nalawade (@ganeshrn)"
++    - "Kedar Kekan (@kedarX)"
+ short_description: Manage Interface on Cisco IOS XR network devices
+ description:
+   - This module provides declarative management of Interfaces
+     on Cisco IOS XR network devices.
+ extends_documentation_fragment: iosxr
+ notes:
+-  - Tested against IOS XR 6.1.2
++  - Tested against IOS XRv 6.1.2
++  - Preconfiguration of physical interfaces is not supported with C(netconf) transport.
+ options:
+   name:
+     description:
+-      - Name of the Interface.
++      - Name of the interface to configure in C(type + path) format. e.g. C(GigabitEthernet0/0/0/0)
+     required: true
+   description:
+     description:
+-      - Description of Interface.
++      - Description of Interface being configured.
+   enabled:
+     description:
+-      - Interface link status.
++      - Removes the shutdown configuration, which removes the forced administrative down on the interface,
++        enabling it to move to an up or down state.
++    choices: ['True', 'False']
++    default: True
++  active:
++    description:
++      - Whether the interface is C(active) or C(preconfigured)
++    choices: ['active', 'preconfigure']
++    default: active
++    version_added: 2.5
+   speed:
+     description:
+-      - Interface link speed.
++      - Configure the speed for an interface. Default is auto-negotiation when not configured.
++    choices: ['10', '100', '1000']
+   mtu:
+     description:
+-      - Maximum size of transmit packet.
++      - Sets the MTU value for the interface. Range is between 64 and 65535'
+   duplex:
+     description:
+-      - Interface link status
++      - Configures the interface duplex mode. Default is auto-negotiation when not configured.
+     choices: ['full', 'half']
+   tx_rate:
+     description:
+@@ -53,7 +66,9 @@
+     description:
+       - Receiver rate in bits per second (bps).
+   aggregate:
+-    description: List of Interfaces definitions.
++    description:
++      - List of Interface definitions. Include multiple interface configurations together,
++        one each on a seperate line
+   delay:
+     description:
+       - Time in seconds to wait before checking for the operational state on remote
+@@ -102,6 +117,16 @@
+     mtu: 512
+     state: present
+ 
++- name: Create interface using aggregate along with additional params in aggregate
++  iosxr_interface:
++    aggregate:
++    - { name: GigabitEthernet0/0/0/3, description: test-interface 3 }
++    - { name: GigabitEthernet0/0/0/2, description: test-interface 2 }
++    speed: 100
++    duplex: full
++    mtu: 512
++    state: present
++
+ - name: Delete interface using aggregate
+   iosxr_interface:
+     aggregate:
+@@ -125,240 +150,453 @@
+ 
+ RETURN = """
+ commands:
+-  description: The list of configuration mode commands to send to the device.
+-  returned: always, except for the platforms that use Netconf transport to manage the device.
++  description: The list of configuration mode commands sent to device with transport C(cli)
++  returned: always (empty list when no commands to send)
+   type: list
+   sample:
+   - interface GigabitEthernet0/0/0/2
+   - description test-interface
+   - duplex half
+   - mtu 512
++
++xml:
++  description: NetConf rpc xml sent to device with transport C(netconf)
++  returned: always (empty list when no xml rpc to send)
++  type: list
++  version_added: 2.5
++  sample:
++  - '<config xmlns:xc="urn:ietf:params:xml:ns:netconf:base:1.0">
++    <interface-configurations xmlns="http://cisco.com/ns/yang/Cisco-IOS-XR-ifmgr-cfg">
++    <interface-configuration xc:operation="merge">
++    <active>act</active>
++    <interface-name>GigabitEthernet0/0/0/0</interface-name>
++    <description>test-interface-0</description>
++    <mtus><mtu>
++    <owner>GigabitEthernet</owner>
++    <mtu>512</mtu>
++    </mtu></mtus>
++    <ethernet xmlns="http://cisco.com/ns/yang/Cisco-IOS-XR-drivers-media-eth-cfg">
++    <speed>100</speed>
++    <duplex>half</duplex>
++    </ethernet>
++    </interface-configuration>
++    </interface-configurations></config>'
+ """
+ import re
+-
+ from time import sleep
+ from copy import deepcopy
++import collections
+ 
+-from ansible.module_utils._text import to_text
+ from ansible.module_utils.basic import AnsibleModule
+-from ansible.module_utils.connection import exec_command
+-from ansible.module_utils.network.iosxr.iosxr import get_config, load_config
+-from ansible.module_utils.network.iosxr.iosxr import iosxr_argument_spec
++from ansible.module_utils.network.iosxr.iosxr import get_config, load_config, build_xml
++from ansible.module_utils.network.iosxr.iosxr import run_command, iosxr_argument_spec, get_oper
++from ansible.module_utils.network.iosxr.iosxr import is_netconf, is_cliconf, etree_findall, etree_find
+ from ansible.module_utils.network.common.utils import conditional, remove_default_spec
+ 
+ 
+-def validate_mtu(value, module):
++def validate_mtu(value):
+     if value and not 64 <= int(value) <= 65535:
+-        module.fail_json(msg='mtu must be between 64 and 65535')
+-
+-
+-def validate_param_values(module, obj, param=None):
+-    if param is None:
+-        param = module.params
+-    for key in obj:
+-        # validate the param value (if validator func exists)
+-        validator = globals().get('validate_%s' % key)
+-        if callable(validator):
+-            validator(param.get(key), module)
+-
+-
+-def parse_shutdown(intf_config):
+-    for cfg in intf_config:
+-        match = re.search(r'%s' % 'shutdown', cfg, re.M)
+-        if match:
+-            return True
+-    return False
+-
+-
+-def parse_config_argument(intf_config, arg):
+-    for cfg in intf_config:
+-        match = re.search(r'%s (.+)$' % arg, cfg, re.M)
+-        if match:
+-            return match.group(1)
+-
+-
+-def search_obj_in_list(name, lst):
+-    for o in lst:
+-        if o['name'] == name:
+-            return o
+-
+-    return None
+-
+-
+-def map_params_to_obj(module):
+-    obj = []
+-
+-    aggregate = module.params.get('aggregate')
+-    if aggregate:
+-        for item in aggregate:
+-            for key in item:
+-                if item.get(key) is None:
+-                    item[key] = module.params[key]
+-
+-            validate_param_values(module, item, item)
+-            d = item.copy()
+-
+-            if d['enabled']:
+-                d['disable'] = False
+-            else:
+-                d['disable'] = True
+-
+-            obj.append(d)
+-
+-    else:
+-        validate_param_values(module, module.params)
+-        params = {
+-            'name': module.params['name'],
+-            'description': module.params['description'],
+-            'speed': module.params['speed'],
+-            'mtu': module.params['mtu'],
+-            'duplex': module.params['duplex'],
+-            'state': module.params['state'],
+-            'delay': module.params['delay'],
+-            'tx_rate': module.params['tx_rate'],
+-            'rx_rate': module.params['rx_rate']
+-        }
+-
+-        if module.params['enabled']:
+-            params.update({'disable': False})
+-        else:
+-            params.update({'disable': True})
+-
+-        obj.append(params)
+-    return obj
+-
+-
+-def map_config_to_obj(module):
+-    data = get_config(module, config_filter='interface')
+-    interfaces = data.strip().rstrip('!').split('!')
+-
+-    if not interfaces:
+-        return list()
+-
+-    instances = list()
+-
+-    for interface in interfaces:
+-        intf_config = interface.strip().splitlines()
+-
+-        name = intf_config[0].strip().split()[1]
+-
+-        if name == 'preconfigure':
+-            name = intf_config[0].strip().split()[2]
+-
+-        obj = {
+-            'name': name,
+-            'description': parse_config_argument(intf_config, 'description'),
+-            'speed': parse_config_argument(intf_config, 'speed'),
+-            'duplex': parse_config_argument(intf_config, 'duplex'),
+-            'mtu': parse_config_argument(intf_config, 'mtu'),
+-            'disable': True if parse_shutdown(intf_config) else False,
+-            'state': 'present'
+-        }
+-        instances.append(obj)
+-    return instances
++        return False, 'mtu must be between 64 and 65535'
++    return True, None
++
++
++class ConfigBase(object):
++    def __init__(self, module):
++        self._module = module
++        self._result = {'changed': False, 'warnings': []}
++        self._want = list()
++        self._have = list()
++
++    def validate_param_values(self, param=None):
++        for key, value in param.items():
++            # validate the param value (if validator func exists)
++            validator = globals().get('validate_%s' % key)
++            if callable(validator):
++                rc, msg = validator(value)
++                if not rc:
++                    self._module.fail_json(msg=msg)
++
++    def map_params_to_obj(self):
++        aggregate = self._module.params.get('aggregate')
++        if aggregate:
++            for item in aggregate:
++                for key in item:
++                    if item.get(key) is None:
++                        item[key] = self._module.params[key]
++
++                self.validate_param_values(item)
++                d = item.copy()
++
++                match = re.match(r"(^[a-z]+)([0-9/]+$)", d['name'], re.I)
++                if match:
++                    d['owner'] = match.groups()[0]
++
++                if d['active'] == 'preconfigure':
++                    d['active'] = 'pre'
++                else:
++                    d['active'] = 'act'
++
++                self._want.append(d)
+ 
++        else:
++            self.validate_param_values(self._module.params)
++            params = {
++                'name': self._module.params['name'],
++                'description': self._module.params['description'],
++                'speed': self._module.params['speed'],
++                'mtu': self._module.params['mtu'],
++                'duplex': self._module.params['duplex'],
++                'state': self._module.params['state'],
++                'delay': self._module.params['delay'],
++                'tx_rate': self._module.params['tx_rate'],
++                'rx_rate': self._module.params['rx_rate'],
++                'enabled': self._module.params['enabled'],
++                'active': self._module.params['active'],
++            }
++
++            match = re.match(r"(^[a-z]+)([0-9/]+$)", params['name'], re.I)
++            if match:
++                params['owner'] = match.groups()[0]
+ 
+-def map_obj_to_commands(updates):
+-    commands = list()
+-    want, have = updates
++                if params['active'] == 'preconfigure':
++                    params['active'] = 'pre'
++                else:
++                    params['active'] = 'act'
+ 
+-    args = ('speed', 'description', 'duplex', 'mtu')
+-    for w in want:
+-        name = w['name']
+-        disable = w['disable']
+-        state = w['state']
++            self._want.append(params)
+ 
+-        obj_in_have = search_obj_in_list(name, have)
+-        interface = 'interface ' + name
+ 
+-        if state == 'absent' and obj_in_have:
+-            commands.append('no ' + interface)
++class CliConfiguration(ConfigBase):
++    def __init__(self, module):
++        super(CliConfiguration, self).__init__(module)
+ 
+-        elif state in ('present', 'up', 'down'):
+-            if obj_in_have:
+-                for item in args:
+-                    candidate = w.get(item)
+-                    running = obj_in_have.get(item)
+-                    if candidate != running:
+-                        if candidate:
+-                            cmd = interface + ' ' + item + ' ' + str(candidate)
+-                            commands.append(cmd)
+-
+-                if disable and not obj_in_have.get('disable', False):
+-                    commands.append(interface + ' shutdown')
+-                elif not disable and obj_in_have.get('disable', False):
+-                    commands.append('no ' + interface + ' shutdown')
+-            else:
+-                for item in args:
+-                    value = w.get(item)
+-                    if value:
+-                        commands.append(interface + ' ' + item + ' ' + str(value))
+-                if disable:
+-                    commands.append('no ' + interface + ' shutdown')
+-    return commands
+-
+-
+-def check_declarative_intent_params(module, want, result):
+-    failed_conditions = []
+-    for w in want:
+-        want_state = w.get('state')
+-        want_tx_rate = w.get('tx_rate')
+-        want_rx_rate = w.get('rx_rate')
+-        if want_state not in ('up', 'down') and not want_tx_rate and not want_rx_rate:
+-            continue
+-
+-        if result['changed']:
+-            sleep(w['delay'])
+-
+-        command = 'show interfaces %s' % w['name']
+-        rc, out, err = exec_command(module, command)
+-        if rc != 0:
+-            module.fail_json(msg=to_text(err, errors='surrogate_then_replace'), command=command, rc=rc)
+-
+-        if want_state in ('up', 'down'):
+-            match = re.search(r'%s (\w+)' % 'line protocol is', out, re.M)
+-            have_state = None
+-            if match:
+-                have_state = match.group(1)
+-                if have_state.strip() == 'administratively':
+-                    match = re.search(r'%s (\w+)' % 'administratively', out, re.M)
+-                    if match:
+-                        have_state = match.group(1)
+-
+-            if have_state is None or not conditional(want_state, have_state.strip()):
+-                failed_conditions.append('state ' + 'eq(%s)' % want_state)
+-
+-        if want_tx_rate:
+-            match = re.search(r'%s (\d+)' % 'output rate', out, re.M)
+-            have_tx_rate = None
++    def parse_shutdown(self, intf_config):
++        for cfg in intf_config:
++            match = re.search(r'%s' % 'shutdown', cfg, re.M)
+             if match:
+-                have_tx_rate = match.group(1)
+-
+-            if have_tx_rate is None or not conditional(want_tx_rate, have_tx_rate.strip(), cast=int):
+-                failed_conditions.append('tx_rate ' + want_tx_rate)
++                return True
++        return False
+ 
+-        if want_rx_rate:
+-            match = re.search(r'%s (\d+)' % 'input rate', out, re.M)
+-            have_rx_rate = None
++    def parse_config_argument(self, intf_config, arg):
++        for cfg in intf_config:
++            match = re.search(r'%s (.+)$' % arg, cfg, re.M)
+             if match:
+-                have_rx_rate = match.group(1)
+-
+-            if have_rx_rate is None or not conditional(want_rx_rate, have_rx_rate.strip(), cast=int):
+-                failed_conditions.append('rx_rate ' + want_rx_rate)
+-
+-    return failed_conditions
++                return match.group(1)
++
++    def search_obj_in_list(self, name):
++        for obj in self._have:
++            if obj['name'] == name:
++                return obj
++        return None
++
++    def map_config_to_obj(self):
++        data = get_config(self._module, config_filter='interface')
++        interfaces = data.strip().rstrip('!').split('!')
++
++        if not interfaces:
++            return list()
++
++        for interface in interfaces:
++            intf_config = interface.strip().splitlines()
++
++            name = intf_config[0].strip().split()[1]
++
++            active = 'act'
++            if name == 'preconfigure':
++                active = 'pre'
++                name = intf_config[0].strip().split()[2]
++
++            obj = {
++                'name': name,
++                'description': self.parse_config_argument(intf_config, 'description'),
++                'speed': self.parse_config_argument(intf_config, 'speed'),
++                'duplex': self.parse_config_argument(intf_config, 'duplex'),
++                'mtu': self.parse_config_argument(intf_config, 'mtu'),
++                'enabled': True if not self.parse_shutdown(intf_config) else False,
++                'active': active,
++                'state': 'present'
++            }
++            self._have.append(obj)
++
++    def map_obj_to_commands(self):
++        commands = list()
++
++        args = ('speed', 'description', 'duplex', 'mtu')
++        for want_item in self._want:
++            name = want_item['name']
++            disable = not want_item['enabled']
++            state = want_item['state']
++
++            obj_in_have = self.search_obj_in_list(name)
++            interface = 'interface ' + name
++
++            if state == 'absent' and obj_in_have:
++                commands.append('no ' + interface)
++
++            elif state in ('present', 'up', 'down'):
++                if obj_in_have:
++                    for item in args:
++                        candidate = want_item.get(item)
++                        running = obj_in_have.get(item)
++                        if candidate != running:
++                            if candidate:
++                                cmd = interface + ' ' + item + ' ' + str(candidate)
++                                commands.append(cmd)
++
++                    if disable and obj_in_have.get('enabled', False):
++                        commands.append(interface + ' shutdown')
++                    elif not disable and not obj_in_have.get('enabled', False):
++                        commands.append('no ' + interface + ' shutdown')
++                else:
++                    for item in args:
++                        value = want_item.get(item)
++                        if value:
++                            commands.append(interface + ' ' + item + ' ' + str(value))
++                    if not disable:
++                        commands.append('no ' + interface + ' shutdown')
++        self._result['commands'] = commands
++
++        if commands:
++            commit = not self._module.check_mode
++            diff = load_config(self._module, commands, commit=commit)
++            if diff:
++                self._result['diff'] = dict(prepared=diff)
++            self._result['changed'] = True
++
++    def check_declarative_intent_params(self):
++        failed_conditions = []
++        for want_item in self._want:
++            want_state = want_item.get('state')
++            want_tx_rate = want_item.get('tx_rate')
++            want_rx_rate = want_item.get('rx_rate')
++            if want_state not in ('up', 'down') and not want_tx_rate and not want_rx_rate:
++                continue
++
++            if self._result['changed']:
++                sleep(want_item['delay'])
++
++            command = 'show interfaces {!s}'.format(want_item['name'])
++            out = run_command(self._module, command)[0]
++
++            if want_state in ('up', 'down'):
++                match = re.search(r'%s (\w+)' % 'line protocol is', out, re.M)
++                have_state = None
++                if match:
++                    have_state = match.group(1)
++                    if have_state.strip() == 'administratively':
++                        match = re.search(r'%s (\w+)' % 'administratively', out, re.M)
++                        if match:
++                            have_state = match.group(1)
++
++                if have_state is None or not conditional(want_state, have_state.strip()):
++                    failed_conditions.append('state ' + 'eq({!s})'.format(want_state))
++
++            if want_tx_rate:
++                match = re.search(r'%s (\d+)' % 'output rate', out, re.M)
++                have_tx_rate = None
++                if match:
++                    have_tx_rate = match.group(1)
++
++                if have_tx_rate is None or not conditional(want_tx_rate, have_tx_rate.strip(), cast=int):
++                    failed_conditions.append('tx_rate ' + want_tx_rate)
++
++            if want_rx_rate:
++                match = re.search(r'%s (\d+)' % 'input rate', out, re.M)
++                have_rx_rate = None
++                if match:
++                    have_rx_rate = match.group(1)
++
++                if have_rx_rate is None or not conditional(want_rx_rate, have_rx_rate.strip(), cast=int):
++                    failed_conditions.append('rx_rate ' + want_rx_rate)
++
++        if failed_conditions:
++            msg = 'One or more conditional statements have not been satisfied'
++            self._module.fail_json(msg=msg, failed_conditions=failed_conditions)
++
++    def run(self):
++        self.map_params_to_obj()
++        self.map_config_to_obj()
++        self.map_obj_to_commands()
++        self.check_declarative_intent_params()
++
++        return self._result
++
++
++class NCConfiguration(ConfigBase):
++    def __init__(self, module):
++        super(NCConfiguration, self).__init__(module)
++
++        self._intf_meta = collections.OrderedDict()
++        self._shut_meta = collections.OrderedDict()
++        self._data_rate_meta = collections.OrderedDict()
++        self._line_state_meta = collections.OrderedDict()
++
++    def map_obj_to_xml_rpc(self):
++        self._intf_meta.update([
++            ('interface-configuration', {'xpath': 'interface-configurations/interface-configuration', 'tag': True, 'attrib': 'operation'}),
++            ('a:active', {'xpath': 'interface-configurations/interface-configuration/active', 'operation': 'edit'}),
++            ('a:name', {'xpath': 'interface-configurations/interface-configuration/interface-name'}),
++            ('a:description', {'xpath': 'interface-configurations/interface-configuration/description', 'operation': 'edit'}),
++            ('mtus', {'xpath': 'interface-configurations/interface-configuration/mtus', 'tag': True, 'operation': 'edit'}),
++            ('mtu', {'xpath': 'interface-configurations/interface-configuration/mtus/mtu', 'tag': True, 'operation': 'edit'}),
++            ('a:owner', {'xpath': 'interface-configurations/interface-configuration/mtus/mtu/owner', 'operation': 'edit'}),
++            ('a:mtu', {'xpath': 'interface-configurations/interface-configuration/mtus/mtu/mtu', 'operation': 'edit'}),
++            ('CEthernet', {'xpath': 'interface-configurations/interface-configuration/ethernet', 'tag': True, 'operation': 'edit', 'ns': True}),
++            ('a:speed', {'xpath': 'interface-configurations/interface-configuration/ethernet/speed', 'operation': 'edit'}),
++            ('a:duplex', {'xpath': 'interface-configurations/interface-configuration/ethernet/duplex', 'operation': 'edit'}),
++        ])
++
++        self._shut_meta.update([
++            ('interface-configuration', {'xpath': 'interface-configurations/interface-configuration', 'tag': True}),
++            ('a:active', {'xpath': 'interface-configurations/interface-configuration/active', 'operation': 'edit'}),
++            ('a:name', {'xpath': 'interface-configurations/interface-configuration/interface-name'}),
++            ('shutdown', {'xpath': 'interface-configurations/interface-configuration/shutdown', 'tag': True, 'operation': 'edit', 'attrib': 'operation'}),
++        ])
++        state = self._module.params['state']
++
++        _get_filter = build_xml('interface-configurations', xmap=self._intf_meta, params=self._want, opcode="filter")
++
++        running = get_config(self._module, source='running', config_filter=_get_filter)
++        intfcfg_nodes = etree_findall(running, 'interface-configuration')
++
++        intf_list = set()
++        shut_list = set()
++        for item in intfcfg_nodes:
++            intf_name = etree_find(item, 'interface-name').text
++            if intf_name is not None:
++                intf_list.add(intf_name)
++
++                if etree_find(item, 'shutdown') is not None:
++                    shut_list.add(intf_name)
++
++        intf_params = list()
++        shut_params = list()
++        noshut_params = list()
++        for index, item in enumerate(self._want):
++            if item['name'] in intf_list:
++                intf_params.append(item)
++            if not item['enabled']:
++                shut_params.append(item)
++            if item['name'] in shut_list and item['enabled']:
++                noshut_params.append(item)
++
++        opcode = None
++        if state == 'absent':
++            if intf_params:
++                opcode = "delete"
++        elif state in ('present', 'up', 'down'):
++            intf_params = self._want
++            opcode = 'merge'
++
++        self._result['xml'] = []
++        _edit_filter_list = list()
++        if opcode:
++            _edit_filter_list.append(build_xml('interface-configurations', xmap=self._intf_meta,
++                                               params=intf_params, opcode=opcode))
++
++            if opcode == 'merge':
++                if len(shut_params):
++                    _edit_filter_list.append(build_xml('interface-configurations', xmap=self._shut_meta,
++                                                       params=shut_params, opcode='merge'))
++                if len(noshut_params):
++                    _edit_filter_list.append(build_xml('interface-configurations', xmap=self._shut_meta,
++                                                       params=noshut_params, opcode='delete'))
++            diff = None
++            if len(_edit_filter_list):
++                commit = not self._module.check_mode
++                diff = load_config(self._module, _edit_filter_list, commit=commit, running=running,
++                                   nc_get_filter=_get_filter)
++
++            if diff:
++                if self._module._diff:
++                    self._result['diff'] = dict(prepared=diff)
++
++                self._result['xml'] = _edit_filter_list
++                self._result['changed'] = True
++
++    def check_declarative_intent_params(self):
++        failed_conditions = []
++
++        self._data_rate_meta.update([
++            ('interfaces', {'xpath': 'infra-statistics/interfaces', 'tag': True}),
++            ('interface', {'xpath': 'infra-statistics/interfaces/interface', 'tag': True}),
++            ('a:name', {'xpath': 'infra-statistics/interfaces/interface/interface-name'}),
++            ('cache', {'xpath': 'infra-statistics/interfaces/interface/cache', 'tag': True}),
++            ('data-rate', {'xpath': 'infra-statistics/interfaces/interface/cache/data-rate', 'tag': True}),
++            ('input-data-rate', {'xpath': 'infra-statistics/interfaces/interface/cache/data-rate/input-data-rate', 'tag': True}),
++            ('output-data-rate', {'xpath': 'infra-statistics/interfaces/interface/cache/data-rate/output-data-rate', 'tag': True}),
++        ])
++
++        self._line_state_meta.update([
++            ('data-nodes', {'xpath': 'interface-properties/data-nodes', 'tag': True}),
++            ('data-node', {'xpath': 'interface-properties/data-nodes/data-node', 'tag': True}),
++            ('system-view', {'xpath': 'interface-properties/data-nodes/data-node/system-view', 'tag': True}),
++            ('interfaces', {'xpath': 'interface-properties/data-nodes/data-node/system-view/interfaces', 'tag': True}),
++            ('interface', {'xpath': 'interface-properties/data-nodes/data-node/system-view/interfaces/interface', 'tag': True}),
++            ('a:name', {'xpath': 'interface-properties/data-nodes/data-node/system-view/interfaces/interface/interface-name'}),
++            ('line-state', {'xpath': 'interface-properties/data-nodes/data-node/system-view/interfaces/interface/line-state', 'tag': True}),
++        ])
++
++        _rate_filter = build_xml('infra-statistics', xmap=self._data_rate_meta, params=self._want, opcode="filter")
++        out = get_oper(self._module, filter=_rate_filter)
++        data_rate_list = etree_findall(out, 'interface')
++        data_rate_map = dict()
++        for item in data_rate_list:
++            data_rate_map.update({etree_find(item, 'interface-name').text: dict()})
++            data_rate_map[etree_find(item, 'interface-name').text].update({'input-data-rate': etree_find(item, 'input-data-rate').text,
++                                                                           'output-data-rate': etree_find(item, 'output-data-rate').text})
++
++        _line_state_filter = build_xml('interface-properties', xmap=self._line_state_meta, params=self._want, opcode="filter")
++        out = get_oper(self._module, filter=_line_state_filter)
++        line_state_list = etree_findall(out, 'interface')
++        line_state_map = dict()
++        for item in line_state_list:
++            line_state_map.update({etree_find(item, 'interface-name').text: etree_find(item, 'line-state').text})
++
++        for want_item in self._want:
++            want_state = want_item.get('state')
++            want_tx_rate = want_item.get('tx_rate')
++            want_rx_rate = want_item.get('rx_rate')
++            if want_state not in ('up', 'down') and not want_tx_rate and not want_rx_rate:
++                continue
++
++            if self._result['changed']:
++                sleep(want_item['delay'])
++
++            if want_state in ('up', 'down'):
++                if want_state not in line_state_map[want_item['name']]:
++                    failed_conditions.append('state ' + 'eq({!s})'.format(want_state))
++
++            if want_tx_rate:
++                if want_tx_rate != data_rate_map[want_item['name']]['output-data-rate']:
++                    failed_conditions.append('tx_rate ' + want_tx_rate)
++
++            if want_rx_rate:
++                if want_rx_rate != data_rate_map[want_item['name']]['input-data-rate']:
++                    failed_conditions.append('rx_rate ' + want_rx_rate)
++
++        if failed_conditions:
++            msg = 'One or more conditional statements have not been satisfied'
++            self._module.fail_json(msg=msg, failed_conditions=failed_conditions)
++
++    def run(self):
++        self.map_params_to_obj()
++        self.map_obj_to_xml_rpc()
++        self.check_declarative_intent_params()
++        return self._result
+ 
+ 
+ def main():
+     """ main entry point for module execution
+     """
+     element_spec = dict(
+-        name=dict(),
+-        description=dict(),
+-        speed=dict(),
++        name=dict(type='str'),
++        description=dict(type='str'),
++        speed=dict(choices=['10', '100', '1000']),
+         mtu=dict(),
+         duplex=dict(choices=['full', 'half']),
+         enabled=dict(default=True, type='bool'),
++        active=dict(default='active', type='str', choices=['active', 'preconfigure']),
+         tx_rate=dict(),
+         rx_rate=dict(),
+         delay=dict(default=10, type='int'),
+@@ -387,32 +625,21 @@ def main():
+                            mutually_exclusive=mutually_exclusive,
+                            supports_check_mode=True)
+ 
+-    warnings = list()
+-
+-    result = {'changed': False}
+-
+-    want = map_params_to_obj(module)
+-    have = map_config_to_obj(module)
+-
+-    commands = map_obj_to_commands((want, have))
+-
+-    result['commands'] = commands
+-    result['warnings'] = warnings
+-
+-    if commands:
+-        commit = not module.check_mode
+-        diff = load_config(module, commands, commit=commit)
+-        if diff:
+-            result['diff'] = dict(prepared=diff)
+-        result['changed'] = True
+-
+-    failed_conditions = check_declarative_intent_params(module, want, result)
+-
+-    if failed_conditions:
+-        msg = 'One or more conditional statements have not been satisfied'
+-        module.fail_json(msg=msg, failed_conditions=failed_conditions)
+-
++    config_object = None
++    if is_cliconf(module):
++        module.deprecate("cli support for 'iosxr_interface' is deprecated. Use transport netconf instead",
++                         version='4 releases from v2.5')
++        config_object = CliConfiguration(module)
++    elif is_netconf(module):
++        if module.params['active'] == 'preconfigure':
++            module.fail_json(msg="Physical interface pre-configuration is not supported with transport 'netconf'")
++        config_object = NCConfiguration(module)
++
++    result = {}
++    if config_object:
++        result = config_object.run()
+     module.exit_json(**result)
+ 
++
+ if __name__ == '__main__':
+     main()
+diff --git a/test/integration/targets/iosxr_banner/tests/netconf/basic-login.yaml b/test/integration/targets/iosxr_banner/tests/netconf/basic-login.yaml
+index cb78654e9dc563..3c0518ee388c9f 100644
+--- a/test/integration/targets/iosxr_banner/tests/netconf/basic-login.yaml
++++ b/test/integration/targets/iosxr_banner/tests/netconf/basic-login.yaml
+@@ -29,8 +29,8 @@
+ - assert:
+     that:
+       - "result.changed == true"
+-      - "'this is my login banner' in result.commands"
+-      - "'that has a multiline' in result.commands"
++      - "'this is my login banner' in result.xml"
++      - "'that has a multiline' in result.xml"
+ 
+ - name: Set login again (idempotent)
+   iosxr_banner:
+@@ -46,4 +46,4 @@
+ - assert:
+     that:
+       - "result.changed == false"
+-      - "result.commands | length == 0"
++      - "result.xml | length == 0"
+diff --git a/test/integration/targets/iosxr_banner/tests/netconf/basic-motd.yaml b/test/integration/targets/iosxr_banner/tests/netconf/basic-motd.yaml
+index b50147c97501db..241910ad6bc26f 100644
+--- a/test/integration/targets/iosxr_banner/tests/netconf/basic-motd.yaml
++++ b/test/integration/targets/iosxr_banner/tests/netconf/basic-motd.yaml
+@@ -29,8 +29,8 @@
+ - assert:
+     that:
+       - "result.changed == true"
+-      - "'this is my motd banner' in result.commands"
+-      - "'that has a multiline' in result.commands"
++      - "'this is my motd banner' in result.xml"
++      - "'that has a multiline' in result.xml"
+ 
+ - name: Set motd again (idempotent)
+   iosxr_banner:
+@@ -46,4 +46,4 @@
+ - assert:
+     that:
+       - "result.changed == false"
+-      - "result.commands | length == 0"
++      - "result.xml | length == 0"
+diff --git a/test/integration/targets/iosxr_banner/tests/netconf/basic-no-login.yaml b/test/integration/targets/iosxr_banner/tests/netconf/basic-no-login.yaml
+index e74a0e628d40f4..2601bf1f4458db 100644
+--- a/test/integration/targets/iosxr_banner/tests/netconf/basic-no-login.yaml
++++ b/test/integration/targets/iosxr_banner/tests/netconf/basic-no-login.yaml
+@@ -28,7 +28,7 @@
+ - assert:
+     that:
+       - "result.changed == true"
+-      - "'xc:operation=\"delete\"' in result.commands"
++      - "'xc:operation=\"delete\"' in result.xml"
+ 
+ - name: remove login (idempotent)
+   iosxr_banner:
+@@ -40,4 +40,4 @@
+ - assert:
+     that:
+       - "result.changed == false"
+-      - "result.commands | length == 0"
++      - "result.xml | length == 0"
+diff --git a/test/integration/targets/iosxr_interface/tasks/main.yaml b/test/integration/targets/iosxr_interface/tasks/main.yaml
+index 415c99d8b12e51..af08869c922366 100644
+--- a/test/integration/targets/iosxr_interface/tasks/main.yaml
++++ b/test/integration/targets/iosxr_interface/tasks/main.yaml
+@@ -1,2 +1,3 @@
+ ---
+ - { include: cli.yaml, tags: ['cli'] }
++- { include: netconf.yaml, tags: ['netconf'] }
+diff --git a/test/integration/targets/iosxr_interface/tasks/netconf.yaml b/test/integration/targets/iosxr_interface/tasks/netconf.yaml
+new file mode 100644
+index 00000000000000..1286b354228190
+--- /dev/null
++++ b/test/integration/targets/iosxr_interface/tasks/netconf.yaml
+@@ -0,0 +1,16 @@
++---
++- name: collect all netconf test cases
++  find:
++    paths: "{{ role_path }}/tests/netconf"
++    patterns: "{{ testcase }}.yaml"
++  register: test_cases
++  delegate_to: localhost
++
++- name: set test_items
++  set_fact: test_items="{{ test_cases.files | map(attribute='path') | list }}"
++
++- name: run test case
++  include: "{{ test_case_to_run }}"
++  with_items: "{{ test_items }}"
++  loop_control:
++    loop_var: test_case_to_run
+diff --git a/test/integration/targets/iosxr_interface/tests/netconf/basic.yaml b/test/integration/targets/iosxr_interface/tests/netconf/basic.yaml
+new file mode 100644
+index 00000000000000..21984cb352bf47
+--- /dev/null
++++ b/test/integration/targets/iosxr_interface/tests/netconf/basic.yaml
+@@ -0,0 +1,253 @@
++---
++- debug: msg="START iosxr_interface netconf/basic.yaml"
++
++- name: Enable Netconf service
++  iosxr_netconf:
++    netconf_port: 830
++    netconf_vrf: 'default'
++    state: present
++  register: result
++
++- name: Setup interface
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    state: absent
++    provider: "{{ netconf }}"
++  register: result
++
++
++- name: Confgure interface
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test-interface-initial
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/1" in result.xml[0]'
++
++- name: Confgure interface (idempotent)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test-interface-initial
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == false'
++
++- name: Confgure interface parameters
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test-interface
++    speed: 100
++    duplex: half
++    mtu: 512
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/1" in result.xml[0]'
++      - '"test-interface" in result.xml[0]'
++      - '"100" in result.xml[0]'
++      - '"512" in result.xml[0]'
++
++- name: Change interface parameters
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test-interface-1
++    speed: 10
++    duplex: full
++    mtu: 256
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/1" in result.xml[0]'
++      - '"test-interface-1" in result.xml[0]'
++      - '"10" in result.xml[0]'
++      - '"256" in result.xml[0]'
++
++- name: Change interface parameters (idempotent)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test-interface-1
++    speed: 10
++    duplex: full
++    mtu: 256
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++- assert:
++    that:
++      - 'result.changed == false'
++
++- name: Disable interface
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    enabled: False
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++
++- name: Enable interface
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    enabled: True
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++
++- name: Confgure second interface (setup)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/0
++    description: test-interface-initial
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/0" in result.xml[0]'
++
++- name: Delete interface aggregate (setup)
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    state: absent
++    provider: "{{ netconf }}"
++
++- name: Add interface aggregate
++  iosxr_interface:
++    aggregate:
++      - { name: GigabitEthernet0/0/0/0, mtu: 256, description: test-interface-1 }
++      - { name: GigabitEthernet0/0/0/1, mtu: 516, description: test-interface-2 }
++    speed: 100
++    duplex: full
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/1" in result.xml[0]'
++      - '"GigabitEthernet0/0/0/0" in result.xml[0]'
++
++- name: Add interface aggregate (idempotent)
++  iosxr_interface:
++    aggregate:
++      - { name: GigabitEthernet0/0/0/0, mtu: 256, description: test-interface-1 }
++      - { name: GigabitEthernet0/0/0/1, mtu: 516, description: test-interface-2 }
++    speed: 100
++    duplex: full
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == false'
++
++- name: Disable interface aggregate
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    enabled: False
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++
++- name: Enable interface aggregate
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    enabled: True
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++
++- name: interface aggregate (setup)
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    description: test-interface-initial
++    provider: "{{ netconf }}"
++  register: result
++
++- name: Create interface aggregate
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++        description: test_interface_1
++      - name: GigabitEthernet0/0/0/1
++        description: test_interface_2
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++      - '"GigabitEthernet0/0/0/0" in result.xml[0]'
++      - '"GigabitEthernet0/0/0/1" in result.xml[0]'
++      - '"test_interface_1" in result.xml[0]'
++      - '"test_interface_2" in result.xml[0]'
++
++- name: Delete interface aggregate
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    state: absent
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == true'
++
++- name: Delete interface aggregate (idempotent)
++  iosxr_interface:
++    aggregate:
++      - name: GigabitEthernet0/0/0/0
++      - name: GigabitEthernet0/0/0/1
++    state: absent
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - 'result.changed == false'
++
++- debug: msg="END iosxr_interface netconf/basic.yaml"
+diff --git a/test/integration/targets/iosxr_interface/tests/netconf/intent.yaml b/test/integration/targets/iosxr_interface/tests/netconf/intent.yaml
+new file mode 100644
+index 00000000000000..5d8d07f888904c
+--- /dev/null
++++ b/test/integration/targets/iosxr_interface/tests/netconf/intent.yaml
+@@ -0,0 +1,78 @@
++---
++- debug: msg="START iosxr_interface netconf/intent.yaml"
++
++- name: Setup (interface is up)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    description: test_interface_1
++    enabled: True
++    state: present
++    provider: "{{ netconf }}"
++  register: result
++
++- name: Check intent arguments
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    state: up
++    delay: 10
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - "result.failed == false"
++
++- name: Check intent arguments (failed condition)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    state: down
++    provider: "{{ netconf }}"
++  ignore_errors: yes
++  register: result
++
++- assert:
++    that:
++      - "result.failed == true"
++      - "'state eq(down)' in result.failed_conditions"
++
++- name: Config + intent
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    enabled: False
++    state: down
++    delay: 10
++    provider: "{{ netconf }}"
++  register: result
++
++- assert:
++    that:
++      - "result.failed == false"
++
++- name: Config + intent (fail)
++  iosxr_interface:
++    name: GigabitEthernet0/0/0/1
++    enabled: False
++    state: up
++    provider: "{{ netconf }}"
++  ignore_errors: yes
++  register: result
++
++- assert:
++    that:
++      - "result.failed == true"
++      - "'state eq(up)' in result.failed_conditions"
++
++- name: Aggregate config + intent (pass)
++  iosxr_interface:
++    aggregate:
++    - name: GigabitEthernet0/0/0/1
++      enabled: True
++      state: up
++      delay: 10
++    provider: "{{ netconf }}"
++  ignore_errors: yes
++  register: result
++
++- assert:
++    that:
++      - "result.failed == false"
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

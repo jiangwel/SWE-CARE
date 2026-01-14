@@ -1,0 +1,277 @@
+  Task-ID: RasaHQ__rasa-7797@3d69847
+  Please checkout to this commit first: 2ed20f6239e181788df98159c7470122887b83af
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Documentation checks - retry if a link is not reachable 
+One of the checks in the Publish Documentation workflow checks if links in the docs are still reachable, but sometimes it happens that one of the links didn't respond on time, in such a scenario the workflow will finish with failure. 
+
+Things to improve:
+- increase the timeout for connection
+- retry if a connection failed
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/ci-docs-tests.yml b/.github/workflows/ci-docs-tests.yml
+new file mode 100644
+index 000000000000..c1e0572e10c0
+--- /dev/null
++++ b/.github/workflows/ci-docs-tests.yml
+@@ -0,0 +1,95 @@
++name: Docs Tests
++on:
++  push:
++    branches:
++    - main
++    tags:
++    - '*'
++  pull_request:
++    types: [opened, synchronize, labeled]
++
++env:
++  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
++jobs:
++  changes:
++    name: Check for file changes
++    runs-on: ubuntu-latest
++    outputs:
++      backend: ${{ steps.filter.outputs.backend }}
++      docker: ${{ steps.filter.outputs.docker }}
++      docs: ${{ steps.filter.outputs.docs }}
++    steps:
++      - uses: actions/checkout@v2
++      - uses: RasaHQ/pr-changed-files-filter@c4f7116a04b8a4596313469429e2ad235f59d9c4
++        id: filter
++        with:
++          token: ${{ secrets.GITHUB_TOKEN }}
++          filters: .github/change_filters.yml
++
++  test_documentation:
++    name: Test Documentation
++    runs-on: ubuntu-latest
++    needs: [ changes ]
++
++    steps:
++    - name: Checkout git repository 🕝
++      if: needs.changes.outputs.docs == 'true'
++      uses: actions/checkout@v2
++
++    - name: Set up Python 3.7 🐍
++      if: needs.changes.outputs.docs == 'true'
++      uses: actions/setup-python@v1
++      with:
++        python-version: 3.7
++
++    - name: Set up Node 12.x 🦙
++      if: needs.changes.outputs.docs == 'true'
++      uses: actions/setup-node@v1
++      with:
++        node-version: '12.x'
++
++    - name: Read Poetry Version 🔢
++      if: needs.changes.outputs.docs == 'true'
++      run: |
++        echo "POETRY_VERSION=$(scripts/poetry-version.sh)" >> $GITHUB_ENV
++      shell: bash
++
++    - name: Install poetry 🦄
++      if: needs.changes.outputs.docs == 'true'
++      uses: Gr1N/setup-poetry@v4
++      with:
++        poetry-version: ${{ env.POETRY_VERSION }}
++
++    - name: Load Poetry Cached Libraries ⬇
++      if: needs.changes.outputs.docs == 'true'
++      uses: actions/cache@v2
++      with:
++        path: ~/.cache/pypoetry/virtualenvs
++        key: ${{ runner.os }}-poetry-${{ env.POETRY_VERSION }}-3.7-${{ hashFiles('**/poetry.lock') }}-${{ secrets.POETRY_CACHE_VERSION }}
++        restore-keys: ${{ runner.os }}-poetry-3.7
++
++    - name: Load Yarn Cached Packages ⬇
++      if: needs.changes.outputs.docs == 'true'
++      uses: actions/cache@v2
++      with:
++        path: docs/node_modules
++        key: ${{ runner.os }}-yarn-12.x-${{ hashFiles('docs/yarn.lock') }}
++        restore-keys: ${{ runner.os }}-yarn-12.x
++
++    - name: Install Dependencies 📦
++      if: needs.changes.outputs.docs == 'true'
++      run: |
++        sudo apt-get -y install libpq-dev
++        make install-full install-docs
++
++    - name: Run Swagger 🕵️‍♀️
++      if: needs.changes.outputs.docs == 'true'
++      run: |
++        npm install -g swagger-cli
++        swagger-cli validate docs/static/spec/action-server.yml
++        swagger-cli validate docs/static/spec/rasa.yml
++
++    - name: Test Docs 🕸
++      if: needs.changes.outputs.docs == 'true'
++      run: make test-docs
+\ No newline at end of file
+diff --git a/.github/workflows/continous-integration.yml b/.github/workflows/continous-integration.yml
+index 79f485c4e554..1f2b666f22d0 100644
+--- a/.github/workflows/continous-integration.yml
++++ b/.github/workflows/continous-integration.yml
+@@ -28,9 +28,15 @@ env:
+   # needed to fix issues with boto during testing:
+   # https://github.com/travis-ci/travis-ci/issues/7940
+   BOTO_CONFIG: /dev/null
++
+   IS_TAG_BUILD: ${{ startsWith(github.event.ref, 'refs/tags') }}
+   DOCKERHUB_USERNAME: tmbo
+ 
++  # for wait_for_xx jobs
++  WAIT_TIMEOUT_SECS: 3000
++  WAIT_INTERVAL_SECS: 60
++
++
+ jobs:
+   changes:
+     name: Check for file changes
+@@ -47,72 +53,28 @@ jobs:
+           token: ${{ secrets.GITHUB_TOKEN }}
+           filters: .github/change_filters.yml
+ 
+-  documentation:
+-    name: Test Documentation
++
++  wait_for_docs_tests:
++    # Looks for doc test workflows and waits for it to complete successfully
++    # Runs on tag pushes and pushes to main exclusively, as it is a dependency of release jobs
++    name: Wait for docs tests
+     runs-on: ubuntu-latest
+-    needs: [changes]
++    if: github.event_name == 'push' && (startsWith(github.event.ref, 'refs/tags') || github.ref == 'refs/heads/main')
+ 
+     steps:
+-    - name: Checkout git repository 🕝
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: actions/checkout@v2
++      - name: Checkout git repository 🕝
++        uses: actions/checkout@v2
+ 
+-    - name: Set up Python 3.7 🐍
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: actions/setup-python@v1
+-      with:
+-        python-version: 3.7
+-
+-    - name: Set up Node 12.x 🦙
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: actions/setup-node@v1
+-      with:
+-        node-version: '12.x'
+-
+-    - name: Read Poetry Version 🔢
+-      if: needs.changes.outputs.docs == 'true'
+-      run: |
+-        echo "POETRY_VERSION=$(scripts/poetry-version.sh)" >> $GITHUB_ENV
+-      shell: bash
+-
+-    - name: Install poetry 🦄
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: Gr1N/setup-poetry@v4
+-      with:
+-        poetry-version: ${{ env.POETRY_VERSION }}
+-
+-    - name: Load Poetry Cached Libraries ⬇
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: actions/cache@v2
+-      with:
+-        path: ~/.cache/pypoetry/virtualenvs
+-        key: ${{ runner.os }}-poetry-${{ env.POETRY_VERSION }}-3.7-${{ hashFiles('**/poetry.lock') }}-${{ secrets.POETRY_CACHE_VERSION }}
+-        restore-keys: ${{ runner.os }}-poetry-3.7
+-
+-    - name: Load Yarn Cached Packages ⬇
+-      if: needs.changes.outputs.docs == 'true'
+-      uses: actions/cache@v2
+-      with:
+-        path: docs/node_modules
+-        key: ${{ runner.os }}-yarn-12.x-${{ hashFiles('docs/yarn.lock') }}
+-        restore-keys: ${{ runner.os }}-yarn-12.x
+-
+-    - name: Install Dependencies 📦
+-      if: needs.changes.outputs.docs == 'true'
+-      run: |
+-        sudo apt-get -y install libpq-dev
+-        make install-full install-docs
+-
+-    - name: Run Swagger 🕵️‍♀️
+-      if: needs.changes.outputs.docs == 'true'
+-      run: |
+-        npm install -g swagger-cli
+-        swagger-cli validate docs/static/spec/action-server.yml
+-        swagger-cli validate docs/static/spec/rasa.yml
++      - name: Wait for doc tests
++        uses: fountainhead/action-wait-for-check@4699210ccc66e2a13260803fadbb77085421b891
++        id: wait-for-doc-tests
++        with:
++          token: ${{ secrets.GITHUB_TOKEN }}
++          checkName: Test documentation
++          ref: ${{ github.event.pull_request.head.sha || github.sha }}
++          timeoutSeconds: ${{ env.WAIT_TIMEOUT_SECS }}
++          intervalSeconds: ${{ env.WAIT_INTERVAL_SECS }}
+ 
+-    - name: Test Docs 🕸
+-      if: needs.changes.outputs.docs == 'true'
+-      run: make test-docs
+ 
+   quality:
+     name: Code Quality
+@@ -505,7 +467,7 @@ jobs:
+ 
+     # deploy will only be run when there is a tag available
+     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags') && github.repository == 'RasaHQ/rasa'
+-    needs: [quality, test, documentation, docker]  # only run after all other stages succeeded
++    needs: [quality, test, wait_for_docs_tests, docker]  # only run after all other stages succeeded
+ 
+     steps:
+     - name: Checkout git repository 🕝
+@@ -569,7 +531,7 @@ jobs:
+ 
+   mergepal-merge: # run merge pal in the end
+     runs-on: ubuntu-latest
+-    needs: [quality, test, documentation, docker]
++    needs: [quality, test,  wait_for_docs_tests, docker]
+     steps:
+       - uses: actions/checkout@v1
+       - name: Make sure there is a github token
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

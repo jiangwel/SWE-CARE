@@ -1,0 +1,272 @@
+  Task-ID: sqlfluff__sqlfluff-2540@f7266c6
+  Please checkout to this commit first: ef7d86548757fcbc3405ac421c38acefa55db9aa
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Blocklisting SQL vendor specific data types
+Following Simon Holywell's SQL Style Guide, it would be nice to have a lint rule that you can config to check for SQL data types used in the query.
+
+I.e. In BigQuery you can use the keyword `BOOL` or `BOOLEAN` to represent a boolean type, the lint rule could blacklist one of those and enforce only a single keyword.
+
+New rule: database & schema restrictions
+_Note: This is for general enhancements to the project. Please use the Bug report template instead to raise parsing/linting/syntax issues for existing supported dialects_
+At some companies different databases & schemas serve different purposes. Some are secure. Others aren’t. Some are sandboxes not fit for production while others are for production. In order not to misuse data source it is a good idea to allow projects to prohibit usage of (or limit usage to) certain databases & schemas in their `.sqlfluff` file.
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/core/default_config.cfg b/src/sqlfluff/core/default_config.cfg
+index 2775cba87c9..576a3872d29 100644
+--- a/src/sqlfluff/core/default_config.cfg
++++ b/src/sqlfluff/core/default_config.cfg
+@@ -143,3 +143,7 @@ unquoted_identifiers_policy = all
+ quoted_identifiers_policy = all
+ allow_space_in_identifier = False
+ additional_allowed_characters = ""
++
++[sqlfluff:rules:L062]
++# Blocked phrases
++blocked_words = None
+diff --git a/src/sqlfluff/core/rules/config_info.py b/src/sqlfluff/core/rules/config_info.py
+index dc1a33da948..5ae079e7268 100644
+--- a/src/sqlfluff/core/rules/config_info.py
++++ b/src/sqlfluff/core/rules/config_info.py
+@@ -137,6 +137,11 @@
+             "in addition to alphanumerics (A-Z, a-z, 0-9) and underscores."
+         ),
+     },
++    "blocked_words": {
++        "definition": (
++            "Optional list of blocked words which should not be used in statements."
++        ),
++    },
+ }
+ 
+ 
+diff --git a/src/sqlfluff/rules/L062.py b/src/sqlfluff/rules/L062.py
+new file mode 100644
+index 00000000000..96781e91f02
+--- /dev/null
++++ b/src/sqlfluff/rules/L062.py
+@@ -0,0 +1,92 @@
++"""Implementation of Rule L062."""
++
++from typing import Optional
++
++from sqlfluff.core.rules.base import BaseRule, LintResult, RuleContext
++from sqlfluff.core.rules.doc_decorators import document_configuration
++
++
++@document_configuration
++class Rule_L062(BaseRule):
++    """Block a list of configurable phrases from being used.
++
++    This generic rule can be useful to prevent certain keywords, functions, or objects
++    from being used. Only whole words can be blocked, not phrases, nor parts of words.
++
++    This block list is case insensitive.
++
++    Example use cases:
++
++    * We prefer ``BOOL`` over ``BOOLEAN`` and there is no existing rule to enforce
++      this. We can add ``BOOLEAN`` to the deny list until such a rule is written to
++      cause a linting error.
++    * We have deprecated a schema/table/function and want to prevent it being used
++      in future. We can add that to the denylist and then add a ``-- noqa: L062`` for
++      the few exceptions that still need to be in the code base.
++
++    | **Anti-pattern**
++    | If the ``blocked_words`` config is set to ``deprecated_table,bool`` then the
++    | following will flag:
++
++    .. code-block:: sql
++
++        SELECT * FROM deprecated_table WHERE 1 = 1;
++        CREATE TABLE myschema.t1 (a BOOL);
++
++    | **Best practice**
++    | Do not used any blocked words
++
++    .. code-block:: sql
++
++        SELECT * FROM another_table WHERE 1 = 1;
++        CREATE TABLE myschema.t1 (a BOOLEAN);
++
++    """
++
++    config_keywords = [
++        "blocked_words",
++    ]
++
++    def _eval(self, context: RuleContext) -> Optional[LintResult]:
++        # Config type hints
++        self.blocked_words: Optional[str]
++
++        # Exit early if no block list set
++        if not self.blocked_words:
++            return None
++
++        # Get the ignore list configuration and cache it
++        try:
++            blocked_words_list = self.blocked_words_list
++        except AttributeError:
++            # First-time only, read the settings from configuration.
++            # So we can cache them for next time for speed.
++            blocked_words_list = self._init_blocked_words()
++
++        # Only look at child elements
++        # Note: we do not need to ignore comments or meta types
++        # or the like as they will not have single word raws
++        if context.segment.segments:
++            return None
++
++        if str(context.segment.raw_upper) in blocked_words_list:
++            return LintResult(
++                anchor=context.segment,
++                description=f"Use of blocked word '{context.segment.raw}'.",
++            )
++
++        return None
++
++    def _init_blocked_words(self):
++        """Called first time rule is evaluated to fetch & cache the blocked_words."""
++        # Use str() in case bools are passed which might otherwise be read as bool
++        blocked_words_config = str(getattr(self, "blocked_words"))
++        if blocked_words_config and blocked_words_config != "None":
++            self.blocked_words_list = self.split_comma_separated_string(
++                blocked_words_config.upper()
++            )
++        else:
++            self.blocked_words_list = []
++
++        blocked_words_list = self.blocked_words_list
++        return blocked_words_list
+diff --git a/test/fixtures/rules/std_rule_cases/L062.yml b/test/fixtures/rules/std_rule_cases/L062.yml
+new file mode 100644
+index 00000000000..0a24e6996c6
+--- /dev/null
++++ b/test/fixtures/rules/std_rule_cases/L062.yml
+@@ -0,0 +1,91 @@
++rule: L062
++
++test_pass_default:
++  pass_str: |
++    SELECT col1 FROM deprecated_table
++
++test_fail_deny_word:
++  fail_str: |
++    SELECT col1 FROM deprecated_table
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table
++
++test_fail_deny_word_case_difference1:
++  fail_str: |
++    SELECT col1 FROM deprecated_table
++  configs:
++    rules:
++      L062:
++        blocked_words: Deprecated_Table
++
++test_fail_deny_word_case_difference2:
++  fail_str: |
++    SELECT col1 FROM Deprecated_Table
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table
++
++test_fail_multiple_deny_words1:
++  fail_str: |
++    SELECT myOldFunction(col1) FROM table1
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table,myoldFunction
++
++test_fail_multiple_deny_words2:
++  fail_str: |
++    SELECT col1 FROM deprecated_table
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table,myoldFunction
++
++test_pass_not_complete_match:
++  pass_str: |
++    SELECT col1 FROM deprecated_table1
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table
++
++test_pass_is_comment:
++  pass_str: |
++    -- deprecated_table
++    SELECT col1 FROM new_table
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table
++
++test_pass_in_comment:
++  pass_str: |
++    -- This used to use the deprecated_table
++    SELECT col1 FROM new_table
++  configs:
++    rules:
++      L062:
++        blocked_words: deprecated_table
++
++test_fail_bool:
++  fail_str: |
++    CREATE TABLE myschema.t1 (a BOOL);
++  configs:
++    core:
++      dialect: exasol
++    rules:
++      L062:
++        blocked_words: bool
++
++test_pass_bool:
++  pass_str: |
++    CREATE TABLE myschema.t1 (a BOOLEAN);
++  configs:
++    core:
++      dialect: exasol
++    rules:
++      L062:
++        blocked_words: bool
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

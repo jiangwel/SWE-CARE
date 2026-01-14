@@ -1,0 +1,333 @@
+  Task-ID: dask__dask-10723@09b7b68
+  Please checkout to this commit first: 31b26dfa4bf15f23a7070155ac67e6ba285de76f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  DEPR: pandas 3.0 deprecations and the migration to dask-expr
+pandas deprecated a bunch of things in the 2.x series that will be removed in pandas 3.0. Some of these things are changes in behaviour that are hard to replace but other things are just syntactic sugar. Examples like this are:
+
+- [ ] GroupBy.fillna -> you can either use ffill/bfill or a regular fillna without a GroupBy at all, this method is useless
+- [ ] GroupBys with axis=1 -> no need for grouping at all
+- [ ] Rolling axis 1
+- [ ] DataFrame.first/last
+- [ ] axis in GroupBy.idxmin GroupBy.idxmax
+- [ ] axis in GroupBy.shift
+
+I don't want to implement these things for dask-expr just to remove them in a couple of months again, so I propose to deprecate this directly in dask/dask so that we can enforce it when we switch over to dask-expr
+  </issue>
+  
+  <patch>
+  diff --git a/dask/dataframe/core.py b/dask/dataframe/core.py
+index 7cddc42d933..fc3111d66f2 100644
+--- a/dask/dataframe/core.py
++++ b/dask/dataframe/core.py
+@@ -3735,6 +3735,7 @@ def resample(self, rule, closed=None, label=None):
+ 
+         return Resampler(self, rule, closed=closed, label=label)
+ 
++    @_deprecated(message="Will be removed in a future version.")
+     @derived_from(pd.DataFrame)
+     def first(self, offset):
+         # Let pandas error on bad args
+@@ -3769,6 +3770,7 @@ def first(self, offset):
+         graph = HighLevelGraph.from_collections(name, dsk, dependencies=[self])
+         return new_dd_object(graph, name, self, divs)
+ 
++    @_deprecated(message="Will be removed in a future version.")
+     @derived_from(pd.DataFrame)
+     def last(self, offset):
+         # Let pandas error on bad args
+diff --git a/dask/dataframe/groupby.py b/dask/dataframe/groupby.py
+index 955f19191a2..d6643e5d507 100644
+--- a/dask/dataframe/groupby.py
++++ b/dask/dataframe/groupby.py
+@@ -1895,6 +1895,11 @@ def idxmin(
+         skipna=True,
+         numeric_only=no_default,
+     ):
++        if axis != no_default:
++            warnings.warn(
++                "`axis` parameter is deprecated and will be removed in a future version.",
++                FutureWarning,
++            )
+         if axis in (1, "columns"):
+             raise NotImplementedError(
+                 f"The axis={axis} keyword is not implemented for groupby.idxmin"
+@@ -1925,6 +1930,12 @@ def idxmax(
+         skipna=True,
+         numeric_only=no_default,
+     ):
++        if axis != no_default:
++            warnings.warn(
++                "`axis` parameter is deprecated and will be removed in a future version.",
++                FutureWarning,
++            )
++
+         if axis in (1, "columns"):
+             raise NotImplementedError(
+                 f"The axis={axis} keyword is not implemented for groupby.idxmax"
+@@ -2632,6 +2643,11 @@ def shift(
+         >>> ddf = dask.datasets.timeseries(freq="1h")
+         >>> result = ddf.groupby("name").shift(1, meta={"id": int, "x": float, "y": float})
+         """
++        if axis != no_default:
++            warnings.warn(
++                "`axis` parameter is deprecated and will be removed in a future version.",
++                FutureWarning,
++            )
+         axis = self._normalize_axis(axis, "shift")
+         kwargs = {"periods": periods, "axis": axis}
+         if freq is not no_default:
+@@ -2768,8 +2784,16 @@ def _normalize_axis(self, axis, method: str):
+         if axis is no_default:
+             axis = 0
+ 
++        if axis in ("index", 1):
++            warnings.warn(
++                "Using axis=1 in GroupBy does not require grouping, will be removed "
++                "entirely in a future version.",
++                FutureWarning,
++            )
++
+         return axis
+ 
++    @_deprecated(message="Please use `ffill`/`bfill` or `fillna` without a GroupBy.")
+     def fillna(self, value=None, method=None, limit=None, axis=no_default):
+         """Fill NA/NaN values using the specified method.
+ 
+diff --git a/dask/dataframe/rolling.py b/dask/dataframe/rolling.py
+index 09a412e77c7..799d2ad0b08 100644
+--- a/dask/dataframe/rolling.py
++++ b/dask/dataframe/rolling.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import datetime
++import warnings
+ from numbers import Integral
+ 
+ import pandas as pd
+@@ -479,6 +480,13 @@ def __init__(
+         # See https://github.com/pandas-dev/pandas/issues/15969
+         self._win_type = None if isinstance(self.window, int) else "freq"
+ 
++        if self.axis in ("index", 1, "rows"):
++            warnings.warn(
++                "Using axis=1 in Rolling has been deprecated and will be removed "
++                "in a future version.",
++                FutureWarning,
++            )
++
+     def _rolling_kwargs(self):
+         kwargs = {
+             "window": self.window,
+diff --git a/dask/dataframe/tests/test_dataframe.py b/dask/dataframe/tests/test_dataframe.py
+index 364e385ebcd..ba202197def 100644
+--- a/dask/dataframe/tests/test_dataframe.py
++++ b/dask/dataframe/tests/test_dataframe.py
+@@ -4677,13 +4677,19 @@ def test_first_and_last(method):
+             with _check_warning(PANDAS_GE_210, FutureWarning, method):
+                 expected = f(df, offset)
+             with _check_warning(PANDAS_GE_210, FutureWarning, method):
+-                actual = f(ddf, offset)
++                with pytest.warns(
++                    FutureWarning, match="Will be removed in a future version."
++                ):
++                    actual = f(ddf, offset)
+             assert_eq(actual, expected)
+ 
+             with _check_warning(PANDAS_GE_210, FutureWarning, method):
+                 expected = f(df.A, offset)
+             with _check_warning(PANDAS_GE_210, FutureWarning, method):
+-                actual = f(ddf.A, offset)
++                with pytest.warns(
++                    FutureWarning, match="Will be removed in a future version."
++                ):
++                    actual = f(ddf.A, offset)
+             assert_eq(actual, expected)
+ 
+ 
+diff --git a/dask/dataframe/tests/test_groupby.py b/dask/dataframe/tests/test_groupby.py
+index 4d604b92d6c..12a2e91a95a 100644
+--- a/dask/dataframe/tests/test_groupby.py
++++ b/dask/dataframe/tests/test_groupby.py
+@@ -1311,27 +1311,34 @@ def test_fillna(axis, group_keys, limit):
+     )
+     ddf = dd.from_pandas(df, npartitions=2)
+ 
++    deprecated_ctx = pytest.warns(
++        FutureWarning, match="Please use `ffill`/`bfill` or `fillna` without a GroupBy"
++    )
++
+     with groupby_axis_deprecated():
+         expected = df.groupby("A", group_keys=group_keys).fillna(0, axis=axis)
+-    with groupby_axis_deprecated():
++    with groupby_axis_deprecated(), deprecated_ctx:
+         result = ddf.groupby("A", group_keys=group_keys).fillna(0, axis=axis)
+     assert_eq(expected, result)
+-    assert_eq(
+-        df.groupby("A", group_keys=group_keys).B.fillna(0),
+-        ddf.groupby("A", group_keys=group_keys).B.fillna(0),
+-    )
+-    assert_eq(
+-        df.groupby(["A", "B"], group_keys=group_keys).fillna(0),
+-        ddf.groupby(["A", "B"], group_keys=group_keys).fillna(0),
+-    )
+ 
+-    with pytest.raises(NotImplementedError):
++    with deprecated_ctx:
++        assert_eq(
++            df.groupby("A", group_keys=group_keys).B.fillna(0),
++            ddf.groupby("A", group_keys=group_keys).B.fillna(0),
++        )
++    with deprecated_ctx:
++        assert_eq(
++            df.groupby(["A", "B"], group_keys=group_keys).fillna(0),
++            ddf.groupby(["A", "B"], group_keys=group_keys).fillna(0),
++        )
++
++    with pytest.raises(NotImplementedError), deprecated_ctx:
+         ddf.groupby("A").fillna({"A": 0})
+ 
+-    with pytest.raises(NotImplementedError):
++    with pytest.raises(NotImplementedError), deprecated_ctx:
+         ddf.groupby("A").fillna(pd.Series(dtype=int))
+ 
+-    with pytest.raises(NotImplementedError):
++    with pytest.raises(NotImplementedError), deprecated_ctx:
+         ddf.groupby("A").fillna(pd.DataFrame)
+ 
+ 
+@@ -1757,15 +1764,22 @@ def test_cumulative_axis(func):
+     assert_eq(expected, result)
+ 
+     # axis=1
++    deprecate_ctx = pytest.warns(
++        FutureWarning,
++        match="Using axis=1 in GroupBy does not require grouping, will be removed entirely in a future version",
++    )
+     with groupby_axis_deprecated():
+         expected = getattr(df.groupby("a"), func)(axis=1)
+-    with groupby_axis_deprecated():
++    with groupby_axis_deprecated(), deprecate_ctx:
+         result = getattr(ddf.groupby("a"), func)(axis=1)
+     assert_eq(expected, result)
+ 
+     with groupby_axis_deprecated():
+-        with pytest.raises(ValueError, match="No axis named 1 for object type Series"):
+-            getattr(ddf.groupby("a").b, func)(axis=1)
++        with deprecate_ctx:
++            with pytest.raises(
++                ValueError, match="No axis named 1 for object type Series"
++            ):
++                getattr(ddf.groupby("a").b, func)(axis=1)
+ 
+     with pytest.warns(
+         FutureWarning,
+@@ -2362,13 +2376,18 @@ def test_df_groupby_idx_axis(func, axis):
+     ).set_index("idx")
+ 
+     ddf = dd.from_pandas(pdf, npartitions=2)
++
+     if axis in (1, "columns"):
+-        with pytest.raises(NotImplementedError):
++        with pytest.raises(NotImplementedError), pytest.warns(
++            FutureWarning, match="`axis` parameter is deprecated"
++        ):
+             getattr(ddf.groupby("group"), func)(axis=axis)
+     else:
+         with groupby_axis_deprecated():
+             expected = getattr(pdf.groupby("group"), func)(axis=axis)
+-        with groupby_axis_deprecated():
++        with groupby_axis_deprecated(), pytest.warns(
++            FutureWarning, match="`axis` parameter is deprecated"
++        ):
+             result = getattr(ddf.groupby("group"), func)(axis=axis)
+         assert_eq(expected, result)
+ 
+@@ -2599,6 +2618,9 @@ def test_groupby_shift_basic_input(npartitions, period, axis):
+         result = ddf.groupby(["a", "c"]).shift(period, axis=axis)
+     assert_eq(expected, result)
+ 
++    with pytest.warns(FutureWarning, match="`axis` parameter is deprecated"):
++        ddf.groupby(["a", "c"]).shift(period, axis=axis)
++
+     with groupby_axis_deprecated():
+         expected = pdf.groupby(["a"]).shift(period, axis=axis)
+     with groupby_axis_and_meta():
+@@ -2611,6 +2633,9 @@ def test_groupby_shift_basic_input(npartitions, period, axis):
+         result = ddf.groupby(ddf.c).shift(period, axis=axis)
+     assert_eq(expected, result)
+ 
++    with pytest.warns(FutureWarning, match="`axis` parameter is deprecated"):
++        result = ddf.groupby(ddf.c).shift(period, axis=axis)
++
+ 
+ def test_groupby_shift_series():
+     pdf = pd.DataFrame(
+diff --git a/dask/dataframe/tests/test_rolling.py b/dask/dataframe/tests/test_rolling.py
+index a8fda109b1b..3afaafed087 100644
+--- a/dask/dataframe/tests/test_rolling.py
++++ b/dask/dataframe/tests/test_rolling.py
+@@ -361,11 +361,12 @@ def test_rolling_axis(kwargs):
+     df = pd.DataFrame(np.random.randn(20, 16))
+     ddf = dd.from_pandas(df, npartitions=3)
+ 
+-    ctx = (
+-        pytest.warns(FutureWarning, match="The 'axis' keyword|Support for axis")
+-        if PANDAS_GE_210
+-        else contextlib.nullcontext()
+-    )
++    ctx = contextlib.ExitStack()
++    if PANDAS_GE_210:
++        ctx.enter_context(
++            pytest.warns(FutureWarning, match="The 'axis' keyword|Support for axis")
++        )
++
+     if kwargs["axis"] == "series":
+         # Series
+         with ctx:
+@@ -377,6 +378,10 @@ def test_rolling_axis(kwargs):
+         # DataFrame
+         with ctx:
+             expected = df.rolling(3, **kwargs).mean()
++        if kwargs["axis"] in (1, "rows"):
++            ctx.enter_context(
++                pytest.warns(FutureWarning, match="Using axis=1 in Rolling")
++            )
+         with ctx:
+             result = ddf.rolling(3, **kwargs).mean()
+         assert_eq(expected, result)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

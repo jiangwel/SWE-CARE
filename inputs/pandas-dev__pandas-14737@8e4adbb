@@ -1,0 +1,333 @@
+  Task-ID: pandas-dev__pandas-14737@8e4adbb
+  Please checkout to this commit first: 725453deb2efae1b84d87131e785a42a22753659
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: enable pd.cut to handle i8 convertibles
+so this should work for timedeltas AND datetimes.
+
+Should be straight forward. detect an i8 convertible. turn into i8. do the cut. turn back to the original dtype.
+
+```
+In [15]: s = Series(pd.to_timedelta(np.random.randint(0,100,size=10),unit='ms')).sort_values()
+
+In [16]: s
+Out[16]:
+3   00:00:00.005000
+5   00:00:00.007000
+7   00:00:00.010000
+4   00:00:00.017000
+9   00:00:00.023000
+1   00:00:00.043000
+0   00:00:00.045000
+6   00:00:00.047000
+8   00:00:00.065000
+2   00:00:00.090000
+dtype: timedelta64[ns]
+
+In [18]: pd.cut(s, 5)
+TypeError: unsupported operand type(s) for +: 'Timedelta' and 'float'
+
+# works when converted
+In [17]: pd.cut(s.astype('timedelta64[ms]'), 5)
+Out[17]:
+3    (4.915, 22]
+5    (4.915, 22]
+7    (4.915, 22]
+4    (4.915, 22]
+9       (22, 39]
+1       (39, 56]
+0       (39, 56]
+6       (39, 56]
+8       (56, 73]
+2       (73, 90]
+dtype: category
+Categories (5, object): [(4.915, 22] < (22, 39] < (39, 56] < (56, 73] < (73, 90]]
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.20.0.txt b/doc/source/whatsnew/v0.20.0.txt
+index 6fe0ad8092a03..5e94a95e38cbb 100644
+--- a/doc/source/whatsnew/v0.20.0.txt
++++ b/doc/source/whatsnew/v0.20.0.txt
+@@ -50,6 +50,7 @@ Other enhancements
+ 
+ - ``pd.read_excel`` now preserves sheet order when using ``sheetname=None`` (:issue:`9930`)
+ 
++- ``pd.cut`` and ``pd.qcut`` now support datetime64 and timedelta64 dtypes (issue:`14714`)
+ 
+ .. _whatsnew_0200.api_breaking:
+ 
+diff --git a/pandas/tools/tests/test_tile.py b/pandas/tools/tests/test_tile.py
+index e5b9c65b515d6..ce634ddfc275b 100644
+--- a/pandas/tools/tests/test_tile.py
++++ b/pandas/tools/tests/test_tile.py
+@@ -12,6 +12,7 @@
+ from pandas.core.algorithms import quantile
+ from pandas.tools.tile import cut, qcut
+ import pandas.tools.tile as tmod
++from pandas import to_datetime, DatetimeIndex
+ 
+ 
+ class TestCut(tm.TestCase):
+@@ -283,6 +284,36 @@ def test_single_bin(self):
+         result = cut(s, 1, labels=False)
+         tm.assert_series_equal(result, expected)
+ 
++    def test_datetime_cut(self):
++        # GH 14714
++        # testing for time data to be present as series
++        data = to_datetime(Series(['2013-01-01', '2013-01-02', '2013-01-03']))
++        result, bins = cut(data, 3, retbins=True)
++        expected = Series(['(2012-12-31 23:57:07.200000, 2013-01-01 16:00:00]',
++                          '(2013-01-01 16:00:00, 2013-01-02 08:00:00]',
++                           '(2013-01-02 08:00:00, 2013-01-03 00:00:00]'],
++                          ).astype("category", ordered=True)
++        tm.assert_series_equal(result, expected)
++
++        # testing for time data to be present as list
++        data = [np.datetime64('2013-01-01'), np.datetime64('2013-01-02'),
++                np.datetime64('2013-01-03')]
++        result, bins = cut(data, 3, retbins=True)
++        tm.assert_series_equal(Series(result), expected)
++
++        # testing for time data to be present as ndarray
++
++        data = np.array([np.datetime64('2013-01-01'),
++                        np.datetime64('2013-01-02'),
++                        np.datetime64('2013-01-03')])
++        result, bins = cut(data, 3, retbins=True)
++        tm.assert_series_equal(Series(result), expected)
++
++        # testing for time data to be present as datetime index
++        data = DatetimeIndex(['2013-01-01', '2013-01-02', '2013-01-03'])
++        result, bins = cut(data, 3, retbins=True)
++        tm.assert_series_equal(Series(result), expected)
++
+ 
+ def curpath():
+     pth, _ = os.path.split(os.path.abspath(__file__))
+diff --git a/pandas/tools/tile.py b/pandas/tools/tile.py
+index ef75f2f84779b..2b2f145f1857d 100644
+--- a/pandas/tools/tile.py
++++ b/pandas/tools/tile.py
+@@ -11,8 +11,9 @@
+ import pandas.core.algorithms as algos
+ import pandas.core.nanops as nanops
+ from pandas.compat import zip
+-
++from pandas import to_timedelta, to_datetime
+ import numpy as np
++from pandas.types.common import is_datetime64_dtype, is_timedelta64_dtype
+ 
+ 
+ def cut(x, bins, right=True, labels=None, retbins=False, precision=3,
+@@ -81,6 +82,11 @@ def cut(x, bins, right=True, labels=None, retbins=False, precision=3,
+     array([1, 1, 1, 1, 1], dtype=int64)
+     """
+     # NOTE: this binning code is changed a bit from histogram for var(x) == 0
++    # for handling the cut for datetime and timedelta objects
++    x_is_series, series_index, name, x = _preprocess_for_cut(x)
++
++    original, x, dtype = _coerce_to_type(x)
++
+     if not np.iterable(bins):
+         if is_scalar(bins) and bins < 1:
+             raise ValueError("`bins` should be a positive integer.")
+@@ -114,9 +120,12 @@ def cut(x, bins, right=True, labels=None, retbins=False, precision=3,
+         if (np.diff(bins) < 0).any():
+             raise ValueError('bins must increase monotonically.')
+ 
+-    return _bins_to_cuts(x, bins, right=right, labels=labels,
+-                         retbins=retbins, precision=precision,
+-                         include_lowest=include_lowest)
++    fac, bins = _bins_to_cuts(x, bins, right=right, labels=labels,
++                              retbins=retbins, precision=precision,
++                              include_lowest=include_lowest, dtype=dtype)
++
++    return _postprocess_for_cut(fac, bins, retbins, x_is_series,
++                                series_index, name)
+ 
+ 
+ def qcut(x, q, labels=None, retbins=False, precision=3):
+@@ -166,26 +175,26 @@ def qcut(x, q, labels=None, retbins=False, precision=3):
+     >>> pd.qcut(range(5), 4, labels=False)
+     array([0, 0, 1, 2, 3], dtype=int64)
+     """
++    x_is_series, series_index, name, x = _preprocess_for_cut(x)
++
++    original, x, dtype = _coerce_to_type(x)
++
+     if is_integer(q):
+         quantiles = np.linspace(0, 1, q + 1)
+     else:
+         quantiles = q
+     bins = algos.quantile(x, quantiles)
+-    return _bins_to_cuts(x, bins, labels=labels, retbins=retbins,
+-                         precision=precision, include_lowest=True)
+-
++    fac, bins = _bins_to_cuts(x, bins, labels=labels, retbins=retbins,
++                              precision=precision, include_lowest=True,
++                              dtype=dtype)
+ 
+-def _bins_to_cuts(x, bins, right=True, labels=None, retbins=False,
+-                  precision=3, name=None, include_lowest=False):
+-    x_is_series = isinstance(x, Series)
+-    series_index = None
++    return _postprocess_for_cut(fac, bins, retbins, x_is_series,
++                                series_index, name)
+ 
+-    if x_is_series:
+-        series_index = x.index
+-        if name is None:
+-            name = x.name
+ 
+-    x = np.asarray(x)
++def _bins_to_cuts(x, bins, right=True, labels=None, retbins=False,
++                  precision=3, name=None, include_lowest=False,
++                  dtype=None):
+ 
+     side = 'left' if right else 'right'
+     ids = bins.searchsorted(x, side=side)
+@@ -205,7 +214,8 @@ def _bins_to_cuts(x, bins, right=True, labels=None, retbins=False,
+             while True:
+                 try:
+                     levels = _format_levels(bins, precision, right=right,
+-                                            include_lowest=include_lowest)
++                                            include_lowest=include_lowest,
++                                            dtype=dtype)
+                 except ValueError:
+                     increases += 1
+                     precision += 1
+@@ -229,18 +239,12 @@ def _bins_to_cuts(x, bins, right=True, labels=None, retbins=False,
+             fac = fac.astype(np.float64)
+             np.putmask(fac, na_mask, np.nan)
+ 
+-    if x_is_series:
+-        fac = Series(fac, index=series_index, name=name)
+-
+-    if not retbins:
+-        return fac
+-
+     return fac, bins
+ 
+ 
+ def _format_levels(bins, prec, right=True,
+-                   include_lowest=False):
+-    fmt = lambda v: _format_label(v, precision=prec)
++                   include_lowest=False, dtype=None):
++    fmt = lambda v: _format_label(v, precision=prec, dtype=dtype)
+     if right:
+         levels = []
+         for a, b in zip(bins, bins[1:]):
+@@ -258,12 +262,16 @@ def _format_levels(bins, prec, right=True,
+     else:
+         levels = ['[%s, %s)' % (fmt(a), fmt(b))
+                   for a, b in zip(bins, bins[1:])]
+-
+     return levels
+ 
+ 
+-def _format_label(x, precision=3):
++def _format_label(x, precision=3, dtype=None):
+     fmt_str = '%%.%dg' % precision
++
++    if is_datetime64_dtype(dtype):
++        return to_datetime(x, unit='ns')
++    if is_timedelta64_dtype(dtype):
++        return to_timedelta(x, unit='ns')
+     if np.isinf(x):
+         return str(x)
+     elif is_float(x):
+@@ -300,3 +308,56 @@ def _trim_zeros(x):
+     if len(x) > 1 and x[-1] == '.':
+         x = x[:-1]
+     return x
++
++
++def _coerce_to_type(x):
++    """
++    if the passed data is of datetime/timedelta type,
++    this method converts it to integer so that cut method can
++    handle it
++    """
++    dtype = None
++    original = x
++    if is_timedelta64_dtype(x):
++        x = to_timedelta(x).view(np.int64)
++        dtype = np.timedelta64
++
++    elif is_datetime64_dtype(x):
++        x = to_datetime(x).view(np.int64)
++        dtype = np.datetime64
++    return original, x, dtype
++
++
++def _preprocess_for_cut(x):
++    """
++    handles preprocessing for cut where we convert passed
++    input to array, strip the index information and store it
++    seperately
++    """
++    x_is_series = isinstance(x, Series)
++    series_index = None
++
++    name = None
++    if x_is_series:
++        series_index = x.index
++        if name is None:
++            name = x.name
++
++    x = np.asarray(x)
++
++    return x_is_series, series_index, name, x
++
++
++def _postprocess_for_cut(fac, bins, retbins, x_is_series, series_index, name):
++    """
++    handles post processing for the cut method where
++    we combine the index information if the originally passed
++    datatype was a series
++    """
++    if x_is_series:
++        fac = Series(fac, index=series_index, name=name)
++
++    if not retbins:
++        return fac
++
++    return fac, bins
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

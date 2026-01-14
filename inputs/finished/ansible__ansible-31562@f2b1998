@@ -1,0 +1,594 @@
+  Task-ID: ansible__ansible-31562@f2b1998
+  Please checkout to this commit first: 48ab1a1334d1c5273691398ae2629dc0b7ec52a8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add parse xml filter which returns a json object [XML_FILTER]
+<!---
+Verify first that your issue/request is not already reported on GitHub.
+Also test if the latest release, and master branch are affected too.
+-->
+
+##### ISSUE TYPE
+<!--- Pick one below and delete the rest: -->
+ - Feature Idea
+
+##### COMPONENT NAME
+<!--- Name of the module/plugin/task/feature -->
+filter/network.py
+
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes below -->
+```
+2.5
+```
+
+##### CONFIGURATION
+<!---
+If using Ansible 2.4 or above, paste the results of "ansible-config dump --only-changed"
+
+Otherwise, mention any settings you have changed/added/removed in ansible.cfg
+(or using the ANSIBLE_* environment variables).
+
+-->
+
+##### OS / ENVIRONMENT
+<!---
+Mention the OS you are running Ansible from, and the OS you are
+managing, or say "N/A" for anything that is not platform-specific.
+Also mention the specific version of what you are trying to control,
+e.g. if this is a network bug the version of firmware on the network device.
+-->
+
+##### SUMMARY
+<!--- Explain the problem briefly -->
+*  Add parse_xml filter to parse a xml response and convert to json object.
+
+##### STEPS TO REPRODUCE
+<!---
+For bugs, show exactly how to reproduce the problem, using a minimal test-case.
+For new features, show how the feature would be used.
+-->
+
+<!--- Paste example playbooks or commands between quotes below -->
+```yaml
+
+```
+
+<!--- You can also paste gist.github.com links for larger files -->
+
+##### EXPECTED RESULTS
+<!--- What did you expect to happen when running the steps above? -->
+
+##### ACTUAL RESULTS
+<!--- What actually happened? If possible run with extra verbosity (-vvvv) -->
+
+<!--- Paste verbatim command output between quotes below -->
+```
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/docs/docsite/rst/playbooks_filters.rst b/docs/docsite/rst/playbooks_filters.rst
+index 329c0fc75b6603..f4384182112a59 100644
+--- a/docs/docsite/rst/playbooks_filters.rst
++++ b/docs/docsite/rst/playbooks_filters.rst
+@@ -340,7 +340,7 @@ output, use the ``parse_cli`` filter::
+   {{ output | parse_cli('path/to/spec') }}
+ 
+ The ``parse_cli`` filter will load the spec file and pass the command output
+-through, it returning JSON output.  The spec file is a YAML yaml that defines
++through, it returning JSON output.  The spec file is a YAML that defines
+ how to parse the CLI output.
+ 
+ The spec file should be valid formatted YAML.  It defines how to parse the CLI
+@@ -357,7 +357,6 @@ will parse the output from the ``show vlan`` command.::
+ 
+     keys:
+       vlans:
+-        type: list
+         value: "{{ vlan }}"
+         items: "^(?P<vlan_id>\\d+)\\s+(?P<name>\\w+)\\s+(?P<state>active|act/lshut|suspended)"
+       state_static:
+@@ -382,7 +381,6 @@ value using the same ``show vlan`` command.::
+ 
+     keys:
+       vlans:
+-        type: list
+         value: "{{ vlan }}"
+         items: "^(?P<vlan_id>\\d+)\\s+(?P<name>\\w+)\\s+(?P<state>active|act/lshut|suspended)"
+       state_static:
+@@ -421,6 +419,99 @@ filter::
+ 
+ Use of the TextFSM filter requires the TextFSM library to be installed.
+ 
++Network XML filters
++```````````````````
++
++.. versionadded:: 2.5
++
++To convert the XML output of a network device command into structured JSON
++output, use the ``parse_xml`` filter::
++
++  {{ output | parse_xml('path/to/spec') }}
++
++The ``parse_xml`` filter will load the spec file and pass the command output
++through formatted as JSON.
++
++The spec file should be valid formatted YAML. It defines how to parse the XML
++output and return JSON data.  
++
++Below is an example of a valid spec file that
++will parse the output from the ``show vlan | display xml`` command.::
++
++    ---
++    vars:
++      vlan:
++        vlan_id: "{{ item.vlan_id }}"
++        name: "{{ item.name }}"
++        desc: "{{ item.desc }}"
++        enabled: "{{ item.state.get('inactive') != 'inactive' }}"
++        state: "{% if item.state.get('inactive') == 'inactive'%} inactive {% else %} active {% endif %}"
++
++    keys:
++      vlans:
++        value: "{{ vlan }}"
++        top: configuration/vlans/vlan
++        items:
++          vlan_id: vlan-id
++          name: name
++          desc: description
++          state: ".[@inactive='inactive']"
++
++The spec file above will return a JSON data structure that is a list of hashes
++with the parsed VLAN information.
++
++The same command could be parsed into a hash by using the key and values
++directives.  Here is an example of how to parse the output into a hash
++value using the same ``show vlan | display xml`` command.::
++
++    ---
++    vars:
++      vlan:
++        key: "{{ item.vlan_id }}"
++        values:
++            vlan_id: "{{ item.vlan_id }}"
++            name: "{{ item.name }}"
++            desc: "{{ item.desc }}"
++            enabled: "{{ item.state.get('inactive') != 'inactive' }}"
++            state: "{% if item.state.get('inactive') == 'inactive'%} inactive {% else %} active {% endif %}"
++
++    keys:
++      vlans:
++        value: "{{ vlan }}"
++        top: configuration/vlans/vlan
++        items:
++          vlan_id: vlan-id
++          name: name
++          desc: description
++          state: ".[@inactive='inactive']"
++
++
++The value of ``top`` is the relative XPath till inner-most container in xml heirarchy.
++From the example xml output given below the value of ``top`` is ``configuration/vlans/vlan`` which
++is a relative XPath expression with respect to root node (ie. rpc-reply)
++
++``items`` is a dictionary, of key-value pairs that map user-defined names to XPath expressions
++that select elements. The Xpath expression is relative XPath with respect to value of XPath in ``top``.
++For example the ``vlan_id`` in spec file is user defined name and it's value ``vlan-id`` is the
++relative XPath with respect to value of XPath in ``top``
++
++Attributes of xml tags can be extracted using XPath expressions, the value of ``state`` in spec
++is a XPath expression to get the attributes of ``vlan`` tag in output xml.::
++
++    <rpc-reply>
++      <configuration>
++        <vlans>
++          <vlan inactive="inactive">
++           <name>vlan-1</name>
++           <vlan-id>200</vlan-id>
++           <description>This is vlan-1</description>
++          </vlan>
++        </vlans>
++      </configuration>
++    </rpc-reply>
++
++.. note:: To get more details on supported XPath expression, check https://docs.python.org/2/library/xml.etree.elementtree.html#xpath-support
++
+ .. _hash_filters:
+ 
+ Hashing filters
+diff --git a/lib/ansible/plugins/filter/network.py b/lib/ansible/plugins/filter/network.py
+index 6a53cf5c073cce..bfee2408b80c83 100644
+--- a/lib/ansible/plugins/filter/network.py
++++ b/lib/ansible/plugins/filter/network.py
+@@ -22,9 +22,10 @@
+ 
+ import re
+ import os
+-import json
++import traceback
+ 
+ from collections import Mapping
++from xml.etree.ElementTree import fromstring
+ 
+ from ansible.module_utils.network_common import Template
+ from ansible.module_utils.six import iteritems, string_types
+@@ -243,12 +244,115 @@ def parse_cli_textfsm(value, template):
+     return results
+ 
+ 
++def _extract_param(template, root, attrs, value):
++
++    key = None
++    when = attrs.get('when')
++    conditional = "{%% if %s %%}True{%% else %%}False{%% endif %%}" % when
++    param_to_xpath_map = attrs['items']
++
++    if isinstance(value, Mapping):
++        key = value.get('key', None)
++        if key:
++            value = value['values']
++
++    entries = dict() if key else list()
++
++    for element in root.findall(attrs['top']):
++        entry = dict()
++        item_dict = dict()
++        for param, param_xpath in iteritems(param_to_xpath_map):
++            fields = None
++            try:
++                fields = element.findall(param_xpath)
++            except:
++                display.warning("Failed to evaluate value of '%s' with XPath '%s'.\nUnexpected error: %s." % (param, param_xpath, traceback.format_exc()))
++
++            tags = param_xpath.split('/')
++
++            # check if xpath ends with attribute.
++            # If yes set attribute key/value dict to param value in case attribute matches
++            # else if it is a normal xpath assign matched element text value.
++            if len(tags) and tags[-1].endswith(']'):
++                if fields:
++                    if len(fields) > 1:
++                        item_dict[param] = [field.attrib for field in fields]
++                    else:
++                        item_dict[param] = fields[0].attrib
++                else:
++                    item_dict[param] = {}
++            else:
++                if fields:
++                    if len(fields) > 1:
++                        item_dict[param] = [field.text for field in fields]
++                    else:
++                        item_dict[param] = fields[0].text
++                else:
++                    item_dict[param] = None
++
++        if isinstance(value, Mapping):
++            for item_key, item_value in iteritems(value):
++                entry[item_key] = template(item_value, {'item': item_dict})
++        else:
++            entry = template(value, {'item': item_dict})
++
++        if key:
++            expanded_key = template(key, {'item': item_dict})
++            if when:
++                if template(conditional, {'item': {'key': expanded_key, 'value': entry}}):
++                    entries[expanded_key] = entry
++            else:
++                entries[expanded_key] = entry
++        else:
++            if when:
++                if template(conditional, {'item': entry}):
++                    entries.append(entry)
++            else:
++                entries.append(entry)
++
++    return entries
++
++
++def parse_xml(output, tmpl):
++    if not os.path.exists(tmpl):
++        raise AnsibleError('unable to locate parse_cli template: %s' % tmpl)
++
++    if not isinstance(output, string_types):
++        raise AnsibleError('parse_xml works on string input, but given input of : %s' % type(output))
++
++    root = fromstring(output)
++    try:
++        template = Template()
++    except ImportError as exc:
++        raise AnsibleError(str(exc))
++
++    spec = yaml.safe_load(open(tmpl).read())
++    obj = {}
++
++    for name, attrs in iteritems(spec['keys']):
++        value = attrs['value']
++
++        try:
++            variables = spec.get('vars', {})
++            value = template(value, variables)
++        except:
++            pass
++
++        if 'items' in attrs:
++            obj[name] = _extract_param(template, root, attrs, value)
++        else:
++            obj[name] = value
++
++    return obj
++
++
+ class FilterModule(object):
+     """Filters for working with output from network devices"""
+ 
+     filter_map = {
+         'parse_cli': parse_cli,
+-        'parse_cli_textfsm': parse_cli_textfsm
++        'parse_cli_textfsm': parse_cli_textfsm,
++        'parse_xml': parse_xml
+     }
+ 
+     def filters(self):
+diff --git a/test/units/plugins/filter/fixtures/network/show_vlans_xml_output.txt b/test/units/plugins/filter/fixtures/network/show_vlans_xml_output.txt
+new file mode 100644
+index 00000000000000..b426dcca81d200
+--- /dev/null
++++ b/test/units/plugins/filter/fixtures/network/show_vlans_xml_output.txt
+@@ -0,0 +1,34 @@
++<rpc-reply>
++    <configuration>
++            <vlans>
++                <vlan>
++                    <name>test-1</name>
++                    <vlan-id>100</vlan-id>
++                </vlan>
++                <vlan>
++                    <name>test-2</name>
++                </vlan>
++                <vlan>
++                    <name>test-3</name>
++                    <vlan-id>300</vlan-id>
++                    <description>test vlan-3</description>
++                    <interface>
++                        <name>em3.0</name>
++                    </interface>
++                </vlan>
++                <vlan inactive="inactive">
++                    <name>test-4</name>
++                    <description>test vlan-4</description>
++                    <vlan-id>400</vlan-id>
++                </vlan>
++                <vlan inactive="inactive">
++                    <name>test-5</name>
++                    <description>test vlan-5</description>
++                    <vlan-id>500</vlan-id>
++                    <interface>
++                        <name>em5.0</name>
++                    </interface>
++                </vlan>
++            </vlans>
++    </configuration>
++</rpc-reply>
+diff --git a/test/units/plugins/filter/fixtures/network/show_vlans_xml_single_value_spec.yml b/test/units/plugins/filter/fixtures/network/show_vlans_xml_single_value_spec.yml
+new file mode 100644
+index 00000000000000..c320eb10297954
+--- /dev/null
++++ b/test/units/plugins/filter/fixtures/network/show_vlans_xml_single_value_spec.yml
+@@ -0,0 +1,11 @@
++---
++vars:
++  vlan: "{{ item.name }}"
++
++keys:
++  vlans:
++    type: list
++    value: "{{ vlan }}"
++    top: configuration/vlans/vlan
++    items:
++      name: name
+diff --git a/test/units/plugins/filter/fixtures/network/show_vlans_xml_spec.yml b/test/units/plugins/filter/fixtures/network/show_vlans_xml_spec.yml
+new file mode 100644
+index 00000000000000..555e3547d0c83a
+--- /dev/null
++++ b/test/units/plugins/filter/fixtures/network/show_vlans_xml_spec.yml
+@@ -0,0 +1,21 @@
++---
++vars:
++  vlan:
++    vlan_id: "{{ item.vlan_id }}"
++    name: "{{ item.name }}"
++    desc: "{{ item.desc }}"
++    interface: "{{ item.intf }}"
++    enabled: "{{ item.state.get('inactive') != 'inactive' }}"
++    state: "{% if item.state.get('inactive') == 'inactive'%}inactive{% else %}active{% endif %}"
++
++keys:
++  vlans:
++    type: list
++    value: "{{ vlan }}"
++    top: configuration/vlans/vlan
++    items:
++      vlan_id: vlan-id
++      name: name
++      desc: description
++      intf: interface/name
++      state: ".[@inactive='inactive']"
+diff --git a/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_condition_spec.yml b/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_condition_spec.yml
+new file mode 100644
+index 00000000000000..d1d3fe225e3432
+--- /dev/null
++++ b/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_condition_spec.yml
+@@ -0,0 +1,22 @@
++---
++vars:
++  vlan:
++    vlan_id: "{{ item.vlan_id }}"
++    name: "{{ item.name }}"
++    desc: "{{ item.desc }}"
++    interface: "{{ item.intf }}"
++    enabled: "{{ item.state.get('inactive') != 'inactive' }}"
++    state: "{% if item.state.get('inactive') == 'inactive'%}inactive{% else %}active{% endif %}"
++
++keys:
++  vlans:
++    type: list
++    value: "{{ vlan }}"
++    top: configuration/vlans/vlan
++    items:
++      vlan_id: vlan-id
++      name: name
++      desc: description
++      intf: interface/name
++      state: ".[@inactive='inactive']"
++    when: item.name == 'test-5'
+diff --git a/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_key_spec.yml b/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_key_spec.yml
+new file mode 100644
+index 00000000000000..341498a9ad7130
+--- /dev/null
++++ b/test/units/plugins/filter/fixtures/network/show_vlans_xml_with_key_spec.yml
+@@ -0,0 +1,23 @@
++---
++vars:
++  vlan:
++    key: "{{ item.name }}"
++    values:
++      vlan_id: "{{ item.vlan_id }}"
++      name: "{{ item.name }}"
++      desc: "{{ item.desc }}"
++      interface: "{{ item.intf }}"
++      enabled: "{{ item.state.get('inactive') != 'inactive' }}"
++      state: "{% if item.state.get('inactive') == 'inactive'%}inactive{% else %}active{% endif %}"
++
++keys:
++  vlans:
++    type: list
++    value: "{{ vlan }}"
++    top: configuration/vlans/vlan
++    items:
++      vlan_id: vlan-id
++      name: name
++      desc: description
++      intf: interface/name
++      state: ".[@inactive='inactive']"
+diff --git a/test/units/plugins/filter/test_network.py b/test/units/plugins/filter/test_network.py
+new file mode 100644
+index 00000000000000..1836bd30ab18ff
+--- /dev/null
++++ b/test/units/plugins/filter/test_network.py
+@@ -0,0 +1,80 @@
++# This file is part of Ansible
++#
++# Ansible is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# Ansible is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
++
++# Make coding more python3-ish
++from __future__ import (absolute_import, division, print_function)
++__metaclass__ = type
++
++import os
++import sys
++
++from ansible.compat.tests import unittest
++from ansible.plugins.filter.network import parse_xml
++
++fixture_path = os.path.join(os.path.dirname(__file__), 'fixtures', 'network')
++
++with open(os.path.join(fixture_path, 'show_vlans_xml_output.txt')) as f:
++    output_xml = f.read()
++
++
++class TestNetworkParseFilter(unittest.TestCase):
++
++    @unittest.skipIf(sys.version_info[:2] == (2, 6), 'XPath expression not supported in this version')
++    def test_parse_xml_to_list_of_dict(self):
++        spec_file_path = os.path.join(fixture_path, 'show_vlans_xml_spec.yml')
++        parsed = parse_xml(output_xml, spec_file_path)
++        expected = {'vlans': [{'name': 'test-1', 'enabled': True, 'state': 'active', 'interface': None, 'vlan_id': 100, 'desc': None},
++                              {'name': 'test-2', 'enabled': True, 'state': 'active', 'interface': None, 'vlan_id': None, 'desc': None},
++                              {'name': 'test-3', 'enabled': True, 'state': 'active', 'interface': 'em3.0', 'vlan_id': 300, 'desc': 'test vlan-3'},
++                              {'name': 'test-4', 'enabled': False, 'state': 'inactive', 'interface': None, 'vlan_id': 400, 'desc': 'test vlan-4'},
++                              {'name': 'test-5', 'enabled': False, 'state': 'inactive', 'interface': 'em5.0', 'vlan_id': 500, 'desc': 'test vlan-5'}]}
++        self.assertEqual(parsed, expected)
++
++    @unittest.skipIf(sys.version_info[:2] == (2, 6), 'XPath expression not supported in this version')
++    def test_parse_xml_to_dict(self):
++        spec_file_path = os.path.join(fixture_path, 'show_vlans_xml_with_key_spec.yml')
++        parsed = parse_xml(output_xml, spec_file_path)
++        expected = {'vlans': {'test-4': {'name': 'test-4', 'enabled': False, 'state': 'inactive', 'interface': None, 'vlan_id': 400, 'desc': 'test vlan-4'},
++                              'test-3': {'name': 'test-3', 'enabled': True, 'state': 'active', 'interface': 'em3.0', 'vlan_id': 300, 'desc': 'test vlan-3'},
++                              'test-1': {'name': 'test-1', 'enabled': True, 'state': 'active', 'interface': None, 'vlan_id': 100, 'desc': None},
++                              'test-5': {'name': 'test-5', 'enabled': False, 'state': 'inactive', 'interface': 'em5.0', 'vlan_id': 500, 'desc': 'test vlan-5'},
++                              'test-2': {'name': 'test-2', 'enabled': True, 'state': 'active', 'interface': None, 'vlan_id': None, 'desc': None}}
++                    }
++        self.assertEqual(parsed, expected)
++
++    @unittest.skipIf(sys.version_info[:2] == (2, 6), 'XPath expression not supported in this version')
++    def test_parse_xml_with_condition_spec(self):
++        spec_file_path = os.path.join(fixture_path, 'show_vlans_xml_with_condition_spec.yml')
++        parsed = parse_xml(output_xml, spec_file_path)
++        expected = {'vlans': [{'name': 'test-5', 'enabled': False, 'state': 'inactive', 'interface': 'em5.0', 'vlan_id': 500, 'desc': 'test vlan-5'}]}
++        self.assertEqual(parsed, expected)
++
++    def test_parse_xml_with_single_value_spec(self):
++        spec_file_path = os.path.join(fixture_path, 'show_vlans_xml_single_value_spec.yml')
++        parsed = parse_xml(output_xml, spec_file_path)
++        expected = {'vlans': ['test-1', 'test-2', 'test-3', 'test-4', 'test-5']}
++        self.assertEqual(parsed, expected)
++
++    def test_parse_xml_validate_input(self):
++        spec_file_path = os.path.join(fixture_path, 'show_vlans_xml_spec.yml')
++        output = 10
++
++        with self.assertRaises(Exception) as e:
++            parse_xml(output_xml, 'junk_path')
++        self.assertEqual("unable to locate parse_cli template: junk_path", str(e.exception))
++
++        with self.assertRaises(Exception) as e:
++            parse_xml(output, spec_file_path)
++        self.assertEqual("parse_xml works on string input, but given input of : %s" % type(output), str(e.exception))
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

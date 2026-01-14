@@ -1,0 +1,719 @@
+  Task-ID: OpenMined__PySyft-4522@776c2e8
+  Please checkout to this commit first: c83e615a85bb8944245668d90582fb97c45e6e18
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Replicated Sharing Tensor (RST): Add support for FixedPrecisionTensor chain 
+Replicated Sharing Tensor currently can work if the plain text type is float or int, we want it to be able to work given a FixedPrecisionTensor as plain text.
+When this issue is solved this test case should work properly:
+```
+a = a.fix_perc().share(bob, alice, james, protocol = "falcon")
+b = a.reconstruct().float_perc()
+assert (a==b).all()
+```
+also, it should be tested on arithmetic operation (addition, multiplication, and matrix multiplication)
+  </issue>
+  
+  <patch>
+  diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+index 6eeedfb9ac7..1b32354fcfe 100644
+--- a/.pre-commit-config.yaml
++++ b/.pre-commit-config.yaml
+@@ -12,7 +12,7 @@ repos:
+     -   id: requirements-txt-fixer
+     -   id: flake8
+ -   repo: https://github.com/psf/black
+-    rev: 19.10b0
++    rev: 20.8b1
+     hooks:
+     -   id: black
+ -   repo: https://github.com/pre-commit/pygrep-hooks
+diff --git a/syft/frameworks/torch/mpc/falcon/falcon.py b/syft/frameworks/torch/mpc/falcon/falcon.py
+index b86156efdf8..0bb4ab1d7d5 100644
+--- a/syft/frameworks/torch/mpc/falcon/falcon.py
++++ b/syft/frameworks/torch/mpc/falcon/falcon.py
+@@ -4,6 +4,14 @@
+ 
+ 
+ def conv2d(filters: syft.ReplicatedSharingTensor, image, padding=0):
++    is_wrapper = filters.is_wrapper or image.is_wrapper
++
++    if filters.is_wrapper:
++        filters = filters.child
++
++    if image.is_wrapper:
++        image = image.child
++
+     image_batches, image_channels, image_width, image_height = image.shape
+     channels_out, filter_channels, filter_width, filter_height = filters.shape
+     image = FalconHelper.unfold(image, filter_height, padding)
+@@ -11,4 +19,7 @@ def conv2d(filters: syft.ReplicatedSharingTensor, image, padding=0):
+     result = filters @ image
+     output_size = (image_height - filter_height + 2 * padding) + 1
+     result = result.view(-1, channels_out, output_size, output_size)
++
++    if is_wrapper:
++        result = result.wrap()
+     return result
+diff --git a/syft/frameworks/torch/mpc/falcon/falcon_helper.py b/syft/frameworks/torch/mpc/falcon/falcon_helper.py
+index db797e9cf2f..51163c23cba 100644
+--- a/syft/frameworks/torch/mpc/falcon/falcon_helper.py
++++ b/syft/frameworks/torch/mpc/falcon/falcon_helper.py
+@@ -38,6 +38,13 @@ def xor(
+         Returns:
+             The XOR computation between value and other
+         """
++        is_wrapper = value.is_wrapper
++
++        if value.is_wrapper:
++            value = value.child
++
++        if torch.is_tensor(other) and other.is_wrapper:
++            other = other.child
+ 
+         assert (
+             isinstance(value, ReplicatedSharingTensor) and value.ring_size == 2
+@@ -50,7 +57,11 @@ def xor(
+             ]
+         ), "Second argument should be RST (with ring size of 2)/Integer/LongTensor values in {0, 1}"
+ 
+-        return value + other - 2 * value * other
++        result = value + other - 2 * value * other
++
++        if is_wrapper:
++            result = result.wrap()
++        return result
+ 
+     @staticmethod
+     def __switch_public_private(value, public_function, private_function, *args, **kwargs):
+@@ -88,6 +99,8 @@ def select_share(
+         c = torch.randint(high=2, size=shape)
+         c_2 = c.share(*players, protocol="falcon", field=2)
+         c_L = c.share(*players, protocol="falcon", field=ring_size)
++        print(c_L)
++        print(c_2)
+ 
+         xor_b_c = FalconHelper.xor(b, c_2).reconstruct()
+         d = c_L * (1 - 2 * xor_b_c) + xor_b_c
+diff --git a/syft/frameworks/torch/tensors/interpreters/native.py b/syft/frameworks/torch/tensors/interpreters/native.py
+index c012c7a87b9..43c654e07e7 100644
+--- a/syft/frameworks/torch/tensors/interpreters/native.py
++++ b/syft/frameworks/torch/tensors/interpreters/native.py
+@@ -3,6 +3,8 @@
+ import warnings
+ 
+ import torch
++from syft.frameworks.torch.tensors.interpreters.precision import FixedPrecisionTensor
++from syft.frameworks.torch.tensors.interpreters.replicated_shared import ReplicatedSharingTensor
+ 
+ import syft
+ from syft.generic.frameworks.hook import hook_args
+@@ -252,6 +254,20 @@ def grad(self, new_grad):
+                 self.native_grad = new_grad
+         return self
+ 
++    @property
++    def players(self):
++        if hasattr(self, "child") and isinstance(self.child, ReplicatedSharingTensor):
++            return self.child.players
++        raise ValueError('Only ReplicatedSharingTensors have property "players"')
++
++    @property
++    def ring_size(self):
++        if hasattr(self, "child") and isinstance(
++            self.child, (FixedPrecisionTensor, ReplicatedSharingTensor)
++        ):
++            return self.child.ring_size
++        raise ValueError('only ReplicatedSharingTensors have property "ring_size"')
++
+     def __str__(self) -> str:
+         if self.has_child():
+             if self.is_wrapper:
+@@ -910,7 +926,6 @@ def fix_prec(self, *args, no_wrap: bool = False, **kwargs):
+             no_wrap (bool): if True, we don't add a wrapper on top of the fixed precision tensor
+             **kwargs (dict): kwargs to transmit to the fixed precision tensor
+         """
+-
+         if not kwargs.get("owner"):
+             kwargs["owner"] = self.owner
+ 
+@@ -974,11 +989,6 @@ def share(
+             requires_grad (bool): Should we add AutogradTensor to allow gradient computation,
+                 default is False.
+         """
+-        if protocol == "falcon":
+-            shared_tensor = syft.ReplicatedSharingTensor(
+-                self, owners, ring_size=field, owner=self.owner
+-            )
+-            return shared_tensor
+         if self.has_child():
+             chain = self.child
+ 
+@@ -997,17 +1007,22 @@ def share(
+             if self.type() == "torch.FloatTensor":
+                 raise TypeError("FloatTensor cannot be additively shared, Use fix_precision.")
+ 
+-            shared_tensor = (
+-                syft.AdditiveSharingTensor(
+-                    protocol=protocol,
+-                    field=field,
+-                    dtype=dtype,
+-                    crypto_provider=crypto_provider,
+-                    owner=self.owner,
++            if protocol == "falcon":
++                shared_tensor = syft.ReplicatedSharingTensor(
++                    self, owners, ring_size=field, owner=self.owner
++                )
++            else:
++                shared_tensor = (
++                    syft.AdditiveSharingTensor(
++                        protocol=protocol,
++                        field=field,
++                        dtype=dtype,
++                        crypto_provider=crypto_provider,
++                        owner=self.owner,
++                    )
++                    .on(self.copy(), wrap=False)
++                    .share_secret(*owners)
+                 )
+-                .on(self.copy(), wrap=False)
+-                .share_secret(*owners)
+-            )
+ 
+         if requires_grad and not isinstance(shared_tensor, syft.PointerTensor):
+             shared_tensor = syft.AutogradTensor().on(shared_tensor, wrap=False)
+@@ -1198,3 +1213,8 @@ def numpy_tensor(self):
+                 "on a wrapper. Add NumpyTensor to the chain by hand if you want "
+                 "this functionality.",
+             )
++
++    def reconstruct(self):
++        if not isinstance(self.child, (ReplicatedSharingTensor, FixedPrecisionTensor)):
++            raise ValueError("reconstruct can only be called for RST and FPT")
++        return self.child.get()
+diff --git a/syft/frameworks/torch/tensors/interpreters/precision.py b/syft/frameworks/torch/tensors/interpreters/precision.py
+index 7c47437a3df..c490a6d8f66 100644
+--- a/syft/frameworks/torch/tensors/interpreters/precision.py
++++ b/syft/frameworks/torch/tensors/interpreters/precision.py
+@@ -2,6 +2,7 @@
+ import warnings
+ 
+ import syft
++from syft.frameworks.torch.tensors.interpreters.replicated_shared import ReplicatedSharingTensor
+ from syft.frameworks.torch.nn import nn
+ from syft.frameworks.torch.tensors.interpreters.additive_shared import AdditiveSharingTensor
+ from syft.generic.frameworks.hook import hook_args
+@@ -125,7 +126,6 @@ def fix_precision(self, check_range=True):
+             ).all(), (
+                 f"{rational} cannot be correctly embedded: choose bigger field or a lower precision"
+             )
+-
+         field_element = upscaled
+         field_element.owner = rational.owner
+         self.child = field_element.type(self.torch_dtype)
+@@ -159,6 +159,14 @@ def truncate(self, precision_fractional, check_sign=True):
+             self.child = neg_nums * gate + pos_nums * (1 - gate)
+             return self
+ 
++    @property
++    def ring_size(self):
++        if hasattr(self, "child") and isinstance(
++            self.child, (FixedPrecisionTensor, ReplicatedSharingTensor)
++        ):
++            return self.child.ring_size
++        raise ValueError('only ReplicatedSharingTensors have property "ring_size"')
++
+     @overloaded.method
+     def mod(self, _self, divisor):
+         """
+@@ -193,6 +201,9 @@ def add(self, _self, other):
+             # we swap operators so that we do the same operation as above
+             _self, other = other, _self.wrap()
+ 
++        elif isinstance(other, ReplicatedSharingTensor) and isinstance(_self, torch.Tensor):
++            _self, other = other, _self
++
+         response = getattr(_self, "add")(other)
+ 
+         return response
+@@ -231,6 +242,9 @@ def sub(self, _self, other):
+             # we swap operators so that we do the same operation as above
+             _self, other = -other, -_self.wrap()
+ 
++        elif isinstance(other, ReplicatedSharingTensor) and isinstance(_self, torch.Tensor):
++            _self, other = other * -1, -_self
++
+         response = getattr(_self, "sub")(other)
+ 
+         return response
+@@ -525,6 +539,12 @@ def reciprocal(self, method="NR", nr_iters=10):
+         else:
+             raise ValueError(f"Invalid method {method} given for reciprocal function")
+ 
++    def reconstruct(self):
++        if not isinstance(self.child, ReplicatedSharingTensor):
++            raise ValueError("reconstruct can only be called on RST")
++        self.child = self.child.reconstruct()
++        return self
++
+     # Approximations:
+     def inverse(self, iterations=8):
+         """
+@@ -935,7 +955,12 @@ def share(self, *owners, protocol=None, field=None, dtype=None, crypto_provider=
+         tensor = FixedPrecisionTensor(owner=self.owner, **self.get_class_attributes())
+ 
+         tensor.child = self.child.share(
+-            *owners, protocol=protocol, dtype=dtype, crypto_provider=crypto_provider, no_wrap=True
++            *owners,
++            protocol=protocol,
++            dtype=dtype,
++            field=field,
++            crypto_provider=crypto_provider,
++            no_wrap=True,
+         )
+         return tensor
+ 
+diff --git a/syft/frameworks/torch/tensors/interpreters/replicated_shared.py b/syft/frameworks/torch/tensors/interpreters/replicated_shared.py
+index 15842483d26..ce6e2427f70 100644
+--- a/syft/frameworks/torch/tensors/interpreters/replicated_shared.py
++++ b/syft/frameworks/torch/tensors/interpreters/replicated_shared.py
+@@ -1,5 +1,6 @@
+ from operator import add, sub, mul
+ import torch
++from syft.generic.frameworks.hook import hook_args
+ import syft
+ from syft.generic.abstract.tensor import AbstractTensor
+ from syft.frameworks.torch.mpc.przs import PRZS, gen_alpha_3of3
+@@ -69,6 +70,8 @@ def reconstruct(self):
+         plain_text = self.__map_modular_to_real(plain_text_mod)
+         return plain_text
+ 
++    get = reconstruct
++
+     def retrieve_shares(self):
+         pointers = self.retrieve_pointers()
+         shares = []
+@@ -277,3 +280,7 @@ def __str__(self):
+             for v in self.child.values():
+                 out += "\n\t-> " + str(v)
+         return out
++
++
++### Register the tensor with hook_args.py ###
++hook_args.default_register_tensor(ReplicatedSharingTensor)
+diff --git a/test/torch/mpc/falcon/test_falcon_helper.py b/test/torch/mpc/falcon/test_falcon_helper.py
+index 3023b6ffff4..c3fefb6225e 100644
+--- a/test/torch/mpc/falcon/test_falcon_helper.py
++++ b/test/torch/mpc/falcon/test_falcon_helper.py
+@@ -38,7 +38,7 @@
+ def test_public_xor(x_val, y, x_xor_y, workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = x_val.share(bob, alice, james, protocol="falcon", field=2)
+-    assert (FalconHelper.xor(x, y).reconstruct() == x_xor_y).all()
++    assert (FalconHelper.xor(x.child, y).reconstruct() == x_xor_y).all()
+ 
+ 
+ @pytest.mark.parametrize("x_val, y_val, x_xor_y", TEST_VALS_TENSORS)
+@@ -46,7 +46,7 @@ def test_private_xor(x_val, y_val, x_xor_y, workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = x_val.share(bob, alice, james, protocol="falcon", field=2)
+     y = y_val.share(bob, alice, james, protocol="falcon", field=2)
+-    assert (FalconHelper.xor(x, y).reconstruct() == x_xor_y).all()
++    assert (FalconHelper.xor(x.child, y.child).reconstruct() == x_xor_y).all()
+ 
+ 
+ @pytest.mark.parametrize("bit_select", [0, 1])
+@@ -95,3 +95,27 @@ def test_determine_sign(beta, workers):
+     plaintext = FalconHelper.determine_sign(x_shared, beta).reconstruct()
+ 
+     assert (expected_plaintext == plaintext).all()
++
++
++def test_rst_wrapper(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    workers = [bob, alice, james]
++    x = torch.tensor([0, 1, 2])
++    rst_wrapper = x.share(*workers, protocol="falcon", field=2)
++    assert FalconHelper.xor(rst_wrapper, 1).is_wrapper
++
++    y = torch.tensor([4, 5, 6])
++    other_wrapper = y.share(*workers, protocol="falcon", field=2)
++    assert FalconHelper.xor(rst_wrapper, other_wrapper).is_wrapper
++
++
++def test_rst_no_wrap(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    workers = [bob, alice, james]
++    x = torch.tensor([0, 1, 2])
++    simple_rst = x.share(*workers, protocol="falcon", field=2).child
++    assert not FalconHelper.xor(simple_rst, 1).is_wrapper
++
++    y = torch.tensor([4, 5, 6])
++    other_wrapper = y.share(*workers, protocol="falcon", field=2)
++    assert not FalconHelper.xor(simple_rst, other_wrapper).is_wrapper
+diff --git a/test/torch/tensors/test_native.py b/test/torch/tensors/test_native.py
+index ee7b375724a..78cfe2fae45 100644
+--- a/test/torch/tensors/test_native.py
++++ b/test/torch/tensors/test_native.py
+@@ -231,3 +231,64 @@ def test_get_response():
+     result = torch.Tensor._get_response("torch._test_func", t, {})
+     delattr(torch, "_test_func")
+     assert t == result
++
++
++def test_reconstruct(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    plain_text = torch.tensor([3, -7, 11])
++
++    # test for RST
++    secret = plain_text.share(bob, alice, james, protocol="falcon", field=2 ** 5)
++    decryption = secret.reconstruct()
++    assert (plain_text == decryption).all()
++
++    # test for FPT
++    secret = plain_text.fix_prec().share(bob, alice, james, protocol="falcon", field=2 ** 20)
++    decryption = secret.reconstruct().float_prec()
++    assert (plain_text == decryption).all()
++
++    # exception test for AST
++    secret = plain_text.share(bob, alice, crypto_provider=james)
++    with pytest.raises(ValueError):
++        decryption = secret.reconstruct()
++
++    # exception test for native
++    with pytest.raises(ValueError):
++        decryption = secret.reconstruct()
++
++
++def test_ring_size(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    plain_text = torch.tensor([3, -7, 11])
++    ring_size = 2 ** 20
++
++    # test for RST
++    secret = plain_text.share(bob, alice, james, protocol="falcon", field=ring_size)
++    assert secret.ring_size == ring_size
++
++    # test for (wrapper) > FPT > RST
++    secret = plain_text.fix_prec().share(bob, alice, james, protocol="falcon", field=ring_size)
++    assert secret.ring_size == ring_size
++
++    # exception test for AST
++    secret = plain_text.share(bob, alice, crypto_provider=james)
++    with pytest.raises(ValueError):
++        ring_size_ = secret.ring_size
++
++    # exception test for native
++    with pytest.raises(ValueError):
++        ring_size_ = plain_text.ring_size
++
++
++def test_players(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    plain_text = torch.tensor([3, -7, 11])
++    ring_size = 2 ** 20
++
++    # test for RST
++    secret = plain_text.share(bob, alice, james, protocol="falcon", field=ring_size)
++    assert secret.players == [bob, alice, james]
++
++    # test for native
++    with pytest.raises(ValueError):
++        players = plain_text.players
+diff --git a/test/torch/tensors/test_precision.py b/test/torch/tensors/test_precision.py
+index 0be9e292efd..2265a6169a9 100644
+--- a/test/torch/tensors/test_precision.py
++++ b/test/torch/tensors/test_precision.py
+@@ -691,3 +691,38 @@ def test_dtype():
+         and x.child.field == 2 ** 64
+         and isinstance(x.child.child, torch.LongTensor)
+     )
++
++
++def test_reconstruct(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    plain_text = torch.tensor([3, -7, 11])
++
++    # test for (wrapper) > FPT > RST
++    secret = plain_text.fix_prec().share(bob, alice, james, protocol="falcon", field=2 ** 20)
++    decryption = secret.reconstruct().float_prec()
++    assert (plain_text == decryption).all()
++
++    # exception test for AST
++    secret = plain_text.fix_prec().share(bob, alice, crypto_provider=james)
++    with pytest.raises(ValueError):
++        decryption = secret.child.reconstruct()
++
++
++def test_ring_size(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    plain_text = torch.tensor([3, -7, 11])
++    ring_size = 2 ** 5
++
++    # test for (wrapper) > FPT > RST
++    secret = plain_text.fix_prec().share(bob, alice, james, protocol="falcon", field=ring_size)
++    assert secret.ring_size == ring_size
++
++    # exception test for AST
++    secret = plain_text.share(bob, alice, crypto_provider=james)
++    with pytest.raises(ValueError):
++        ring_size_ = secret.ring_size
++
++    # exception test for FPT
++    secret = plain_text.fix_prec()
++    with pytest.raises(ValueError):
++        ring_size_ = secret.ring_size
+diff --git a/test/torch/tensors/test_replicated_shared.py b/test/torch/tensors/test_replicated_shared.py
+index 8534caad482..a4e7f45f7b8 100644
+--- a/test/torch/tensors/test_replicated_shared.py
++++ b/test/torch/tensors/test_replicated_shared.py
+@@ -7,8 +7,8 @@ def test_sharing(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     plain_text = torch.tensor([3, 7, 11])
+     secret = plain_text.share(bob, alice, james, protocol="falcon")
+-    assert isinstance(secret, syft.ReplicatedSharingTensor)
+-    assert type(secret.child) == dict
++    assert isinstance(secret.child, syft.ReplicatedSharingTensor)
++    assert type(secret.child.child) == dict
+ 
+ 
+ def test_reconstruction(workers):
+@@ -23,21 +23,21 @@ def test_private_add(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, 4]).share(bob, alice, james, protocol="falcon")
+     y = torch.tensor([-2, 5]).share(bob, alice, james, protocol="falcon")
+-    assert (x.add(y).reconstruct() == torch.Tensor([5, 9])).all()
++    assert torch.allclose(x.add(y).reconstruct(), torch.tensor([5, 9]))
+ 
+ 
+ def test_public_add(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, 4]).share(bob, alice, james, protocol="falcon")
+     y = torch.Tensor([-2, 5])
+-    assert (x.add(y).reconstruct() == torch.Tensor([5, 9])).all()
++    assert torch.allclose(x.add(y).reconstruct(), torch.tensor([5, 9]))
+ 
+ 
+ def test_reversed_add(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, 4]).share(bob, alice, james, protocol="falcon")
+     y = 1
+-    assert ((y + x).reconstruct() == torch.Tensor([8, 5])).all()
++    assert torch.allclose((y + x).reconstruct(), torch.tensor([8, 5]))
+ 
+ 
+ def test_private_sub(workers):
+@@ -58,47 +58,47 @@ def test_reversed_sub(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, 4]).share(bob, alice, james, protocol="falcon")
+     y = 1
+-    assert ((y - x).reconstruct() == torch.Tensor([-6, -3])).all()
++    assert torch.allclose((y - x).reconstruct(), torch.tensor([-6, -3]))
+ 
+ 
+ def test_add_with_operator(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, 4]).share(bob, alice, james, protocol="falcon")
+     y = torch.Tensor([2, 5])
+-    assert ((x + y).reconstruct() == torch.Tensor([9, 9])).all()
++    assert torch.allclose((x + y).reconstruct(), torch.tensor([9, 9]))
+ 
+ 
+ def test_public_mul(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, -4]).share(bob, alice, james, protocol="falcon")
+-    assert ((x * 2).reconstruct() == torch.Tensor([14, -8])).all()
++    assert torch.allclose((x * 2).reconstruct(), torch.tensor([14, -8]))
+ 
+ 
+ def test_reversed_mul(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([7, -4]).share(bob, alice, james, protocol="falcon")
+-    assert ((2 * x).reconstruct() == torch.Tensor([14, -8])).all()
++    assert torch.allclose((2 * x).reconstruct(), torch.tensor([14, -8]))
+ 
+ 
+ def test_private_mul(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([3, -5]).share(bob, alice, james, protocol="falcon")
+     y = torch.tensor([5, -2]).share(bob, alice, james, protocol="falcon")
+-    assert ((x * y).reconstruct() == torch.tensor([15, 10])).all()
++    assert torch.allclose((x * y).reconstruct(), torch.tensor([15, 10]))
+ 
+ 
+ def test_public_matmul(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([[1, 2], [3, 4]]).share(bob, alice, james, protocol="falcon")
+     y = torch.tensor([[1, 2], [1, 2]])
+-    assert ((x.matmul(y)).reconstruct() == torch.tensor([[3, 6], [7, 14]])).all()
++    assert torch.allclose((x.matmul(y)).reconstruct(), torch.tensor([[3, 6], [7, 14]]))
+ 
+ 
+ def test_private_matmul(workers):
+     bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
+     x = torch.tensor([[1, 2], [3, 4]]).share(bob, alice, james, protocol="falcon")
+     y = torch.tensor([[1, 2], [1, 2]]).share(bob, alice, james, protocol="falcon")
+-    assert ((x.matmul(y)).reconstruct() == torch.tensor([[3, 6], [7, 14]])).all()
++    assert torch.allclose((x.matmul(y)).reconstruct(), torch.tensor([[3, 6], [7, 14]]))
+ 
+ 
+ def test_get_shape(workers):
+@@ -129,7 +129,7 @@ def test_consecutive_arithmetic(workers):
+     x = torch.tensor([1, 2]).share(bob, alice, james, protocol="falcon")
+     y = torch.tensor([1, 2]).share(bob, alice, james, protocol="falcon")
+     z = x * x + y * 2 - x * 4
+-    assert (z.reconstruct() == torch.tensor([-1, 0])).all()
++    assert torch.allclose(z.reconstruct(), torch.tensor([-1, 0]))
+ 
+ 
+ def test_negative_result(workers):
+@@ -152,3 +152,116 @@ def test_workers_arrangement(workers):
+     me, bob, alice = (workers["me"], workers["bob"], workers["alice"])
+     x = torch.tensor(7).share(bob, alice, me, protocol="falcon")
+     assert x.players[0] == me
++
++
++def test_fixed_precision_and_sharing(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++    t = torch.tensor([3.25, 6.83, 8.21, 5.506])
++    x = t.fix_prec().share(bob, alice, james, protocol="falcon")
++    out = x.reconstruct().float_prec()
++    assert torch.allclose(out, t)
++
++
++def test_add(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++
++    # 3 workers
++    t = torch.tensor([1, 2, 3])
++    x = torch.tensor([1, 2, 3]).share(bob, alice, james, protocol="falcon")
++    y = (x + x).reconstruct()
++    assert torch.allclose(y, (t + t))
++
++    # negative numbers
++    t = torch.tensor([1, -2, 3])
++    x = torch.tensor([1, -2, 3]).share(bob, alice, james, protocol="falcon")
++    y = (x + x).reconstruct()
++    assert torch.allclose(y, (t + t))
++
++    # with fixed precisions
++    t = torch.tensor([1.0, -2, 3])
++    x = torch.tensor([1.0, -2, 3]).fix_prec().share(bob, alice, james, protocol="falcon")
++    y = (x + x).reconstruct().float_prec()
++    assert torch.allclose(y, (t + t))
++
++    # with FPT>torch.tensor
++    t = torch.tensor([1.0, -2.0, 3.0])
++    x = t.fix_prec().share(bob, alice, james, protocol="falcon")
++    y = t.fix_prec()
++    z = (x + y).reconstruct().float_prec()
++    assert torch.allclose(z, (t + t))
++
++    z = (y + x).reconstruct().float_prec()
++    assert torch.allclose(z, (t + t))
++
++    # with constant integer
++    t = torch.tensor([1.0, -2.0, 3.0])
++    x = t.fix_prec().share(alice, bob, james, protocol="falcon")
++    c = 4
++
++    z = (x + c).reconstruct().float_prec()
++    assert torch.allclose(z, (t + c))
++
++    z = (c + x).reconstruct().float_prec()
++    assert torch.allclose(z, (c + t))
++
++    # with constant float
++    t = torch.tensor([1.0, -2.0, 3.0])
++    x = t.fix_prec().share(alice, bob, james, protocol="falcon")
++    c = 4.2
++    z = (x + c).reconstruct().float_prec()
++    assert torch.allclose(z, (t + c))
++
++    z = (c + x).reconstruct().float_prec()
++    assert torch.allclose(z, (c + t))
++
++
++def test_sub(workers):
++    bob, alice, james = (workers["bob"], workers["alice"], workers["james"])
++
++    t = torch.tensor([1, 2, 3])
++    x = torch.tensor([1, 2, 3]).share(bob, alice, james, protocol="falcon")
++    y = (x - x).reconstruct()
++    assert torch.allclose(y, (t - t))
++
++    # negative numbers
++    t = torch.tensor([1, -2, 3])
++    x = torch.tensor([1, -2, 3]).share(bob, alice, james, protocol="falcon")
++    y = (x - x).reconstruct()
++    assert torch.allclose(y, (t - t))
++
++    # with fixed precision
++    t = torch.tensor([1.0, -2, 3])
++    x = torch.tensor([1.0, -2, 3]).fix_prec().share(bob, alice, james, protocol="falcon")
++    y = (x - x).reconstruct().float_prec()
++    assert torch.allclose(y, (t - t))
++
++    # with FPT>torch.tensor
++    t = torch.tensor([1.0, -2.0, 3.0])
++    u = torch.tensor([4.0, 3.0, 2.0])
++    x = t.fix_prec().share(bob, alice, james, protocol="falcon")
++    y = u.fix_prec()
++    z = (x - y).reconstruct().float_prec()
++    assert torch.allclose(z, (t - u))
++
++    z = (y - x).reconstruct().float_prec()
++    assert torch.allclose(z, (u - t))
++
++    # with constant integer
++    t = torch.tensor([1.0, -2.0, 3.0])
++    x = t.fix_prec().share(alice, bob, james, protocol="falcon")
++    c = 4
++    z = (x - c).reconstruct().float_prec()
++    assert torch.allclose(z, (t - c))
++
++    z = (c - x).reconstruct().float_prec()
++    assert torch.allclose(z, (c - t))
++
++    # with constant float
++    t = torch.tensor([1.0, -2.0, 3.0])
++    x = t.fix_prec().share(alice, bob, james, protocol="falcon")
++    c = 4.2
++    z = (x - c).reconstruct().float_prec()
++    assert torch.allclose(z, (t - c))
++
++    z = (c - x).reconstruct().float_prec()
++    assert torch.allclose(z, (c - t))
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

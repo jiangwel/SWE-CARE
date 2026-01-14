@@ -1,0 +1,123 @@
+  Task-ID: deepset-ai__haystack-3837@e0d9ac8
+  Please checkout to this commit first: 62935bde6dcfa37354ae2c8ccea7406202f0914e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Preprocessing: Warning when max doc length significantly exceeds preprocessor split length
+**Is your feature request related to a problem? Please describe.**
+When running a retriever-reader pipeline, we noticed that certain inference times were much longer than others, and were even running into timeout problems. We thought this was odd, since we had a preprocessor splitting files into 250-word docs in order to avoid this. However, since `split_respect_sentence_boundary` was set to `True` by default, and since there were large passages in our files without a period (hence were parsed as a single sentence and not split by the preprocessor), this meant that some of the documents were much, much longer than 250 words (e.g., 62,000 words), hence the slowdown. It took us quite some time to figure this out, which admittedly falls partly on our shoulders, but it would have saved us considerable time and effort if we had received some sort of warning indicating that the max doc length in our document store was many multiples greater than the preprocessor's split length.
+
+**Describe the solution you'd like**
+It would be helpful to receive some kind of warning whenever the max document length after preprocessing is significantly greater than the preprocessor's split length. (I don't have an exact definition of "significantly greater" pinned down; apologies for the imprecision.)
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/nodes/preprocessor/preprocessor.py b/haystack/nodes/preprocessor/preprocessor.py
+index 0d24e93ae1..3cee9375d2 100644
+--- a/haystack/nodes/preprocessor/preprocessor.py
++++ b/haystack/nodes/preprocessor/preprocessor.py
+@@ -64,6 +64,7 @@ def __init__(
+         id_hash_keys: Optional[List[str]] = None,
+         progress_bar: bool = True,
+         add_page_number: bool = False,
++        max_chars: int = 10_000,
+     ):
+         """
+         :param clean_header_footer: Use heuristic to remove footers and headers across different pages by searching
+@@ -97,6 +98,7 @@ def __init__(
+                                 field `"page"`. Page boundaries are determined by `"\f"' character which is added
+                                 in between pages by `PDFToTextConverter`, `TikaConverter`, `ParsrConverter` and
+                                 `AzureConverter`.
++        :param max_chars: the maximum lenght a document is expected to have. Each document that is longer than max_chars after pre-processing will raise a warning.
+         """
+         super().__init__()
+ 
+@@ -122,6 +124,7 @@ def __init__(
+         self.id_hash_keys = id_hash_keys
+         self.progress_bar = progress_bar
+         self.add_page_number = add_page_number
++        self.max_chars = max_chars
+ 
+     def process(
+         self,
+@@ -169,8 +172,26 @@ def process(
+         else:
+             raise Exception("documents provided to PreProcessor.prepreprocess() is not of type list nor Document")
+ 
++        self._long_documents(ret, max_chars=self.max_chars)
++
+         return ret
+ 
++    def _long_documents(self, documents: List[Document], max_chars=10_000):
++        """
++        Function that tries to detect unusually long documents.
++
++        NOTE: this function is a heuristic that is in place only because a proper fix that prevents such documents from forming
++        would imply a complete revamp of this class, including better definitions of what the various units (word, sentence, passage) mean exactly.
++        """
++        for document in documents:
++            if len(document.content) > max_chars:
++                logger.warning(
++                    "Document %s is %s characters long after preprocessing, where the maximum lenght should be %s.",
++                    document.id,
++                    len(document.content),
++                    max_chars,
++                )
++
+     def _process_single(
+         self,
+         document: Union[dict, Document],
+diff --git a/test/nodes/test_preprocessor.py b/test/nodes/test_preprocessor.py
+index bf0218f383..5972fc4c33 100644
+--- a/test/nodes/test_preprocessor.py
++++ b/test/nodes/test_preprocessor.py
+@@ -508,3 +508,16 @@ def test_file_exists_error_during_download(monkeypatch: MonkeyPatch, module_tmp_
+ 
+     # This shouldn't raise an exception as the `FileExistsError` is ignored
+     PreProcessor(split_length=2, split_respect_sentence_boundary=False)
++
++
++def test_preprocessor_very_long_document(caplog):
++    preproc = PreProcessor(
++        clean_empty_lines=False, clean_header_footer=False, clean_whitespace=False, split_by=None, max_chars=10
++    )
++    documents = [
++        Document(content=f"this is a test document with more than max_char characters: {'1'*i}") for i in range(9)
++    ]
++    results = preproc.process(documents)
++    assert results == documents
++    for i in range(5):
++        assert f"is 6{i} characters long after preprocessing, where the maximum lenght should be 10." in caplog.text
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

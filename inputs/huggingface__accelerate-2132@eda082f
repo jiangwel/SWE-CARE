@@ -1,0 +1,186 @@
+  Task-ID: huggingface__accelerate-2132@eda082f
+  Please checkout to this commit first: e638b1e21a52aa6b7846ce4b753401e1a1bcbfad
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  accelerator.save_model(): NotImplementedError: Cannot copy out of meta tensor; no data!
+### System Info
+
+Hi,
+
+I just tried to save a model with "safe_serialization=True" and I got this error ("safe_serialization=False" works):
+
+Like: accelerator.save_model(model, save_dir, safe_serialization=True)
+
+  File "/home/blap/AutoGPTQ-env/lib/python3.10/site-packages/safetensors/torch.py", line 404, in _tobytes
+    tensor = tensor.to("cpu")
+NotImplementedError: Cannot copy out of meta tensor; no data!
+
+Maybe the docs lack something or I don't know...
+
+
+- `Accelerate` version: 0.25.0.dev0
+- Platform: Linux-5.15.90.1-microsoft-standard-WSL2-x86_64-with-glibc2.37
+- Python version: 3.10.13
+- Numpy version: 1.26.1
+- PyTorch version (GPU?): 2.2.0.dev20231106+cu118 (True)
+- PyTorch XPU available: False
+- PyTorch NPU available: False
+- System RAM: 5.71 GB
+- GPU type: NVIDIA GeForce MX330
+- `Accelerate` default config:
+        - compute_environment: LOCAL_MACHINE
+        - distributed_type: NO
+        - mixed_precision: fp16
+        - use_cpu: True
+        - debug: False
+        - num_processes: 1
+        - machine_rank: 0
+        - num_machines: 1
+        - rdzv_backend: static
+        - same_network: True
+        - main_training_function: main
+        - ipex_config: {'ipex': True}
+        - downcast_bf16: no
+        - tpu_use_cluster: False
+        - tpu_use_sudo: False
+        - tpu_env: []
+        - dynamo_config: {'dynamo_backend': 'INDUCTOR', 'dynamo_mode': 'reduce-overhead', 'dynamo_use_dynamic': True, 'dynamo_use_fullgraph': False}
+
+
+
+### Information
+
+- [ ] The official example scripts
+- [ ] My own modified scripts
+
+### Tasks
+
+- [ ] One of the scripts in the examples/ folder of Accelerate or an officially supported `no_trainer` script in the `examples` folder of the `transformers` repo (such as `run_no_trainer_glue.py`)
+- [X] My own task or dataset (give details below)
+
+### Reproduction
+
+```
+from huggingface_hub import login
+import torch
+
+login(token="hf_****", add_to_git_credential=True)
+
+from transformers import LlamaTokenizer, AutoModelForCausalLM
+
+folder_offload="long_llama_3b_instruct_offload"
+model_name="syzymon/long_llama_3b_instruct"
+tokenizer = LlamaTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, offload_folder=folder_offload, offload_state_dict=True, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True, low_cpu_mem_usage = True)    
+model = torch.compile(model)
+
+from accelerate import Accelerator
+
+save_dir="long_llama_3b_instruct"
+accelerator = Accelerator() 
+model = accelerator.prepare(model)
+unwrapped_model = accelerator.unwrap_model(model)
+# Errors too: unwrapped_model.save_pretrained(save_directory=save_dir, is_main_process=True, save_function=accelerator.save, safe_serialization=True)
+
+accelerator.save_model(model, save_dir, safe_serialization=True)
+
+del model
+```
+
+### Expected behavior
+
+Save model with safe_serialization.
+  </issue>
+  
+  <patch>
+  diff --git a/src/accelerate/accelerator.py b/src/accelerate/accelerator.py
+index cc34cd5cb1c..40fd064508f 100755
+--- a/src/accelerate/accelerator.py
++++ b/src/accelerate/accelerator.py
+@@ -2580,6 +2580,10 @@ def save_model(
+ 
+         os.makedirs(save_directory, exist_ok=True)
+ 
++        for param in model.parameters():
++            if param.device == torch.device("meta"):
++                raise RuntimeError("You can't save the model since some parameters are on the meta device.")
++
+         # get the state_dict of the model
+         state_dict = self.get_state_dict(model)
+ 
+diff --git a/tests/test_accelerator.py b/tests/test_accelerator.py
+index 610995cc527..8b681411017 100644
+--- a/tests/test_accelerator.py
++++ b/tests/test_accelerator.py
+@@ -35,6 +35,17 @@ def load_random_weights(model):
+     model.load_state_dict(state)
+ 
+ 
++class ModelForTest(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.linear1 = torch.nn.Linear(3, 4)
++        self.batchnorm = torch.nn.BatchNorm1d(4)
++        self.linear2 = torch.nn.Linear(4, 5)
++
++    def forward(self, x):
++        return self.linear2(self.batchnorm(self.linear1(x)))
++
++
+ class AcceleratorTester(AccelerateTestCase):
+     @require_cuda
+     def test_accelerator_can_be_reinstantiated(self):
+@@ -139,6 +150,19 @@ def test_save_model_safetensors(self):
+             load_checkpoint_in_model(model, tmpdirname)
+             self.assertTrue(abs(model_signature - get_signature(model)) < 1e-3)
+ 
++    @require_safetensors
++    def test_save_model_offload(self):
++        accelerator = Accelerator()
++
++        device_map = {"linear1": "cpu", "batchnorm": "disk", "linear2": "cpu"}
++
++        model = ModelForTest()
++        with tempfile.TemporaryDirectory() as tmp_dir:
++            accelerator.save_model(model, tmp_dir, safe_serialization=True)
++            load_checkpoint_in_model(model, tmp_dir, device_map=device_map, offload_folder=tmp_dir)
++            with self.assertRaises(RuntimeError):
++                accelerator.save_model(model, tmp_dir, safe_serialization=True)
++
+     def test_save_load_model_with_hooks(self):
+         accelerator = Accelerator()
+         model, optimizer, scheduler, train_dl, valid_dl = create_components()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

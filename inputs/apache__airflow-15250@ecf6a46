@@ -1,0 +1,156 @@
+  Task-ID: apache__airflow-15250@ecf6a46
+  Please checkout to this commit first: 99ec208024933d790272a09a6f20b241410a7df7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Passing Custom Image Family Name to the DataprocClusterCreateOperator()
+**Description**
+Currently, we can only pass custom Image name to  **DataprocClusterCreateOperator(),**
+as the custom image expires after 60 days, we either need to update the image or we need to pass the expiration token.
+
+Functionality is already available in **gcloud** and **REST**.
+
+`gcloud dataproc clusters test_cluster ......
+--image projects/<custom_image_project_id>/global/images/family/<family_name>
+.......
+`
+
+
+**Use case / motivation**
+The user should be able to pass either Custom Image or Custom Image family name,
+so we don't have to update the image up on expiration or use expiration token.
+
+
+**Are you willing to submit a PR?**
+Yes
+
+**Related Issues**
+None
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/providers/google/cloud/operators/dataproc.py b/airflow/providers/google/cloud/operators/dataproc.py
+index d578565b06526..144ccad9bdc20 100644
+--- a/airflow/providers/google/cloud/operators/dataproc.py
++++ b/airflow/providers/google/cloud/operators/dataproc.py
+@@ -75,6 +75,10 @@ class ClusterGenerator:
+     :param custom_image_project_id: project id for the custom Dataproc image, for more info see
+         https://cloud.google.com/dataproc/docs/guides/dataproc-images
+     :type custom_image_project_id: str
++    :param custom_image_family: family for the custom Dataproc image,
++        family name can be provide using --family flag while creating custom image, for more info see
++        https://cloud.google.com/dataproc/docs/guides/dataproc-images
++    :type custom_image_family: str
+     :param autoscaling_policy: The autoscaling policy used by the cluster. Only resource names
+         including projectid and location (region) are valid. Example:
+         ``projects/[projectId]/locations/[dataproc_region]/autoscalingPolicies/[policy_id]``
+@@ -163,6 +167,7 @@ def __init__(
+         metadata: Optional[Dict] = None,
+         custom_image: Optional[str] = None,
+         custom_image_project_id: Optional[str] = None,
++        custom_image_family: Optional[str] = None,
+         image_version: Optional[str] = None,
+         autoscaling_policy: Optional[str] = None,
+         properties: Optional[Dict] = None,
+@@ -194,6 +199,7 @@ def __init__(
+         self.metadata = metadata
+         self.custom_image = custom_image
+         self.custom_image_project_id = custom_image_project_id
++        self.custom_image_family = custom_image_family
+         self.image_version = image_version
+         self.properties = properties or {}
+         self.optional_components = optional_components
+@@ -220,6 +226,12 @@ def __init__(
+         if self.custom_image and self.image_version:
+             raise ValueError("The custom_image and image_version can't be both set")
+ 
++        if self.custom_image_family and self.image_version:
++            raise ValueError("The image_version and custom_image_family can't be both set")
++
++        if self.custom_image_family and self.custom_image:
++            raise ValueError("The custom_image and custom_image_family can't be both set")
++
+         if self.single_node and self.num_preemptible_workers > 0:
+             raise ValueError("Single node cannot have preemptible workers.")
+ 
+@@ -346,6 +358,16 @@ def _build_cluster_data(self):
+             if not self.single_node:
+                 cluster_data['worker_config']['image_uri'] = custom_image_url
+ 
++        elif self.custom_image_family:
++            project_id = self.custom_image_project_id or self.project_id
++            custom_image_url = (
++                'https://www.googleapis.com/compute/beta/projects/'
++                '{}/global/images/family/{}'.format(project_id, self.custom_image_family)
++            )
++            cluster_data['master_config']['image_uri'] = custom_image_url
++            if not self.single_node:
++                cluster_data['worker_config']['image_uri'] = custom_image_url
++
+         cluster_data = self._build_gce_cluster_config(cluster_data)
+ 
+         if self.single_node:
+diff --git a/tests/providers/google/cloud/operators/test_dataproc.py b/tests/providers/google/cloud/operators/test_dataproc.py
+index e66acb4afb0d3..01a907f4bd2cd 100644
+--- a/tests/providers/google/cloud/operators/test_dataproc.py
++++ b/tests/providers/google/cloud/operators/test_dataproc.py
+@@ -144,6 +144,26 @@ def test_image_version(self):
+             )
+             assert "custom_image and image_version" in str(ctx.value)
+ 
++    def test_custom_image_family_1(self):
++        with pytest.raises(ValueError) as ctx:
++            ClusterGenerator(
++                image_version="image_version",
++                custom_image_family="custom_image_family",
++                project_id=GCP_PROJECT,
++                cluster_name=CLUSTER_NAME,
++            )
++            assert "image_version and custom_image_family" in str(ctx.value)
++
++    def test_custom_image_family_2(self):
++        with pytest.raises(ValueError) as ctx:
++            ClusterGenerator(
++                custom_image="custom_image",
++                custom_image_family="custom_image_family",
++                project_id=GCP_PROJECT,
++                cluster_name=CLUSTER_NAME,
++            )
++            assert "custom_image and custom_image_family" in str(ctx.value)
++
+     def test_nodes_number(self):
+         with pytest.raises(AssertionError) as ctx:
+             ClusterGenerator(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

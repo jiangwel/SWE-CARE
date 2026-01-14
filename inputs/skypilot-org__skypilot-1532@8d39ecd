@@ -1,0 +1,136 @@
+  Task-ID: skypilot-org__skypilot-1532@8d39ecd
+  Please checkout to this commit first: e9b378e63296e0a545bc83e6f54e05e4a0afd765
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Error when restarting cluster
+Hi, I'm running into the following error when restarting a cluster: `ModuleNotFoundError: No module named 'sky'`.
+Steps to reproduce:
+1. `sky launch -C my_cluster config.yaml`
+2. `sky stop my_cluster`
+3. `sky start my_cluster`
+
+The instance is successfully provisioned on AWS, and I am able to SSH using the IP address. I'm not sure if this is relevant, but I noticed that after running `sky start` and SSHing, the terminal would not be running inside an active Conda environment.
+
+I'm also using the AWS Deep Learning AMI and storing data in S3.
+
+Full error log:
+```
+Restarting 1 cluster: sky-b4da-peter. Proceed? [Y/n]:
+I 12-13 13:58:55 cloud_vm_ray_backend.py:903] To view detailed progress: tail -n100 -f /home/peter/sky_logs/sky-2022-12-13-13-58-55-599628/provision.log
+I 12-13 13:58:55 cloud_vm_ray_backend.py:744] Cluster 'sky-b4da-peter' (status: STOPPED) was previously launched in AWS (us-west-2). Relaunching in that region.
+I 12-13 13:58:56 cloud_vm_ray_backend.py:1152] Launching on AWS us-west-2 (us-west-2a,us-west-2b,us-west-2c,us-west-2d)
+I 12-13 14:00:13 log_utils.py:45] Head node is up.
+I 12-13 14:00:47 cloud_vm_ray_backend.py:996] Successfully provisioned or found existing VM.
+E 12-13 14:00:48 subprocess_utils.py:69] Traceback (most recent call last):
+E 12-13 14:00:48 subprocess_utils.py:69]   File "<string>", line 1, in <module>
+E 12-13 14:00:48 subprocess_utils.py:69] ModuleNotFoundError: No module named 'sky'
+E 12-13 14:00:48 subprocess_utils.py:69]
+sky.exceptions.CommandError: Command python3 -u -c 'import os;from sky.skylet import job_lib, log_lib;job_lib.fail_all_jobs_in_progress()' failed with return code 1.
+Failed to set previously in-progress jobs to FAILED
+```
+  </issue>
+  
+  <patch>
+  diff --git a/examples/tests/test_yamls/no_conda_ami.yaml b/examples/tests/test_yamls/no_conda_ami.yaml
+new file mode 100644
+index 00000000000..5aae1f70a55
+--- /dev/null
++++ b/examples/tests/test_yamls/no_conda_ami.yaml
+@@ -0,0 +1,9 @@
++resources:
++  cloud: aws
++  instance_type: g4dn.xlarge
++  region: us-west-2
++  image_id: ami-0fe5af21074ad2a10  # Deep learning AMI with CUDA 11.6
++
++run: |
++  nvidia-smi
++
+diff --git a/examples/tpu/tpuvm_mnist.yaml b/examples/tpu/tpuvm_mnist.yaml
+index 67a69f6d13c..f25932331d8 100644
+--- a/examples/tpu/tpuvm_mnist.yaml
++++ b/examples/tpu/tpuvm_mnist.yaml
+@@ -20,6 +20,7 @@ setup: |
+     pip install "jax[tpu]>=0.2.16" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+     pip install --upgrade clu
+     pip install -e flax
++    pip install tensorflow tensorflow-datasets
+   fi
+ 
+ 
+diff --git a/sky/templates/aws-ray.yml.j2 b/sky/templates/aws-ray.yml.j2
+index 4646ff12241..e10609cf319 100644
+--- a/sky/templates/aws-ray.yml.j2
++++ b/sky/templates/aws-ray.yml.j2
+@@ -110,7 +110,7 @@ setup_commands:
+     pip3 --version > /dev/null 2>&1 || (curl -sSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py && python3 get-pip.py && echo "PATH=$HOME/.local/bin:$PATH" >> ~/.bashrc);
+     (type -a python | grep -q python3) || echo 'alias python=python3' >> ~/.bashrc;
+     (type -a pip | grep -q pip3) || echo 'alias pip=pip3' >> ~/.bashrc;
+-    (which conda > /dev/null 2>&1 && conda init > /dev/null && conda config --set auto_activate_base false) || (wget -nc https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && bash Miniconda3-latest-Linux-x86_64.sh -b && eval "$(~/miniconda3/bin/conda shell.bash hook)" && conda init && conda config --set auto_activate_base true);
++    (which conda > /dev/null 2>&1 && conda init > /dev/null) || (wget -nc https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && bash Miniconda3-latest-Linux-x86_64.sh -b && eval "$(~/miniconda3/bin/conda shell.bash hook)" && conda init && conda config --set auto_activate_base true);
+     source ~/.bashrc;
+     (pip3 list | grep ray | grep {{ray_version}} 2>&1 > /dev/null || pip3 install -U ray[default]=={{ray_version}}) && mkdir -p ~/sky_workdir && mkdir -p ~/.sky/sky_app;
+     (pip3 list | grep skypilot && [ "$(cat {{sky_remote_path}}/current_sky_wheel_hash)" == "{{sky_wheel_hash}}" ]) || (pip3 uninstall skypilot -y; pip3 install "$(echo {{sky_remote_path}}/{{sky_wheel_hash}}/skypilot-{{sky_version}}*.whl)[aws]" && echo "{{sky_wheel_hash}}" > {{sky_remote_path}}/current_sky_wheel_hash || exit 1);
+diff --git a/tests/test_smoke.py b/tests/test_smoke.py
+index c3b536f5a35..ac0d432f016 100644
+--- a/tests/test_smoke.py
++++ b/tests/test_smoke.py
+@@ -262,6 +262,24 @@ def test_image_id_dict_with_zone():
+     run_one_test(test)
+ 
+ 
++def test_image_no_conda():
++    name = _get_cluster_name()
++    test = Test(
++        'image_no_conda',
++        [
++            # Use image id dict.
++            f'sky launch -y -c {name} examples/tests/test_yamls/no_conda_ami.yaml',
++            f'sky logs {name} 1 --status',
++            f'sky stop {name} -y',
++            f'sky start {name} -y',
++            f'sky exec {name} examples/tests/test_yamls/no_conda_ami.yaml',
++            f'sky logs {name} 2 --status',
++        ],
++        f'sky down -y {name}',
++    )
++    run_one_test(test)
++
++
+ def test_stale_job():
+     name = _get_cluster_name()
+     test = Test(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

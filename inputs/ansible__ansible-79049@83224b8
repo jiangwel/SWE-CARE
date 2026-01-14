@@ -1,0 +1,307 @@
+  Task-ID: ansible__ansible-79049@83224b8
+  Please checkout to this commit first: 680bf029b1c2430fab6988bc6cd8138d2d06a023
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  become not applied on roles
+### Summary
+
+Become is not applied on roles when playbook has `become: true` set.
+
+
+
+### Issue Type
+
+Bug Report
+
+### Component Name
+
+become
+
+### Ansible Version
+
+```console
+$ ansible --version
+ansible [core 2.14.0b2]
+  config file = /home/twouters/.ansible.cfg
+  configured module search path = ['/home/twouters/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /home/twouters/ansible-2.14/lib/python3.10/site-packages/ansible
+  ansible collection location = /home/twouters/.ansible/collections:/usr/share/ansible/collections
+  executable location = /home/twouters//ansible-2.14/bin/ansible
+  python version = 3.10.7 (main, Sep  6 2022, 21:22:27) [GCC 12.2.0] (/home/twouters/ansible-2.14/bin/python)
+  jinja version = 3.1.2
+  libyaml = True
+```
+
+
+### Configuration
+
+```console
+# if using a version older than ansible-core 2.12 you should omit the '-t all'
+$ ansible-config dump --only-changed -t all
+```
+
+
+### OS / Environment
+
+Arch Linux and Debian but probably irrelevant
+
+### Steps to Reproduce
+
+```
+$ tree -Ap                                       
+[drwx------]  .
+├── [drwxr-xr-x]  testrole
+│   └── [drwxr-xr-x]  tasks
+│       └── [-rw-r--r--]  main.yml
+└── [-rw-r--r--]  test.yml
+
+2 directories, 2 files
+```
+```
+$ cat test.yml 
+---
+
+- hosts: localhost
+  become: true
+  gather_facts: no
+  pre_tasks:
+    - ansible.builtin.command: whoami
+      register: whoami
+    - ansible.builtin.assert:
+        that: whoami.stdout == "root"
+  roles:
+    - testrole
+```
+
+```
+$ cat testrole/tasks/main.yml 
+---
+
+- ansible.builtin.command: whoami
+  register: whoami
+- ansible.builtin.assert:
+    that: whoami.stdout == "root"
+```
+
+### Expected Results
+
+All assertions pass and become is applied to all tasks
+
+```
+[WARNING]: No inventory was parsed, only implicit localhost is available
+[WARNING]: provided hosts list is empty, only localhost is available. Note that the implicit localhost
+does not match 'all'
+
+PLAY [localhost] ***************************************************************************************
+
+TASK [ansible.builtin.command] *************************************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.assert] **************************************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [testrole : ansible.builtin.command] **************************************************************
+changed: [localhost]
+
+TASK [testrole : ansible.builtin.assert] ***************************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+PLAY RECAP *********************************************************************************************
+localhost                  : ok=4    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+```
+
+### Actual Results
+
+```console
+[WARNING]: No inventory was parsed, only implicit localhost is available
+[WARNING]: provided hosts list is empty, only localhost is available. Note that the implicit localhost
+does not match 'all'
+
+PLAY [localhost] ***************************************************************************************
+
+TASK [ansible.builtin.command] *************************************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.assert] **************************************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [testrole : ansible.builtin.command] **************************************************************
+changed: [localhost]
+
+TASK [testrole : ansible.builtin.assert] ***************************************************************
+fatal: [localhost]: FAILED! => {
+    "assertion": "whoami.stdout == \"root\"",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "Assertion failed"
+}
+
+PLAY RECAP *********************************************************************************************
+localhost                  : ok=3    changed=2    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0
+```
+
+
+### Code of Conduct
+
+- [X] I agree to follow the Ansible Code of Conduct
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/79021-dont-squash-in-validate.yml b/changelogs/fragments/79021-dont-squash-in-validate.yml
+new file mode 100644
+index 00000000000000..52a1e30e03cb51
+--- /dev/null
++++ b/changelogs/fragments/79021-dont-squash-in-validate.yml
+@@ -0,0 +1,3 @@
++bugfixes:
++- keyword inheritance - Ensure that we do not squash keywords in validate
++  (https://github.com/ansible/ansible/issues/79021)
+diff --git a/lib/ansible/playbook/base.py b/lib/ansible/playbook/base.py
+index 9daccbbd714cfc..5504645a12679d 100644
+--- a/lib/ansible/playbook/base.py
++++ b/lib/ansible/playbook/base.py
+@@ -211,7 +211,7 @@ def validate(self, all_vars=None):
+                     method(attribute, name, getattr(self, name))
+                 else:
+                     # and make sure the attribute is of the type it should be
+-                    value = getattr(self, name)
++                    value = getattr(self, f'_{name}', Sentinel)
+                     if value is not None:
+                         if attribute.isa == 'string' and isinstance(value, (list, dict)):
+                             raise AnsibleParserError(
+diff --git a/lib/ansible/playbook/block.py b/lib/ansible/playbook/block.py
+index 216d04e856e824..112b02577ef41b 100644
+--- a/lib/ansible/playbook/block.py
++++ b/lib/ansible/playbook/block.py
+@@ -298,8 +298,10 @@ def _get_parent_attribute(self, attr, omit=False):
+         '''
+         Generic logic to get the attribute or parent attribute for a block value.
+         '''
+-        extend = self.fattributes.get(attr).extend
+-        prepend = self.fattributes.get(attr).prepend
++        fattr = self.fattributes[attr]
++
++        extend = getattr(fattr, 'extend', False)
++        prepend = getattr(fattr, 'prepend', False)
+ 
+         try:
+             # omit self, and only get parent values
+diff --git a/lib/ansible/playbook/task.py b/lib/ansible/playbook/task.py
+index d0a4c6ecc8dde1..cc0f1460348c90 100644
+--- a/lib/ansible/playbook/task.py
++++ b/lib/ansible/playbook/task.py
+@@ -461,8 +461,10 @@ def _get_parent_attribute(self, attr, omit=False):
+         '''
+         Generic logic to get the attribute or parent attribute for a task value.
+         '''
+-        extend = self.fattributes.get(attr).extend
+-        prepend = self.fattributes.get(attr).prepend
++        fattr = self.fattributes[attr]
++
++        extend = getattr(fattr, 'extend', False)
++        prepend = getattr(fattr, 'prepend', False)
+ 
+         try:
+             # omit self, and only get parent values
+diff --git a/test/integration/targets/keyword_inheritance/aliases b/test/integration/targets/keyword_inheritance/aliases
+new file mode 100644
+index 00000000000000..a6a33411a34444
+--- /dev/null
++++ b/test/integration/targets/keyword_inheritance/aliases
+@@ -0,0 +1,3 @@
++shippable/posix/group4
++context/controller
++needs/target/setup_test_user
+diff --git a/test/integration/targets/keyword_inheritance/roles/whoami/tasks/main.yml b/test/integration/targets/keyword_inheritance/roles/whoami/tasks/main.yml
+new file mode 100644
+index 00000000000000..80252c0354a7e3
+--- /dev/null
++++ b/test/integration/targets/keyword_inheritance/roles/whoami/tasks/main.yml
+@@ -0,0 +1,3 @@
++- command: whoami
++  register: result
++  failed_when: result.stdout_lines|first != 'ansibletest0'
+diff --git a/test/integration/targets/keyword_inheritance/runme.sh b/test/integration/targets/keyword_inheritance/runme.sh
+new file mode 100755
+index 00000000000000..6b78a06dc4f31e
+--- /dev/null
++++ b/test/integration/targets/keyword_inheritance/runme.sh
+@@ -0,0 +1,5 @@
++#!/usr/bin/env bash
++
++set -eux
++
++ANSIBLE_ROLES_PATH=../ ansible-playbook -i ../../inventory test.yml "$@"
+diff --git a/test/integration/targets/keyword_inheritance/test.yml b/test/integration/targets/keyword_inheritance/test.yml
+new file mode 100644
+index 00000000000000..886f9858ff2595
+--- /dev/null
++++ b/test/integration/targets/keyword_inheritance/test.yml
+@@ -0,0 +1,8 @@
++- hosts: testhost
++  gather_facts: false
++  become_user: ansibletest0
++  become: yes
++  roles:
++    - role: setup_test_user
++      become_user: root
++    - role: whoami
+diff --git a/test/integration/targets/omit/75692.yml b/test/integration/targets/omit/75692.yml
+index eaabd978819afa..5ba8a2df1b7172 100644
+--- a/test/integration/targets/omit/75692.yml
++++ b/test/integration/targets/omit/75692.yml
+@@ -2,9 +2,11 @@
+   hosts: testhost
+   gather_facts: false
+   become: yes
++  # become_user needed at play level for testing this behavior
+   become_user: nobody
+   roles:
+     - name: setup_test_user
++      become_user: root
+   tasks:
+     - shell: whoami
+       register: inherited
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

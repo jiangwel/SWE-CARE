@@ -1,0 +1,749 @@
+  Task-ID: gradio-app__gradio-4933@8ceb23c
+  Please checkout to this commit first: 6d40cdc7c516434d498d6b1bf129cfaa1d5a7eb3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  RTL support in `gr.Textbox`
+- [x] I have searched to see if a similar issue already exists.
+
+
+**Is your feature request related to a problem? Please describe.**  
+I want to build Arabic demo websites.
+
+**Describe the solution you'd like**  
+I want a toggle to switch the web app from `LTR` to `RTL`
+  </issue>
+  
+  <patch>
+  diff --git a/.config/playwright.config.js b/.config/playwright.config.js
+index 7172e17f97..cf8fb79278 100644
+--- a/.config/playwright.config.js
++++ b/.config/playwright.config.js
+@@ -5,5 +5,5 @@ export default {
+ 	},
+ 	testMatch: /.*.spec.ts/,
+ 	testDir: "..",
+-	globalSetup: "./playwright-setup.js",
++	globalSetup: "./playwright-setup.js"
+ };
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 968a787fe9..bb138e9e75 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,21 @@
+ ## New Features:
+ - Chatbot messages now show hyperlinks to download files uploaded to `gr.Chatbot()` by [@dawoodkhan82](https://github.com/dawoodkhan82) in [PR 4848](https://github.com/gradio-app/gradio/pull/4848)
+ - Cached examples now work with generators and async generators by [@abidlabs](https://github.com/abidlabs) in [PR 4927](https://github.com/gradio-app/gradio/pull/4927)
++- Add RTL support to `gr.Textbox` (via the `rtl` boolean parameter) and text-alignment to `gr.Textbox`, `gr.Markdown`, and `gr.Chatbot` (via the string `text_align` parameter) by [@abidlabs](https://github.com/abidlabs) in [PR 4933](https://github.com/gradio-app/gradio/pull/4933)
++
++Examples of usage:
++
++```py
++with gr.Blocks() as demo:   
++    gr.Textbox(interactive=True, rtl=True)
++demo.launch()
++```
++
++```py
++with gr.Blocks() as demo:   
++    gr.Markdown("سلام", text_align="right")
++demo.launch()
++```
+ 
+ ## Bug Fixes:
+ 
+diff --git a/gradio/components/chatbot.py b/gradio/components/chatbot.py
+index b37c857084..ed84ef05c6 100644
+--- a/gradio/components/chatbot.py
++++ b/gradio/components/chatbot.py
+@@ -51,12 +51,14 @@ def __init__(
+         elem_classes: list[str] | str | None = None,
+         height: int | None = None,
+         latex_delimiters: list[dict[str, str | bool]] | None = None,
++        text_align: Literal["left", "center", "right", "justify"] = "left",
+         show_share_button: bool | None = None,
+         **kwargs,
+     ):
+         """
+         Parameters:
+             value: Default value to show in chatbot. If callable, the function will be called whenever the app loads to set the initial value of the component.
++            color_map: This parameter is deprecated.
+             label: component name in interface.
+             every: If `value` is a callable, run the function 'every' number of seconds while the client connection is open. Has no effect otherwise. Queue must be enabled. The event can be accessed (e.g. to cancel it) via this component's .load_event attribute.
+             show_label: if True, will display label.
+@@ -68,6 +70,7 @@ def __init__(
+             elem_classes: An optional list of strings that are assigned as the classes of this component in the HTML DOM. Can be used for targeting CSS styles.
+             height: height of the component in pixels.
+             latex_delimiters: A list of dicts of the form {"left": open delimiter (str), "right": close delimiter (str), "display": whether to display in newline (bool)} that will be used to render LaTeX expressions. If not provided, `latex_delimiters` is set to `[{ "left": "$$", "right": "$$", "display": True }]`, so only expressions enclosed in $$ delimiters will be rendered as LaTeX, and in a new line. Pass in an empty list to disable LaTeX rendering. For more information, see the [KaTeX documentation](https://katex.org/docs/autorender.html).
++            text_align: How to align the rendered text or Markdown. One of: 'left', 'center', 'right', 'justify'. Default is 'left'.
+             show_share_button: If True, will show a share icon in the corner of the component that allows user to share outputs to Hugging Face Spaces Discussions. If False, icon does not appear. If set to None (default behavior), then the icon appears if this Gradio app is launched on Spaces, but not otherwise.
+         """
+         if color_map is not None:
+@@ -79,6 +82,7 @@ def __init__(
+         See EventData documentation on how to use this event data.
+         """
+         self.height = height
++        self.text_align = text_align
+         if latex_delimiters is None:
+             latex_delimiters = [{"left": "$$", "right": "$$", "display": True}]
+         self.latex_delimiters = latex_delimiters
+@@ -110,6 +114,7 @@ def get_config(self):
+             "selectable": self.selectable,
+             "height": self.height,
+             "show_share_button": self.show_share_button,
++            "text_align": self.text_align,
+             **IOComponent.get_config(self),
+         }
+ 
+@@ -125,6 +130,7 @@ def update(
+         min_width: int | None = None,
+         visible: bool | None = None,
+         height: int | None = None,
++        text_align: Literal["left", "center", "right", "justify"] | None = None,
+         show_share_button: bool | None = None,
+     ):
+         updated_config = {
+@@ -137,6 +143,7 @@ def update(
+             "value": value,
+             "height": height,
+             "show_share_button": show_share_button,
++            "text_align": text_align,
+             "__type__": "update",
+         }
+         return updated_config
+diff --git a/gradio/components/markdown.py b/gradio/components/markdown.py
+index a441a2de70..edef4c076c 100644
+--- a/gradio/components/markdown.py
++++ b/gradio/components/markdown.py
+@@ -35,6 +35,7 @@ def __init__(
+         visible: bool = True,
+         elem_id: str | None = None,
+         elem_classes: list[str] | str | None = None,
++        text_align: Literal["left", "center", "right", "justify"] = "left",
+         **kwargs,
+     ):
+         """
+@@ -43,8 +44,10 @@ def __init__(
+             visible: If False, component will be hidden.
+             elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
+             elem_classes: An optional list of strings that are assigned as the classes of this component in the HTML DOM. Can be used for targeting CSS styles.
++            text_align: How to align the rendered Markdown. One of: 'left', 'center', 'right', 'justify'. Default is 'left'.
+         """
+         self.md = utils.get_markdown_parser()
++        self.text_align = text_align
+         IOComponent.__init__(
+             self,
+             visible=visible,
+@@ -69,6 +72,7 @@ def postprocess(self, y: str | None) -> str | None:
+     def get_config(self):
+         return {
+             "value": self.value,
++            "text_align": self.text_align,
+             **Component.get_config(self),
+         }
+ 
+@@ -76,10 +80,12 @@ def get_config(self):
+     def update(
+         value: Any | Literal[_Keywords.NO_VALUE] | None = _Keywords.NO_VALUE,
+         visible: bool | None = None,
++        text_align: Literal["left", "center", "right", "justify"] | None = None,
+     ):
+         updated_config = {
+             "visible": visible,
+             "value": value,
++            "text_align": text_align,
+             "__type__": "update",
+         }
+         return updated_config
+diff --git a/gradio/components/textbox.py b/gradio/components/textbox.py
+index c042f14871..765bb7529a 100644
+--- a/gradio/components/textbox.py
++++ b/gradio/components/textbox.py
+@@ -68,6 +68,8 @@ def __init__(
+         elem_id: str | None = None,
+         elem_classes: list[str] | str | None = None,
+         type: Literal["text", "password", "email"] = "text",
++        text_align: Literal["left", "right"] = "left",
++        rtl: bool = False,
+         show_copy_button: bool = False,
+         **kwargs,
+     ):
+@@ -89,6 +91,8 @@ def __init__(
+             elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
+             elem_classes: An optional list of strings that are assigned as the classes of this component in the HTML DOM. Can be used for targeting CSS styles.
+             type: The type of textbox. One of: 'text', 'password', 'email', Default is 'text'.
++            text_align: How to align the text in the textbox. One of: 'left', 'center', 'right', 'justify'. Default is 'left'. Can only be changed if type=='text'.
++            rtl: If True and type=='text', sets the direction of the text to right-to-left (text is aligned right, and cursor appears on the left of the text). Takes precendence over the `text_align` parameter. Default is False, which renders cursor on the right.
+             show_copy_button: If True, includes a copy button to copy the text in the textbox. Only applies if show_label is True.
+         """
+         if type not in ["text", "password", "email"]:
+@@ -125,6 +129,8 @@ def __init__(
+         )
+         TokenInterpretable.__init__(self)
+         self.type = type
++        self.rtl = rtl
++        self.text_align = text_align
+ 
+     def get_config(self):
+         return {
+@@ -134,6 +140,8 @@ def get_config(self):
+             "value": self.value,
+             "type": self.type,
+             "show_copy_button": self.show_copy_button,
++            "text_align": self.text_align,
++            "rtl": self.rtl,
+             **IOComponent.get_config(self),
+         }
+ 
+@@ -152,6 +160,8 @@ def update(
+         visible: bool | None = None,
+         interactive: bool | None = None,
+         type: Literal["text", "password", "email"] | None = None,
++        text_align: Literal["left", "right"] | None = None,
++        rtl: bool | None = None,
+         show_copy_button: bool | None = None,
+     ):
+         return {
+@@ -169,6 +179,8 @@ def update(
+             "type": type,
+             "interactive": interactive,
+             "show_copy_button": show_copy_button,
++            "text_align": text_align,
++            "rtl": rtl,
+             "__type__": "update",
+         }
+ 
+diff --git a/gradio/test_data/blocks_configs.py b/gradio/test_data/blocks_configs.py
+index 80d2a1eef3..755d15978f 100644
+--- a/gradio/test_data/blocks_configs.py
++++ b/gradio/test_data/blocks_configs.py
+@@ -11,6 +11,7 @@
+                 "value": "<h1>Detect Disease From Scan</h1>\n<p>With this model you can lorem ipsum</p>\n<ul>\n<li>ipsum 1</li>\n<li>ipsum 2</li>\n</ul>\n",
+                 "name": "markdown",
+                 "visible": True,
++                "text_align": "left",
+             },
+             "serializer": "StringSerializable",
+             "api_info": {"info": {"type": "string"}, "serialized_info": False},
+@@ -195,6 +196,8 @@
+                 "name": "textbox",
+                 "show_copy_button": False,
+                 "visible": True,
++                "rtl": False,
++                "text_align": "left",
+             },
+             "serializer": "StringSerializable",
+             "api_info": {"info": {"type": "string"}, "serialized_info": False},
+@@ -327,6 +330,7 @@
+                 "value": "<h1>Detect Disease From Scan</h1>\n<p>With this model you can lorem ipsum</p>\n<ul>\n<li>ipsum 1</li>\n<li>ipsum 2</li>\n</ul>\n",
+                 "name": "markdown",
+                 "visible": True,
++                "text_align": "left",
+             },
+             "serializer": "StringSerializable",
+             "api_info": {"info": {"type": "string"}, "serialized_info": False},
+@@ -511,6 +515,8 @@
+                 "name": "textbox",
+                 "show_copy_button": False,
+                 "visible": True,
++                "rtl": False,
++                "text_align": "left",
+             },
+             "serializer": "StringSerializable",
+             "api_info": {"info": {"type": "string"}, "serialized_info": False},
+@@ -643,6 +649,7 @@
+             "props": {
+                 "value": "<h1>Detect Disease From Scan</h1>\n<p>With this model you can lorem ipsum</p>\n<ul>\n<li>ipsum 1</li>\n<li>ipsum 2</li>\n</ul>\n",
+                 "name": "markdown",
++                "text_align": "left",
+             },
+         },
+         {
+@@ -774,6 +781,8 @@
+                 "name": "textbox",
+                 "show_copy_button": False,
+                 "type": "text",
++                "rtl": False,
++                "text_align": "left",
+             },
+         },
+     ],
+diff --git a/js/app/src/components/Markdown/Markdown.stories.svelte b/js/app/src/components/Markdown/Markdown.stories.svelte
+new file mode 100644
+index 0000000000..3c2a5ab077
+--- /dev/null
++++ b/js/app/src/components/Markdown/Markdown.stories.svelte
+@@ -0,0 +1,35 @@
++<script>
++	import {Meta, Template, Story } from "@storybook/addon-svelte-csf";
++	import Markdown from "./Markdown.svelte";
++</script>
++
++<Meta
++	title="Components/Markdown"
++	component={Markdown}
++	argTypes={{
++		text_align: {
++			options: ["left", "center", "right"],
++			description: "Whether to align the text left or right",
++			control: { type: "select" },
++			defaultValue: "left"
++		}
++	}}
++/>
++
++
++<Template let:args>
++	<Markdown
++		{...args}
++		value="Here's some <strong>bold</strong> text. And some <em>italics</em> and some <code>code</code>"
++	/>
++</Template>
++
++<Story
++	name="Simple inline Markdown"
++	args={{  }}
++/>
++<Story
++	name="Right aligned Markdown"
++	args={{ text_align: "right" }}
++/>
++
+diff --git a/js/app/src/components/Markdown/Markdown.svelte b/js/app/src/components/Markdown/Markdown.svelte
+index 3210d9b560..24867f9851 100644
+--- a/js/app/src/components/Markdown/Markdown.svelte
++++ b/js/app/src/components/Markdown/Markdown.svelte
+@@ -11,6 +11,7 @@
+ 	export let visible: boolean = true;
+ 	export let value: string = "";
+ 	export let loading_status: LoadingStatus;
++	export let text_align: "left" | "center" | "right" | "justify" = "left";
+ 
+ 	const dispatch = createEventDispatcher<{ change: undefined }>();
+ 
+@@ -26,6 +27,7 @@
+ 			{elem_id}
+ 			{elem_classes}
+ 			{visible}
++			{text_align}
+ 			on:change
+ 		/>
+ 	</div>
+diff --git a/js/app/src/components/Textbox/Textbox.stories.svelte b/js/app/src/components/Textbox/Textbox.stories.svelte
+new file mode 100644
+index 0000000000..ad9bf70241
+--- /dev/null
++++ b/js/app/src/components/Textbox/Textbox.stories.svelte
+@@ -0,0 +1,72 @@
++<script>
++	import {Meta, Template, Story } from "@storybook/addon-svelte-csf";
++	import Textbox from "./Textbox.svelte";
++</script>
++
++<Meta
++	title="Components/Textbox"
++	component={Textbox}
++	argTypes={{
++		label: {
++			control: "text",
++			description: "The textbox label",
++			name: "label",
++		},
++		show_label: {
++			options: [true, false],
++			description: "Whether to show the label",
++			control: { type: "boolean" },
++			defaultValue: true
++		},
++		type: {
++			options: ["text", "email", "password"],
++			description: "The type of textbox",
++			control: { type: "select" },
++			defaultValue: "text"
++		},
++		text_align: {
++			options: ["left", "right"],
++			description: "Whether to align the text left or right",
++			control: { type: "select" },
++			defaultValue: "left"
++		},
++		lines: {
++			options: [1, 5, 10, 20],
++			description: "The number of lines to display in the textbox",
++			control: { type: "select" },
++			defaultValue: 1
++		},
++		max_lines: {
++			options: [1, 5, 10, 20],
++			description: "The maximum number of lines to allow users to type in the textbox",
++			control: { type: "select" },
++			defaultValue: 1
++		},
++	}}
++/>
++
++
++<Template let:args>
++	<Textbox
++		{...args}
++		value="hello world"
++	/>
++</Template>
++
++<Story
++	name="Textbox with label"
++	args={{ label: "My simple label", show_label: true }}
++/>
++<Story
++	name="Textbox with 5 lines and max 5 lines"
++	args={{ lines: 5, max_lines: 5 }}
++/>
++<Story
++	name="Password input"
++	args={{ type: "password", lines: 1, max_lines: 1 }}
++/>
++<Story
++	name="Right aligned textbox"
++	args={{ text_align: "right" }}
++/>
++
+diff --git a/js/app/src/components/Textbox/Textbox.svelte b/js/app/src/components/Textbox/Textbox.svelte
+index 71c47a0360..487cdd91a6 100644
+--- a/js/app/src/components/Textbox/Textbox.svelte
++++ b/js/app/src/components/Textbox/Textbox.svelte
+@@ -24,6 +24,8 @@
+ 	export let loading_status: LoadingStatus | undefined = undefined;
+ 	export let mode: "static" | "dynamic";
+ 	export let value_is_output: boolean = false;
++	export let rtl = false;
++	export let text_align: "left" | "right" = "left";
+ </script>
+ 
+ <Block {visible} {elem_id} {elem_classes} {scale} {min_width} {container}>
+@@ -39,6 +41,8 @@
+ 		{show_label}
+ 		{lines}
+ 		{type}
++		{rtl}
++		{text_align}
+ 		max_lines={!max_lines && mode === "static" ? lines + 1 : max_lines}
+ 		{placeholder}
+ 		{show_copy_button}
+diff --git a/js/chatbot/src/Chatbot.stories.svelte b/js/chatbot/src/Chatbot.stories.svelte
+new file mode 100644
+index 0000000000..54fac0dc6c
+--- /dev/null
++++ b/js/chatbot/src/Chatbot.stories.svelte
+@@ -0,0 +1,51 @@
++<script>
++	import {Meta, Template, Story } from "@storybook/addon-svelte-csf";
++	import Chatbot from "./Index.svelte";
++</script>
++
++<Meta
++	title="Components/Chatbot"
++	component={Chatbot}
++	argTypes={{
++		label: {
++			control: "text",
++			description: "The textbox label",
++			name: "label",
++		},
++		show_label: {
++			options: [true, false],
++			description: "Whether to show the label",
++			control: { type: "boolean" },
++			defaultValue: true
++		},
++		text_align: {
++			options: ["left", "right"],
++			description: "Whether to align the text left or right",
++			control: { type: "select" },
++			defaultValue: "left"
++		},
++	}}
++/>
++
++<Template let:args>
++	<Chatbot
++		{...args}
++		value={[["Can you write a function in Python?", "```py\ndef test():\n\tprint(x)\n```"], ["Can you do math?", "$$1+1=2$$"]]}
++	/>
++</Template>
++
++<Story
++	name="Chatbot with math enabled"
++	args={{ latex_delimiters: [{ "left": "$$", "right": "$$", "display": true }] }}
++/>
++
++<Story
++	name="Chatbot with math disabled, small height"
++	args={{ latex_delimiters: [], height: 200 }}
++/>
++
++<Story
++	name="Chatbot with text aligned to the right"
++	args={{ text_align: "right", latex_delimiters: [{ "left": "$$", "right": "$$", "display": true }]}}
++/>
++
+diff --git a/js/chatbot/src/Index.svelte b/js/chatbot/src/Index.svelte
+index d4b910edab..853d4da4cc 100644
+--- a/js/chatbot/src/Index.svelte
++++ b/js/chatbot/src/Index.svelte
+@@ -28,6 +28,7 @@
+ 	export let selectable = false;
+ 	export let theme_mode: ThemeMode;
+ 	export let show_share_button = false;
++	export let text_align: "left" | "center" | "right" | "justify" = "left";
+ 
+ 	const redirect_src_url = (src: string): string =>
+ 		src.replace('src="/file', `src="${root}file`);
+@@ -82,6 +83,7 @@
+ 			value={_value}
+ 			{latex_delimiters}
+ 			pending_message={loading_status?.status === "pending"}
++			{text_align}
+ 			on:change
+ 			on:select
+ 			on:share
+diff --git a/js/chatbot/src/static/ChatBot.svelte b/js/chatbot/src/static/ChatBot.svelte
+index 5c8513ab34..1f42e740b6 100644
+--- a/js/chatbot/src/static/ChatBot.svelte
++++ b/js/chatbot/src/static/ChatBot.svelte
+@@ -25,6 +25,7 @@
+ 	export let selectable = false;
+ 	export let show_share_button = false;
+ 	export let theme_mode: ThemeMode;
++	export let text_align: "left" | "center" | "right" | "justify" = "left";
+ 
+ 	$: if (theme_mode == "dark") {
+ 		code_highlight_css.dark();
+@@ -103,7 +104,8 @@
+ 						class:hide={message === null}
+ 						class:selectable
+ 						on:click={() => handle_select(i, j, message)}
+-					>
++						style="text-align: {text_align}"
++						>
+ 						{#if typeof message === "string"}
+ 							<Markdown {message} {latex_delimiters} on:load={scroll} />
+ 							{#if feedback && j == 1}
+@@ -403,4 +405,5 @@
+ 		top: 6px;
+ 		right: 6px;
+ 	}
++
+ </style>
+diff --git a/js/form/src/Textbox.svelte b/js/form/src/Textbox.svelte
+index f2a560ee05..4fc5902e0c 100644
+--- a/js/form/src/Textbox.svelte
++++ b/js/form/src/Textbox.svelte
+@@ -16,6 +16,8 @@
+ 	export let max_lines: number;
+ 	export let type: "text" | "password" | "email" = "text";
+ 	export let show_copy_button: boolean = false;
++	export let rtl = false;
++	export let text_align: "left" | "right" = "left";
+ 
+ 	let el: HTMLTextAreaElement | HTMLInputElement;
+ 	let copied = false;
+@@ -142,6 +144,7 @@
+ 				data-testid="textbox"
+ 				type="text"
+ 				class="scroll-hide"
++				class:rtl={rtl}
+ 				bind:value
+ 				bind:this={el}
+ 				{placeholder}
+@@ -149,6 +152,7 @@
+ 				on:keypress={handle_keypress}
+ 				on:blur={handle_blur}
+ 				on:select={handle_select}
++				style="text-align: {text_align}"
+ 			/>
+ 		{:else if type === "password"}
+ 			<input
+@@ -191,6 +195,7 @@
+ 			data-testid="textbox"
+ 			use:text_area_resize={value}
+ 			class="scroll-hide"
++			class:rtl={rtl}
+ 			bind:value
+ 			bind:this={el}
+ 			{placeholder}
+@@ -199,6 +204,7 @@
+ 			on:keypress={handle_keypress}
+ 			on:blur={handle_blur}
+ 			on:select={handle_select}
++			style="text-align: {text_align}"
+ 		/>
+ 	{/if}
+ </label>
+@@ -227,6 +233,9 @@
+ 		font-size: var(--input-text-size);
+ 		line-height: var(--line-sm);
+ 	}
++	.rtl {
++		direction: rtl;
++	}
+ 	input:disabled,
+ 	textarea:disabled {
+ 		-webkit-text-fill-color: var(--body-text-color);
+diff --git a/js/markdown/src/Markdown.svelte b/js/markdown/src/Markdown.svelte
+index f94c672daa..ceb3cb6f39 100644
+--- a/js/markdown/src/Markdown.svelte
++++ b/js/markdown/src/Markdown.svelte
+@@ -5,6 +5,7 @@
+ 	export let visible: boolean = true;
+ 	export let value: string;
+ 	export let min_height = false;
++	export let text_align: "left" | "center" | "right" | "justify" = "left";
+ 
+ 	const dispatch = createEventDispatcher<{ change: undefined }>();
+ 
+@@ -20,6 +21,7 @@
+ 	class:hide={!visible}
+ 	bind:this={target}
+ 	data-testid="markdown"
++	style="text-align: {text_align}"
+ >
+ 	{@html value}
+ </div>
+@@ -48,4 +50,5 @@
+ 	.hide {
+ 		display: none;
+ 	}
++
+ </style>
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index b62665d160..5314ca85fd 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1,4 +1,4 @@
+-lockfileVersion: '6.0'
++lockfileVersion: '6.1'
+ 
+ settings:
+   autoInstallPeers: true
+@@ -5289,7 +5289,7 @@ packages:
+       ts-dedent: 2.2.0
+       util-deprecate: 1.0.2
+       watchpack: 2.4.0
+-      ws: 8.13.0
++      ws: 8.13.0(bufferutil@4.0.7)
+     transitivePeerDependencies:
+       - bufferutil
+       - encoding
+@@ -5763,7 +5763,7 @@ packages:
+     peerDependencies:
+       '@sveltejs/kit': ^1.0.0
+     dependencies:
+-      '@sveltejs/kit': 1.16.3(svelte@3.59.2)(vite@4.3.9)
++      '@sveltejs/kit': 1.16.3(svelte@3.57.0)(vite@4.3.5)
+       import-meta-resolve: 3.0.0
+     dev: true
+ 
+@@ -10231,7 +10231,7 @@ packages:
+       whatwg-encoding: 2.0.0
+       whatwg-mimetype: 3.0.0
+       whatwg-url: 12.0.1
+-      ws: 8.13.0
++      ws: 8.13.0(bufferutil@4.0.7)
+       xml-name-validator: 4.0.0
+     transitivePeerDependencies:
+       - bufferutil
+@@ -14738,18 +14738,6 @@ packages:
+       async-limiter: 1.0.1
+     dev: true
+ 
+-  /ws@8.13.0:
+-    resolution: {integrity: sha512-x9vcZYTrFPC7aSIbj7sRCYo7L/Xb8Iy+pW0ng0wt2vCJv7M9HOMy0UoN3rr+IFC7hb7vXoqS+P9ktyLLLhO+LA==}
+-    engines: {node: '>=10.0.0'}
+-    peerDependencies:
+-      bufferutil: ^4.0.1
+-      utf-8-validate: '>=5.0.2'
+-    peerDependenciesMeta:
+-      bufferutil:
+-        optional: true
+-      utf-8-validate:
+-        optional: true
+-
+   /ws@8.13.0(bufferutil@4.0.7):
+     resolution: {integrity: sha512-x9vcZYTrFPC7aSIbj7sRCYo7L/Xb8Iy+pW0ng0wt2vCJv7M9HOMy0UoN3rr+IFC7hb7vXoqS+P9ktyLLLhO+LA==}
+     engines: {node: '>=10.0.0'}
+diff --git a/test/test_blocks.py b/test/test_blocks.py
+index c10cdbb4cd..59ba9f1c0f 100644
+--- a/test/test_blocks.py
++++ b/test/test_blocks.py
+@@ -1076,6 +1076,8 @@ def test_with_update(self):
+             "type": None,
+             "interactive": False,
+             "show_copy_button": None,
++            "rtl": None,
++            "text_align": None,
+             "__type__": "update",
+         }
+ 
+@@ -1097,6 +1099,8 @@ def test_with_update(self):
+             "type": None,
+             "interactive": True,
+             "show_copy_button": None,
++            "rtl": None,
++            "text_align": None,
+             "__type__": "update",
+         }
+ 
+diff --git a/test/test_components.py b/test/test_components.py
+index 14af3a5d9b..31683e262c 100644
+--- a/test/test_components.py
++++ b/test/test_components.py
+@@ -103,6 +103,8 @@ def test_component_functions(self):
+             "visible": True,
+             "interactive": None,
+             "root_url": None,
++            "rtl": False,
++            "text_align": "left",
+         }
+ 
+     @pytest.mark.asyncio
+@@ -1976,6 +1978,7 @@ def test_component_functions(self):
+             "root_url": None,
+             "selectable": False,
+             "latex_delimiters": [{"display": True, "left": "$$", "right": "$$"}],
++            "text_align": "left",
+         }
+ 
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

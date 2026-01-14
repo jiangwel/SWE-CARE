@@ -1,0 +1,482 @@
+  Task-ID: conan-io__conan-6052@ca23055
+  Please checkout to this commit first: 9e348424d85fa22b41c93cec4b0a113f25fef24d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add intel compiler to default settings.yml
+Suggested:
+
+```
+intel:
+        version: ["17.0.0", "17.0.1", "17.0.2", "17.0.3", "17.0.4", "17.0.5", "17.0.6", "17.0.7", "17.0.8",
+                  "18.0.0", "18.0.1", "18.0.2", "18.0.3", "18.0.4",
+                  "19.0.0", "19.0.1", "19.0.2", "19.0.3"]
+        libcxx: [libstdc++, libstdc++11] # Linux only
+        runtime: [MD, MT, MTd, MDd] # Windows only
+        cppstd: [None, 98, gnu98, 11, gnu11, 14, gnu14, 17, gnu17, 20, gnu20]
+```
+
+To investigate:
+- Binary compatibility of update/patches: reported erorrs on 17.0.4->17.0.6
+- Intel compiler also includes fortran, check if it makes sense regarding cppstd/libcxx
+- libcxx/runtime in different OS, how to manage?
+  </issue>
+  
+  <patch>
+  diff --git a/conans/__init__.py b/conans/__init__.py
+index 8bd5cbf3a7b..7f0450385be 100644
+--- a/conans/__init__.py
++++ b/conans/__init__.py
+@@ -9,7 +9,6 @@
+ from conans.model.conan_file import ConanFile
+ from conans.model.options import Options
+ from conans.model.settings import Settings
+-from conans.model.compatible_package import CompatiblePackage
+ from conans.util.files import load
+ 
+ # complex_search: With ORs and not filtering by not restricted settings
+diff --git a/conans/client/conf/__init__.py b/conans/client/conf/__init__.py
+index 4280a4f80b5..09105e1c0b8 100644
+--- a/conans/client/conf/__init__.py
++++ b/conans/client/conf/__init__.py
+@@ -57,7 +57,7 @@
+         version: ["5.10", "5.11", "5.12", "5.13", "5.14"]
+         threads: [None, posix]
+         libcxx: [libCstd, libstdcxx, libstlport, libstdc++]
+-    gcc:
++    gcc: &gcc
+         version: ["4.1", "4.4", "4.5", "4.6", "4.7", "4.8", "4.9",
+                   "5", "5.1", "5.2", "5.3", "5.4", "5.5",
+                   "6", "6.1", "6.2", "6.3", "6.4",
+@@ -68,7 +68,7 @@
+         threads: [None, posix, win32] #  Windows MinGW
+         exception: [None, dwarf2, sjlj, seh] # Windows MinGW
+         cppstd: [None, 98, gnu98, 11, gnu11, 14, gnu14, 17, gnu17, 20, gnu20]
+-    Visual Studio:
++    Visual Studio: &visual_studio
+         runtime: [MD, MT, MTd, MDd]
+         version: ["8", "9", "10", "11", "12", "14", "15", "16"]
+         toolset: [None, v90, v100, v110, v110_xp, v120, v120_xp,
+@@ -86,6 +86,15 @@
+         version: ["5.0", "5.1", "6.0", "6.1", "7.0", "7.3", "8.0", "8.1", "9.0", "9.1", "10.0", "11.0"]
+         libcxx: [libstdc++, libc++]
+         cppstd: [None, 98, gnu98, 11, gnu11, 14, gnu14, 17, gnu17, 20, gnu20]
++    intel:
++        version: ["11", "12", "13", "14", "15", "16", "17", "18", "19"]
++        base:
++            gcc:
++                <<: *gcc
++                threads: [None]
++                exception: [None]
++            Visual Studio:
++                <<: *visual_studio
+     qcc:
+         version: ["4.4", "5.4"]
+         libcxx: [cxx, gpp, cpp, cpp-ne, accp, acpp-ne, ecpp, ecpp-ne]
+diff --git a/conans/client/graph/graph_binaries.py b/conans/client/graph/graph_binaries.py
+index cae69b27f28..b1850ce5373 100644
+--- a/conans/client/graph/graph_binaries.py
++++ b/conans/client/graph/graph_binaries.py
+@@ -184,8 +184,8 @@ def _evaluate_node(self, node, build_mode, update, remotes):
+                                                    % (node.package_id, package_id))
+                         node._package_id = package_id
+                         # So they are available in package_info() method
+-                        node.conanfile.settings = compatible_package.settings
+-                        node.conanfile.options = compatible_package.options
++                        node.conanfile.settings.values = compatible_package.settings
++                        node.conanfile.options.values = compatible_package.options
+                         break
+                     else:
+                         node.binary = BINARY_MISSING
+diff --git a/conans/model/compatible_package.py b/conans/model/compatible_package.py
+deleted file mode 100644
+index ae38fdaac53..00000000000
+--- a/conans/model/compatible_package.py
++++ /dev/null
+@@ -1,36 +0,0 @@
+-class CompatiblePackage(object):
+-
+-    def __init__(self, conanfile):
+-        self._conanfile = conanfile
+-        self._settings = None
+-        self._options = None
+-        self._requires = None
+-
+-    @property
+-    def settings(self):
+-        if not self._settings:
+-            self._settings = self._conanfile.settings.copy()
+-        return self._settings
+-
+-    @property
+-    def options(self):
+-        if not self._options:
+-            self._options = self._conanfile.options.copy()
+-        return self._options
+-
+-    @property
+-    def requires(self):
+-        if not self._requires:
+-            self._requires = self._conanfile.info.requires.copy()
+-        return self._requires
+-
+-    def package_id(self):
+-        info = self._conanfile.info.copy()
+-        if self._settings:
+-            info.settings = self._settings.values
+-        if self._options:
+-            info.options = self._options.values
+-            info.options.clear_indirect()
+-        if self._requires:
+-            info.requires = self._requires
+-        return info.package_id()
+diff --git a/conans/model/info.py b/conans/model/info.py
+index d6411a0c9ce..dad1c59442b 100644
+--- a/conans/model/info.py
++++ b/conans/model/info.py
+@@ -315,7 +315,6 @@ def create(settings, options, prefs_direct, prefs_indirect, default_package_id_m
+         result.vs_toolset_compatible()
+         result.discard_build_settings()
+         result.default_std_matching()
+-
+         return result
+ 
+     @staticmethod
+@@ -365,6 +364,13 @@ def indent(text):
+ 
+         return '\n'.join(result) + "\n"
+ 
++    def clone(self):
++        q = self.copy()
++        q.full_settings = self.full_settings.copy()
++        q.full_options = self.full_options.copy()
++        q.full_requires = _PackageReferenceList.loads(self.full_requires.dumps())
++        return q
++
+     def __eq__(self, other):
+         """ currently just for testing purposes
+         """
+@@ -402,7 +408,6 @@ def package_id(self):
+         if requires_sha is None:
+             return PACKAGE_ID_UNKNOWN
+         result.append(requires_sha)
+-
+         package_id = sha1('\n'.join(result).encode())
+         return package_id
+ 
+@@ -481,4 +486,30 @@ def shared_library_package_id(self):
+             for dep_name in self.requires.pkg_names:
+                 dep_options = self.full_options[dep_name]
+                 if "shared" not in dep_options or not self.full_options[dep_name].shared:
+-                    self.requires[dep_name].package_revision_mode()
+\ No newline at end of file
++                    self.requires[dep_name].package_revision_mode()
++
++    def base_compiler_compatible(self, intel_compiler_version):
++        """If a built package for Intel has to be compatible for a Visual/GCC compiler
++        (consumer). Transform the visual/gcc full_settings into an intel one"""
++        if self.full_settings.compiler.base:
++            return
++
++        self.settings.compiler = "intel"
++        # You have to use here a specific version or create more than one version of
++        # compatible packages
++        self.settings.compiler.version = intel_compiler_version
++        self.settings.compiler.base = self.full_settings.compiler
++        for field in self.full_settings.compiler.fields:
++            value = getattr(self.full_settings.compiler, field)
++            setattr(self.settings.compiler.base, field, value)
++
++    def intel_compatible(self):
++        """If a built package for Visual/GCC has to be compatible for an Intel compiler
++          (consumer). Transform the Intel profile into an visual/gcc one"""
++        if not self.full_settings.compiler.base:
++            return
++
++        self.settings.compiler = self.full_settings.compiler.base
++        for field in self.full_settings.compiler.base.fields:
++            value = getattr(self.full_settings.compiler.base, field)
++            setattr(self.settings.compiler, field, value)
+diff --git a/conans/test/functional/package_id/compatible_test.py b/conans/test/functional/package_id/compatible_test.py
+index 47ef9cce2dd..e05e7d6b824 100644
+--- a/conans/test/functional/package_id/compatible_test.py
++++ b/conans/test/functional/package_id/compatible_test.py
+@@ -1,7 +1,10 @@
+ import textwrap
++import time
+ import unittest
+ 
++from conans.model.ref import ConanFileReference
+ from conans.test.utils.tools import TestClient, GenConanfile
++from conans.util.env_reader import get_env
+ 
+ 
+ class CompatibleIDsTest(unittest.TestCase):
+@@ -9,14 +12,14 @@ class CompatibleIDsTest(unittest.TestCase):
+     def compatible_setting_test(self):
+         client = TestClient()
+         conanfile = textwrap.dedent("""
+-            from conans import ConanFile, CompatiblePackage
++            from conans import ConanFile
+ 
+             class Pkg(ConanFile):
+                 settings = "os", "compiler"
+                 def package_id(self):
+                     if self.settings.compiler == "gcc" and self.settings.compiler.version == "4.9":
+                         for version in ("4.8", "4.7", "4.6"):
+-                            compatible_pkg = CompatiblePackage(self)
++                            compatible_pkg = self.info.clone()
+                             compatible_pkg.settings.compiler.version = version
+                             self.compatible_packages.append(compatible_pkg)
+                 def package_info(self):
+@@ -47,14 +50,14 @@ def package_info(self):
+     def compatible_setting_no_binary_test(self):
+         client = TestClient()
+         conanfile = textwrap.dedent("""
+-           from conans import ConanFile, CompatiblePackage
++           from conans import ConanFile
+ 
+            class Pkg(ConanFile):
+                settings = "os", "compiler"
+                def package_id(self):
+                    if self.settings.compiler == "gcc" and self.settings.compiler.version == "4.9":
+                        for version in ("4.8", "4.7", "4.6"):
+-                           compatible_pkg = CompatiblePackage(self)
++                           compatible_pkg = self.info.clone()
+                            compatible_pkg.settings.compiler.version = version
+                            self.compatible_packages.append(compatible_pkg)
+                def package_info(self):
+@@ -72,7 +75,7 @@ def package_info(self):
+                      "myprofile": profile})
+         # Create package with gcc 4.8
+         client.run("export . pkg/0.1@user/stable")
+-        self.assertIn("pkg/0.1@user/stable: Exported revision: c89d6976443e7a9cd975c5b8210ae212",
++        self.assertIn("pkg/0.1@user/stable: Exported revision: b27c975bb0d9e40c328bd02bc529b6f8",
+                       client.out)
+ 
+         # package can be used with a profile gcc 4.9 falling back to 4.8 binary
+@@ -86,14 +89,14 @@ def package_info(self):
+     def compatible_setting_no_user_channel_test(self):
+         client = TestClient()
+         conanfile = textwrap.dedent("""
+-            from conans import ConanFile, CompatiblePackage
++            from conans import ConanFile
+ 
+             class Pkg(ConanFile):
+                 settings = "os", "compiler"
+                 def package_id(self):
+                     if self.settings.compiler == "gcc" and self.settings.compiler.version == "4.9":
+                         for version in ("4.8", "4.7", "4.6"):
+-                            compatible_pkg = CompatiblePackage(self)
++                            compatible_pkg = self.info.clone()
+                             compatible_pkg.settings.compiler.version = version
+                             self.compatible_packages.append(compatible_pkg)
+             """)
+@@ -120,14 +123,14 @@ def package_id(self):
+     def compatible_option_test(self):
+         client = TestClient()
+         conanfile = textwrap.dedent("""
+-            from conans import ConanFile, CompatiblePackage
++            from conans import ConanFile
+ 
+             class Pkg(ConanFile):
+                 options = {"optimized": [1, 2, 3]}
+                 default_options = {"optimized": 1}
+                 def package_id(self):
+                     for optimized in range(int(self.options.optimized), 0, -1):
+-                        compatible_pkg = CompatiblePackage(self)
++                        compatible_pkg = self.info.clone()
+                         compatible_pkg.options.optimized = optimized
+                         self.compatible_packages.append(compatible_pkg)
+                 def package_info(self):
+@@ -158,44 +161,128 @@ def package_info(self):
+                       client.out)
+         self.assertIn("pkg/0.1@user/stable: Already installed!", client.out)
+ 
+-    def error_setting_test(self):
++    def visual_package_compatible_with_intel_test(self):
+         client = TestClient()
++        ref = ConanFileReference.loads("Bye/0.1@us/ch")
+         conanfile = textwrap.dedent("""
+-            from conans import ConanFile, CompatiblePackage
++        from conans import ConanFile
+ 
+-            class Pkg(ConanFile):
+-                settings = "os", "compiler"
+-                def package_id(self):
+-                    compatible_pkg = CompatiblePackage(self)
+-                    compatible_pkg.settings.compiler.version = "bad"
+-                    self.compatible_packages.append(self)
+-            """)
+-        client.save({"conanfile.py": conanfile})
+-        client.run("create . pkg/0.1@user/stable",  assert_error=True)
++        class Conan(ConanFile):
++            settings = "compiler"
+ 
+-        self.assertIn('ERROR: pkg/0.1@user/stable: Error in package_id() method, line 8',
++            def package_id(self):
++                p = self.info.clone()
++                p.intel_compatible()
++                self.compatible_packages.append(p)
++            """)
++        visual_profile = textwrap.dedent("""
++            [settings]
++            compiler = Visual Studio
++            compiler.version = 8
++            compiler.runtime = MD
++            """)
++        intel_profile = textwrap.dedent("""
++            [settings]
++            compiler = intel
++            compiler.version = 16
++            compiler.base = Visual Studio
++            compiler.base.version = 8
++            compiler.base.runtime = MD
++            """)
++        client.save({"conanfile.py": conanfile,
++                     "intel_profile": intel_profile,
++                     "visual_profile": visual_profile})
++        client.run("create . %s --profile visual_profile" % ref.full_str())
++        client.run("install %s -p intel_profile" % ref.full_str())
++        self.assertIn("Bye/0.1@us/ch: Main binary package '2ef6f6c768dd0f332dc252"
++                      "b72c30dee116632302' missing. Using compatible package "
++                      "'1151fe341e6b310f7645a76b4d3d524342835acc'",
+                       client.out)
+-        self.assertIn('compatible_pkg.settings.compiler.version = "bad"', client.out)
+-        self.assertIn("ConanException: Invalid setting 'bad' is not a valid "
+-                      "'settings.compiler.version' value", client.out)
++        self.assertIn("Bye/0.1@us/ch:1151fe341e6b310f7645a76b4d3d524342835acc - Cache", client.out)
+ 
+-    def error_option_test(self):
++    def intel_package_compatible_with_base_test(self):
+         client = TestClient()
++        ref = ConanFileReference.loads("Bye/0.1@us/ch")
+         conanfile = textwrap.dedent("""
+-            from conans import ConanFile, CompatiblePackage
++        from conans import ConanFile
+ 
+-            class Pkg(ConanFile):
+-                options = {"shared": [True, False]}
+-                default_options = {"shared": True}
+-                def package_id(self):
+-                    compatible_pkg = CompatiblePackage(self)
+-                    compatible_pkg.options.shared = "bad"
+-                    self.compatible_packages.append(self)
++        class Conan(ConanFile):
++            settings = "compiler"
++
++            def package_id(self):
++               compatible_pkg = self.info.clone()
++               compatible_pkg.base_compiler_compatible(intel_compiler_version=16)
++               self.compatible_packages.append(compatible_pkg)
++               
+             """)
+-        client.save({"conanfile.py": conanfile})
+-        client.run("create . pkg/0.1@user/stable",  assert_error=True)
++        visual_profile = textwrap.dedent("""
++            [settings]
++            compiler = Visual Studio
++            compiler.version = 8
++            compiler.runtime = MD
++            """)
++        intel_profile = textwrap.dedent("""
++            [settings]
++            compiler = intel
++            compiler.version = 16
++            compiler.base = Visual Studio
++            compiler.base.version = 8
++            compiler.base.runtime = MD
++            """)
++        client.save({"conanfile.py": conanfile,
++                     "intel_profile": intel_profile,
++                     "visual_profile": visual_profile})
++        client.run("create . %s --profile intel_profile" % ref.full_str())
++        client.run("install %s -p visual_profile" % ref.full_str())
++        self.assertIn("Bye/0.1@us/ch: Main binary package "
++                      "'1151fe341e6b310f7645a76b4d3d524342835acc' missing. Using compatible "
++                      "package '2ef6f6c768dd0f332dc252b72c30dee116632302'",
++                      client.out)
++        self.assertIn("Bye/0.1@us/ch:2ef6f6c768dd0f332dc252b72c30dee116632302 - Cache", client.out)
++
++    def additional_id_mode_test(self):
++        c1 = GenConanfile().with_name("AA").with_version("1.0")
++        c2 = GenConanfile().with_name("BB").with_version("1.0").with_require_plain("AA/1.0")
++        client = TestClient()
++        # Recipe revision mode
++        client.run("config set general.default_package_id_mode=recipe_revision_mode")
++
++        # Create binaries with recipe revision mode for both
++        client.save({"conanfile.py": c1})
++        client.run("create .")
++
++        client.save({"conanfile.py": c2})
++        client.run("create .")
++
++        # Back to semver default
++        client.run("config set general.default_package_id_mode=semver_direct_mode")
++        client.run("install BB/1.0@", assert_error=True)
++        self.assertIn("Missing prebuilt package for 'BB/1.0'", client.out)
++
++        # What if client modifies the packages declaring a compatible_package with the recipe mode
++        # Recipe revision mode
++        client.run("config set general.default_package_id_mode=recipe_revision_mode")
++        tmp = """
++    
++    def package_id(self):
++        p = self.info.clone()
++        p.requires.recipe_revision_mode()
++        self.output.warn("Alternative package ID: {}".format(p.package_id()))
++        self.compatible_packages.append(p)
++"""
++        c1 = str(c1) + tmp
++        c2 = str(c2) + tmp
++        # Create the packages, now with the recipe mode declared as compatible package
++        time.sleep(1)  # new timestamp
++        client.save({"conanfile.py": c1})
++        client.run("create .")
++
++        client.save({"conanfile.py": c2})
++        client.run("create .")
++        self.assertIn("Package '9fc42b36e70615fe97acca0afa27e1731868861c' created", client.out)
+ 
+-        self.assertIn('ERROR: pkg/0.1@user/stable: Error in package_id() method, line 9',
++        # Back to semver mode
++        client.run("config set general.default_package_id_mode=semver_direct_mode")
++        client.run("install BB/1.0@ --update")
++        self.assertIn("Using compatible package '9fc42b36e70615fe97acca0afa27e1731868861c'",
+                       client.out)
+-        self.assertIn('compatible_pkg.options.shared = "bad"', client.out)
+-        self.assertIn("ConanException: 'bad' is not a valid 'options.shared' value.", client.out)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

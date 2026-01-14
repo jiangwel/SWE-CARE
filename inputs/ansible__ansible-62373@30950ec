@@ -1,0 +1,531 @@
+  Task-ID: ansible__ansible-62373@30950ec
+  Please checkout to this commit first: f8f76628500052ad3521fbec16c073ae7f99d287
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Deprecated variables do not point to the same data
+<!--- Verify first that your issue is not already reported on GitHub -->
+<!--- Also test if the latest release and devel branch are affected too -->
+<!--- Complete *all* sections as described, this form is processed automatically -->
+
+##### SUMMARY
+<!--- Explain the problem briefly below -->
+`ansible_become_pass` and `ansible_become_password` do the same things but if you set one variable somewhere in your files, and then the other variable somewhere else, it is not overriden.
+
+##### ISSUE TYPE
+- Bug Report
+
+##### COMPONENT NAME
+<!--- Write the short name of the module, plugin, task or feature below, use your best guess if unsure -->
+variables
+
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes -->
+```paste below
+2.7.5
+2.8.5
+```
+
+##### CONFIGURATION
+<!--- Paste verbatim output from "ansible-config dump --only-changed" between quotes -->
+```paste below
+
+```
+
+##### OS / ENVIRONMENT
+<!--- Provide all relevant information below, e.g. target OS versions, network device firmware, etc. -->
+Linux
+
+##### STEPS TO REPRODUCE
+<!--- Describe exactly how to reproduce the problem, using a minimal test-case -->
+Try to set `ansible_become_pass` and `ansible_become_password` and debug them. They are hold different values while they are supposed to do the same thing. It probably applies to tons of similar variables.
+
+
+
+<!--- HINT: You can paste gist.github.com links for larger files -->
+
+##### EXPECTED RESULTS
+<!--- Describe what you expected to happen when running the steps above -->
+It should use the same value as it's an "alias" variable and since you change the variable names regularly
+
+##### ACTUAL RESULTS
+<!--- Describe what actually happened. If possible run with extra verbosity (-vvvv) -->
+`ansible_become_pass` and `ansible_become_password` do the same things but if you set one variable somewhere in your files, and then the other variable somewhere else, it is not overriden.
+
+I ended up wasting 4 days of incomprehension... asking for support and wasting other people's time too
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/become-pass-precedence.yaml b/changelogs/fragments/become-pass-precedence.yaml
+new file mode 100644
+index 00000000000000..8e21fe24e3668c
+--- /dev/null
++++ b/changelogs/fragments/become-pass-precedence.yaml
+@@ -0,0 +1,3 @@
++bugfixes:
++- become - Fix various plugins that still used play_context to get the become password instead of through the plugin - https://github.com/ansible/ansible/issues/62367
++- runas - Fix the ``runas`` ``become_pass`` variable fallback from ``ansible_runas_runas`` to ``ansible_runas_pass``
+diff --git a/lib/ansible/plugins/action/__init__.py b/lib/ansible/plugins/action/__init__.py
+index cc1136e8f74406..8688f6f6bca92d 100644
+--- a/lib/ansible/plugins/action/__init__.py
++++ b/lib/ansible/plugins/action/__init__.py
+@@ -175,6 +175,23 @@ def _configure_module(self, module_name, module_args, task_vars=None):
+         final_environment = dict()
+         self._compute_environment_string(final_environment)
+ 
++        become_kwargs = {
++            'become': False,
++            'become_method': None,
++            'become_user': None,
++            'become_password': None,
++            'become_flags': None
++        }
++        if self._connection.become:
++            become_kwargs['become'] = True
++            become_kwargs['become_method'] = self._connection.become.name
++            become_kwargs['become_user'] = self._connection.become.get_option('become_user',
++                                                                              playcontext=self._play_context)
++            become_kwargs['become_password'] = self._connection.become.get_option('become_pass',
++                                                                                  playcontext=self._play_context)
++            become_kwargs['become_flags'] = self._connection.become.get_option('become_flags',
++                                                                               playcontext=self._play_context)
++
+         # modify_module will exit early if interpreter discovery is required; re-run after if necessary
+         for dummy in (1, 2):
+             try:
+@@ -182,12 +199,8 @@ def _configure_module(self, module_name, module_args, task_vars=None):
+                                                                             task_vars=task_vars,
+                                                                             module_compression=self._play_context.module_compression,
+                                                                             async_timeout=self._task.async_val,
+-                                                                            become=self._play_context.become,
+-                                                                            become_method=self._play_context.become_method,
+-                                                                            become_user=self._play_context.become_user,
+-                                                                            become_password=self._play_context.become_pass,
+-                                                                            become_flags=self._play_context.become_flags,
+-                                                                            environment=final_environment)
++                                                                            environment=final_environment,
++                                                                            **become_kwargs)
+                 break
+             except InterpreterDiscoveryRequiredError as idre:
+                 self._discovered_interpreter = AnsibleUnsafeText(discover_interpreter(
+@@ -260,7 +273,7 @@ def _is_pipelining_enabled(self, module_style, wrap_async=False):
+             module_style == "new",                     # old style modules do not support pipelining
+             not C.DEFAULT_KEEP_REMOTE_FILES,           # user wants remote files
+             not wrap_async or self._connection.always_pipeline_modules,  # async does not normally support pipelining unless it does (eg winrm)
+-            self._play_context.become_method != 'su',  # su does not work with pipelining,
++            (self._connection.become.name if self._connection.become else '') != 'su',  # su does not work with pipelining,
+             # FIXME: we might need to make become_method exclusion a configurable list
+         ]:
+             if not condition:
+@@ -298,7 +311,7 @@ def _is_become_unprivileged(self):
+         '''
+         # if we don't use become then we know we aren't switching to a
+         # different unprivileged user
+-        if not self._play_context.become:
++        if self._connection.become is None:
+             return False
+ 
+         # if we use become and the user is not an admin (or same user) then
+@@ -634,7 +647,7 @@ def _remote_expand_user(self, path, sudoable=True, pathsep=None):
+             become_user = self.get_become_option('become_user')
+             if getattr(self._connection, '_remote_is_local', False):
+                 pass
+-            elif sudoable and self._play_context.become and become_user:
++            elif sudoable and self._connection.become and become_user:
+                 expand_path = '~%s' % become_user
+             else:
+                 # use remote user instead, if none set default to current user
+diff --git a/lib/ansible/plugins/action/fetch.py b/lib/ansible/plugins/action/fetch.py
+index 515dd0177a7f0e..5344f0410383cb 100644
+--- a/lib/ansible/plugins/action/fetch.py
++++ b/lib/ansible/plugins/action/fetch.py
+@@ -72,7 +72,7 @@ def run(self, tmp=None, task_vars=None):
+             source = self._remote_expand_user(source)
+ 
+             remote_checksum = None
+-            if not self._play_context.become:
++            if self._connection.become is None:
+                 # calculate checksum for the remote file, don't bother if using become as slurp will be used
+                 # Force remote_checksum to follow symlinks because fetch always follows symlinks
+                 remote_checksum = self._remote_checksum(source, all_vars=task_vars, follow=True)
+diff --git a/lib/ansible/plugins/action/win_updates.py b/lib/ansible/plugins/action/win_updates.py
+index 56fbff1b77d494..7e0187a5036119 100644
+--- a/lib/ansible/plugins/action/win_updates.py
++++ b/lib/ansible/plugins/action/win_updates.py
+@@ -8,6 +8,7 @@
+ from ansible.module_utils.parsing.convert_bool import boolean
+ from ansible.parsing.yaml.objects import AnsibleUnicode
+ from ansible.plugins.action import ActionBase
++from ansible.plugins.loader import become_loader
+ from ansible.utils.display import Display
+ 
+ display = Display()
+@@ -103,27 +104,19 @@ def _merge_dict(self, original, new):
+ 
+     def _execute_module_with_become(self, module_name, module_args, task_vars,
+                                     wrap_async, use_task):
+-        orig_become = self._play_context.become
+-        orig_become_method = self._play_context.become_method
+-        orig_become_user = self._play_context.become_user
+-
+-        if not use_task:
+-            if orig_become is None or orig_become is False:
+-                self._play_context.become = True
+-            if orig_become_method != 'runas':
+-                self._play_context.become_method = 'runas'
+-            if orig_become_user is None or orig_become_user == 'root':
+-                self._play_context.become_user = 'SYSTEM'
+-
++        orig_become = self._connection.become
+         try:
++            if not use_task and orig_become is None:
++                become = become_loader.get('runas')
++                become.set_options(direct={'become_user': 'SYSTEM', 'become_pass': None})
++                self._connection.set_become_plugin(become)
++
+             module_res = self._execute_module(module_name=module_name,
+                                               module_args=module_args,
+                                               task_vars=task_vars,
+                                               wrap_async=wrap_async)
+         finally:
+-            self._play_context.become = orig_become
+-            self._play_context.become_method = orig_become_method
+-            self._play_context.become_user = orig_become_user
++            self._connection.set_become_plugin(orig_become)
+ 
+         return module_res
+ 
+diff --git a/lib/ansible/plugins/become/__init__.py b/lib/ansible/plugins/become/__init__.py
+index 6f7e1d19509ee3..f20326c633e436 100644
+--- a/lib/ansible/plugins/become/__init__.py
++++ b/lib/ansible/plugins/become/__init__.py
+@@ -40,6 +40,19 @@ def __init__(self):
+         self._id = ''
+         self.success = ''
+ 
++    def get_option(self, option, hostvars=None, playcontext=None):
++        """ Overrides the base get_option to provide a fallback to playcontext vars in case a 3rd party plugin did not
++        implement the base become options required in Ansible. """
++        # TODO: add deprecation warning for ValueError in devel that removes the playcontext fallback
++        try:
++            return super(BecomeBase, self).get_option(option, hostvars=hostvars)
++        except KeyError:
++            pc_fallback = ['become_user', 'become_pass', 'become_flags', 'become_exe']
++            if option not in pc_fallback:
++                raise
++
++            return getattr(playcontext, option, None)
++
+     def expect_prompt(self):
+         """This function assists connection plugins in determining if they need to wait for
+         a prompt. Both a prompt and a password are required.
+diff --git a/lib/ansible/plugins/become/runas.py b/lib/ansible/plugins/become/runas.py
+index 9607932fe0cd12..c8ae881c3c2fcc 100644
+--- a/lib/ansible/plugins/become/runas.py
++++ b/lib/ansible/plugins/become/runas.py
+@@ -48,7 +48,7 @@
+             vars:
+               - name: ansible_become_password
+               - name: ansible_become_pass
+-              - name: ansible_runas_runas
++              - name: ansible_runas_pass
+             env:
+               - name: ANSIBLE_BECOME_PASS
+               - name: ANSIBLE_RUNAS_PASS
+diff --git a/lib/ansible/plugins/connection/docker.py b/lib/ansible/plugins/connection/docker.py
+index f393bba8570e67..118434ad41ab5a 100644
+--- a/lib/ansible/plugins/connection/docker.py
++++ b/lib/ansible/plugins/connection/docker.py
+@@ -249,7 +249,8 @@ def exec_command(self, cmd, in_data=None, sudoable=False):
+                 selector.close()
+ 
+             if not self.become.check_success(become_output):
+-                p.stdin.write(to_bytes(self._play_context.become_pass, errors='surrogate_or_strict') + b'\n')
++                become_pass = self.become.get_option('become_pass', playcontext=self._play_context)
++                p.stdin.write(to_bytes(become_pass, errors='surrogate_or_strict') + b'\n')
+             fcntl.fcntl(p.stdout, fcntl.F_SETFL, fcntl.fcntl(p.stdout, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+             fcntl.fcntl(p.stderr, fcntl.F_SETFL, fcntl.fcntl(p.stderr, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+ 
+diff --git a/lib/ansible/plugins/connection/local.py b/lib/ansible/plugins/connection/local.py
+index 14752b2cba7a78..219d5843b0def5 100644
+--- a/lib/ansible/plugins/connection/local.py
++++ b/lib/ansible/plugins/connection/local.py
+@@ -118,7 +118,8 @@ def exec_command(self, cmd, in_data=None, sudoable=True):
+                 selector.close()
+ 
+             if not self.become.check_success(become_output):
+-                p.stdin.write(to_bytes(self._play_context.become_pass, errors='surrogate_or_strict') + b'\n')
++                become_pass = self.become.get_option('become_pass', playcontext=self._play_context)
++                p.stdin.write(to_bytes(become_pass, errors='surrogate_or_strict') + b'\n')
+             fcntl.fcntl(p.stdout, fcntl.F_SETFL, fcntl.fcntl(p.stdout, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+             fcntl.fcntl(p.stderr, fcntl.F_SETFL, fcntl.fcntl(p.stderr, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+ 
+diff --git a/lib/ansible/plugins/connection/paramiko_ssh.py b/lib/ansible/plugins/connection/paramiko_ssh.py
+index ce47b74bbc176b..d955543248f5de 100644
+--- a/lib/ansible/plugins/connection/paramiko_ssh.py
++++ b/lib/ansible/plugins/connection/paramiko_ssh.py
+@@ -415,7 +415,9 @@ def exec_command(self, cmd, in_data=None, sudoable=True):
+                     display.debug("chunk is: %s" % chunk)
+                     if not chunk:
+                         if b'unknown user' in become_output:
+-                            raise AnsibleError('user %s does not exist' % self._play_context.become_user)
++                            n_become_user = to_native(self.become.get_option('become_user',
++                                                                             playcontext=self._play_context))
++                            raise AnsibleError('user %s does not exist' % n_become_user)
+                         else:
+                             break
+                             # raise AnsibleError('ssh connection closed waiting for password prompt')
+@@ -432,8 +434,9 @@ def exec_command(self, cmd, in_data=None, sudoable=True):
+                             break
+ 
+                 if passprompt:
+-                    if self._play_context.become and self._play_context.become_pass:
+-                        chan.sendall(to_bytes(self._play_context.become_pass) + b'\n')
++                    if self.become:
++                        become_pass = self.become.get_option('become_pass', playcontext=self._play_context)
++                        chan.sendall(to_bytes(become_pass, errors='surrogate_or_strict') + b'\n')
+                     else:
+                         raise AnsibleError("A password is required but none was supplied")
+                 else:
+diff --git a/lib/ansible/plugins/connection/psrp.py b/lib/ansible/plugins/connection/psrp.py
+index 639c268e8e91d8..8ec648732ff3ec 100644
+--- a/lib/ansible/plugins/connection/psrp.py
++++ b/lib/ansible/plugins/connection/psrp.py
+@@ -577,10 +577,6 @@ def close(self):
+         self._connected = False
+ 
+     def _build_kwargs(self):
+-        self._become_method = self._play_context.become_method
+-        self._become_user = self._play_context.become_user
+-        self._become_pass = self._play_context.become_pass
+-
+         self._psrp_host = self.get_option('remote_addr')
+         self._psrp_user = self.get_option('remote_user')
+         self._psrp_pass = self._play_context.password
+diff --git a/lib/ansible/plugins/connection/ssh.py b/lib/ansible/plugins/connection/ssh.py
+index b978a5f622581b..80bad6dc34da24 100644
+--- a/lib/ansible/plugins/connection/ssh.py
++++ b/lib/ansible/plugins/connection/ssh.py
+@@ -837,7 +837,7 @@ def _bare_run(self, cmd, in_data, sudoable=True, checkrc=True):
+                 # wait for a password prompt.
+                 state = states.index('awaiting_prompt')
+                 display.debug(u'Initial state: %s: %s' % (states[state], to_text(prompt)))
+-            elif self._play_context.become and self.become.success:
++            elif self.become and self.become.success:
+                 # We're requesting escalation without a password, so we have to
+                 # detect success/failure before sending any initial data.
+                 state = states.index('awaiting_escalation')
+@@ -947,7 +947,8 @@ def _bare_run(self, cmd, in_data, sudoable=True, checkrc=True):
+                 if states[state] == 'awaiting_prompt':
+                     if self._flags['become_prompt']:
+                         display.debug(u'Sending become_password in response to prompt')
+-                        stdin.write(to_bytes(self._play_context.become_pass) + b'\n')
++                        become_pass = self.become.get_option('become_pass', playcontext=self._play_context)
++                        stdin.write(to_bytes(become_pass, errors='surrogate_or_strict') + b'\n')
+                         # On python3 stdin is a BufferedWriter, and we don't have a guarantee
+                         # that the write will happen without a flush
+                         stdin.flush()
+@@ -968,19 +969,19 @@ def _bare_run(self, cmd, in_data, sudoable=True, checkrc=True):
+                         display.vvv(u'Escalation failed')
+                         self._terminate_process(p)
+                         self._flags['become_error'] = False
+-                        raise AnsibleError('Incorrect %s password' % self._play_context.become_method)
++                        raise AnsibleError('Incorrect %s password' % self.become.name)
+                     elif self._flags['become_nopasswd_error']:
+                         display.vvv(u'Escalation requires password')
+                         self._terminate_process(p)
+                         self._flags['become_nopasswd_error'] = False
+-                        raise AnsibleError('Missing %s password' % self._play_context.become_method)
++                        raise AnsibleError('Missing %s password' % self.become.name)
+                     elif self._flags['become_prompt']:
+                         # This shouldn't happen, because we should see the "Sorry,
+                         # try again" message first.
+                         display.vvv(u'Escalation prompt repeated')
+                         self._terminate_process(p)
+                         self._flags['become_prompt'] = False
+-                        raise AnsibleError('Incorrect %s password' % self._play_context.become_method)
++                        raise AnsibleError('Incorrect %s password' % self.become.name)
+ 
+                 # Once we're sure that the privilege escalation prompt, if any, has
+                 # been dealt with, we can send any initial data and start waiting
+diff --git a/test/integration/targets/win_become/tasks/main.yml b/test/integration/targets/win_become/tasks/main.yml
+index 3b20b59ee75e44..a0759580baccab 100644
+--- a/test/integration/targets/win_become/tasks/main.yml
++++ b/test/integration/targets/win_become/tasks/main.yml
+@@ -143,6 +143,15 @@
+     - '"LogonUser failed" not in become_invalid_pass.msg'
+     - '"Win32ErrorCode 1326 - 0x0000052E)" not in become_invalid_pass.msg'
+ 
++  - name: test become password precedence
++    win_whoami:
++    become: yes
++    become_method: runas
++    become_user: '{{ become_test_username }}'
++    vars:
++      ansible_become_pass: broken
++      ansible_runas_pass: '{{ gen_pw }}'  # should have a higher precedence than ansible_become_pass
++
+   - name: test become + async
+     vars: *become_vars
+     win_command: whoami
+diff --git a/test/units/plugins/action/test_win_updates.py b/test/units/plugins/action/test_win_updates.py
+index 039e73c304d7b4..021090c5e94262 100644
+--- a/test/units/plugins/action/test_win_updates.py
++++ b/test/units/plugins/action/test_win_updates.py
+@@ -6,13 +6,30 @@
+ from __future__ import (absolute_import, division, print_function)
+ __metaclass__ = type
+ 
++import os
+ import pytest
+ 
+ from units.compat.mock import patch, MagicMock
+ from ansible.plugins.action.win_updates import ActionModule
++from ansible.plugins.become.runas import BecomeModule
+ from ansible.playbook.task import Task
+ 
+ 
++@pytest.fixture()
++def test_win_updates():
++    task = MagicMock(Task)
++    task.args = {}
++
++    connection = MagicMock()
++    connection.module_implementation_preferences = ('.ps1', '.exe', '')
++
++    play_context = MagicMock()
++    play_context.check_mode = False
++
++    plugin = ActionModule(task, connection, play_context, loader=None, templar=None, shared_loader_obj=None)
++    return plugin
++
++
+ class TestWinUpdatesActionPlugin(object):
+ 
+     INVALID_OPTIONS = (
+@@ -58,58 +75,46 @@ def test_invalid_options(self, task_args, async_val, expected):
+         assert res['failed']
+         assert expected in res['msg']
+ 
+-    BECOME_OPTIONS = (
+-        (False, False, "sudo", "root", True, "runas", "SYSTEM"),
+-        (False, True, "sudo", "root", True, "runas", "SYSTEM"),
+-        (False, False, "runas", "root", True, "runas", "SYSTEM"),
+-        (False, False, "sudo", "user", True, "runas", "user"),
+-        (False, None, "sudo", None, True, "runas", "SYSTEM"),
++    def test_exec_with_become(self, test_win_updates):
++        test_become = os.urandom(8)
+ 
+-        # use scheduled task, we shouldn't change anything
+-        (True, False, "sudo", None, False, "sudo", None),
+-        (True, True, "runas", "SYSTEM", True, "runas", "SYSTEM"),
+-    )
++        set_become_mock = MagicMock()
++        test_win_updates._connection.become = test_become
++        test_win_updates._connection.set_become_plugin = set_become_mock
+ 
+-    # pylint bug: https://github.com/PyCQA/pylint/issues/511
+-    # pylint: disable=undefined-variable
+-    @pytest.mark.parametrize('use_task, o_b, o_bmethod, o_buser, e_b, e_bmethod, e_buser',
+-                             ((u, ob, obm, obu, eb, ebm, ebu)
+-                              for u, ob, obm, obu, eb, ebm, ebu in BECOME_OPTIONS))
+-    def test_module_exec_with_become(self, use_task, o_b, o_bmethod, o_buser,
+-                                     e_b, e_bmethod, e_buser):
+-        def mock_execute_module(self, **kwargs):
+-            pc = self._play_context
+-            return {"become": pc.become, "become_method": pc.become_method,
+-                    "become_user": pc.become_user}
++        with patch('ansible.plugins.action.ActionBase._execute_module', new=MagicMock()):
++            test_win_updates._execute_module_with_become('win_updates', {}, {}, True, False)
+ 
+-        task = MagicMock(Task)
+-        task.args = {}
++        # Asserts we don't override the become plugin.
++        assert set_become_mock.call_count == 1
++        assert set_become_mock.mock_calls[0][1][0] == test_become
+ 
+-        connection = MagicMock()
+-        connection.module_implementation_preferences = ('.ps1', '.exe', '')
++    def test_exec_with_become_no_plugin_set(self, test_win_updates):
++        set_become_mock = MagicMock()
++        test_win_updates._connection.become = None
++        test_win_updates._connection.set_become_plugin = set_become_mock
+ 
+-        play_context = MagicMock()
+-        play_context.check_mode = False
+-        play_context.become = o_b
+-        play_context.become_method = o_bmethod
+-        play_context.become_user = o_buser
++        with patch('ansible.plugins.action.ActionBase._execute_module', new=MagicMock()):
++            test_win_updates._execute_module_with_become('win_updates', {}, {}, True, False)
+ 
+-        plugin = ActionModule(task, connection, play_context, loader=None,
+-                              templar=None, shared_loader_obj=None)
+-        with patch('ansible.plugins.action.ActionBase._execute_module',
+-                   new=mock_execute_module):
+-            actual = plugin._execute_module_with_become('win_updates', {}, {},
+-                                                        True, use_task)
+-
+-        # always make sure we reset back to the defaults
+-        assert play_context.become == o_b
+-        assert play_context.become_method == o_bmethod
+-        assert play_context.become_user == o_buser
+-
+-        # verify what was set when _execute_module was called
+-        assert actual['become'] == e_b
+-        assert actual['become_method'] == e_bmethod
+-        assert actual['become_user'] == e_buser
++        assert set_become_mock.call_count == 2
++        assert isinstance(set_become_mock.mock_calls[0][1][0], BecomeModule)
++        assert set_become_mock.mock_calls[0][1][0].name == 'runas'
++        assert set_become_mock.mock_calls[0][1][0].get_option('become_user') == 'SYSTEM'
++        assert set_become_mock.mock_calls[0][1][0].get_option('become_flags') == ''
++        assert set_become_mock.mock_calls[0][1][0].get_option('become_pass') is None
++        assert set_become_mock.mock_calls[1][1] == (None,)
++
++    def test_exec_with_become_no_plugin_set_use_task(self, test_win_updates):
++        set_become_mock = MagicMock()
++        test_win_updates._connection.become = None
++        test_win_updates._connection.set_become_plugin = set_become_mock
++
++        with patch('ansible.plugins.action.ActionBase._execute_module', new=MagicMock()):
++            test_win_updates._execute_module_with_become('win_updates', {}, {}, True, True)
++
++        assert set_become_mock.call_count == 1
++        assert set_become_mock.mock_calls[0][1][0] is None
+ 
+     def test_module_exec_async_result(self, monkeypatch):
+         return_val = {
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,280 @@
+  Task-ID: huggingface__accelerate-1545@fa958dc
+  Please checkout to this commit first: 62357f218f72cce88b8e086cc372b15c119b590b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  device_map issue with M1_M2 MacOS 
+### System Info
+
+Hi,
+I am on M2 MAX CHIP MACOS that has 12 CPU, 38 GPU. I am having issue with ever modification of this code snippet. Would you please tell me how I can correct it?
+
+
+### Who can help?
+
+_No response_
+
+### Information
+
+- [ ] The official example scripts
+- [ ] My own modified scripts
+
+### Tasks
+
+- [ ] An officially supported task in the `examples` folder (such as GLUE/SQuAD, ...)
+- [ ] My own task or dataset (give details below)
+
+### Reproduction
+
+
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import transformers
+import torch
+
+model = AutoModelForCausalLM.from_pretrained("tiiuae/falcon-40b-instruct", trust_remote_code=True)
+model = model.to('mps')
+
+tokenizer = AutoTokenizer.from_pretrained(model)
+pipeline = transformers.pipeline(
+"text-generation",
+model=model,
+tokenizer=tokenizer,
+torch_dtype=torch.bfloat16,
+trust_remote_code=True,
+# device = torch.device('mps'),
+# device_map="auto",
+)
+
+### Expected behavior
+
+
+
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import transformers
+import torch
+
+model = AutoModelForCausalLM.from_pretrained("tiiuae/falcon-40b-instruct", trust_remote_code=True)
+model = model.to('mps')
+
+tokenizer = AutoTokenizer.from_pretrained(model)
+pipeline = transformers.pipeline(
+"text-generation",
+model=model,
+tokenizer=tokenizer,
+torch_dtype=torch.bfloat16,
+trust_remote_code=True,
+# device = torch.device('mps'),
+# device_map="auto",
+)
+  </issue>
+  
+  <patch>
+  diff --git a/src/accelerate/big_modeling.py b/src/accelerate/big_modeling.py
+index 8b6d6bcb81b..4aecef26227 100644
+--- a/src/accelerate/big_modeling.py
++++ b/src/accelerate/big_modeling.py
+@@ -358,7 +358,7 @@ def dispatch_model(
+         name: main_device if device in ["cpu", "disk"] else device for name, device in device_map.items()
+     }
+     execution_device[""] = main_device
+-    offloaded_devices = ["disk"] if main_device == "cpu" else ["cpu", "disk"]
++    offloaded_devices = ["disk"] if main_device == "cpu" or main_device == "mps" else ["cpu", "disk"]
+     offload = {name: device in offloaded_devices for name, device in device_map.items()}
+     save_folder = offload_dir if len(disk_modules) > 0 else None
+     if state_dict is not None or save_folder is not None or offload_index is not None:
+diff --git a/src/accelerate/utils/modeling.py b/src/accelerate/utils/modeling.py
+index 214fa33e1f0..1667d700fd1 100644
+--- a/src/accelerate/utils/modeling.py
++++ b/src/accelerate/utils/modeling.py
+@@ -30,7 +30,7 @@
+ 
+ from ..state import AcceleratorState
+ from .dataclasses import DistributedType
+-from .imports import is_safetensors_available, is_torch_version, is_xpu_available
++from .imports import is_mps_available, is_safetensors_available, is_torch_version, is_xpu_available
+ from .offload import load_offloaded_weight, offload_weight, save_offload_index
+ from .tqdm import is_tqdm_available, tqdm
+ 
+@@ -480,7 +480,11 @@ def get_max_memory(max_memory: Optional[Dict[Union[int, str], Union[int, str]]]
+                 for i in range(torch.xpu.device_count()):
+                     _ = torch.tensor(0, device=torch.device("xpu", i))
+                 max_memory = {i: torch.xpu.max_memory_allocated(i) for i in range(torch.xpu.device_count())}
+-        max_memory["cpu"] = psutil.virtual_memory().available
++        # allocate everything in the mps device as the RAM is shared
++        if is_mps_available():
++            max_memory["mps"] = psutil.virtual_memory().available
++        else:
++            max_memory["cpu"] = psutil.virtual_memory().available
+         return max_memory
+ 
+     for key in max_memory:
+@@ -572,7 +576,7 @@ def get_balanced_memory(
+     # Get default / clean up max_memory
+     max_memory = get_max_memory(max_memory)
+ 
+-    if not (torch.cuda.is_available() or is_xpu_available()):
++    if not (torch.cuda.is_available() or is_xpu_available()) or is_mps_available():
+         return max_memory
+ 
+     if not is_xpu_available():
+@@ -688,7 +692,12 @@ def infer_auto_device_map(
+         devices.append("disk")
+ 
+     # Devices that need to keep space for a potential offloaded layer.
+-    main_devices = [gpus[0], "cpu"] if len(gpus) > 0 else ["cpu"]
++    if "mps" in gpus:
++        main_devices = ["mps"]
++    elif len(gpus) > 0:
++        main_devices = [gpus[0], "cpu"] if len(gpus) > 0
++    else:
++        main_devices = ["cpu"]
+ 
+     module_sizes = compute_module_sizes(model, dtype=dtype, special_dtypes=special_dtypes)
+     tied_parameters = find_tied_parameters(model)
+diff --git a/tests/test_big_modeling.py b/tests/test_big_modeling.py
+index e8421b3c7b5..14ace51db9a 100644
+--- a/tests/test_big_modeling.py
++++ b/tests/test_big_modeling.py
+@@ -285,6 +285,19 @@ def test_dispatch_model(self):
+             output = model(x)
+             self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
+ 
++    @require_mps
++    def test_dispatch_model_mps(self):
++        model = ModelForTest()
++        device_map = {"linear1": "mps", "batchnorm": "disk", "linear2": "disk"}
++
++        x = torch.randn(2, 3)
++        expected = model(x)
++
++        with TemporaryDirectory() as tmp_dir:
++            dispatch_model(model, device_map, offload_dir=tmp_dir)
++            output = model(x)
++            self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
++
+     @require_cuda
+     def test_dispatch_model_tied_weights(self):
+         model = ModelForTestTiedWeights()
+@@ -373,6 +386,21 @@ def test_dispatch_model_with_unused_submodules(self):
+             output = model(x)
+             self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
+ 
++    @require_mps
++    def test_dispatch_model_with_unused_submodules_mps(self):
++        model = ModelWithUnusedSubModulesForTest()
++        device_map = {"linear1": "mps", "linear2": "mps", "batchnorm": "mps", "linear3": "mps", "linear4": "disk"}
++
++        x = torch.randn(2, 3)
++        expected = model(x)
++
++        with TemporaryDirectory() as tmp_dir:
++            dispatch_model(
++                model, device_map, offload_dir=tmp_dir, preload_module_classes=["ModuleWithUnusedSubModules"]
++            )
++            output = model(x)
++            self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
++
+     @require_multi_gpu
+     def test_dispatch_model_with_unused_submodules_multi_gpu(self):
+         model = ModelWithUnusedSubModulesForTest()
+@@ -410,6 +438,30 @@ def test_load_checkpoint_and_dispatch(self):
+         output = new_model(x)
+         self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
+ 
++    @require_mps
++    def test_load_checkpoint_and_dispatch_mps(self):
++        model = ModelForTest()
++        device_map = {"linear1": "mps", "batchnorm": "mps", "linear2": "disk"}
++
++        x = torch.randn(2, 3)
++        expected = model(x)
++
++        with TemporaryDirectory() as tmp_dir:
++            checkpoint = os.path.join(tmp_dir, "pt_model.bin")
++            torch.save(model.state_dict(), checkpoint)
++
++            new_model = ModelForTest()
++            new_model = load_checkpoint_and_dispatch(
++                new_model, checkpoint, device_map=device_map, offload_folder=tmp_dir
++            )
++
++            # CPU-offloaded weights are on the meta device while waiting for the forward pass.
++            self.assertEqual(new_model.linear1.weight.device, torch.device("mps:0"))
++            self.assertEqual(new_model.linear2.weight.device, torch.device("meta"))
++
++            output = new_model(x)
++            self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
++
+     @require_multi_gpu
+     def test_load_checkpoint_and_dispatch_multi_gpu(self):
+         model = BiggerModelForTest()
+@@ -460,6 +512,36 @@ def test_load_checkpoint_and_dispatch_with_unused_submodules(self):
+         output = new_model(x)
+         self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
+ 
++    @require_mps
++    def test_load_checkpoint_and_dispatch_with_unused_submodules_mps(self):
++        model = ModelWithUnusedSubModulesForTest()
++        device_map = {"linear1": "mps", "linear2": "mps", "batchnorm": "mps", "linear3": "disk", "linear4": "disk"}
++
++        x = torch.randn(2, 3)
++        expected = model(x)
++
++        with TemporaryDirectory() as tmp_dir:
++            checkpoint = os.path.join(tmp_dir, "pt_model.bin")
++            torch.save(model.state_dict(), checkpoint)
++
++            new_model = ModelWithUnusedSubModulesForTest()
++            new_model = load_checkpoint_and_dispatch(
++                new_model,
++                checkpoint,
++                device_map=device_map,
++                preload_module_classes=["ModuleWithUnusedSubModules"],
++                offload_folder=tmp_dir,
++            )
++
++            # CPU-offloaded weights are on the meta device while waiting for the forward pass.
++            self.assertEqual(new_model.linear1.linear.weight.device, torch.device("mps:0"))
++            self.assertEqual(new_model.linear2.linear.weight.device, torch.device("mps:0"))
++            self.assertEqual(new_model.linear3.linear.weight.device, torch.device("meta"))
++            self.assertEqual(new_model.linear4.linear.weight.device, torch.device("meta"))
++
++            output = new_model(x)
++            self.assertTrue(torch.allclose(expected, output.cpu(), atol=1e-5))
++
+     @require_multi_gpu
+     def test_load_checkpoint_and_dispatch_multi_gpu_with_unused_submodules(self):
+         model = ModelWithUnusedSubModulesForTest()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

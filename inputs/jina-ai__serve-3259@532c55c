@@ -1,0 +1,800 @@
+  Task-ID: jina-ai__serve-3259@532c55c
+  Please checkout to this commit first: caf132dbe136828f147b75a0f58a0d2dcc687b55
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [GraphDocument] Add nodes and edges by lists
+**Describe the feature**
+Building a large graph by adding one node or one edge a time becomes very slow. Let's add the option as other frameworks just as DGL or NetworkX to add nodes and edges by lists.
+
+We could define the interfaces as:
+
+```python
+graph = GraphDocument()
+graph.add_single_node(Document())
+graph.add_nodes([Document() for _ in range]) ( Accept iterable of Documents (Also can accept DocumentArrays and DocumentArrayMemmap)
+graph.add_single_edge(Document(), Document())
+graph.add_edges([Document() ...], [Document() ...]) (Validate lengths)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/.github/2.0/cookbooks/Document.md b/.github/2.0/cookbooks/Document.md
+index 1593a173f6b5b..5aa69a186e6f4 100644
+--- a/.github/2.0/cookbooks/Document.md
++++ b/.github/2.0/cookbooks/Document.md
+@@ -530,7 +530,7 @@ from jina.types.document.graph import GraphDocument
+ from jina import Document
+ 
+ graph = GraphDocument()
+-graph.add_node(Document(text='hello world'))
++graph.add_single_node(Document(text='hello world'))
+ graph.nodes[0]
+ ```
+ 
+@@ -548,7 +548,7 @@ from jina.types.document.graph import GraphDocument
+ graph = GraphDocument()
+ d1 = Document(id='1', text='hello world')
+ d2 = Document(id='2', text='goodbye world')
+-graph.add_edge(d1, d2, features={"text": "both documents are linked"})
++graph.add_single_edge(d1, d2, features={"text": "both documents are linked"})
+ graph.nodes
+ ```
+ 
+@@ -585,8 +585,8 @@ graph = GraphDocument()
+ d1 = Document(id='1', text='hello world')
+ d2 = Document(id='2', text='goodbye world')
+ d3 = Document(id='3')
+-graph.add_edge(d1, d2)
+-graph.add_edge(d1, d3)
++graph.add_single_edge(d1, d2)
++graph.add_single_edge(d1, d3)
+ 
+ assert graph.get_out_degree(d1) == 2
+ 
+diff --git a/jina/helper.py b/jina/helper.py
+index aa2144dc2a690..e0dc75d1a68dd 100644
+--- a/jina/helper.py
++++ b/jina/helper.py
+@@ -125,6 +125,21 @@ def wrapper(*args, **kwargs):
+     return deco
+ 
+ 
++def deprecated_method(new_function_name):
++    def deco(func):
++        def wrapper(*args, **kwargs):
++            warnings.warn(
++                f'`{func.__name__}` is renamed to `{new_function_name}`, the usage of `{func.__name__}` is '
++                f'deprecated and will be removed.',
++                DeprecationWarning,
++            )
++            return func(*args, **kwargs)
++
++        return wrapper
++
++    return deco
++
++
+ def get_readable_size(num_bytes: Union[int, float]) -> str:
+     """
+     Transform the bytes into readable value with different units (e.g. 1 KB, 20 MB, 30.1 GB).
+diff --git a/jina/types/document/graph.py b/jina/types/document/graph.py
+index 9c03dcd503331..5b3cb5073bf37 100644
+--- a/jina/types/document/graph.py
++++ b/jina/types/document/graph.py
+@@ -1,4 +1,4 @@
+-from typing import Optional, Iterator, Tuple, Dict, Iterable
++from typing import Optional, Iterator, Tuple, Dict, Iterable, Sequence, Union
+ 
+ import numpy as np
+ 
+@@ -8,6 +8,7 @@
+ from ..struct import StructView
+ from ...importer import ImportExtensions
+ from ...logging.predefined import default_logger
++from ...helper import deprecated_method
+ 
+ __all__ = ['GraphDocument']
+ 
+@@ -71,7 +72,7 @@ def _check_installed_array_packages():
+             ):
+                 JINA_GLOBAL.scipy_installed = True
+ 
+-    def add_node(self, node: 'Document'):
++    def add_single_node(self, node: 'Document'):
+         """
+         Add a a node to the graph
+ 
+@@ -84,7 +85,26 @@ def add_node(self, node: 'Document'):
+         self._node_id_to_offset[node.id] = len(self.nodes)
+         self.nodes.append(node)
+ 
+-    def remove_node(self, node: 'Document'):
++    @deprecated_method(new_function_name='add_single_node')
++    def add_node(self, *args, **kwargs):
++        """
++        Add a a node to the graph
++
++            .. # noqa: DAR101
++            .. # noqa: DAR201
++        """
++        return self.add_single_node(*args, **kwargs)
++
++    def add_nodes(self, nodes: Iterable['Document']):
++        """
++        Add a set of nodes into the graph
++
++        :param nodes: the nodes to be added to the graph
++        """
++        for node in nodes:
++            self.add_node(node)
++
++    def remove_single_node(self, node: Union['Document', str]):
+         """
+         Remove a node from the graph along with the edges that may contain it
+ 
+@@ -92,23 +112,24 @@ def remove_node(self, node: 'Document'):
+         """
+         from scipy.sparse import coo_matrix
+ 
+-        if node.id not in self._node_id_to_offset:
++        node_id = node.id if isinstance(node, Document) else node
++        if node_id not in self._node_id_to_offset:
+             default_logger.debug(
+-                f'Trying to remove document {node.id} from the graph while is not a node of the graph'
++                f'Trying to remove document {node_id} from the graph while is not a node of the graph'
+             )
+             return
+ 
+-        offset = self._node_id_to_offset[node.id]
++        offset = self._node_id_to_offset[node_id]
+ 
+         if self.num_edges > 0:
++            nodes = self.nodes
++
+             edges_to_remove = []
+             for edge_id, (row, col) in enumerate(
+                 zip(self.adjacency.row, self.adjacency.col)
+             ):
+                 if row.item() == offset or col.item() == offset:
+-                    edge_features_keys = (
+-                        f'{self.nodes[row.item()].id}-{self.nodes[col.item()]}'
+-                    )
++                    edge_features_keys = f'{nodes[row.item()].id}-{nodes[col.item()]}'
+                     edges_to_remove.append((edge_id, edge_features_keys))
+ 
+             for edge_id, edge_features_key in reversed(edges_to_remove):
+@@ -129,27 +150,39 @@ def remove_node(self, node: 'Document'):
+ 
+         del self.nodes[offset]
+         self._node_id_to_offset = {
+-            node.id: offset for offset, node in enumerate(self.nodes)
++            present_node.id: offset for offset, present_node in enumerate(self.nodes)
+         }
+ 
+-    def _get_edge_key(self, doc1: 'Document', doc2: 'Document') -> str:
++    @deprecated_method(new_function_name='remove_single_node')
++    def remove_node(self, *args, **kwargs):
+         """
+-        Create a key that is lexicographically sorted in the case of undirected graphs
++        Remove a node from the graph along with the edges that may contain it
+ 
+-        :param doc1: the starting node for this edge
+-        :param doc2: the ending node for this edge
+-        :return: lexicographically sorted key where doc1 < doc2 if undirected
++            .. # noqa: DAR101
++            .. # noqa: DAR201
+         """
++        return self.remove_single_node(*args, **kwargs)
+ 
++    def _get_edge_key(self, doc1_id: str, doc2_id: str) -> str:
++        """
++        Create a key that is lexicographically sorted in the case of undirected graphs
++
++        :param doc1_id: the starting node for this edge
++        :param doc2_id: the ending node for this edge
++        :return: lexicographically sorted key where doc1_id < doc2_id if undirected
++        """
+         if self.undirected:
+             return (
+-                f'{doc1.id}-{doc2.id}' if doc1.id < doc2.id else f'{doc2.id}-{doc1.id}'
++                f'{doc1_id}-{doc2_id}' if doc1_id < doc2_id else f'{doc2_id}-{doc1_id}'
+             )
+         else:
+-            return f'{doc1.id}-{doc2.id}'
++            return f'{doc1_id}-{doc2_id}'
+ 
+-    def add_edge(
+-        self, doc1: 'Document', doc2: 'Document', features: Optional[Dict] = None
++    def add_single_edge(
++        self,
++        doc1: Union['Document', str],
++        doc2: Union['Document', str],
++        features: Optional[Dict] = None,
+     ):
+         """
+         Add an edge to the graph connecting `doc1` with `doc2`
+@@ -160,20 +193,32 @@ def add_edge(
+         """
+         from scipy.sparse import coo_matrix
+ 
+-        edge_key = self._get_edge_key(doc1, doc2)
++        doc1_id = doc1.id if isinstance(doc1, Document) else doc1
++        doc2_id = doc2.id if isinstance(doc2, Document) else doc2
++        edge_key = self._get_edge_key(doc1_id, doc2_id)
+ 
+         if edge_key not in self.edge_features:
+             self.edge_features[edge_key] = features
+-            self.add_node(doc1)
+-            self.add_node(doc2)
++            if isinstance(doc1, Document):
++                self.add_single_node(doc1)
++            else:
++                assert (
++                    doc1_id in self.nodes
++                ), 'trying to add an edge from a node not in the graph'
++            if isinstance(doc2, Document):
++                self.add_single_node(doc2)
++            else:
++                assert (
++                    doc2_id in self.nodes
++                ), 'trying to add an edge to a node not in the graph'
+ 
+             current_adjacency = self.adjacency
+ 
+-            source_id = doc1.id
+-            target_id = doc2.id
+-            if self.undirected and doc1.id > doc2.id:
+-                source_id = doc2.id
+-                target_id = doc1.id
++            source_id = doc1_id
++            target_id = doc2_id
++            if self.undirected and doc1_id > doc2_id:
++                source_id = doc2_id
++                target_id = doc1_id
+ 
+             source_node_offset = self._node_id_to_offset[source_id]
+             target_node_offset = self._node_id_to_offset[target_id]
+@@ -197,6 +242,95 @@ def add_edge(
+                 self._pb_body.graph.adjacency, sp_format='coo'
+             ).value = coo_matrix((data, (row, col)))
+ 
++    @deprecated_method(new_function_name='add_single_edge')
++    def add_edge(self, *args, **kwargs):
++        """
++        Add an edge to the graph
++
++            .. # noqa: DAR101
++            .. # noqa: DAR201
++        """
++        return self.add_single_edge(*args, **kwargs)
++
++    def add_edges(
++        self,
++        source_docs: Sequence[Union['Document', str]],
++        dest_docs: Sequence[Union['Document', str]],
++        edge_features: Optional[Sequence[Optional[Dict]]] = None,
++    ):
++        """
++        Add edges to the graph connecting docs from `source_docs` with docs from `dest_docs`
++
++        :param source_docs: Iterable of docs containing the source nodes
++        :param dest_docs: Iterable of docs containing the destination nodes
++        :param edge_features: Optional features dictionary to be added to the new created edges
++        """
++        from scipy.sparse import coo_matrix
++
++        assert len(source_docs) == len(dest_docs), (
++            'the number of source documents must match the number of '
++            'destination documents '
++        )
++        assert edge_features is None or len(source_docs) == len(edge_features)
++
++        edge_keys = []
++        is_documents_source = isinstance(source_docs[0], Document)
++        is_documents_dest = isinstance(dest_docs[0], Document)
++        for doc1, doc2 in zip(source_docs, dest_docs):
++            doc1_id = doc1.id if is_documents_source else doc1
++            doc2_id = doc2.id if is_documents_source else doc2
++            if is_documents_source:
++                self.add_single_node(doc1)
++            else:
++                assert (
++                    doc1_id in self.nodes
++                ), 'trying to add an edge from a node not in the graph'
++            if is_documents_dest:
++                self.add_single_node(doc2)
++            else:
++                assert (
++                    doc2_id in self.nodes
++                ), 'trying to add an edge from a node not in the graph'
++            edge_keys.append(self._get_edge_key(doc1_id, doc2_id))
++
++        if edge_features is not None:
++            for edge_key, features in zip(edge_keys, edge_features):
++                self.edge_features[edge_key] = features
++        else:
++            for edge_key in edge_keys:
++                if edge_key not in self.edge_features:
++                    self.edge_features[edge_key] = None
++
++        # manipulate the adjacency matrix in a single shot
++        current_adjacency = self.adjacency
++        source_node_offsets = [
++            self._node_id_to_offset[source.id if is_documents_source else source]
++            for source in source_docs
++        ]
++        target_node_offsets = [
++            self._node_id_to_offset[target.id if is_documents_dest else target]
++            for target in dest_docs
++        ]
++        row = (
++            np.append(current_adjacency.row, source_node_offsets)
++            if current_adjacency is not None
++            else np.array(source_node_offsets)
++        )
++        col = (
++            np.append(current_adjacency.col, target_node_offsets)
++            if current_adjacency is not None
++            else np.array(target_node_offsets)
++        )
++        data = (
++            np.append(current_adjacency.data, [1] * len(source_node_offsets))
++            if current_adjacency is not None
++            else np.array([1] * len(source_node_offsets))
++        )
++
++        SparseNdArray(
++            self._pb_body.graph.adjacency, sp_format='coo'
++        ).value = coo_matrix((data, (row, col)))
++
+     def _remove_edge_id(self, edge_id: int, edge_feature_key: str):
+         from scipy.sparse import coo_matrix
+ 
+@@ -220,22 +354,38 @@ def _remove_edge_id(self, edge_id: int, edge_feature_key: str):
+             if edge_feature_key in self.edge_features:
+                 del self.edge_features[edge_feature_key]
+ 
+-    def remove_edge(self, doc1: 'Document', doc2: 'Document'):
++    def remove_single_edge(
++        self,
++        doc1: Union['Document', str],
++        doc2: Union['Document', str],
++    ):
+         """
+         Remove the edge between doc1 and doc2 from the graph
+ 
+         :param doc1: the starting node for this edge
+         :param doc2: the ending node for this edge
+         """
+-        offset1 = self._node_id_to_offset[doc1.id]
+-        offset2 = self._node_id_to_offset[doc2.id]
++        doc1_id = doc1.id if isinstance(doc1, Document) else doc1
++        doc2_id = doc2.id if isinstance(doc2, Document) else doc2
++        offset1 = self._node_id_to_offset[doc1_id]
++        offset2 = self._node_id_to_offset[doc2_id]
+         for edge_id, (row, col) in enumerate(
+             zip(self.adjacency.row, self.adjacency.col)
+         ):
+             if row.item() == offset1 and col.item() == offset2:
+-                edge_key = self._get_edge_key(doc1, doc2)
++                edge_key = self._get_edge_key(doc1_id, doc2_id)
+                 self._remove_edge_id(edge_id, edge_key)
+ 
++    @deprecated_method(new_function_name='remove_single_edge')
++    def remove_edge(self, *args, **kwargs):
++        """
++        Remove the edge between doc1 and doc2 from the graph
++
++            .. # noqa: DAR101
++            .. # noqa: DAR201
++        """
++        return self.remove_single_edge(*args, **kwargs)
++
+     @property
+     def edge_features(self) -> StructView:
+         """
+@@ -374,10 +524,10 @@ def load_from_dgl_graph(dgl_graph: 'DGLGraph') -> 'GraphDocument':
+         for node in dgl_graph.nodes():
+             node_doc = Document()
+             nodeid_to_doc[int(node)] = node_doc
+-            jina_graph.add_node(node_doc)
++            jina_graph.add_single_node(node_doc)
+ 
+         for node_source, node_destination in zip(*dgl_graph.edges()):
+-            jina_graph.add_edge(
++            jina_graph.add_single_edge(
+                 nodeid_to_doc[int(node_source)], nodeid_to_doc[int(node_destination)]
+             )
+ 
+diff --git a/tests/integration/graph/test_graph_executor.py b/tests/integration/graph/test_graph_executor.py
+index f116ee11a3e9c..af84790fbc4bd 100644
+--- a/tests/integration/graph/test_graph_executor.py
++++ b/tests/integration/graph/test_graph_executor.py
+@@ -50,11 +50,11 @@ def graph():
+     doc2 = Document(text='Document2')
+     doc3 = Document(text='Document3')
+ 
+-    graph.add_edge(doc0, doc1, features={'weight': 1})
+-    graph.add_edge(doc0, doc2, features={'weight': 1})
+-    graph.add_edge(doc2, doc1, features={'weight': 10})
+-    graph.add_edge(doc1, doc3, features={'weight': 1})
+-    graph.add_edge(doc2, doc3, features={'weight': 1})
++    graph.add_single_edge(doc0, doc1, features={'weight': 1})
++    graph.add_single_edge(doc0, doc2, features={'weight': 1})
++    graph.add_single_edge(doc2, doc1, features={'weight': 10})
++    graph.add_single_edge(doc1, doc3, features={'weight': 1})
++    graph.add_single_edge(doc2, doc3, features={'weight': 1})
+     return graph
+ 
+ 
+diff --git a/tests/unit/types/document/test_graph_document.py b/tests/unit/types/document/test_graph_document.py
+index ea2f9d3ee398f..216d3eb04f8b1 100644
+--- a/tests/unit/types/document/test_graph_document.py
++++ b/tests/unit/types/document/test_graph_document.py
+@@ -15,11 +15,11 @@ def graph():
+     doc2 = Document(text='Document2')
+     doc3 = Document(text='Document3')
+ 
+-    graph.add_edge(doc0, doc1, features={'text': 'I connect Doc0 and Doc1'})
+-    graph.add_edge(doc0, doc2, features={'text': 'I connect Doc0 and Doc2'})
+-    graph.add_edge(doc2, doc1, features={'text': 'I connect Doc2 and Doc1'})
+-    graph.add_edge(doc1, doc3, features={'text': 'I connect Doc1 and Doc3'})
+-    graph.add_edge(doc2, doc3, features={'text': 'I connect Doc2 and Doc3'})
++    graph.add_single_edge(doc0, doc1, features={'text': 'I connect Doc0 and Doc1'})
++    graph.add_single_edge(doc0, doc2, features={'text': 'I connect Doc0 and Doc2'})
++    graph.add_single_edge(doc2, doc1, features={'text': 'I connect Doc2 and Doc1'})
++    graph.add_single_edge(doc1, doc3, features={'text': 'I connect Doc1 and Doc3'})
++    graph.add_single_edge(doc2, doc3, features={'text': 'I connect Doc2 and Doc3'})
+     return graph
+ 
+ 
+@@ -138,7 +138,7 @@ def test_remove_nodes(graph):
+         num_nodes = graph.num_nodes
+         num_edges = graph.num_edges
+         num_edges_to_remove = graph.get_in_degree(node) + graph.get_out_degree(node)
+-        graph.remove_node(node)
++        graph.remove_single_node(node)
+         assert graph.num_nodes == num_nodes - 1
+         assert graph.num_edges == num_edges - num_edges_to_remove
+ 
+@@ -152,7 +152,7 @@ def test_remove_edges(graph):
+     num_edge_features = len(graph.edge_features.keys())
+     for doc1, doc2 in edges:
+         num_edges = graph.num_edges
+-        graph.remove_edge(doc1, doc2)
++        graph.remove_single_edge(doc1, doc2)
+         num_edge_features -= 1
+         assert graph.num_edges == num_edges - 1
+ 
+@@ -249,8 +249,8 @@ def test_graph_edge_behaviour_creation(graph, expected_output):
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    graph.add_edge(doc1, doc0)
++    graph.add_single_edge(doc0, doc1)
++    graph.add_single_edge(doc1, doc0)
+ 
+     assert graph.num_edges == expected_output
+ 
+@@ -263,8 +263,8 @@ def test_graph_edge_behaviour_creation(graph, expected_output):
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    graph.add_edge(doc1, doc0)
++    graph.add_single_edge(doc0, doc1)
++    graph.add_single_edge(doc1, doc0)
+ 
+     assert graph.num_edges == expected_output
+ 
+@@ -277,8 +277,8 @@ def test_graph_count_invariance(graph, expected_output):
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    graph.add_edge(doc0, doc1)
++    graph.add_single_edge(doc0, doc1)
++    graph.add_single_edge(doc0, doc1)
+ 
+     assert graph.num_edges == expected_output
+ 
+@@ -291,8 +291,8 @@ def test_added_edges_in_edge_features(graph, expected_output):
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    edge_key = graph._get_edge_key(doc0, doc1)
++    graph.add_single_edge(doc0, doc1)
++    edge_key = graph._get_edge_key(doc0.id, doc1.id)
+ 
+     assert edge_key in graph.edge_features
+     assert graph.edge_features[edge_key] is None
+@@ -306,8 +306,8 @@ def test_manual_update_edges_features(graph, expected_output):
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    edge_key = graph._get_edge_key(doc0, doc1)
++    graph.add_single_edge(doc0, doc1)
++    edge_key = graph._get_edge_key(doc0.id, doc1.id)
+ 
+     graph._pb_body.graph.edge_features[edge_key] = {'number_value': 1234}
+ 
+@@ -319,8 +319,8 @@ def test_edge_update_nested_lists():
+     doc0 = Document(text='Document0')
+     doc1 = Document(text='Document1')
+ 
+-    graph.add_edge(doc0, doc1)
+-    edge_key = graph._get_edge_key(doc0, doc1)
++    graph.add_single_edge(doc0, doc1)
++    edge_key = graph._get_edge_key(doc0.id, doc1.id)
+     graph.edge_features[edge_key] = {
+         'hey': {'nested': True, 'list': ['elem1', 'elem2', {'inlist': 'here'}]},
+         'hoy': [0, 1],
+@@ -338,3 +338,231 @@ def test_edge_update_nested_lists():
+ 
+ def test_graph_plot_does_not_fail(graph):
+     graph.plot()
++
++
++def test_graph_add_multiple_edges():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++    graph.add_edges(
++        [doc0, doc0, doc2, doc1, doc2],
++        [doc1, doc2, doc1, doc3, doc3],
++        edge_features=[
++            {'text': 'I connect Doc0 and Doc1'},
++            {'text': 'I connect Doc0 and Doc2'},
++            {'text': 'I connect Doc2 and Doc1'},
++            {'text': 'I connect Doc1 and Doc3'},
++            {'text': 'I connect Doc2 and Doc3'},
++        ],
++    )
++    assert graph.num_nodes == 4
++    assert graph.num_edges == 5
++
++    doc0 = graph.chunks[0]
++    assert doc0.text == 'Document0'
++    doc1 = graph.chunks[1]
++    assert doc1.text == 'Document1'
++    doc2 = graph.chunks[2]
++    assert doc2.text == 'Document2'
++    doc3 = graph.chunks[3]
++    assert doc3.text == 'Document3'
++
++    edge_features = graph.edge_features
++    for i, (d1, d2) in enumerate(graph):
++        if i == 0:
++            assert (
++                edge_features[f'{d1.id}-{d2.id}']['text'] == 'I connect Doc0 and Doc1'
++            )
++            assert d1.text == 'Document0'
++            assert d2.text == 'Document1'
++        if i == 1:
++            assert (
++                edge_features[f'{d1.id}-{d2.id}']['text'] == 'I connect Doc0 and Doc2'
++            )
++            assert d1.text == 'Document0'
++            assert d2.text == 'Document2'
++        if i == 2:
++            assert (
++                edge_features[f'{d1.id}-{d2.id}']['text'] == 'I connect Doc2 and Doc1'
++            )
++            assert d1.text == 'Document2'
++            assert d2.text == 'Document1'
++        if i == 3:
++            assert (
++                edge_features[f'{d1.id}-{d2.id}']['text'] == 'I connect Doc1 and Doc3'
++            )
++            assert d1.text == 'Document1'
++            assert d2.text == 'Document3'
++        if i == 4:
++            assert (
++                edge_features[f'{d1.id}-{d2.id}']['text'] == 'I connect Doc2 and Doc3'
++            )
++            assert d1.text == 'Document2'
++            assert d2.text == 'Document3'
++
++
++def test_graph_add_multiple_nodes():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++    graph.add_nodes([doc0, doc1, doc2, doc3])
++    assert graph.num_nodes == 4
++    assert graph.num_edges == 0
++
++
++def test_add_remove_node_deprecated():
++    graph = GraphDocument()
++    d1 = Document(id='1')
++    d2 = Document(id='2')
++    graph.add_node(d1)
++    graph.add_node(d2)
++    assert len(graph.nodes) == 2
++    graph.remove_node(d1)
++    graph.remove_node(d2)
++    assert len(graph.nodes) == 0
++
++
++def test_add_remove_edge_deprecated():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++
++    graph.add_edge(doc0, doc1, features={'text': 'I connect Doc0 and Doc1'})
++    assert graph.num_nodes == 2
++    assert graph.num_edges == 1
++    graph.remove_edge(doc0, doc1)
++    assert graph.num_nodes == 2
++    assert graph.num_edges == 0
++
++
++def test_add_single_edge_from_id_strings():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++    graph.add_nodes([doc0, doc1, doc2, doc3])
++
++    graph.add_single_edge(
++        doc0.id, doc1.id, features={'text': 'I connect Doc0 and Doc1'}
++    )
++    graph.add_single_edge(
++        doc0.id, doc2.id, features={'text': 'I connect Doc0 and Doc2'}
++    )
++    graph.add_single_edge(
++        doc2.id, doc1.id, features={'text': 'I connect Doc2 and Doc1'}
++    )
++    graph.add_single_edge(
++        doc1.id, doc3.id, features={'text': 'I connect Doc1 and Doc3'}
++    )
++    graph.add_single_edge(
++        doc2.id, doc3.id, features={'text': 'I connect Doc2 and Doc3'}
++    )
++    validate_graph(graph)
++
++
++def test_add_single_edge_from_id_strings_non_existing_nodes():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++
++    with pytest.raises(AssertionError):
++        graph.add_single_edge(
++            doc0.id, doc1.id, features={'text': 'I connect Doc0 and Doc1'}
++        )
++
++
++def test_remove_single_node_from_string():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++
++    graph.add_single_node(doc0)
++    graph.add_single_node(doc1)
++    graph.add_single_node(doc2)
++    graph.add_single_node(doc3)
++    assert len(graph.nodes) == 4
++    assert doc0.id in graph.nodes
++    graph.remove_single_node(doc0.id)
++    assert len(graph.nodes) == 3
++    assert doc0.id not in graph.nodes
++
++
++def test_remove_single_node_from_string_non_existing():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    graph.add_node(doc0)
++    assert graph.num_nodes == 1
++    graph.remove_single_node(doc1.id)
++    assert graph.num_nodes == 1
++
++
++def test_remove_single_edge_from_string():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++
++    graph.add_nodes([doc0, doc1, doc2, doc3])
++
++    graph.add_single_edge(
++        doc0.id, doc1.id, features={'text': 'I connect Doc0 and Doc1'}
++    )
++    graph.add_single_edge(
++        doc0.id, doc2.id, features={'text': 'I connect Doc0 and Doc2'}
++    )
++    graph.add_single_edge(
++        doc2.id, doc1.id, features={'text': 'I connect Doc2 and Doc1'}
++    )
++    graph.add_single_edge(
++        doc1.id, doc3.id, features={'text': 'I connect Doc1 and Doc3'}
++    )
++    graph.add_single_edge(
++        doc2.id, doc3.id, features={'text': 'I connect Doc2 and Doc3'}
++    )
++    assert graph.num_nodes == 4
++    assert graph.num_edges == 5
++    graph.remove_single_edge(doc0.id, doc1.id)
++    assert graph.num_nodes == 4
++    assert graph.num_edges == 4
++
++
++def test_add_multiple_edges_from_string():
++    graph = GraphDocument()
++
++    doc0 = Document(text='Document0')
++    doc1 = Document(text='Document1')
++    doc2 = Document(text='Document2')
++    doc3 = Document(text='Document3')
++
++    graph.add_nodes([doc0, doc1, doc2, doc3])
++
++    graph.add_edges(
++        [doc0.id, doc0.id, doc2.id, doc1.id, doc2.id],
++        [doc1.id, doc2.id, doc1.id, doc3.id, doc3.id],
++        edge_features=[
++            {'text': 'I connect Doc0 and Doc1'},
++            {'text': 'I connect Doc0 and Doc2'},
++            {'text': 'I connect Doc2 and Doc1'},
++            {'text': 'I connect Doc1 and Doc3'},
++            {'text': 'I connect Doc2 and Doc3'},
++        ],
++    )
++
++    validate_graph(graph)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

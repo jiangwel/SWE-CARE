@@ -1,0 +1,419 @@
+  Task-ID: deepset-ai__haystack-6159@3608897
+  Please checkout to this commit first: 5e1223043643410cba5a4e8dc50f754d414b5929
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `MarkdownToTextDocument` (v2)
+This file converter converts each Markdown files into a text Document.
+
+Draft I/O:
+
+```python
+@component
+class MarkdownToTextDocument:
+
+    @component.output_type(documents=List[Document])
+    def run(self, paths: List[Union[str, Path]]):
+        ... loads the content of the files ...
+        return {"documents": documents}
+```
+
+In order to ease preprocessing, this converter should also extract metadata from the files while converting them into Documents.
+
+Some information that can be gathered from the files may be:
+
+- File name and file-related metadata
+- Page numbers
+- Headings and chapter information (implemented partially in v1 as well)
+
+All this information should be "anchored" to the text by character index, if so needed. For example, it may look like this:
+
+```
+{
+    "pages": [
+         {"start": 0, "end": 2034},
+         {"start": 2034, "end": 3987},
+         ...
+    ],
+    "headings": [
+        {"text": "Chapter 1", "position:" 3, "level": 1},
+        {"text": "Paragraph 1", "position:" 203, "level": 2},
+        {"text": "Paragraph 2", "position:" 3203, "level": 2},
+        {"text": "Chapter 2", "position:" 10349, "level": 1},
+        ....
+    ]
+}
+```
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/linting_preview.yml b/.github/workflows/linting_preview.yml
+index ffd7c2b442..2fd5215fad 100644
+--- a/.github/workflows/linting_preview.yml
++++ b/.github/workflows/linting_preview.yml
+@@ -72,7 +72,7 @@ jobs:
+ 
+       - name: Install Haystack
+         run: |
+-          pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2'
++          pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2' beautifulsoup4 markdown python-frontmatter
+           pip install ./haystack-linter
+ 
+       - name: Pylint
+diff --git a/.github/workflows/tests_preview.yml b/.github/workflows/tests_preview.yml
+index 9f570491b7..43e14eb1ee 100644
+--- a/.github/workflows/tests_preview.yml
++++ b/.github/workflows/tests_preview.yml
+@@ -116,7 +116,7 @@ jobs:
+           python-version: ${{ env.PYTHON_VERSION }}
+ 
+       - name: Install Haystack
+-        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2'
++        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2' beautifulsoup4 markdown python-frontmatter
+ 
+       - name: Run
+         run: pytest -m "unit" test/preview
+@@ -175,7 +175,7 @@ jobs:
+           sudo apt install ffmpeg  # for local Whisper tests
+ 
+       - name: Install Haystack
+-        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2'
++        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2' beautifulsoup4 markdown python-frontmatter
+ 
+       - name: Run
+         run: pytest --maxfail=5 -m "integration" test/preview
+@@ -230,7 +230,7 @@ jobs:
+           colima start
+ 
+       - name: Install Haystack
+-        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2'
++        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2' beautifulsoup4 markdown python-frontmatter
+ 
+       - name: Run Tika
+         run: docker run -d -p 9998:9998 apache/tika:2.9.0.0
+@@ -282,7 +282,7 @@ jobs:
+           python-version: ${{ env.PYTHON_VERSION }}
+ 
+       - name: Install Haystack
+-        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2'
++        run: pip install .[dev,preview] langdetect transformers[torch,sentencepiece]==4.32.1 'sentence-transformers>=2.2.0' pypdf openai-whisper tika 'azure-ai-formrecognizer>=3.2.0b2' beautifulsoup4 markdown python-frontmatter
+ 
+       - name: Run
+         run: pytest --maxfail=5 -m "integration" test/preview -k 'not tika'
+diff --git a/haystack/preview/components/file_converters/__init__.py b/haystack/preview/components/file_converters/__init__.py
+index ac75560757..6db81ead15 100644
+--- a/haystack/preview/components/file_converters/__init__.py
++++ b/haystack/preview/components/file_converters/__init__.py
+@@ -3,6 +3,7 @@
+ from haystack.preview.components.file_converters.azure import AzureOCRDocumentConverter
+ from haystack.preview.components.file_converters.pypdf import PyPDFToDocument
+ from haystack.preview.components.file_converters.html import HTMLToDocument
++from haystack.preview.components.file_converters.markdown import MarkdownToTextDocument
+ 
+ __all__ = [
+     "TextFileToDocument",
+@@ -10,4 +11,5 @@
+     "AzureOCRDocumentConverter",
+     "PyPDFToDocument",
+     "HTMLToDocument",
++    "MarkdownToTextDocument",
+ ]
+diff --git a/haystack/preview/components/file_converters/markdown.py b/haystack/preview/components/file_converters/markdown.py
+new file mode 100644
+index 0000000000..1f6fdf0adb
+--- /dev/null
++++ b/haystack/preview/components/file_converters/markdown.py
+@@ -0,0 +1,119 @@
++import logging
++import re
++from pathlib import Path
++from typing import Dict, List, Optional, Tuple, Union, Any
++
++from tqdm import tqdm
++
++from haystack.preview import Document, component
++from haystack.preview.lazy_imports import LazyImport
++
++with LazyImport("Run 'pip install beautifulsoup4 markdown python-frontmatter'") as markdown_conversion_imports:
++    import frontmatter
++    from bs4 import BeautifulSoup, NavigableString
++    from markdown import markdown
++
++
++logger = logging.getLogger(__name__)
++
++
++@component
++class MarkdownToTextDocument:
++    """
++    Converts a Markdown file into a text Document.
++    """
++
++    def __init__(
++        self,
++        remove_code_snippets: bool = True,
++        extract_headlines: bool = False,
++        add_frontmatter_to_meta: bool = False,
++        progress_bar: bool = True,
++    ):
++        """
++        :param remove_code_snippets: Whether to remove snippets from the markdown file. Defaults to True.
++        :param extract_headlines: Whether to extract headings from the markdown file. Defaults to False.
++        :param add_frontmatter_to_meta: Whether to add the contents of the frontmatter to `meta`. Defaults to False.
++        :param progress_bar: Show a progress bar for the conversion.
++        """
++        markdown_conversion_imports.check()
++
++        self.remove_code_snippets = remove_code_snippets
++        self.extract_headlines = extract_headlines
++        self.add_frontmatter_to_meta = add_frontmatter_to_meta
++        self.progress_bar = progress_bar
++
++    @component.output_types(documents=List[Document])
++    def run(self, paths: List[Union[str, Path]], metadata: Optional[List[Union[Dict, Any]]] = None):
++        """
++        Reads text from a markdown file and executes optional preprocessing steps.
++
++        :param file_path: path of the file to convert
++        :param metadata: Optional list of metadata to attach to the Documents.
++        The length of the list must match the number of paths. Defaults to `None`.
++        """
++
++        if metadata is None:
++            metadata = [None] * len(paths)
++
++        documents = []
++
++        for file_path, meta in tqdm(
++            zip(paths, metadata),
++            total=len(paths),
++            desc="Converting markdown files to Documents",
++            disable=not self.progress_bar,
++        ):
++            with open(file_path, errors="ignore") as f:
++                file_metadata, markdown_text = frontmatter.parse(f.read())
++
++            # md -> html -> text since BeautifulSoup can extract text cleanly
++            html = markdown(markdown_text, extensions=["fenced_code"])
++
++            # remove code snippets
++            if self.remove_code_snippets:
++                html = re.sub(r"<pre>(.*?)</pre>", " ", html, flags=re.DOTALL)
++                html = re.sub(r"<code>(.*?)</code>", " ", html, flags=re.DOTALL)
++            soup = BeautifulSoup(html, "html.parser")
++
++            if self.add_frontmatter_to_meta:
++                if meta is None:
++                    meta = file_metadata
++                else:
++                    meta.update(file_metadata)
++
++            if self.extract_headlines:
++                text, headlines = self._extract_text_and_headlines(soup)
++                if meta is None:
++                    meta = {}
++                meta["headlines"] = headlines
++            else:
++                text = soup.get_text()
++
++            if meta is None:
++                document = Document(text=text)
++            else:
++                document = Document(text=text, metadata=meta)
++            documents.append(document)
++
++        return {"documents": documents}
++
++    @staticmethod
++    def _extract_text_and_headlines(soup: "BeautifulSoup") -> Tuple[str, List[Dict]]:
++        """
++        Extracts text and headings from a soup object.
++        """
++        headline_tags = {"h1", "h2", "h3", "h4", "h5", "h6"}
++        headlines = []
++        text = ""
++        for desc in soup.descendants:
++            if desc.name in headline_tags:
++                current_headline = desc.get_text()
++                current_start_idx = len(text)
++                current_level = int(desc.name[-1]) - 1
++                headlines.append({"headline": current_headline, "start_idx": current_start_idx, "level": current_level})
++
++            if isinstance(desc, NavigableString):
++                text += desc.get_text()
++
++        return text, headlines
+diff --git a/releasenotes/notes/add-MarkdownToTextDocument-f97ec6c5fb35527d.yaml b/releasenotes/notes/add-MarkdownToTextDocument-f97ec6c5fb35527d.yaml
+new file mode 100644
+index 0000000000..ceedb7eaaa
+--- /dev/null
++++ b/releasenotes/notes/add-MarkdownToTextDocument-f97ec6c5fb35527d.yaml
+@@ -0,0 +1,4 @@
++---
++preview:
++  - |
++    Add MarkdownToTextDocument, a file converter that converts Markdown files into a text Documents.
+diff --git a/test/preview/components/file_converters/test_markdown_to_document.py b/test/preview/components/file_converters/test_markdown_to_document.py
+new file mode 100644
+index 0000000000..f512271e03
+--- /dev/null
++++ b/test/preview/components/file_converters/test_markdown_to_document.py
+@@ -0,0 +1,54 @@
++import pytest
++
++from haystack.preview.components.file_converters.markdown import MarkdownToTextDocument
++
++
++class TestMarkdownToTextDocument:
++    @pytest.mark.unit
++    def test_markdown_converter(self, preview_samples_path):
++        converter = MarkdownToTextDocument()
++        results = converter.run(
++            paths=[preview_samples_path / "markdown" / "sample.md", preview_samples_path / "markdown" / "sample.md"]
++        )
++        assert results["documents"][0].text.startswith("\nWhat to build with Haystack")
++        assert "# git clone https://github.com/deepset-ai/haystack.git" not in results["documents"][0].text
++
++    @pytest.mark.unit
++    def test_markdown_converter_headline_extraction(self, preview_samples_path):
++        expected_headlines = [
++            ("What to build with Haystack", 1),
++            ("Core Features", 1),
++            ("Quick Demo", 1),
++            ("2nd level headline for testing purposes", 2),
++            ("3rd level headline for testing purposes", 3),
++        ]
++
++        converter = MarkdownToTextDocument(extract_headlines=True, remove_code_snippets=False)
++        results = converter.run(paths=[preview_samples_path / "markdown" / "sample.md"])
++
++        # Check if correct number of headlines are extracted
++        assert len(results["documents"][0].metadata["headlines"]) == 5
++        for extracted_headline, (expected_headline, expected_level) in zip(
++            results["documents"][0].metadata["headlines"], expected_headlines
++        ):
++            # Check if correct headline and level is extracted
++            assert extracted_headline["headline"] == expected_headline
++            assert extracted_headline["level"] == expected_level
++
++            # Check if correct start_idx is extracted
++            start_idx = extracted_headline["start_idx"]
++            hl_len = len(extracted_headline["headline"])
++            assert extracted_headline["headline"] == results["documents"][0].text[start_idx : start_idx + hl_len]
++
++    @pytest.mark.unit
++    def test_markdown_converter_frontmatter_to_meta(self, preview_samples_path):
++        converter = MarkdownToTextDocument(add_frontmatter_to_meta=True)
++        results = converter.run(paths=[preview_samples_path / "markdown" / "sample.md"])
++        assert results["documents"][0].metadata["type"] == "intro"
++        assert results["documents"][0].metadata["date"] == "1.1.2023"
++
++    @pytest.mark.unit
++    def test_markdown_converter_remove_code_snippets(self, preview_samples_path):
++        converter = MarkdownToTextDocument(remove_code_snippets=False)
++        results = converter.run(paths=[preview_samples_path / "markdown" / "sample.md"])
++        assert results["documents"][0].text.startswith("pip install farm-haystack")
+diff --git a/test/preview/test_files/markdown/sample.md b/test/preview/test_files/markdown/sample.md
+new file mode 100644
+index 0000000000..d39e32d44e
+--- /dev/null
++++ b/test/preview/test_files/markdown/sample.md
+@@ -0,0 +1,65 @@
++---
++type: intro
++date: 1.1.2023
++---
++```bash
++pip install farm-haystack
++```
++## What to build with Haystack
++
++- **Ask questions in natural language** and find granular answers in your own documents.
++- Perform **semantic search** and retrieve documents according to meaning not keywords
++- Use **off-the-shelf models** or **fine-tune** them to your own domain.
++- Use **user feedback** to evaluate, benchmark and continuously improve your live models.
++- Leverage existing **knowledge bases** and better handle the long tail of queries that **chatbots** receive.
++- **Automate processes** by automatically applying a list of questions to new documents and using the extracted answers.
++
++![Logo](https://raw.githubusercontent.com/deepset-ai/haystack/main/docs/img/logo.png)
++
++
++## Core Features
++
++-   **Latest models**: Utilize all latest transformer based models (e.g. BERT, RoBERTa, MiniLM) for extractive QA, generative QA and document retrieval.
++-   **Modular**: Multiple choices to fit your tech stack and use case. Pick your favorite database, file converter or modeling framework.
++-   **Open**: 100% compatible with HuggingFace's model hub. Tight interfaces to other frameworks (e.g. Transformers, FARM, sentence-transformers)
++-   **Scalable**: Scale to millions of docs via retrievers, production-ready backends like Elasticsearch / FAISS and a fastAPI REST API
++-   **End-to-End**: All tooling in one place: file conversion, cleaning, splitting, training, eval, inference, labeling ...
++-   **Developer friendly**: Easy to debug, extend and modify.
++-   **Customizable**: Fine-tune models to your own domain or implement your custom DocumentStore.
++-   **Continuous Learning**: Collect new training data via user feedback in production & improve your models continuously
++
++|  |  |
++|-|-|
++| :ledger: [Docs](https://haystack.deepset.ai/overview/intro) | Usage, Guides, API documentation ...|
++| :beginner: [Quick Demo](https://github.com/deepset-ai/haystack/#quick-demo) | Quickly see what Haystack offers |
++| :floppy_disk: [Installation](https://github.com/deepset-ai/haystack/#installation) | How to install Haystack |
++| :art: [Key Components](https://github.com/deepset-ai/haystack/#key-components) | Overview of core concepts |
++| :mortar_board: [Tutorials](https://github.com/deepset-ai/haystack/#tutorials) | Jupyter/Colab Notebooks & Scripts |
++| :eyes: [How to use Haystack](https://github.com/deepset-ai/haystack/#how-to-use-haystack) | Basic explanation of concepts, options and usage |
++| :heart: [Contributing](https://github.com/deepset-ai/haystack/#heart-contributing) | We welcome all contributions! |
++| :bar_chart: [Benchmarks](https://haystack.deepset.ai/benchmarks/v0.9.0) | Speed & Accuracy of Retriever, Readers and DocumentStores |
++| :telescope: [Roadmap](https://haystack.deepset.ai/overview/roadmap) | Public roadmap of Haystack |
++| :pray: [Slack](https://haystack.deepset.ai/community/join) | Join our community on Slack |
++| :bird: [Twitter](https://twitter.com/deepset_ai) | Follow us on Twitter for news and updates |
++| :newspaper: [Blog](https://medium.com/deepset-ai) | Read our articles on Medium |
++
++
++## Quick Demo
++
++The quickest way to see what Haystack offers is to start a [Docker Compose](https://docs.docker.com/compose/) demo application:
++
++**1. Update/install Docker and Docker Compose, then launch Docker**
++
++```
++    # apt-get update && apt-get install docker && apt-get install docker-compose
++    # service docker start
++```
++
++**2. Clone Haystack repository**
++
++```
++    # git clone https://github.com/deepset-ai/haystack.git
++```
++
++### 2nd level headline for testing purposes
++#### 3rd level headline for testing purposes
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,364 @@
+  Task-ID: bridgecrewio__checkov-4155@48ecaf7
+  Please checkout to this commit first: a9f7b28ad9385a42d95377800195e48cd657384b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Ensure that Public Network Access is disabled for Azure Key Vault
+**Describe the issue**
+It seems that there are no Checkov checks related to the best practice of not allowing Public Network Access to Azure Key Vault
+It should be either:
+
+- A list of pre-approved ip_rules in a network_acls block
+- A private endpoint
+
+**Examples**
+
+````hcl
+resource "azurerm_key_vault" "example" {
+  name                                   = "examplekeyvault"
+  location                               = azurerm_resource_group.example.location
+  resource_group_name                    = azurerm_resource_group.example.name
+  enabled_for_disk_encryption            = true
+  tenant_id                              = data.azurerm_client_config.current.tenant_id
+  soft_delete_retention_days             = 90
+  purge_protection_enabled               = enabled
+  public_network_access_enabled          = false
+  sku_name                               = "standard"
+
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    key_permissions = [
+      "Get",
+    ]
+
+    secret_permissions = [
+      "Get",
+    ]
+
+    storage_permissions = [
+      "Get",
+    ]
+  }
+}
+````
+
+**Version (please complete the following information):**
+ - N/A
+  </issue>
+  
+  <patch>
+  diff --git a/checkov/terraform/checks/resource/azure/KeyVaultDisablesPublicNetworkAccess.py b/checkov/terraform/checks/resource/azure/KeyVaultDisablesPublicNetworkAccess.py
+new file mode 100644
+index 0000000000..32231f48c2
+--- /dev/null
++++ b/checkov/terraform/checks/resource/azure/KeyVaultDisablesPublicNetworkAccess.py
+@@ -0,0 +1,38 @@
++from checkov.common.models.enums import CheckCategories, CheckResult
++from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
++
++
++class KeyVaultDisablesPublicNetworkAccess(BaseResourceValueCheck):
++    def __init__(self):
++        name = "Ensure that key vault disable public network access"
++        id = "CKV_AZURE_189"
++        supported_resources = ['azurerm_key_vault']
++        categories = [CheckCategories.NETWORKING]
++        super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
++
++    def get_inspected_key(self):
++        return "public_network_access_enabled"
++
++    def get_expected_value(self):
++        return False
++
++    def scan_resource_conf(self, conf) -> CheckResult:
++        """
++        KeyVaultDisablesPublicNetworkAccess unique logic.
++        public_network_access_enabled default value is True (when creating it)
++        If it False - check pass
++        Otherwise, we check that network_acls configure exists.
++
++        """
++        network_acls_key = "network_acls"
++        if self.get_inspected_key() in conf:
++            conf_value = conf.get(self.get_inspected_key())
++            conf_value = conf_value[0] if isinstance(conf_value, list) else conf_value
++            if self.get_expected_value() == conf_value:
++                return CheckResult.PASSED
++        if conf.get(network_acls_key):
++            return CheckResult.PASSED
++        return CheckResult.FAILED
++
++
++check = KeyVaultDisablesPublicNetworkAccess()
+diff --git a/tests/terraform/checks/resource/azure/example_KeyVaultDisablesPublicNetworkAccess/main.tf b/tests/terraform/checks/resource/azure/example_KeyVaultDisablesPublicNetworkAccess/main.tf
+new file mode 100644
+index 0000000000..3bd45b36d1
+--- /dev/null
++++ b/tests/terraform/checks/resource/azure/example_KeyVaultDisablesPublicNetworkAccess/main.tf
+@@ -0,0 +1,177 @@
++resource "azurerm_key_vault" "pass1" {
++  name                                   = "examplepass1"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  public_network_access_enabled          = false
++  sku_name                               = "standard"
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
++
++resource "azurerm_key_vault" "pass2" {
++  name                                   = "examplepass2"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  public_network_access_enabled          = false
++  sku_name                               = "standard"
++  network_acls {
++    default_action = "Allow"
++    bypass         = "AzureServices"
++  }
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
++
++resource "azurerm_key_vault" "pass3" {
++  name                                   = "examplepass3"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  public_network_access_enabled          = true
++  sku_name                               = "standard"
++  network_acls {
++    default_action = "Allow"
++    bypass         = "AzureServices"
++  }
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
++
++resource "azurerm_key_vault" "pass4" {
++  name                                   = "examplepass4"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  sku_name                               = "standard"
++  network_acls {
++    default_action = "Allow"
++    bypass         = "AzureServices"
++  }
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
++
++resource "azurerm_key_vault" "fail1" {
++  name                                   = "examplefail1"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  sku_name                               = "standard"
++  public_network_access_enabled          = true
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
++
++resource "azurerm_key_vault" "fail2" {
++  name                                   = "examplefail2"
++  location                               = azurerm_resource_group.example.location
++  resource_group_name                    = azurerm_resource_group.example.name
++  enabled_for_disk_encryption            = true
++  tenant_id                              = data.azurerm_client_config.current.tenant_id
++  soft_delete_retention_days             = 90
++  purge_protection_enabled               = enabled
++  sku_name                               = "standard"
++  access_policy {
++    tenant_id = data.azurerm_client_config.current.tenant_id
++    object_id = data.azurerm_client_config.current.object_id
++
++    key_permissions = [
++      "Get",
++    ]
++
++    secret_permissions = [
++      "Get",
++    ]
++
++    storage_permissions = [
++      "Get",
++    ]
++  }
++}
+diff --git a/tests/terraform/checks/resource/azure/test_KeyVaultDisablesPublicNetworkAccess.py b/tests/terraform/checks/resource/azure/test_KeyVaultDisablesPublicNetworkAccess.py
+new file mode 100644
+index 0000000000..011f7d8c35
+--- /dev/null
++++ b/tests/terraform/checks/resource/azure/test_KeyVaultDisablesPublicNetworkAccess.py
+@@ -0,0 +1,46 @@
++import os
++import unittest
++
++from checkov.runner_filter import RunnerFilter
++from checkov.terraform.runner import Runner
++from checkov.terraform.checks.resource.azure.KeyVaultDisablesPublicNetworkAccess import check
++
++
++class TestKeyVaultDisablesPublicNetworkAccess(unittest.TestCase):
++
++    def test(self):
++        runner = Runner()
++        current_dir = os.path.dirname(os.path.realpath(__file__))
++
++        test_files_dir = os.path.join(current_dir, "example_KeyVaultDisablesPublicNetworkAccess")
++        report = runner.run(root_folder=test_files_dir,
++                            runner_filter=RunnerFilter(checks=[check.id]))
++        summary = report.get_summary()
++
++        passing_resources = {
++            'azurerm_key_vault.pass1',
++            'azurerm_key_vault.pass2',
++            'azurerm_key_vault.pass3',
++            'azurerm_key_vault.pass4'
++        }
++        failing_resources = {
++            'azurerm_key_vault.fail1',
++            'azurerm_key_vault.fail2'
++        }
++
++        skipped_resources = {}
++
++        passed_check_resources = set([c.resource for c in report.passed_checks])
++        failed_check_resources = set([c.resource for c in report.failed_checks])
++
++        self.assertEqual(summary['passed'], len(passing_resources))
++        self.assertEqual(summary['failed'], len(failing_resources))
++        self.assertEqual(summary['skipped'], len(skipped_resources))
++        self.assertEqual(summary['parsing_errors'], 0)
++
++        self.assertEqual(passing_resources, passed_check_resources)
++        self.assertEqual(failing_resources, failed_check_resources)
++
++
++if __name__ == '__main__':
++    unittest.main()
+\ No newline at end of file
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

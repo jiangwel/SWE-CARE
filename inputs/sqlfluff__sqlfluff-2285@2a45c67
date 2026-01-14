@@ -1,0 +1,201 @@
+  Task-ID: sqlfluff__sqlfluff-2285@2a45c67
+  Please checkout to this commit first: faf16d06ecf6ba0d19cb5ab0c029f73383d5dc2d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  dbt - L009: Files must end with a single trailing newline.
+<!--If this is a parsing or linting issue, please include a minimal SQL example which reproduces the issue, along with the `sqlfluff parse` output, `sqlfluff lint` output and `sqlfluff fix` output when relevant.-->
+
+## Expected Behaviour
+No error
+
+
+## Observed Behaviour
+```
+L:  5 | P:  60 | L009 | Files must end with a single trailing newline.    
+```
+
+## Steps to Reproduce
+A dbt model that calls a macro, eg:
+```
+{{ config ( materialized='incremental',
+   transient=false,
+    ) }}
+
+{{ generate_table('mytable') }}
+
+```
+
+## Dialect
+snowflake
+
+## Version
+sqlfluff, version 0.8.2
+python 3.9
+
+## Configuration
+```
+[tool.sqlfluff.core]
+templater = "dbt"
+sql_file_exts = ".sql,.sql.j2,.dml,.ddl"
+dialect = "snowflake"
+ignore_templated_areas = true
+
+[tool.sqlfluff.indentation]
+indented_joins = false
+indented_using_on = true
+template_blocks_indent = false
+
+[tool.sqlfluff.templater.dbt]
+project_dir = "."
+profile = "snowflake"
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/core/rules/functional/__init__.py b/src/sqlfluff/core/rules/functional/__init__.py
+index 9ab43488147..8e7f84dd363 100644
+--- a/src/sqlfluff/core/rules/functional/__init__.py
++++ b/src/sqlfluff/core/rules/functional/__init__.py
+@@ -12,7 +12,8 @@
+ use one or the other for readability.
+ """
+ 
+-__all__ = ("Segments", "sp")
++__all__ = ("Segments", "rsp", "sp")
+ 
+ from sqlfluff.core.rules.functional.segments import Segments
++import sqlfluff.core.rules.functional.raw_file_slice_predicates as rsp
+ import sqlfluff.core.rules.functional.segment_predicates as sp
+diff --git a/src/sqlfluff/core/rules/functional/segment_predicates.py b/src/sqlfluff/core/rules/functional/segment_predicates.py
+index 7eeeeddb273..833cc3a6abc 100644
+--- a/src/sqlfluff/core/rules/functional/segment_predicates.py
++++ b/src/sqlfluff/core/rules/functional/segment_predicates.py
+@@ -8,9 +8,11 @@
+ requirements. Rule authors can define their own predicates as needed, either
+ as regular functions, `lambda`, etc.
+ """
+-from typing import Callable
++from typing import Callable, Optional
+ 
+ from sqlfluff.core.parser import BaseSegment
++from sqlfluff.core.rules.functional.raw_file_slices import RawFileSlices
++from sqlfluff.core.templaters.base import TemplatedFile
+ 
+ 
+ def is_type(*seg_type: str) -> Callable[[BaseSegment], bool]:
+@@ -133,3 +135,18 @@ def _(segment: BaseSegment):
+         return not fn(segment)
+ 
+     return _
++
++
++def raw_slices(
++    segment: BaseSegment,
++    templated_file: Optional[TemplatedFile],
++) -> RawFileSlices:
++    """Returns raw slices for a segment."""
++    if not templated_file:
++        raise ValueError('raw_slices: "templated_file" parameter is required.')
++    return RawFileSlices(
++        *templated_file.raw_slices_spanning_source_slice(
++            segment.pos_marker.source_slice
++        ),
++        templated_file=templated_file
++    )
+diff --git a/src/sqlfluff/rules/L009.py b/src/sqlfluff/rules/L009.py
+index ad3dc632028..b5c03afca1e 100644
+--- a/src/sqlfluff/rules/L009.py
++++ b/src/sqlfluff/rules/L009.py
+@@ -5,8 +5,7 @@
+ 
+ from sqlfluff.core.rules.base import BaseRule, LintResult, LintFix, RuleContext
+ from sqlfluff.core.rules.doc_decorators import document_fix_compatible
+-from sqlfluff.core.rules.functional import Segments
+-from sqlfluff.core.rules.functional import segment_predicates as sp
++from sqlfluff.core.rules.functional import Segments, rsp, sp
+ 
+ 
+ @document_fix_compatible
+@@ -99,10 +98,7 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+             loop_while=sp.or_(sp.is_whitespace(), sp.is_type("dedent")),
+         )
+ 
+-        if len(trailing_newlines) == 1:
+-            # No need for fix if single new line exists.
+-            return None
+-        elif len(trailing_newlines) == 0:
++        if not trailing_newlines:
+             # We make an edit to create this segment after the child of the FileSegment.
+             if len(parent_stack) == 1:
+                 fix_anchor_segment = context.segment
+@@ -119,8 +115,20 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                 ],
+             )
+         else:
+-            # There are excess newlines so delete all bar one.
+-            return LintResult(
+-                anchor=context.segment,
+-                fixes=[LintFix.delete(d) for d in trailing_newlines[1:]],
++            # There are one or more trailing newlines in templated space.
++            # For any excess newlines, translate to "raw" space to determine if
++            # they are literal (rather than templated). Delete any extras.
++            # (Note that 'trailing_newlines' is ordered in reverse, i.e. from
++            # the end of the file *backwards*.)
++            extra_newlines = trailing_newlines[1:].select(
++                loop_while=lambda seg: sp.raw_slices(seg, context.templated_file).all(
++                    rsp.is_slice_type("literal")
++                )
+             )
++            if extra_newlines:
++                return LintResult(
++                    anchor=context.segment,
++                    fixes=[LintFix.delete(d) for d in extra_newlines],
++                )
++            # Single newline, no need for fix.
++            return None
+diff --git a/test/fixtures/rules/std_rule_cases/L009.yml b/test/fixtures/rules/std_rule_cases/L009.yml
+index 0da55a7b5ee..b708d5d639d 100644
+--- a/test/fixtures/rules/std_rule_cases/L009.yml
++++ b/test/fixtures/rules/std_rule_cases/L009.yml
+@@ -10,3 +10,7 @@ test_fail_no_final_newline:
+ test_fail_multiple_final_newlines:
+   fail_str: "SELECT foo FROM bar\n\n"
+   fix_str: "SELECT foo FROM bar\n"
++
++test_pass_templated_plus_raw_newlines:
++  pass_str: |
++    {{ "\n\n" }}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

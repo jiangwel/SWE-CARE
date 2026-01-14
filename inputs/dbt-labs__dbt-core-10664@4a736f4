@@ -1,0 +1,420 @@
+  Task-ID: dbt-labs__dbt-core-10664@4a736f4
+  Please checkout to this commit first: c28cb92af51d7f2cb27618aeb43705ba951aa3ef
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [CT-3485] Semantic Layer custom calendar config support
+### Housekeeping
+
+- [X] I am a maintainer of dbt-core
+
+### Short description
+Details unknown.
+
+The spec for this is still in the ideation phase.
+
+### Acceptance criteria
+People can specify the attributes necessary for custom calendar support 👀 
+
+### Impact to Other Teams
+
+* Semantic Layer - The semantic layer can't begin using this until we support it
+* Cloud artifacts - This change will change the v12 manifest that goes out with 1.8
+
+### Will backports be required?
+
+Not sure if required, but the SL team would prefer a backport to 1.7
+
+### Context
+
+This issue should not be considered ready to work on until the work is done in dbt-semantic-interfaces, because the schema we need to implement isn't finalized until that point. Currently there does exist an issue for this work in dbt-semantic-interfaces.
+  </issue>
+  
+  <patch>
+  diff --git a/.changes/unreleased/Features-20240904-182320.yaml b/.changes/unreleased/Features-20240904-182320.yaml
+new file mode 100644
+index 00000000000..7d216ec749a
+--- /dev/null
++++ b/.changes/unreleased/Features-20240904-182320.yaml
+@@ -0,0 +1,6 @@
++kind: Features
++body: Add custom_granularities to YAML spec for time spines.
++time: 2024-09-04T18:23:20.234952-07:00
++custom:
++  Author: courtneyholcomb
++  Issue: "9265"
+diff --git a/core/dbt/artifacts/resources/v1/model.py b/core/dbt/artifacts/resources/v1/model.py
+index 051efc5e987..9c43970f488 100644
+--- a/core/dbt/artifacts/resources/v1/model.py
++++ b/core/dbt/artifacts/resources/v1/model.py
+@@ -22,9 +22,16 @@ class ModelConfig(NodeConfig):
+     )
+ 
+ 
++@dataclass
++class CustomGranularity(dbtClassMixin):
++    name: str
++    column_name: Optional[str] = None
++
++
+ @dataclass
+ class TimeSpine(dbtClassMixin):
+     standard_granularity_column: str
++    custom_granularities: List[CustomGranularity] = field(default_factory=list)
+ 
+ 
+ @dataclass
+diff --git a/core/dbt/contracts/graph/semantic_manifest.py b/core/dbt/contracts/graph/semantic_manifest.py
+index 2381784b794..c8bc2d6685c 100644
+--- a/core/dbt/contracts/graph/semantic_manifest.py
++++ b/core/dbt/contracts/graph/semantic_manifest.py
+@@ -24,6 +24,7 @@
+ from dbt_semantic_interfaces.implementations.semantic_model import PydanticSemanticModel
+ from dbt_semantic_interfaces.implementations.time_spine import (
+     PydanticTimeSpine,
++    PydanticTimeSpineCustomGranularityColumn,
+     PydanticTimeSpinePrimaryColumn,
+ )
+ from dbt_semantic_interfaces.implementations.time_spine_table_configuration import (
+@@ -105,6 +106,12 @@ def _get_pydantic_semantic_manifest(self) -> PydanticSemanticManifest:
+                     name=time_spine.standard_granularity_column,
+                     time_granularity=standard_granularity_column.granularity,
+                 ),
++                custom_granularities=[
++                    PydanticTimeSpineCustomGranularityColumn(
++                        name=custom_granularity.name, column_name=custom_granularity.column_name
++                    )
++                    for custom_granularity in time_spine.custom_granularities
++                ],
+             )
+             pydantic_time_spines.append(pydantic_time_spine)
+             if (
+diff --git a/core/dbt/contracts/graph/unparsed.py b/core/dbt/contracts/graph/unparsed.py
+index 1dd00352ca8..142e8ade72e 100644
+--- a/core/dbt/contracts/graph/unparsed.py
++++ b/core/dbt/contracts/graph/unparsed.py
+@@ -207,9 +207,16 @@ class UnparsedNodeUpdate(HasConfig, HasColumnTests, HasColumnAndTestProps, HasYa
+     access: Optional[str] = None
+ 
+ 
++@dataclass
++class UnparsedCustomGranularity(dbtClassMixin):
++    name: str
++    column_name: Optional[str] = None
++
++
+ @dataclass
+ class UnparsedTimeSpine(dbtClassMixin):
+     standard_granularity_column: str
++    custom_granularities: List[UnparsedCustomGranularity] = field(default_factory=list)
+ 
+ 
+ @dataclass
+@@ -254,12 +261,27 @@ def __post_init__(self) -> None:
+                     f"column name '{self.time_spine.standard_granularity_column}' for model '{self.name}'. Valid names"
+                     f"{' for latest version' if self.latest_version else ''}: {list(column_names_to_columns.keys())}."
+                 )
+-            column = column_names_to_columns[self.time_spine.standard_granularity_column]
+-            if not column.granularity:
++            standard_column = column_names_to_columns[self.time_spine.standard_granularity_column]
++            if not standard_column.granularity:
+                 raise ParsingError(
+                     f"Time spine standard granularity column must have a granularity defined. Please add one for "
+                     f"column '{self.time_spine.standard_granularity_column}' in model '{self.name}'."
+                 )
++            custom_granularity_columns_not_found = []
++            for custom_granularity in self.time_spine.custom_granularities:
++                column_name = (
++                    custom_granularity.column_name
++                    if custom_granularity.column_name
++                    else custom_granularity.name
++                )
++                if column_name not in column_names_to_columns:
++                    custom_granularity_columns_not_found.append(column_name)
++            if custom_granularity_columns_not_found:
++                raise ParsingError(
++                    "Time spine custom granularity columns do not exist in the model. "
++                    f"Columns not found: {custom_granularity_columns_not_found}; "
++                    f"Available columns: {list(column_names_to_columns.keys())}"
++                )
+ 
+     def get_columns_for_version(self, version: NodeVersion) -> List[UnparsedColumn]:
+         if version not in self._version_map:
+diff --git a/core/dbt/parser/schemas.py b/core/dbt/parser/schemas.py
+index 96313425faa..cb0d5f9f5a8 100644
+--- a/core/dbt/parser/schemas.py
++++ b/core/dbt/parser/schemas.py
+@@ -6,7 +6,7 @@
+ 
+ from dbt import deprecations
+ from dbt.artifacts.resources import RefArgs
+-from dbt.artifacts.resources.v1.model import TimeSpine
++from dbt.artifacts.resources.v1.model import CustomGranularity, TimeSpine
+ from dbt.clients.jinja_static import statically_parse_ref_or_source
+ from dbt.clients.yaml_helper import load_yaml_text
+ from dbt.config import RuntimeConfig
+@@ -627,7 +627,14 @@ def parse_patch(self, block: TargetBlock[NodeTarget], refs: ParserRef) -> None:
+             deprecation_date = block.target.deprecation_date
+             time_spine = (
+                 TimeSpine(
+-                    standard_granularity_column=block.target.time_spine.standard_granularity_column
++                    standard_granularity_column=block.target.time_spine.standard_granularity_column,
++                    custom_granularities=[
++                        CustomGranularity(
++                            name=custom_granularity.name,
++                            column_name=custom_granularity.column_name,
++                        )
++                        for custom_granularity in block.target.time_spine.custom_granularities
++                    ],
+                 )
+                 if block.target.time_spine
+                 else None
+diff --git a/core/setup.py b/core/setup.py
+index 904b23afeb6..3b2a1ee3261 100644
+--- a/core/setup.py
++++ b/core/setup.py
+@@ -69,7 +69,7 @@
+         # These are major-version-0 packages also maintained by dbt-labs.
+         # Accept patches but avoid automatically updating past a set minor version range.
+         "dbt-extractor>=0.5.0,<=0.6",
+-        "dbt-semantic-interfaces>=0.7.0,<0.8",
++        "dbt-semantic-interfaces>=0.7.1,<0.8",
+         # Minor versions for these are expected to be backwards-compatible
+         "dbt-common>=1.6.0,<2.0",
+         "dbt-adapters>=1.3.0,<2.0",
+diff --git a/schemas/dbt/manifest/v12.json b/schemas/dbt/manifest/v12.json
+index dfa5744ce70..786a9b4382e 100644
+--- a/schemas/dbt/manifest/v12.json
++++ b/schemas/dbt/manifest/v12.json
+@@ -4618,6 +4618,33 @@
+                     "properties": {
+                       "standard_granularity_column": {
+                         "type": "string"
++                      },
++                      "custom_granularities": {
++                        "type": "array",
++                        "items": {
++                          "type": "object",
++                          "title": "CustomGranularity",
++                          "properties": {
++                            "name": {
++                              "type": "string"
++                            },
++                            "column_name": {
++                              "anyOf": [
++                                {
++                                  "type": "string"
++                                },
++                                {
++                                  "type": "null"
++                                }
++                              ],
++                              "default": null
++                            }
++                          },
++                          "additionalProperties": false,
++                          "required": [
++                            "name"
++                          ]
++                        }
+                       }
+                     },
+                     "additionalProperties": false,
+@@ -14233,6 +14260,33 @@
+                           "properties": {
+                             "standard_granularity_column": {
+                               "type": "string"
++                            },
++                            "custom_granularities": {
++                              "type": "array",
++                              "items": {
++                                "type": "object",
++                                "title": "CustomGranularity",
++                                "properties": {
++                                  "name": {
++                                    "type": "string"
++                                  },
++                                  "column_name": {
++                                    "anyOf": [
++                                      {
++                                        "type": "string"
++                                      },
++                                      {
++                                        "type": "null"
++                                      }
++                                    ],
++                                    "default": null
++                                  }
++                                },
++                                "additionalProperties": false,
++                                "required": [
++                                  "name"
++                                ]
++                              }
+                             }
+                           },
+                           "additionalProperties": false,
+diff --git a/tests/functional/time_spines/fixtures.py b/tests/functional/time_spines/fixtures.py
+index 19711c5bb24..0f67488ff11 100644
+--- a/tests/functional/time_spines/fixtures.py
++++ b/tests/functional/time_spines/fixtures.py
+@@ -54,9 +54,16 @@
+   - name: metricflow_time_spine
+     time_spine:
+       standard_granularity_column: date_day
++      custom_granularities:
++        - name: retail_month
++        - name: martian_year
++          column_name: martian__year_xyz
+     columns:
+       - name: date_day
+         granularity: day
++      - name: retail_month
++      - name: martian__year_xyz
++
+ """
+ 
+ missing_time_spine_yml = """
+@@ -76,7 +83,7 @@
+       - name: ts_second
+ """
+ 
+-time_spine_missing_column_yml = """
++time_spine_missing_standard_column_yml = """
+ models:
+   - name: metricflow_time_spine_second
+     time_spine:
+@@ -84,3 +91,15 @@
+     columns:
+       - name: date_day
+ """
++
++time_spine_missing_custom_column_yml = """
++models:
++  - name: metricflow_time_spine_second
++    time_spine:
++      standard_granularity_column: date_day
++      custom_granularities:
++        - name: retail_month
++    columns:
++      - name: date_day
++        granularity: day
++"""
+diff --git a/tests/functional/time_spines/test_time_spines.py b/tests/functional/time_spines/test_time_spines.py
+index 7b21ec0b35b..03063d347be 100644
+--- a/tests/functional/time_spines/test_time_spines.py
++++ b/tests/functional/time_spines/test_time_spines.py
+@@ -13,8 +13,9 @@
+     metricflow_time_spine_sql,
+     models_people_sql,
+     semantic_model_people_yml,
+-    time_spine_missing_column_yml,
++    time_spine_missing_custom_column_yml,
+     time_spine_missing_granularity_yml,
++    time_spine_missing_standard_column_yml,
+     valid_time_spines_yml,
+ )
+ 
+@@ -65,7 +66,18 @@ def test_time_spines(self, project):
+                 model.time_spine.standard_granularity_column
+                 == model_names_to_col_names[model.name]
+             )
+-            assert len(model.columns) == 1
++            if model.name == day_model_name:
++                assert len(model.time_spine.custom_granularities) == 2
++                assert {
++                    custom_granularity.name
++                    for custom_granularity in model.time_spine.custom_granularities
++                } == {"retail_month", "martian_year"}
++                for custom_granularity in model.time_spine.custom_granularities:
++                    if custom_granularity.name == "martian_year":
++                        assert custom_granularity.column_name == "martian__year_xyz"
++            else:
++                assert len(model.time_spine.custom_granularities) == 0
++            assert len(model.columns) > 0
+             assert (
+                 list(model.columns.values())[0].granularity
+                 == model_names_to_granularities[model.name]
+@@ -152,8 +164,8 @@ def test_time_spines(self, project):
+         )
+ 
+ 
+-class TestTimeSpineColumnMissing:
+-    """Tests that YAML with time spine column not in model errors."""
++class TestTimeSpineStandardColumnMissing:
++    """Tests that YAML with time spine standard granularity column not in model errors."""
+ 
+     @pytest.fixture(scope="class")
+     def models(self):
+@@ -162,7 +174,7 @@ def models(self):
+             "people.sql": models_people_sql,
+             "metricflow_time_spine.sql": metricflow_time_spine_sql,
+             "metricflow_time_spine_second.sql": metricflow_time_spine_second_sql,
+-            "time_spines.yml": time_spine_missing_column_yml,
++            "time_spines.yml": time_spine_missing_standard_column_yml,
+         }
+ 
+     def test_time_spines(self, project):
+@@ -175,6 +187,29 @@ def test_time_spines(self, project):
+         )
+ 
+ 
++class TestTimeSpineCustomColumnMissing:
++    """Tests that YAML with time spine custom granularity column not in model errors."""
++
++    @pytest.fixture(scope="class")
++    def models(self):
++        return {
++            "semantic_model_people.yml": semantic_model_people_yml,
++            "people.sql": models_people_sql,
++            "metricflow_time_spine.sql": metricflow_time_spine_sql,
++            "metricflow_time_spine_second.sql": metricflow_time_spine_second_sql,
++            "time_spines.yml": time_spine_missing_custom_column_yml,
++        }
++
++    def test_time_spines(self, project):
++        runner = dbtRunner()
++        result = runner.invoke(["parse"])
++        assert isinstance(result.exception, ParsingError)
++        assert (
++            "Time spine custom granularity columns do not exist in the model."
++            in result.exception.msg
++        )
++
++
+ class TestTimeSpineGranularityMissing:
+     """Tests that YAML with time spine column without granularity errors."""
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,355 @@
+  Task-ID: numba__numba-7082@8147eda
+  Please checkout to this commit first: ad5dec94dbf61c5b1e171f237bb0d9ac788fcfd2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Date arithmetic works when nopython=False, but not when nopython=True
+`nopython=False`:
+
+``` python
+In [14]: from numba import jit, vectorize
+
+In [15]: f = jit(NPDatetime('D')(NPDatetime('D')))(lambda x: x + np.timedelta64(1, 'D'))
+
+In [16]: x = np.random.randint(10, size=10).astype('datetime64[D]')
+
+In [17]: f(x)
+Out[17]:
+array(['1970-01-10', '1970-01-04', '1970-01-07', '1970-01-03',
+       '1970-01-03', '1970-01-10', '1970-01-04', '1970-01-07',
+       '1970-01-03', '1970-01-02'], dtype='datetime64[D]')
+```
+
+`nopython=True`:
+
+```
+UntypedAttributeError: Caused By:
+Traceback (most recent call last):
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/compiler.py", line 201, in run
+    res = stage()
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/compiler.py", line 415, in stage_nopython_frontend
+    self.locals)
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/compiler.py", line 710, in type_inference_stage
+    infer.propagate()
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/typeinfer.py", line 408, in propagate
+    self.constrains.propagate(self.context, self.typevars)
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/typeinfer.py", line 107, in propagate
+    constrain(context, typevars)
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/typeinfer.py", line 275, in __call__
+    attrty = context.resolve_getattr(value=ty, attr=self.attr)
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/typing/context.py", line 88, in resolve_getattr
+    ret = attrinfo.resolve(value, attr)
+  File "/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numba/typing/templates.py", line 335, in resolve
+    raise UntypedAttributeError(value=value, attr=attr)
+UntypedAttributeError: Unknown attribute "timedelta64" of type Module(<module 'numpy' from '/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numpy/__init__.pyc'>)
+
+Failed at nopython (nopython frontend)
+Unknown attribute "timedelta64" of type Module(<module 'numpy' from '/Users/pcloud/miniconda/envs/py27/lib/python2.7/site-packages/numpy/__init__.pyc'>)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/numba/core/ir_utils.py b/numba/core/ir_utils.py
+index 929fdf5a402..6b99919554d 100644
+--- a/numba/core/ir_utils.py
++++ b/numba/core/ir_utils.py
+@@ -108,17 +108,25 @@ def mk_alloc(typingctx, typemap, calltypes, lhs, size_var, dtype, scope, loc,
+     if typemap:
+         typemap[attr_var.name] = get_np_ufunc_typ(numpy.empty)
+     attr_assign = ir.Assign(empty_attr_call, attr_var, loc)
++     # Assume str(dtype) returns a valid type
++    dtype_str = str(dtype)
+     # alloc call: lhs = empty_attr(size_var, typ_var)
+     typ_var = ir.Var(scope, mk_unique_var("$np_typ_var"), loc)
+     if typemap:
+         typemap[typ_var.name] = types.functions.NumberClass(dtype)
+-    # assuming str(dtype) returns valid np dtype string
+-    dtype_str = str(dtype)
+-    if dtype_str=='bool':
+-        # empty doesn't like 'bool' sometimes (e.g. kmeans example)
+-        dtype_str = 'bool_'
+-    np_typ_getattr = ir.Expr.getattr(g_np_var, dtype_str, loc)
+-    typ_var_assign = ir.Assign(np_typ_getattr, typ_var, loc)
++    # If dtype is a datetime/timedelta with a unit,
++    # then it won't return a valid type and instead can be created
++    # with a string. i.e. "datetime64[ns]")
++    if (isinstance(dtype, (types.NPDatetime, types.NPTimedelta)) and
++        dtype.unit != ''):
++            typename_const = ir.Const(dtype_str, loc)
++            typ_var_assign = ir.Assign(typename_const, typ_var, loc)
++    else:
++        if dtype_str=='bool':
++            # empty doesn't like 'bool' sometimes (e.g. kmeans example)
++            dtype_str = 'bool_'
++        np_typ_getattr = ir.Expr.getattr(g_np_var, dtype_str, loc)
++        typ_var_assign = ir.Assign(np_typ_getattr, typ_var, loc)
+     alloc_call = ir.Expr.call(attr_var, [size_var, typ_var], (), loc)
+ 
+     if calltypes:
+diff --git a/numba/np/numpy_support.py b/numba/np/numpy_support.py
+index 7e516d68c75..79541ad8334 100644
+--- a/numba/np/numpy_support.py
++++ b/numba/np/numpy_support.py
+@@ -6,6 +6,7 @@
+ 
+ from numba.core import errors, types
+ from numba.core.typing.templates import signature
++from numba.np import npdatetime_helpers
+ from numba.core.errors import TypingError
+ 
+ # re-export
+@@ -397,7 +398,7 @@ def choose_types(numba_types, ufunc_letters):
+                   for letter in ufunc_letters[len(numba_types):]]
+         return types
+ 
+-    def set_output_dt_units(inputs, outputs, ufunc_inputs):
++    def set_output_dt_units(inputs, outputs, ufunc_inputs, ufunc_name):
+         """
+         Sets the output unit of a datetime type based on the input units
+ 
+@@ -431,6 +432,23 @@ def make_specific(outputs, unit):
+                     new_outputs.append(out)
+             return new_outputs
+ 
++        def make_datetime_specific(outputs, dt_unit, td_unit):
++            new_outputs = []
++            for out in outputs:
++                if isinstance(out, types.NPDatetime) and out.unit == "":
++                    unit = npdatetime_helpers.combine_datetime_timedelta_units(
++                        dt_unit, td_unit)
++                    if unit is None:
++                        raise TypeError(f"ufunc '{ufunc_name}' is not " +
++                                        "supported between " +
++                                        f"datetime64[{dt_unit}] " +
++                                        f"and timedelta64[{td_unit}]"
++                                        )
++                    new_outputs.append(types.NPDatetime(unit))
++                else:
++                    new_outputs.append(out)
++            return new_outputs
++
+         if ufunc_inputs == 'mm':
+             if all(inp.unit == inputs[0].unit for inp in inputs):
+                 # Case with operation on same units. Operations on different
+@@ -441,6 +459,20 @@ def make_specific(outputs, unit):
+             else:
+                 return outputs
+             return new_outputs
++        elif ufunc_inputs == 'mM':
++            # case where the left operand has timedelta type
++            # and the right operand has datetime
++            td_unit = inputs[0].unit
++            dt_unit = inputs[1].unit
++            return make_datetime_specific(outputs, dt_unit, td_unit)
++
++        elif ufunc_inputs == 'Mm':
++            # case where the right operand has timedelta type
++            # and the left operand has datetime
++            dt_unit = inputs[0].unit
++            td_unit = inputs[1].unit
++            return make_datetime_specific(outputs, dt_unit, td_unit)
++
+         elif ufunc_inputs[0] == 'm':
+             # case where the left operand has timedelta type
+             unit = inputs[0].unit
+@@ -488,10 +520,12 @@ def make_specific(outputs, unit):
+             try:
+                 inputs = choose_types(input_types, ufunc_inputs)
+                 outputs = choose_types(output_types, ufunc_outputs)
+-                # if the left operand or both are timedeltas, then the output
+-                # units need to be determined.
+-                if ufunc_inputs[0] == 'm':
+-                    outputs = set_output_dt_units(inputs, outputs, ufunc_inputs)
++                # if the left operand or both are timedeltas, or the first
++                # argument is datetime and the second argument is timedelta,
++                # then the output units need to be determined.
++                if ufunc_inputs[0] == 'm' or ufunc_inputs == 'Mm':
++                    outputs = set_output_dt_units(inputs, outputs,
++                                                  ufunc_inputs, ufunc.__name__)
+ 
+             except errors.NumbaNotImplementedError:
+                 # One of the selected dtypes isn't supported by Numba
+diff --git a/numba/tests/test_npdatetime.py b/numba/tests/test_npdatetime.py
+index 8f24b029b08..6a4a1d76396 100644
+--- a/numba/tests/test_npdatetime.py
++++ b/numba/tests/test_npdatetime.py
+@@ -7,16 +7,17 @@
+ 
+ import contextlib
+ import itertools
++import re
++import unittest
+ import warnings
+ 
+ import numpy as np
+ 
+-import unittest
+ from numba import jit, vectorize, njit
+ from numba.np.numpy_support import numpy_version
+ from numba.core import types, config
+ from numba.core.errors import TypingError
+-from numba.tests.support import TestCase, tag
++from numba.tests.support import TestCase, tag, skip_parfors_unsupported
+ from numba.np import npdatetime_helpers, numpy_support
+ 
+ TIMEDELTA_M = np.dtype('timedelta64[M]')
+@@ -527,10 +528,10 @@ def test_hash(self):
+         f = self.jit(hash_usecase)
+         def check(a):
+             self.assertPreciseEqual(f(a), hash(a))
+-        
++
+         TD_CASES = ((3,), (-4,), (3, 'ms'), (-4, 'ms'), (27, 'D'),
+                     (2, 'D'), (2, 'W'), (2, 'Y'), (3, 'W'),
+-                    (365, 'D'), (10000, 'D'), (-10000, 'D'), 
++                    (365, 'D'), (10000, 'D'), (-10000, 'D'),
+                     ('NaT',), ('NaT', 'ms'), ('NaT', 'D'), (-1,))
+         DT_CASES = (('2014',), ('2016',), ('2000',), ('2014-02',),
+                     ('2014-03',), ('2014-04',), ('2016-02',), ('2000-12-31',),
+@@ -823,5 +824,85 @@ def arr_div(a, b):
+             self.assertTrue(np.array_equal(py_func(a, b), cfunc(a, b)))
+ 
+ 
++class TestDatetimeArrayOps(TestCase):
++
++    def _test_td_add_or_sub(self, operation, parallel):
++        """
++        Test the addition/subtraction of a datetime array with a timedelta type
++        """
++        def impl(a, b):
++            return operation(a, b)
++
++        arr_one = np.array([
++                        np.datetime64("2011-01-01"),
++                        np.datetime64("1971-02-02"),
++                        np.datetime64("2021-03-03"),
++                        np.datetime64("2004-12-07"),
++                    ], dtype="datetime64[ns]")
++        arr_two = np.array([
++                        np.datetime64("2011-01-01"),
++                        np.datetime64("1971-02-02"),
++                        np.datetime64("2021-03-03"),
++                        np.datetime64("2004-12-07"),
++                    ], dtype="datetime64[D]")
++        py_func = impl
++        cfunc = njit(parallel=parallel)(impl)
++        test_cases = [
++            (arr_one, np.timedelta64(1000)),
++            (arr_two, np.timedelta64(1000)),
++            (arr_one, np.timedelta64(-54557)),
++            (arr_two, np.timedelta64(-54557)),
++        ]
++        # np.add is commutative so test the reversed order
++        if operation is np.add:
++            test_cases.extend([
++                (np.timedelta64(1000), arr_one),
++                (np.timedelta64(1000), arr_two),
++                (np.timedelta64(-54557), arr_one),
++                (np.timedelta64(-54557), arr_two),
++            ])
++        for a, b in test_cases:
++            self.assertTrue(np.array_equal(py_func(a, b), cfunc(a, b)))
++
++    def test_add_td(self):
++        self._test_td_add_or_sub(np.add, False)
++
++    @skip_parfors_unsupported
++    def test_add_td_parallel(self):
++        self._test_td_add_or_sub(np.add, True)
++
++    def test_sub_td(self):
++        self._test_td_add_or_sub(np.subtract, False)
++
++    @skip_parfors_unsupported
++    def test_sub_td_parallel(self):
++        self._test_td_add_or_sub(np.subtract, True)
++
++    def _test_add_sub_td_no_match(self, operation):
++        """
++        Tests that attempting to add/sub a datetime64 and timedelta64
++        with types that cannot be cast raises a reasonable exception.
++        """
++        @njit
++        def impl(a, b):
++            return operation(a, b)
++
++        fname = operation.__name__
++        expected = re.escape((f"ufunc '{fname}' is not supported between "
++                              "datetime64[ns] and timedelta64[M]"))
++        with self.assertRaisesRegex(TypeError, expected):
++            impl(
++                np.array([np.datetime64("2011-01-01"),],
++                         dtype="datetime64[ns]"),
++                np.timedelta64(1000,'M')
++            )
++
++    def test_add_td_no_match(self):
++        self._test_add_sub_td_no_match(np.add)
++
++    def test_sub_td_no_match(self):
++        self._test_add_sub_td_no_match(np.subtract)
++
++
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/numba/tests/test_numpy_support.py b/numba/tests/test_numpy_support.py
+index b0adf9434c5..297827db605 100644
+--- a/numba/tests/test_numpy_support.py
++++ b/numba/tests/test_numpy_support.py
+@@ -243,6 +243,7 @@ def test_timedelta_values(self):
+ 
+ class FakeUFunc(object):
+     __slots__ = ('nin', 'nout', 'types', 'ntypes')
++    __name__ = "fake ufunc"
+ 
+     def __init__(self, types):
+         self.types = types
+@@ -339,7 +340,14 @@ def check_no_match(ufunc, input_types):
+                     'mM->M', output_types=(types.NPDatetime('ms'),))
+         check_exact(np_add, (types.NPDatetime('s'), types.NPTimedelta('s')),
+                     'Mm->M', output_types=(types.NPDatetime('s'),))
+-
++        check_exact(np_add, (types.NPDatetime('s'), types.NPTimedelta('')),
++                    'Mm->M', output_types=(types.NPDatetime('s'),))
++        check_exact(np_add, (types.NPDatetime('ns'), types.NPTimedelta('')),
++                    'Mm->M', output_types=(types.NPDatetime('ns'),))
++        check_exact(np_add, (types.NPTimedelta(''), types.NPDatetime('s')),
++                    'mM->M', output_types=(types.NPDatetime('s'),))
++        check_exact(np_add, (types.NPTimedelta(''), types.NPDatetime('ns')),
++                    'mM->M', output_types=(types.NPDatetime('ns'),))
+         check_exact(np_mul, (types.NPTimedelta('s'), types.int64),
+                     'mq->m', output_types=(types.NPTimedelta('s'),))
+         check_exact(np_mul, (types.float64, types.NPTimedelta('s')),
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

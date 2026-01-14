@@ -1,0 +1,348 @@
+  Task-ID: ansible__ansible-57868@1d3295d
+  Please checkout to this commit first: 019a48361b8f39e96e5b7b78a5882a8ac774b80a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Incorrect error message from openssl_publickey
+
+##### SUMMARY
+
+I was attempting to make a playbook which would ensures that a target server (all RHEL 7 in this situation) has a key & CSR. openssl_privatekey runs but openssl_publickey fails with the message “the python pyOpenSSL module is required” despite it being installed
+
+##### ISSUE TYPE
+- Bug Report
+
+##### COMPONENT NAME
+<!--- Write the short name of the module, plugin, task or feature below, use your best guess if unsure -->
+
+##### ANSIBLE VERSION
+```
+ansible 2.7.8
+  config file = /Users/cadams/Projects/lc-prometheus-server/ansible.cfg
+  configured module search path = ['/Users/cadams/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/local/Cellar/ansible/2.7.8/libexec/lib/python3.7/site-packages/ansible
+  executable location = /usr/local/bin/ansible
+  python version = 3.7.2 (default, Feb 12 2019, 08:15:36) [Clang 10.0.0 (clang-1000.11.45.5)]
+```
+
+##### CONFIGURATION
+<!--- Paste verbatim output from "ansible-config dump --only-changed" between quotes -->
+```
+DEFAULT_SCP_IF_SSH(/Users/cadams/Projects/lc-prometheus-server/ansible.cfg) = False
+DEFAULT_VAULT_PASSWORD_FILE(/Users/cadams/Projects/lc-prometheus-server/ansible.cfg) = /Users/cadams/Projects/lc-prometheus-server/get_vault_password_from_keyring
+RETRY_FILES_ENABLED(/Users/cadams/Projects/lc-prometheus-server/ansible.cfg) = False
+```
+
+##### OS / ENVIRONMENT
+RHEL 7
+
+
+##### STEPS TO REPRODUCE
+```yaml
+- name: Ensure that we have a TLS key for nginx
+  block:
+      - yum: name=pyOpenSSL state=installed
+      - openssl_privatekey:
+            path: "/etc/pki/tls/private/{{ inventory_hostname }}.key"
+            type: RSA
+            size: 4096
+      - openssl_publickey:
+            path: "/etc/pki/tls/certs/{{ inventory_hostname }}.crt"
+            privatekey_path: "/etc/pki/tls/private/{{ inventory_hostname }}.key"
+      - openssl_csr:
+            path: "/etc/pki/tls/certs/{{ inventory_hostname }}.csr"
+            privatekey_path: "/etc/pki/tls/private/{{ inventory_hostname }}.key"
+            ocsp_must_staple: true
+            common_name: "prometheus.{{ ansible_domain }}"
+            subject_alt_name:
+                - "{{ inventory_hostname }}"
+```
+
+##### EXPECTED RESULTS
+
+A public key file would exist in the expected location
+
+##### ACTUAL RESULTS
+
+```The full traceback is:
+WARNING: The below traceback may *not* be related to the actual failure.
+  File "/tmp/ansible_openssl_publickey_payload_rw3SSJ/__main__.py", line 131, in <module>
+    from cryptography.hazmat.backends import default_backend
+
+fatal: [HOSTNAME]: FAILED! => {
+    "changed": false,
+    "invocation": {
+        "module_args": {
+            "attributes": null,
+            "backup": null,
+            "content": null,
+            "delimiter": null,
+            "directory_mode": null,
+            "follow": false,
+            "force": false,
+            "format": "PEM",
+            "group": null,
+            "mode": null,
+            "owner": null,
+            "path": "/etc/pki/tls/certs/HOSTNAME.crt",
+            "privatekey_passphrase": null,
+            "privatekey_path": "/etc/pki/tls/private/HOSTNAME.key",
+            "regexp": null,
+            "remote_src": null,
+            "selevel": null,
+            "serole": null,
+            "setype": null,
+            "seuser": null,
+            "src": null,
+            "state": "present",
+            "unsafe_writes": null
+        }
+    },
+    "msg": "the python pyOpenSSL module is required"
+}
+```
+
+Since Ansible doesn't provide real diagnostic output it's not obvious what the real error was. I had no trouble importing OpenSSL or pip-installing `cryptography` and using that.
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/crypto/get_certificate.py b/lib/ansible/modules/crypto/get_certificate.py
+index e84a6bbd1c8930..a8dc6b6043a6c4 100644
+--- a/lib/ansible/modules/crypto/get_certificate.py
++++ b/lib/ansible/modules/crypto/get_certificate.py
+@@ -44,8 +44,7 @@
+   - When using ca_cert on OS X it has been reported that in some conditions the validate will always succeed.
+ 
+ requirements:
+-  - "python >= 2.6"
+-  - "python-pyOpenSSL >= 0.15"
++  - "pyOpenSSL >= 0.15"
+ '''
+ 
+ RETURN = '''
+@@ -153,7 +152,7 @@ def main():
+     )
+ 
+     if not pyopenssl_found:
+-        module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++        module.fail_json(msg=missing_required_lib('pyOpenSSL >= 0.15'), exception=PYOPENSSL_IMP_ERR)
+ 
+     if timeout:
+         setdefaulttimeout(timeout)
+diff --git a/lib/ansible/modules/crypto/openssl_certificate.py b/lib/ansible/modules/crypto/openssl_certificate.py
+index ebe6606773ed1a..9e868a8239f4b5 100644
+--- a/lib/ansible/modules/crypto/openssl_certificate.py
++++ b/lib/ansible/modules/crypto/openssl_certificate.py
+@@ -1859,7 +1859,8 @@ def main():
+ 
+             if backend == 'pyopenssl':
+                 if not PYOPENSSL_FOUND:
+-                    module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                    module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                     exception=PYOPENSSL_IMP_ERR)
+                 if module.params['provider'] in ['selfsigned', 'ownca', 'assertonly']:
+                     try:
+                         getattr(crypto.X509Req, 'get_extensions')
+@@ -1876,7 +1877,8 @@ def main():
+                     certificate = AssertOnlyCertificate(module)
+             elif backend == 'cryptography':
+                 if not CRYPTOGRAPHY_FOUND:
+-                    module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                    module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                     exception=CRYPTOGRAPHY_IMP_ERR)
+                 if module.params['selfsigned_version'] == 2 or module.params['ownca_version'] == 2:
+                     module.fail_json(msg='The cryptography backend does not support v2 certificates, '
+                                          'use select_crypto_backend=pyopenssl for v2 certificates')
+diff --git a/lib/ansible/modules/crypto/openssl_certificate_info.py b/lib/ansible/modules/crypto/openssl_certificate_info.py
+index 083b39f51e2e31..f0d6288ded99f5 100644
+--- a/lib/ansible/modules/crypto/openssl_certificate_info.py
++++ b/lib/ansible/modules/crypto/openssl_certificate_info.py
+@@ -697,7 +697,8 @@ def main():
+ 
+         if backend == 'pyopenssl':
+             if not PYOPENSSL_FOUND:
+-                module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                 exception=PYOPENSSL_IMP_ERR)
+             try:
+                 getattr(crypto.X509Req, 'get_extensions')
+             except AttributeError:
+@@ -706,7 +707,8 @@ def main():
+             certificate = CertificateInfoPyOpenSSL(module)
+         elif backend == 'cryptography':
+             if not CRYPTOGRAPHY_FOUND:
+-                module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                 exception=CRYPTOGRAPHY_IMP_ERR)
+             certificate = CertificateInfoCryptography(module)
+ 
+         result = certificate.get_info()
+diff --git a/lib/ansible/modules/crypto/openssl_csr.py b/lib/ansible/modules/crypto/openssl_csr.py
+index 9b2bfdbc0f305a..65a3fe7f60ace7 100644
+--- a/lib/ansible/modules/crypto/openssl_csr.py
++++ b/lib/ansible/modules/crypto/openssl_csr.py
+@@ -896,7 +896,8 @@ def main():
+     try:
+         if backend == 'pyopenssl':
+             if not PYOPENSSL_FOUND:
+-                module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                 exception=PYOPENSSL_IMP_ERR)
+             try:
+                 getattr(crypto.X509Req, 'get_extensions')
+             except AttributeError:
+@@ -904,7 +905,8 @@ def main():
+             csr = CertificateSigningRequestPyOpenSSL(module)
+         elif backend == 'cryptography':
+             if not CRYPTOGRAPHY_FOUND:
+-                module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                 exception=CRYPTOGRAPHY_IMP_ERR)
+             csr = CertificateSigningRequestCryptography(module)
+ 
+         if module.params['state'] == 'present':
+diff --git a/lib/ansible/modules/crypto/openssl_csr_info.py b/lib/ansible/modules/crypto/openssl_csr_info.py
+index 0283d12bfe6c06..6d835d8da8565f 100644
+--- a/lib/ansible/modules/crypto/openssl_csr_info.py
++++ b/lib/ansible/modules/crypto/openssl_csr_info.py
+@@ -525,7 +525,8 @@ def main():
+ 
+         if backend == 'pyopenssl':
+             if not PYOPENSSL_FOUND:
+-                module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                 exception=PYOPENSSL_IMP_ERR)
+             try:
+                 getattr(crypto.X509Req, 'get_extensions')
+             except AttributeError:
+@@ -534,7 +535,8 @@ def main():
+             certificate = CertificateSigningRequestInfoPyOpenSSL(module)
+         elif backend == 'cryptography':
+             if not CRYPTOGRAPHY_FOUND:
+-                module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                 exception=CRYPTOGRAPHY_IMP_ERR)
+             certificate = CertificateSigningRequestInfoCryptography(module)
+ 
+         result = certificate.get_info()
+diff --git a/lib/ansible/modules/crypto/openssl_privatekey.py b/lib/ansible/modules/crypto/openssl_privatekey.py
+index 78a56f62c2794d..c79c3bdb066506 100644
+--- a/lib/ansible/modules/crypto/openssl_privatekey.py
++++ b/lib/ansible/modules/crypto/openssl_privatekey.py
+@@ -671,11 +671,13 @@ def main():
+     try:
+         if backend == 'pyopenssl':
+             if not PYOPENSSL_FOUND:
+-                module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                 exception=PYOPENSSL_IMP_ERR)
+             private_key = PrivateKeyPyOpenSSL(module)
+         elif backend == 'cryptography':
+             if not CRYPTOGRAPHY_FOUND:
+-                module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                 exception=CRYPTOGRAPHY_IMP_ERR)
+             private_key = PrivateKeyCryptography(module)
+ 
+         if private_key.state == 'present':
+diff --git a/lib/ansible/modules/crypto/openssl_privatekey_info.py b/lib/ansible/modules/crypto/openssl_privatekey_info.py
+index 54f01120456335..fc959c02e15399 100644
+--- a/lib/ansible/modules/crypto/openssl_privatekey_info.py
++++ b/lib/ansible/modules/crypto/openssl_privatekey_info.py
+@@ -610,11 +610,13 @@ def main():
+ 
+         if backend == 'pyopenssl':
+             if not PYOPENSSL_FOUND:
+-                module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('pyOpenSSL >= {0}'.format(MINIMAL_PYOPENSSL_VERSION)),
++                                 exception=PYOPENSSL_IMP_ERR)
+             privatekey = PrivateKeyInfoPyOpenSSL(module)
+         elif backend == 'cryptography':
+             if not CRYPTOGRAPHY_FOUND:
+-                module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
++                module.fail_json(msg=missing_required_lib('cryptography >= {0}'.format(MINIMAL_CRYPTOGRAPHY_VERSION)),
++                                 exception=CRYPTOGRAPHY_IMP_ERR)
+             privatekey = PrivateKeyInfoCryptography(module)
+ 
+         result = privatekey.get_info()
+diff --git a/lib/ansible/modules/crypto/openssl_publickey.py b/lib/ansible/modules/crypto/openssl_publickey.py
+index b189dffaadb5e9..52a15893e3c8e8 100644
+--- a/lib/ansible/modules/crypto/openssl_publickey.py
++++ b/lib/ansible/modules/crypto/openssl_publickey.py
+@@ -22,7 +22,8 @@
+     - Keys are generated in PEM format.
+     - This module works only if the version of PyOpenSSL is recent enough (> 16.0.0).
+ requirements:
+-    - python-pyOpenSSL
++    - pyOpenSSL
++    - cryptography (if I(format) is C(OpenSSL))
+ author:
+ - Yanis Guenane (@Spredzy)
+ options:
+@@ -149,14 +150,22 @@
+ PYOPENSSL_IMP_ERR = None
+ try:
+     from OpenSSL import crypto
+-    from cryptography.hazmat.backends import default_backend
+-    from cryptography.hazmat.primitives import serialization as crypto_serialization
+ except ImportError:
+     PYOPENSSL_IMP_ERR = traceback.format_exc()
+     pyopenssl_found = False
+ else:
+     pyopenssl_found = True
+ 
++CRYPTOGRAPHY_IMP_ERR = None
++try:
++    from cryptography.hazmat.backends import default_backend
++    from cryptography.hazmat.primitives import serialization as crypto_serialization
++except ImportError:
++    CRYPTOGRAPHY_IMP_ERR = traceback.format_exc()
++    cryptography_found = False
++else:
++    cryptography_found = True
++
+ from ansible.module_utils import crypto as crypto_utils
+ from ansible.module_utils._text import to_native, to_bytes
+ from ansible.module_utils.basic import AnsibleModule, missing_required_lib
+@@ -310,6 +319,8 @@ def main():
+ 
+     if not pyopenssl_found:
+         module.fail_json(msg=missing_required_lib('pyOpenSSL'), exception=PYOPENSSL_IMP_ERR)
++    if module.params['format'] == 'OpenSSH' and not cryptography_found:
++        module.fail_json(msg=missing_required_lib('cryptography'), exception=CRYPTOGRAPHY_IMP_ERR)
+ 
+     base_dir = os.path.dirname(module.params['path']) or '.'
+     if not os.path.isdir(base_dir):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

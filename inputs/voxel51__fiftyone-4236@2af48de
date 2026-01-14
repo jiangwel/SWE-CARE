@@ -1,0 +1,617 @@
+  Task-ID: voxel51__fiftyone-4236@2af48de
+  Please checkout to this commit first: 85339fcecf03978435fed6fd94565d1c63f58dd6
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Lazily start DB service to reduce import time?
+Currently, running `fiftyone config`, which simply loads and prints one's FO config, takes ~2 seconds to execute on my machine, because `import fiftyone` currently triggers a DB service to be started, among other things.
+
+Can we adopt a lazy initialization strategy where the DB service is only started when absolutely necessary?
+
+There are many valid use cases, like the CLI, or utilizing many of the utility methods in `fiftyone.utils`, where no DB connection is needed.
+
+
+[FR] Reduce FiftyOne import time
+### System information
+
+-   **OS Platform and Distribution (e.g., Linux Ubuntu 16.04)**: Macos 12.0.1
+-   **FiftyOne installed from (pip or source)**: pip
+-   **FiftyOne version (run `fiftyone --version`)**: v0.15.1
+-   **Python version**: 3.10.4
+
+### Commands to reproduce
+
+`fiftyone`
+or
+`fiftyone --version`
+or
+`python -c "import fiftyone"`
+
+### Describe the problem
+
+Importing fiftyone in general is VERY slow often 4-6 seconds.
+`import fiftyone`
+
+This is not desirable if fiftyone is needed for command line applications.
+
+The main culprits seem to be:
+- submodules in fiftyone reference back to the public api which means importing submodules imports everything. Eg. `fiftyone.core.dataset` contains `import fiftyone`
+- In `fiftyone/__public__.py` the following files seem to be the culprits:
+    + **core.config**: 548.17ms
+    + **core.odm**: 1019.60ms
+    + **core.plots**: 620.60ms
+    + core.session: 54.95ms
+    + load_config(): 214.52ms
+    + **establish_db_conn()**: 3761.12ms
+
+### Code to reproduce issue
+
+`import fiftyone`
+
+`from fiftyone.core.dataset import Dataset`
+- Should be noted that this seems to have back references to `fiftyone.__public__`. This should bot be the case across the library. Imports in submodules should make direct references to the components they need to speed up importing. Importing this should be expected to be faster than importing the entire public interface.
+
+### Other info / logs
+
+
+Output of running: `python3 -c "import fiftyone"` (With modifications given below)
+
+Custom logs for each import from `fiftyone/__public__.py`
+```bash
+N/A: 0.00ms
+core.config: 548.17ms
+core.odm: 1019.60ms
+load_config(): 214.52ms
+load_annotation_config(): 0.19ms
+load_app_config(): 0.07ms
+N/A: 0.00ms
+core.config: 278.28ms
+core.odm: 582.77ms
+load_config(): 58.93ms
+load_annotation_config(): 0.11ms
+load_app_config(): 0.04ms
+establish_db_conn(): 0.01ms
+core.aggregations: 2.35ms
+core.config: 0.00ms
+core.dataset: 122.92ms
+core.expressions: 0.01ms
+core.fields: 0.01ms
+core.frame: 0.00ms
+core.labels: 0.01ms
+core.metadata: 0.00ms
+core.models: 0.00ms
+core.odm: 0.00ms
+core.plots: 620.60ms
+core.sample: 0.00ms
+core.stages: 2.01ms
+core.session: 54.95ms
+core.utils: 0.01ms
+core.view: 0.00ms
+utils.eval.classification: 12.39ms
+utils.eval.detection: 0.00ms
+utils.eval.segmentation: 0.00ms
+utils.eval.quickstart: 25.54ms
+establish_db_conn(): 3761.12ms
+core.aggregations: 2.75ms
+core.config: 0.01ms
+core.dataset: 68.54ms
+core.expressions: 0.01ms
+core.fields: 0.01ms
+core.frame: 0.00ms
+core.labels: 0.01ms
+core.metadata: 0.00ms
+core.models: 0.00ms
+core.odm: 0.01ms
+core.plots: 344.27ms
+core.sample: 0.00ms
+core.stages: 1.26ms
+core.session: 31.29ms
+core.utils: 0.01ms
+core.view: 0.00ms
+utils.eval.classification: 6.16ms
+utils.eval.detection: 0.00ms
+utils.eval.segmentation: 0.00ms
+utils.eval.quickstart: 13.43ms
+```
+
+<details>
+<summary>Code Modification of `__public__.py` Used To Generate the Above</summary>
+<br>
+<p>
+import time
+
+_t = time.time()
+def print_elapsed(msg: str = None):
+    global _t
+    t = time.time() - _t
+    print(f'{msg}: {t*1000:.2f}ms' if msg else f'{t*1000:.2f}ms')
+    _t = time.time()
+
+print_elapsed('N/A')
+import fiftyone.core.config as _foc
+print_elapsed('core.config')
+import fiftyone.core.odm as _foo
+print_elapsed('core.odm')
+
+config = _foc.load_config()
+print_elapsed('load_config()')
+annotation_config = _foc.load_annotation_config()
+print_elapsed('load_annotation_config()')
+app_config = _foc.load_app_config()
+print_elapsed('load_app_config()')
+
+_foo.establish_db_conn(config)
+print_elapsed('establish_db_conn()')
+
+from .core.aggregations import (
+    Bounds,
+    Count,
+    CountValues,
+    Distinct,
+    HistogramValues,
+    Mean,
+    Std,
+    Sum,
+    Values,
+)
+print_elapsed('core.aggregations')
+from .core.config import AppConfig
+print_elapsed('core.config')
+from .core.dataset import (
+    Dataset,
+    list_datasets,
+    dataset_exists,
+    load_dataset,
+    delete_dataset,
+    delete_datasets,
+    delete_non_persistent_datasets,
+    get_default_dataset_name,
+    make_unique_dataset_name,
+    get_default_dataset_dir,
+)
+print_elapsed('core.dataset')
+from .core.expressions import (
+    ViewField,
+    ViewExpression,
+    VALUE,
+)
+print_elapsed('core.expressions')
+from .core.fields import (
+    ArrayField,
+    BooleanField,
+    ClassesField,
+    DateField,
+    DateTimeField,
+    DictField,
+    EmbeddedDocumentField,
+    EmbeddedDocumentListField,
+    Field,
+    FrameNumberField,
+    FrameSupportField,
+    FloatField,
+    GeoPointField,
+    GeoLineStringField,
+    GeoPolygonField,
+    GeoMultiPointField,
+    GeoMultiLineStringField,
+    GeoMultiPolygonField,
+    IntField,
+    IntDictField,
+    KeypointsField,
+    ListField,
+    ObjectIdField,
+    PolylinePointsField,
+    StringField,
+    TargetsField,
+    VectorField,
+)
+print_elapsed('core.fields')
+from .core.frame import Frame
+print_elapsed('core.frame')
+from .core.labels import (
+    Label,
+    Attribute,
+    BooleanAttribute,
+    CategoricalAttribute,
+    NumericAttribute,
+    ListAttribute,
+    Regression,
+    Classification,
+    Classifications,
+    Detection,
+    Detections,
+    Polyline,
+    Polylines,
+    Keypoint,
+    Keypoints,
+    Segmentation,
+    Heatmap,
+    TemporalDetection,
+    TemporalDetections,
+    GeoLocation,
+    GeoLocations,
+)
+print_elapsed('core.labels')
+from .core.metadata import (
+    Metadata,
+    ImageMetadata,
+    VideoMetadata,
+)
+print_elapsed('core.metadata')
+from .core.models import (
+    apply_model,
+    compute_embeddings,
+    compute_patch_embeddings,
+    load_model,
+    Model,
+    ModelConfig,
+    EmbeddingsMixin,
+    TorchModelMixin,
+    ModelManagerConfig,
+    ModelManager,
+)
+print_elapsed('core.models')
+from .core.odm import KeypointSkeleton
+print_elapsed('core.odm')
+from .core.plots import (
+    plot_confusion_matrix,
+    plot_pr_curve,
+    plot_pr_curves,
+    plot_roc_curve,
+    lines,
+    scatterplot,
+    location_scatterplot,
+    Plot,
+    ResponsivePlot,
+    InteractivePlot,
+    ViewPlot,
+    ViewGrid,
+    CategoricalHistogram,
+    NumericalHistogram,
+)
+print_elapsed('core.plots')
+from .core.sample import Sample
+print_elapsed('core.sample')
+from .core.stages import (
+    Concat,
+    Exclude,
+    ExcludeBy,
+    ExcludeFields,
+    ExcludeFrames,
+    ExcludeLabels,
+    Exists,
+    FilterField,
+    FilterLabels,
+    FilterKeypoints,
+    Limit,
+    LimitLabels,
+    GeoNear,
+    GeoWithin,
+    GroupBy,
+    MapLabels,
+    Match,
+    MatchFrames,
+    MatchLabels,
+    MatchTags,
+    Mongo,
+    Shuffle,
+    Select,
+    SelectBy,
+    SelectFields,
+    SelectFrames,
+    SelectLabels,
+    SetField,
+    Skip,
+    SortBy,
+    SortBySimilarity,
+    Take,
+    ToPatches,
+    ToEvaluationPatches,
+    ToClips,
+    ToFrames,
+)
+print_elapsed('core.stages')
+from .core.session import (
+    close_app,
+    launch_app,
+    Session,
+)
+print_elapsed('core.session')
+from .core.utils import (
+    pprint,
+    pformat,
+    ProgressBar,
+)
+print_elapsed('core.utils')
+from .core.view import DatasetView
+print_elapsed('core.view')
+from .utils.eval.classification import (
+    evaluate_classifications,
+    ClassificationResults,
+    BinaryClassificationResults,
+)
+print_elapsed('utils.eval.classification')
+from .utils.eval.detection import (
+    evaluate_detections,
+    DetectionResults,
+)
+print_elapsed('utils.eval.detection')
+from .utils.eval.segmentation import (
+    evaluate_segmentations,
+    SegmentationResults,
+)
+print_elapsed('utils.eval.segmentation')
+from .utils.quickstart import quickstart
+print_elapsed('utils.eval.quickstart')
+</p>
+</details>
+
+### What areas of FiftyOne does this bug affect?
+
+-   [x] `App`: FiftyOne application issue
+-   [x] `Core`: Core `fiftyone` Python library issue
+-   [ ] `Server`: Fiftyone server issue
+
+### Willingness to contribute
+
+The FiftyOne Community encourages bug fix contributions. Would you or another
+member of your organization be willing to contribute a fix for this bug to the
+FiftyOne codebase?
+
+-   [ ] Yes. I can contribute a fix for this bug independently.
+-   [ ] Yes. I would be willing to contribute a fix for this bug with guidance
+        from the FiftyOne community.
+-   [x] No. I cannot contribute a bug fix at this time.
+
+
+[FR] Make fiftyone --version work even if FiftyOne can't be imported?
+Currently, `fiftyone --version` requires `import fiftyone as fo` to be runnable, which in turn requires, among other things, the ability to successfully connect to the database.
+
+This presents a problem in the following situation:
+- I install an incompatible (eg old) version of `fiftyone` for my database
+- I try to `import fiftyone` and get an error (as expected)
+- Unsure what the problem is, I want to create a GitHub issue to get some help
+- As instructed by FiftyOne's issue template, I try to run `fiftyone --version` to report my package version
+- I get the same error!
+
+Thus the FR: it would be ideal if `fiftyone --version` were runnable even for a greater range of "broken" installations. So at least I can obtain my basic system information.
+
+One way to retrieve this info is:
+
+```py
+import pkg_resources
+
+print(pkg_resources.get_distribution("fiftyone").version)
+```
+
+But it may be better to continue to access it via `fiftyone.constants.VERSION`, but in such a way that database connection issues don't interfere with the process...
+
+[FR] Do not create a database connection during import
+### Proposal Summary
+
+Do not setup a database connection during import. 
+
+### Motivation
+
+Setting up a database connection can be time consuming and error prone. Doing it implicitly during an import is unexpected (for me). It leads to errors and creates global state (that we all hate). This is a bad code smell. 
+
+There is a very good alternative: having a client object that represents the connection. 
+
+### What areas of FiftyOne does this feature affect?
+
+-   [x] App: FiftyOne application
+-   [x] Core: Core `fiftyone` Python library
+-   [ ] Server: FiftyOne server
+
+### Details
+
+We including FiftyOne in our multi-gpu training code and it crashed because of it. Multiple processes tried to connect to the same port. This is an unwanted side-effect of doing an import in a file that is not used during the training. 
+
+### Willingness to contribute
+
+The FiftyOne Community welcomes contributions! Would you or another member of your organization be willing to contribute an implementation of this feature?
+
+-   [ ] Yes. I can contribute this feature independently
+-   [ ] Yes. I would be willing to contribute this feature with guidance from the FiftyOne community
+-   [x] No. I cannot contribute this feature at this time
+  </issue>
+  
+  <patch>
+  diff --git a/docs/generate_docs.bash b/docs/generate_docs.bash
+index 058c58d14dc..8ec30aedc68 100755
+--- a/docs/generate_docs.bash
++++ b/docs/generate_docs.bash
+@@ -125,7 +125,7 @@ fi
+ 
+ echo "Building docs"
+ # sphinx-build [OPTIONS] SOURCEDIR OUTPUTDIR [FILENAMES...]
+-sphinx-build -M html source build $SPHINXOPTS
++_FIFTYONE_FORCE_DB_CONNECT_ON_IMPORT=1 sphinx-build -M html source build $SPHINXOPTS
+ 
+ # Remove symlink to fiftyone-teams
+ if [[ -n "${PATH_TO_TEAMS}" ]]; then
+diff --git a/fiftyone/__init__.py b/fiftyone/__init__.py
+index 5ec4db198bc..fb5b3321eb3 100644
+--- a/fiftyone/__init__.py
++++ b/fiftyone/__init__.py
+@@ -25,9 +25,15 @@
+ from fiftyone.__public__ import *
+ 
+ import fiftyone.core.logging as _fol
+-import fiftyone.migrations as _fom
+ 
+-_fol.init_logging()
++# The old way of doing things, migrating database on import. If we
++#   REALLY need to do this, for example doc build, we can.
++if (
++    _os.environ.get("FIFTYONE_DISABLE_SERVICES", "0") != "1"
++    and "_FIFTYONE_FORCE_DB_CONNECT_ON_IMPORT" in _os.environ
++):
++    import fiftyone.migrations as _fom
+ 
+-if _os.environ.get("FIFTYONE_DISABLE_SERVICES", "0") != "1":
+     _fom.migrate_database_if_necessary()
++
++_fol.init_logging()
+diff --git a/fiftyone/__public__.py b/fiftyone/__public__.py
+index 57c91c4b0ac..ff900961f47 100644
+--- a/fiftyone/__public__.py
++++ b/fiftyone/__public__.py
+@@ -5,16 +5,21 @@
+ | `voxel51.com <https://voxel51.com/>`_
+ |
+ """
++import os as _os
+ 
+ import fiftyone.core.config as _foc
+-import fiftyone.core.odm as _foo
+ 
+ config = _foc.load_config()
+ annotation_config = _foc.load_annotation_config()
+ evaluation_config = _foc.load_evaluation_config()
+ app_config = _foc.load_app_config()
+ 
+-_foo.establish_db_conn(config)
++# The old way of doing things, connecting to database on import. If we
++#   REALLY need to do this, for example doc build, we can.
++if "_FIFTYONE_FORCE_DB_CONNECT_ON_IMPORT" in _os.environ:
++    import fiftyone.core.odm as _foo
++
++    _foo.establish_db_conn(config)
+ 
+ from .core.aggregations import (
+     Aggregation,
+diff --git a/fiftyone/core/odm/database.py b/fiftyone/core/odm/database.py
+index c3244c29b25..c498cf15769 100644
+--- a/fiftyone/core/odm/database.py
++++ b/fiftyone/core/odm/database.py
+@@ -27,6 +27,7 @@
+ 
+ import fiftyone as fo
+ import fiftyone.constants as foc
++
+ from fiftyone.core.config import FiftyOneConfigError
+ import fiftyone.core.fields as fof
+ import fiftyone.core.service as fos
+@@ -34,6 +35,7 @@
+ 
+ from .document import Document
+ 
++fom = fou.lazy_import("fiftyone.migrations")
+ foa = fou.lazy_import("fiftyone.core.annotation")
+ fob = fou.lazy_import("fiftyone.core.brain")
+ fod = fou.lazy_import("fiftyone.core.dataset")
+@@ -220,26 +222,37 @@ def establish_db_conn(config):
+ 
+     connect(config.database_name, **_connection_kwargs)
+ 
+-    config = get_db_config()
+-    if foc.CLIENT_TYPE != config.type:
++    db_config = get_db_config()
++    if foc.CLIENT_TYPE != db_config.type:
+         raise ConnectionError(
+             "Cannot connect to database type '%s' with client type '%s'"
+-            % (config.type, foc.CLIENT_TYPE)
++            % (db_config.type, foc.CLIENT_TYPE)
+         )
+ 
++    # Migrate the database if necessary after establishing connection.
++    #   If we are forcing immediate connection upon import though, migration
++    #   is being performed at that time, and we cannot do it here as well,
++    #   or else it'll be a circular import.
++    if (
++        os.environ.get("FIFTYONE_DISABLE_SERVICES", "0") != "1"
++        and "_FIFTYONE_FORCE_DB_CONNECT_ON_IMPORT" not in os.environ
++    ):
++        fom.migrate_database_if_necessary()
++
+ 
+ def _connect():
+     global _client
+     if _client is None:
+         global _connection_kwargs
+ 
+-        _client = pymongo.MongoClient(
+-            **_connection_kwargs, appname=foc.DATABASE_APPNAME
+-        )
+-        connect(fo.config.database_name, **_connection_kwargs)
++        establish_db_conn(fo.config)
+ 
+ 
+ def _async_connect(use_global=False):
++    # Regular connect here first, to ensure connection kwargs are established
++    #   for below.
++    _connect()
++
+     global _async_client
+     if not use_global or _async_client is None:
+         global _connection_kwargs
+diff --git a/fiftyone/factory/repo_factory.py b/fiftyone/factory/repo_factory.py
+index e224b9f1fe2..3badb603227 100644
+--- a/fiftyone/factory/repo_factory.py
++++ b/fiftyone/factory/repo_factory.py
+@@ -15,11 +15,19 @@
+     MongoDelegatedOperationRepo,
+ )
+ 
+-db: Database = foo.get_db_conn()
++_db: Database = None
++
++
++def _get_db():
++    global _db
++    if _db is None:
++        _db = foo.get_db_conn()
++    return _db
+ 
+ 
+ class RepositoryFactory(object):
+     repos = {}
++    db = None
+ 
+     @staticmethod
+     def delegated_operation_repo() -> DelegatedOperationRepo:
+@@ -30,7 +38,9 @@ def delegated_operation_repo() -> DelegatedOperationRepo:
+             RepositoryFactory.repos[
+                 MongoDelegatedOperationRepo.COLLECTION_NAME
+             ] = MongoDelegatedOperationRepo(
+-                collection=db[MongoDelegatedOperationRepo.COLLECTION_NAME]
++                collection=_get_db()[
++                    MongoDelegatedOperationRepo.COLLECTION_NAME
++                ]
+             )
+ 
+         return RepositoryFactory.repos[
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

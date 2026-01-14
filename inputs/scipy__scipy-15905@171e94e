@@ -1,0 +1,142 @@
+  Task-ID: scipy__scipy-15905@171e94e
+  Please checkout to this commit first: e3cd846ef353b10cc66972a5c7718e80948362ac
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: stats.skew: unreliable when all values in axis slice are identical
+### Describe your issue.
+
+computing the skewness of a numpy ndarray will produce two result with following method for a column in ndarray (x):
+1. skew(x[:, i])
+2. skew(x)[i]
+
+the issues happens when this column has equal float value
+
+
+### Reproducing Code Example
+
+```python
+import numpy as np
+from scipy.stats import skew
+
+a = np.random.randn(100, 10)
+a[:, 0] = 1.01
+
+print(f'result in matrix value {skew(a)[0]}')   # -1.0
+print(f'result in array value {skew(a[:, 0])}') # 0.0
+```
+
+
+### Error message
+
+```shell
+No error message
+```
+
+
+### SciPy/NumPy/Python version information
+
+1.7.3 1.22.0 sys.version_info(major=3, minor=8, micro=5, releaselevel='final', serial=0)
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/stats/_stats_py.py b/scipy/stats/_stats_py.py
+index db49bdcadee1..7ae69eac2482 100644
+--- a/scipy/stats/_stats_py.py
++++ b/scipy/stats/_stats_py.py
+@@ -1013,6 +1013,16 @@ def _moment(a, moment, axis, *, mean=None):
+         # Starting point for exponentiation by squares
+         mean = a.mean(axis, keepdims=True) if mean is None else mean
+         a_zero_mean = a - mean
++
++        eps = np.finfo(a_zero_mean.dtype).resolution * 1e6
++        rel_diff = np.max(np.abs(a_zero_mean), axis=axis, keepdims=True)/mean
++        with np.errstate(invalid='ignore'):
++            precision_loss = np.any((0 < rel_diff) & (rel_diff < eps))
++        if precision_loss:
++            message = ("Precision loss occurred in moment calculation due to "
++                       "catastrophc cancellation. Results may be unreliable.")
++            warnings.warn(message, RuntimeWarning, stacklevel=4)
++
+         if n_list[-1] == 1:
+             s = a_zero_mean.copy()
+         else:
+diff --git a/scipy/stats/tests/test_stats.py b/scipy/stats/tests/test_stats.py
+index c73637ca5541..9552383dcb61 100644
+--- a/scipy/stats/tests/test_stats.py
++++ b/scipy/stats/tests/test_stats.py
+@@ -3001,15 +3001,16 @@ def test_skew_propagate_nan(self):
+     def test_skew_constant_value(self):
+         # Skewness of a constant input should be zero even when the mean is not
+         # exact (gh-13245)
+-        a = np.repeat(-0.27829495, 10)
+-        assert stats.skew(a) == 0.0
+-        assert stats.skew(a * float(2**50)) == 0.0
+-        assert stats.skew(a / float(2**50)) == 0.0
+-        assert stats.skew(a, bias=False) == 0.0
++        with pytest.warns(RuntimeWarning, match="Precision loss occurred"):
++            a = np.repeat(-0.27829495, 10)
++            assert stats.skew(a) == 0.0
++            assert stats.skew(a * float(2**50)) == 0.0
++            assert stats.skew(a / float(2**50)) == 0.0
++            assert stats.skew(a, bias=False) == 0.0
+ 
+-        # similarly, from gh-11086:
+-        assert stats.skew([14.3]*7) == 0.0
+-        assert stats.skew(1 + np.arange(-3, 4)*1e-16) == 0
++            # similarly, from gh-11086:
++            assert stats.skew([14.3]*7) == 0.0
++            assert stats.skew(1 + np.arange(-3, 4)*1e-16) == 0
+ 
+     def test_kurtosis(self):
+         # Scalar test case
+@@ -3066,6 +3067,16 @@ def test_moment_accuracy(self):
+         assert_allclose(np.power(tc_no_mean, 42).mean(),
+                             stats.moment(self.testcase_moment_accuracy, 42))
+ 
++    def test_precision_loss_gh15554(self):
++        # gh-15554 was one of several issues that have reported problems with
++        # constant or near-constant input. We can't always fix these, but
++        # make sure there's a warning.
++        with pytest.warns(RuntimeWarning, match="Precision loss occurred"):
++            rng = np.random.default_rng(34095309370)
++            a = rng.random(size=(100, 10))
++            a[:, 0] = 1.01
++            stats.skew(a)[0]
++
+ 
+ class TestStudentTest:
+     X1 = np.array([-1, 0, 1])
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

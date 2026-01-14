@@ -1,0 +1,356 @@
+  Task-ID: modin-project__modin-2801@64caea0
+  Please checkout to this commit first: 3f0e39e382fac347240b3c081ade066dc2d6dc38
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add wait function for _modin_frame
+**Is your feature request related to a problem? Please describe.**
+A clear and concise description of what the problem is. What kind of performance improvements would you like to see with this new API?
+
+This is the most lightweight way to wait for the end of parallel computations on partitions.
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 492971b43b8..c1a03ece786 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -285,6 +285,8 @@ jobs:
+           conda list
+       - name: Install HDF5
+         run: sudo apt update && sudo apt install -y libhdf5-dev
++      - shell: bash -l {0}
++        run: pytest modin/pandas/test/internals/test_benchmark_mode.py
+       - shell: bash -l {0}
+         run: pytest modin/experimental/engines/omnisci_on_ray/test/test_dataframe.py
+       - shell: bash -l {0}
+@@ -370,6 +372,8 @@ jobs:
+           conda list
+       - name: Install HDF5
+         run: sudo apt update && sudo apt install -y libhdf5-dev
++      - shell: bash -l {0}
++        run: pytest modin/pandas/test/internals/test_benchmark_mode.py
+       - shell: bash -l {0}
+         run: pytest modin/experimental/xgboost/test/test_default.py
+       - shell: bash -l {0}
+diff --git a/asv_bench/benchmarks/utils.py b/asv_bench/benchmarks/utils.py
+index effb49d2bf7..788226f8daa 100644
+--- a/asv_bench/benchmarks/utils.py
++++ b/asv_bench/benchmarks/utils.py
+@@ -221,15 +221,20 @@ def execute(df):
+     "Make sure the calculations are done."
+     if ASV_USE_IMPL == "modin":
+         partitions = df._query_compiler._modin_frame._partitions
+-        map(lambda partition: partition.drain_call_queue(), partitions)
++        all(
++            map(
++                lambda partition: partition.drain_call_queue() or True,
++                partitions.flatten(),
++            )
++        )
+         if ASV_USE_ENGINE == "Ray":
+             from ray import wait
+ 
+-            map(lambda partition: wait(partition.oid), partitions)
++            all(map(lambda partition: wait([partition.oid]), partitions.flatten()))
+         elif ASV_USE_ENGINE == "Dask":
+             from dask.distributed import wait
+ 
+-            map(lambda partition: wait(partition.future), partitions)
++            all(map(lambda partition: wait(partition.future), partitions.flatten()))
+         elif ASV_USE_ENGINE == "Python":
+             pass
+ 
+diff --git a/modin/config/envvars.py b/modin/config/envvars.py
+index d629a8baf85..3601ef070a3 100644
+--- a/modin/config/envvars.py
++++ b/modin/config/envvars.py
+@@ -261,6 +261,15 @@ def disable(cls):
+         cls.put(False)
+ 
+ 
++class BenchmarkMode(EnvironmentVariable, type=bool):
++    """
++    Whether or not to perform computations syncronous.
++    """
++
++    varname = "MODIN_BENCHMARK_MODE"
++    default = False
++
++
+ def _check_vars():
+     """
+     Look out for any environment variables that start with "MODIN_" prefix
+diff --git a/modin/engines/base/frame/data.py b/modin/engines/base/frame/data.py
+index 1e7c963de90..602714e6b5b 100644
+--- a/modin/engines/base/frame/data.py
++++ b/modin/engines/base/frame/data.py
+@@ -21,6 +21,7 @@
+ from modin.backends.pandas.query_compiler import PandasQueryCompiler
+ from modin.error_message import ErrorMessage
+ from modin.backends.pandas.parsers import find_common_type_cat as find_common_type
++from modin.config import BenchmarkMode
+ 
+ 
+ class BasePandasFrame(object):
+@@ -81,6 +82,9 @@ def __init__(
+         self._dtypes = dtypes
+         self._filter_empties()
+ 
++        if BenchmarkMode.get():
++            self.wait_computations()
++
+     @property
+     def _row_lengths(self):
+         """Compute the row lengths if they are not cached.
+@@ -2102,6 +2106,33 @@ def to_pandas(self):
+ 
+         return df
+ 
++    def wait_computations(self):
++        """
++        Wait for computation results.
++
++        Use this function when you need to wait for the end of computations in low level.
++        """
++        self._frame_mgr_cls.wait_computations(self._partitions)
++
++    def wait_func_result(self, func):
++        """
++        Synchronize performing a function.
++
++        Parameters
++        ----------
++        func: callable
++            A function that should perform one of high level APIs in syncronous mode.
++
++        Note: `func` should return modin DataFrame.
++        """
++
++        def sync_computations(*args, **kwargs):
++            res = func(*args, **kwargs)
++            res._query_compiler._modin_frame.wait_computations()
++            return res
++
++        return sync_computations
++
+     def to_numpy(self, **kwargs):
+         """
+         Convert a Modin DataFrame to a 2D NumPy array.
+diff --git a/modin/engines/base/frame/partition.py b/modin/engines/base/frame/partition.py
+index ec22573af37..a4a77f07036 100644
+--- a/modin/engines/base/frame/partition.py
++++ b/modin/engines/base/frame/partition.py
+@@ -76,6 +76,10 @@ def drain_call_queue(self):
+         """Execute all functionality stored in the call queue."""
+         pass
+ 
++    def wait(self):
++        """Wait for partition' computations result."""
++        pass
++
+     def to_pandas(self):
+         """Convert the object stored in this partition to a Pandas DataFrame.
+ 
+diff --git a/modin/engines/base/frame/partition_manager.py b/modin/engines/base/frame/partition_manager.py
+index f97a5ff2200..a0fd88821a1 100644
+--- a/modin/engines/base/frame/partition_manager.py
++++ b/modin/engines/base/frame/partition_manager.py
+@@ -555,6 +555,14 @@ def to_pandas(cls, partitions):
+         else:
+             return cls.concatenate(df_rows)
+ 
++    @classmethod
++    def wait_computations(cls, partitions):
++        """Wait for computation results."""
++        # need to go through all the values of the map iterator
++        # since `wait` does not return anything, we need to explicitly add
++        # the return `True` value from the lambda
++        all(map(lambda partition: partition.wait() or True, partitions.flatten()))
++
+     @classmethod
+     def to_numpy(cls, partitions, **kwargs):
+         """
+diff --git a/modin/engines/dask/pandas_on_dask/frame/partition.py b/modin/engines/dask/pandas_on_dask/frame/partition.py
+index bbc16a27e19..ed672d92954 100644
+--- a/modin/engines/dask/pandas_on_dask/frame/partition.py
++++ b/modin/engines/dask/pandas_on_dask/frame/partition.py
+@@ -19,6 +19,7 @@
+ from distributed.client import get_client
+ from distributed.utils import get_ip
+ import cloudpickle as pkl
++from dask.distributed import wait
+ 
+ 
+ def apply_list_of_funcs(funcs, df):
+@@ -99,6 +100,10 @@ def drain_call_queue(self):
+         self.ip = new_partition.ip
+         self.call_queue = []
+ 
++    def wait(self):
++        self.drain_call_queue()
++        wait(self.future)
++
+     def mask(self, row_indices, col_indices):
+         new_obj = self.add_to_apply_calls(
+             lambda df: pandas.DataFrame(df.iloc[row_indices, col_indices])
+diff --git a/modin/engines/python/pandas_on_python/frame/partition.py b/modin/engines/python/pandas_on_python/frame/partition.py
+index 5786d72a03f..6512c30db3b 100644
+--- a/modin/engines/python/pandas_on_python/frame/partition.py
++++ b/modin/engines/python/pandas_on_python/frame/partition.py
+@@ -87,6 +87,9 @@ def drain_call_queue(self):
+             return
+         self.apply(lambda x: x)
+ 
++    def wait(self):
++        self.drain_call_queue()
++
+     def mask(self, row_indices=None, col_indices=None):
+         new_obj = self.add_to_apply_calls(
+             lambda df: pandas.DataFrame(df.iloc[row_indices, col_indices])
+diff --git a/modin/engines/ray/generic/io.py b/modin/engines/ray/generic/io.py
+index 0e931f15d4d..a01cd41670d 100644
+--- a/modin/engines/ray/generic/io.py
++++ b/modin/engines/ray/generic/io.py
+@@ -16,7 +16,6 @@
+ 
+ from modin.engines.base.io import BaseIO
+ from ray.util.queue import Queue
+-from ray import wait
+ 
+ 
+ class RayIO(BaseIO):
+@@ -137,6 +136,4 @@ def func(df, **kw):
+         )
+ 
+         # pending completion
+-        for rows in result:
+-            for partition in rows:
+-                wait([partition.oid])
++        qc._modin_frame._frame_mgr_cls.wait_computations(result)
+diff --git a/modin/engines/ray/pandas_on_ray/frame/partition.py b/modin/engines/ray/pandas_on_ray/frame/partition.py
+index 242265ee070..4657b58e0d6 100644
+--- a/modin/engines/ray/pandas_on_ray/frame/partition.py
++++ b/modin/engines/ray/pandas_on_ray/frame/partition.py
+@@ -83,6 +83,13 @@ def drain_call_queue(self):
+         ) = deploy_ray_func.remote(call_queue, oid)
+         self.call_queue = []
+ 
++    def wait(self):
++        self.drain_call_queue()
++        try:
++            ray.wait([self.oid])
++        except RayTaskError as e:
++            handle_ray_task_error(e)
++
+     def __copy__(self):
+         return PandasOnRayFramePartition(
+             self.oid, self._length_cache, self._width_cache, call_queue=self.call_queue
+diff --git a/modin/experimental/engines/omnisci_on_ray/frame/partition.py b/modin/experimental/engines/omnisci_on_ray/frame/partition.py
+index 37e95a9b012..3aac86c1437 100644
+--- a/modin/experimental/engines/omnisci_on_ray/frame/partition.py
++++ b/modin/experimental/engines/omnisci_on_ray/frame/partition.py
+@@ -43,6 +43,9 @@ def get(self):
+             return self.arrow_table
+         return ray.get(self.oid)
+ 
++    def wait(self):
++        ray.wait([self.oid])
++
+     @classmethod
+     def put(cls, obj):
+         return OmnisciOnRayFramePartition(
+diff --git a/modin/pandas/test/internals/__init__.py b/modin/pandas/test/internals/__init__.py
+new file mode 100644
+index 00000000000..cae6413e559
+--- /dev/null
++++ b/modin/pandas/test/internals/__init__.py
+@@ -0,0 +1,12 @@
++# Licensed to Modin Development Team under one or more contributor license agreements.
++# See the NOTICE file distributed with this work for additional information regarding
++# copyright ownership.  The Modin Development Team licenses this file to you under the
++# Apache License, Version 2.0 (the "License"); you may not use this file except in
++# compliance with the License.  You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software distributed under
++# the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
++# ANY KIND, either express or implied. See the License for the specific language
++# governing permissions and limitations under the License.
+diff --git a/modin/pandas/test/internals/test_benchmark_mode.py b/modin/pandas/test/internals/test_benchmark_mode.py
+new file mode 100644
+index 00000000000..ea668c804a2
+--- /dev/null
++++ b/modin/pandas/test/internals/test_benchmark_mode.py
+@@ -0,0 +1,37 @@
++# Licensed to Modin Development Team under one or more contributor license agreements.
++# See the NOTICE file distributed with this work for additional information regarding
++# copyright ownership.  The Modin Development Team licenses this file to you under the
++# Apache License, Version 2.0 (the "License"); you may not use this file except in
++# compliance with the License.  You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software distributed under
++# the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
++# ANY KIND, either express or implied. See the License for the specific language
++# governing permissions and limitations under the License.
++
++# NOTE: do not use pytest in parallel mode for this file
++
++import modin.pandas as pd
++from modin.config import BenchmarkMode
++from modin.pandas.test.utils import test_data_values
++
++
++def test_wait_func_result():
++    if BenchmarkMode.get():
++        BenchmarkMode.put(False)
++    df = pd.DataFrame(test_data_values[0])
++
++    @df._query_compiler._modin_frame.wait_func_result
++    def compute_mean():
++        return df.mean()
++
++    compute_mean()
++
++
++def test_syncronous_mode():
++    if not BenchmarkMode.get():
++        BenchmarkMode.put(True)
++    df = pd.DataFrame(test_data_values[0])
++    df.mean()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

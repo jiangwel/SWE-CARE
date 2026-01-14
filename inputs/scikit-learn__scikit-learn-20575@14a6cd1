@@ -1,0 +1,187 @@
+  Task-ID: scikit-learn__scikit-learn-20575@14a6cd1
+  Please checkout to this commit first: d753d4dc1a5aa73f753cb3ecc26d7ebb474dbfad
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Using `available_if` causes failed test cases due to different error message format
+<!--
+Before submitting a bug, please make sure the issue hasn't been already
+addressed by searching through the past issues.
+-->
+
+#### Describe the bug
+<!--
+A clear and concise description of what the bug is.
+-->
+Using `available_if` to replace `if_delegate_has_method` in the pipeline module causes failed tests due to different error messages.
+
+#### Steps/Code to Reproduce
+```python
+def _final_estimator_has(attr):
+    return lambda self: hasattr(self._final_estimator, attr)
+```
+
+Replace `if_delegate_has_method(delegate="_final_estimator")` with `available_if(_final_estimator_has("decision_function"))`, run `test_pipeline.py`, the following error occurs:
+
+```
+passthrough = 'passthrough'
+
+    @pytest.mark.parametrize("passthrough", [None, "passthrough"])
+    def test_set_pipeline_step_passthrough(passthrough):
+        X = np.array([[1]])
+        y = np.array([1])
+        mult2 = Mult(mult=2)
+        mult3 = Mult(mult=3)
+        mult5 = Mult(mult=5)
+       .......
+
+        msg = "'str' object has no attribute 'predict'"
+        with pytest.raises(AttributeError, match=msg):
+>           getattr(pipeline, "predict")
+E           AssertionError: Regex pattern "'str' object has no attribute 'predict'" does not match "This 'Pipeline' has no attribute 'predict'".
+
+sklearn/tests/test_pipeline.py:752: AssertionError
+```
+
+In `available_if` the error message is constructed with 
+```python
+if not self.check(obj):
+    raise AttributeError(
+        f"This {repr(owner.__name__)}"
+        " has no attribute"
+        f" {repr(self.attribute_name)}"
+                )
+```
+while in `if_delegate_has_method`, we just raise the original AttributeError on the delegate object
+```python
+if delegate is None:
+    return False
+# raise original AttributeError
+return getattr(delegate, self.attribute_name) or True
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 0814632721ba4..523e2871bc69a 100644
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -18,7 +18,7 @@
+ 
+ from .base import clone, TransformerMixin
+ from .utils._estimator_html_repr import _VisualBlock
+-from .utils.metaestimators import if_delegate_has_method, available_if
++from .utils.metaestimators import available_if
+ from .utils import (
+     Bunch,
+     _print_elapsed_time,
+@@ -33,6 +33,13 @@
+ __all__ = ["Pipeline", "FeatureUnion", "make_pipeline", "make_union"]
+ 
+ 
++def _final_estimator_has(attr):
++    """Check that final_estimator has `attr`.
++
++    Used together with `avaliable_if` in `Pipeline`."""
++    return lambda self: getattr(self._final_estimator, attr) or True
++
++
+ class Pipeline(_BaseComposition):
+     """
+     Pipeline of transforms with a final estimator.
+@@ -402,7 +409,7 @@ def fit_transform(self, X, y=None, **fit_params):
+             else:
+                 return last_step.fit(Xt, y, **fit_params_last_step).transform(Xt)
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("predict"))
+     def predict(self, X, **predict_params):
+         """Apply transforms to the data, and predict with the final estimator
+ 
+@@ -431,7 +438,7 @@ def predict(self, X, **predict_params):
+             Xt = transform.transform(Xt)
+         return self.steps[-1][1].predict(Xt, **predict_params)
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("fit_predict"))
+     def fit_predict(self, X, y=None, **fit_params):
+         """Applies fit_predict of last step in pipeline after transforms.
+ 
+@@ -466,7 +473,7 @@ def fit_predict(self, X, y=None, **fit_params):
+             y_pred = self.steps[-1][1].fit_predict(Xt, y, **fit_params_last_step)
+         return y_pred
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("predict_proba"))
+     def predict_proba(self, X, **predict_proba_params):
+         """Apply transforms, and predict_proba of the final estimator
+ 
+@@ -489,7 +496,7 @@ def predict_proba(self, X, **predict_proba_params):
+             Xt = transform.transform(Xt)
+         return self.steps[-1][1].predict_proba(Xt, **predict_proba_params)
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("decision_function"))
+     def decision_function(self, X):
+         """Apply transforms, and decision_function of the final estimator
+ 
+@@ -508,7 +515,7 @@ def decision_function(self, X):
+             Xt = transform.transform(Xt)
+         return self.steps[-1][1].decision_function(Xt)
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("score_samples"))
+     def score_samples(self, X):
+         """Apply transforms, and score_samples of the final estimator.
+ 
+@@ -527,7 +534,7 @@ def score_samples(self, X):
+             Xt = transformer.transform(Xt)
+         return self.steps[-1][1].score_samples(Xt)
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("predict_log_proba"))
+     def predict_log_proba(self, X, **predict_log_proba_params):
+         """Apply transforms, and predict_log_proba of the final estimator
+ 
+@@ -603,7 +610,7 @@ def inverse_transform(self, Xt):
+             Xt = transform.inverse_transform(Xt)
+         return Xt
+ 
+-    @if_delegate_has_method(delegate="_final_estimator")
++    @available_if(_final_estimator_has("score"))
+     def score(self, X, y=None, sample_weight=None):
+         """Apply transforms, and score with the final estimator
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

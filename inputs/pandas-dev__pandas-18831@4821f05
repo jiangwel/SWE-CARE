@@ -1,0 +1,174 @@
+  Task-ID: pandas-dev__pandas-18831@4821f05
+  Please checkout to this commit first: 21f2412cf1c3bcbde04c1a53e6ecc597b5e871dd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: Timedelta.__floordiv__ - need historical context
+```
+>>> pd.Timedelta(days=3, hours=4) // np.datetime64('NaT')
+-1
+```
+
+`Timedelta.__floordiv__` and `__rfloordiv__` begin with:
+
+```
+        if hasattr(other, 'dtype'):
+            # work with i8
+            other = other.astype('m8[ns]').astype('i8')
+```
+
+I _think_ this is a historical artifact from early numpy versions, because in core.ops there is a comment:
+```
+            # time delta division -> unit less
+            # integer gets converted to timedelta in np < 1.6
+            if ((self.is_timedelta_lhs and self.is_timedelta_rhs) and
+                    not self.is_integer_rhs and not self.is_integer_lhs and
+                    self.name in ('__div__', '__truediv__')):
+```
+
+Before I try to fix `Timedelta.__floordiv__` can someone knowledgeable weight in on why all dtypes are being converted to i8?
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/timedeltas.rst b/doc/source/timedeltas.rst
+index d055c49dc4721..778db17a56b58 100644
+--- a/doc/source/timedeltas.rst
++++ b/doc/source/timedeltas.rst
+@@ -267,6 +267,14 @@ yields another ``timedelta64[ns]`` dtypes Series.
+    td * -1
+    td * pd.Series([1, 2, 3, 4])
+ 
++Rounded division (floor-division) of a ``timedelta64[ns]`` Series by a scalar
++``Timedelta`` gives a series of integers.
++
++.. ipython:: python
++
++   td // pd.Timedelta(days=3, hours=4)
++   pd.Timedelta(days=3, hours=4) // td
++
+ Attributes
+ ----------
+ 
+diff --git a/doc/source/whatsnew/v0.22.0.txt b/doc/source/whatsnew/v0.22.0.txt
+index 0579a80aad28e..6b6d13db27f82 100644
+--- a/doc/source/whatsnew/v0.22.0.txt
++++ b/doc/source/whatsnew/v0.22.0.txt
+@@ -277,6 +277,7 @@ Conversion
+ - Fixed a bug where ``FY5253`` date offsets could incorrectly raise an ``AssertionError`` in arithmetic operatons (:issue:`14774`)
+ - Bug in :meth:`Index.astype` with a categorical dtype where the resultant index is not converted to a :class:`CategoricalIndex` for all types of index (:issue:`18630`)
+ - Bug in :meth:`Series.astype` and ``Categorical.astype()`` where an existing categorical data does not get updated (:issue:`10696`, :issue:`18593`)
++- Bug in :func:`Series.__floordiv__`  and :func:`Series.__rfloordiv__` where operating on a scalar ``timedelta`` raises an exception (:issue:`18824`)
+ 
+ 
+ Indexing
+diff --git a/pandas/core/ops.py b/pandas/core/ops.py
+index e23609b23f529..149c58dd67e12 100644
+--- a/pandas/core/ops.py
++++ b/pandas/core/ops.py
+@@ -409,7 +409,7 @@ def _validate(self, lvalues, rvalues, name):
+ 
+             if name not in ('__div__', '__rdiv__', '__truediv__',
+                             '__rtruediv__', '__add__', '__radd__', '__sub__',
+-                            '__rsub__'):
++                            '__rsub__', '__floordiv__', '__rfloordiv__'):
+                 raise TypeError("can only operate on a timedeltas for addition"
+                                 ", subtraction, and division, but the operator"
+                                 " [{name}] was passed".format(name=name))
+@@ -595,7 +595,9 @@ def _offset(lvalues, rvalues):
+             # integer gets converted to timedelta in np < 1.6
+             if ((self.is_timedelta_lhs and self.is_timedelta_rhs) and
+                     not self.is_integer_rhs and not self.is_integer_lhs and
+-                    self.name in ('__div__', '__truediv__')):
++                    self.name in ('__div__', '__rdiv__',
++                                  '__truediv__', '__rtruediv__',
++                                  '__floordiv__', '__rfloordiv__')):
+                 self.dtype = 'float64'
+                 self.fill_value = np.nan
+                 lvalues = lvalues.astype(np.float64)
+diff --git a/pandas/tests/series/test_operators.py b/pandas/tests/series/test_operators.py
+index 89a6311153d15..24834a4953616 100644
+--- a/pandas/tests/series/test_operators.py
++++ b/pandas/tests/series/test_operators.py
+@@ -962,6 +962,14 @@ def test_timedelta64_ops_nat(self):
+ 
+ 
+ class TestDatetimeSeriesArithmetic(object):
++    @pytest.mark.xfail(reason='GH#18824 bug in Timedelta.__floordiv__')
++    def test_timedelta_rfloordiv(self):
++        td1 = Series([timedelta(minutes=5, seconds=3)] * 3)
++        td1.iloc[2] = np.nan
++        tdscalar = Timedelta(minutes=5, seconds=4)
++        tm.assert_series_equal(tdscalar // td1,
++                               Series([1, 1, np.nan]))
++
+     def test_operators_datetimelike(self):
+         def run_ops(ops, get_ser, test_ser):
+ 
+@@ -976,16 +984,24 @@ def run_ops(ops, get_ser, test_ser):
+         # ## timedelta64 ###
+         td1 = Series([timedelta(minutes=5, seconds=3)] * 3)
+         td1.iloc[2] = np.nan
+-        td2 = timedelta(minutes=5, seconds=4)
+-        ops = ['__mul__', '__floordiv__', '__pow__', '__rmul__',
+-               '__rfloordiv__', '__rpow__']
+-        run_ops(ops, td1, td2)
+-        td1 + td2
+-        td2 + td1
+-        td1 - td2
+-        td2 - td1
+-        td1 / td2
+-        td2 / td1
++        tdscalar = Timedelta(minutes=5, seconds=4)
++        ops = ['__mul__', '__pow__', '__rmul__', '__rpow__']
++        run_ops(ops, td1, tdscalar)
++        td1 + tdscalar
++        tdscalar + td1
++        td1 - tdscalar
++        tdscalar - td1
++        td1 / tdscalar
++        tdscalar / td1
++        tm.assert_series_equal(td1 // tdscalar, Series([0, 0, np.nan]))
++        tm.assert_series_equal(td1 // tdscalar.to_pytimedelta(),
++                               Series([0, 0, np.nan]))
++        tm.assert_series_equal(td1 // tdscalar.to_timedelta64(),
++                               Series([0, 0, np.nan]))
++        tm.assert_series_equal(tdscalar.to_pytimedelta() // td1,
++                               Series([1, 1, np.nan]))
++        tm.assert_series_equal(tdscalar.to_timedelta64() // td1,
++                               Series([1, 1, np.nan]))
+ 
+         # ## datetime64 ###
+         dt1 = Series([Timestamp('20111230'), Timestamp('20120101'),
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

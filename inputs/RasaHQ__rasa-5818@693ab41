@@ -1,0 +1,179 @@
+  Task-ID: RasaHQ__rasa-5818@693ab41
+  Please checkout to this commit first: bd8e8ea9181cbb20a70edd4ae1c7cc26b6c71070
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Update release script to support pre-releases
+**Description of Problem**:
+If you want to tag a pre-release the release script does not accept, for example, the version number `1.10.0a1`. It just supports `1.10.0-alpha1`. Also the release script deletes all changelog files and update the `CHANGELOG.rst` file. This should not happen on a pre-release. We want to keep those updates for the next minor release.
+
+**Overview of the Solution**:
+Add support for pre-release versions, such as `1.10.0a1`.
+Skip updating the `CHANGELOG.rst` file for pre-releases.
+  </issue>
+  
+  <patch>
+  diff --git a/scripts/release.py b/scripts/release.py
+index 466efaedefc3..aeafd815afec 100644
+--- a/scripts/release.py
++++ b/scripts/release.py
+@@ -7,6 +7,7 @@
+ """
+ import argparse
+ import os
++import re
+ import sys
+ from pathlib import Path
+ from subprocess import CalledProcessError, check_call, check_output
+@@ -25,6 +26,8 @@
+ 
+ RELEASE_BRANCH_PREFIX = "prepare-release-"
+ 
++ALPHA_VERSION_PATTERN = re.compile(r"^alpha([1-9]\d*)$")
++
+ 
+ def create_argument_parser() -> argparse.ArgumentParser:
+     """Parse all the command line arguments for the release script."""
+@@ -33,7 +36,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
+     parser.add_argument(
+         "--next_version",
+         type=str,
+-        help="Either next version number or 'major', 'minor', 'patch'",
++        help="Either next version number or 'major', 'minor', 'patch', 'alpha'",
+     )
+ 
+     return parser
+@@ -68,9 +71,6 @@ def write_version_file(version: Text) -> None:
+ 
+ def write_version_to_pyproject(version: Text) -> None:
+     """Dump a new version into the pyproject.toml."""
+-
+-    import toml
+-
+     pyproject_file = pyproject_file_path()
+ 
+     try:
+@@ -130,16 +130,15 @@ def ask_version() -> Text:
+     """Allow the user to confirm the version number."""
+ 
+     def is_valid_version_number(v: Text) -> bool:
+-        # noinspection PyBroadException
+-        try:
+-            return v in {"major", "minor", "patch"} or Version.coerce(v) is not None
+-        except Exception:
+-            # "coerce" did fail, this is probably not a valid version number
+-            return False
++        return v in {"major", "minor", "patch", "alpha"} or validate_version(v)
+ 
++    current_version = Version.coerce(get_current_version())
++    next_patch_version = str(current_version.next_patch())
++    next_alpha_version = str(next_alpha(current_version))
+     version = questionary.text(
+-        "What is the version number you want to release "
+-        "('major', 'minor', 'patch' or valid version number)?",
++        f"What is the version number you want to release "
++        f"('major', 'minor', 'patch', 'alpha' or valid version number "
++        f"e.g. '{next_patch_version}' or '{next_alpha_version}')?",
+         validate=is_valid_version_number,
+     ).ask()
+ 
+@@ -228,6 +227,44 @@ def ensure_clean_git() -> None:
+         sys.exit(1)
+ 
+ 
++def validate_version(version: Text) -> bool:
++    """
++    Ensure that the version follows semver
++    and that the alpha follows the format `alpha1`, `alpha2`, etc...
++    """
++    if not semantic_version.validate(version):
++        return False
++
++    version_object = Version.coerce(version)
++    return not version_object.prerelease or (
++        len(version_object.prerelease) == 1
++        and validate_alpha_version_part(version_object.prerelease[0])
++    )
++
++
++def validate_alpha_version_part(alpha_version_part: Text) -> bool:
++    """
++    Validate that the alpha part in a version follows
++    the pattern specified in `ALPHA_VERSION_PATTERN`.
++    """
++    return ALPHA_VERSION_PATTERN.match(alpha_version_part) is not None
++
++
++def next_alpha(version: Version) -> Version:
++    """Bump the current version to the next alpha."""
++    alpha_number = 0
++    if version.prerelease:
++        alpha_number = int(ALPHA_VERSION_PATTERN.match(version.prerelease[0]).group(1))
++
++    return Version(
++        major=version.major,
++        minor=version.minor,
++        patch=version.patch,
++        prerelease=(f"alpha{alpha_number + 1}",),
++        partial=version.partial,
++    )
++
++
+ def parse_next_version(version: Text) -> Text:
+     """Find the next version as a proper semantic version string."""
+     if version == "major":
+@@ -236,7 +273,9 @@ def parse_next_version(version: Text) -> Text:
+         return str(Version.coerce(get_current_version()).next_minor())
+     elif version == "patch":
+         return str(Version.coerce(get_current_version()).next_patch())
+-    elif semantic_version.validate(version):
++    elif version == "alpha":
++        return str(next_alpha(Version.coerce(get_current_version())))
++    elif validate_version(version):
+         return version
+     else:
+         raise Exception(f"Invalid version number '{cmdline_args.next_version}'.")
+@@ -280,7 +319,9 @@ def main(args: argparse.Namespace) -> None:
+     write_version_file(version)
+     write_version_to_pyproject(version)
+ 
+-    generate_changelog(version)
++    if not version.prerelease:
++        # never update changelog on an alpha version
++        generate_changelog(version)
+     base = git_current_branch()
+     branch = create_release_branch(version)
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,180 @@
+  Task-ID: apache__airflow-26766@cf0c9a6
+  Please checkout to this commit first: 9c73b3f7fc1d18925d0ed09e8719f53b8147b0f2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Use private docker repository with K8S operator and XCOM sidecar container
+**Use private docker repository with K8S operator and XCOM sidecar container**
+
+An extra parameter to KubernetesPodOperator: docker_repository, this allows to specify the repository where the sidecar container is located
+
+**My company force docker proxy usage for K8S**
+
+I need to use my company docker repository, images that are not proxifed by the company docker repository are not allowed
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/config_templates/config.yml b/airflow/config_templates/config.yml
+index b20fea7ff2641..e5bf8dece18bd 100644
+--- a/airflow/config_templates/config.yml
++++ b/airflow/config_templates/config.yml
+@@ -2425,6 +2425,14 @@
+       type: string
+       example: '{"grace_period_seconds": 10}'
+       default: ""
++    - name: sidecar_container_image
++      description: |
++        Define the ``image`` used by the ``PodDefaults.SIDECAR_CONTAINER`` to allow private repositories,
++        as well as custom image overrides.
++      version_added: 2.4.1
++      type: string
++      example: ~
++      default: "alpine"
+     - name: enable_tcp_keepalive
+       description: |
+         Enables TCP keepalive mechanism. This prevents Kubernetes API requests to hang indefinitely
+diff --git a/airflow/config_templates/default_airflow.cfg b/airflow/config_templates/default_airflow.cfg
+index 174f33dbc8bd1..df3c25feff70f 100644
+--- a/airflow/config_templates/default_airflow.cfg
++++ b/airflow/config_templates/default_airflow.cfg
+@@ -1213,6 +1213,10 @@ kube_client_request_args =
+ # Example: delete_option_kwargs = {{"grace_period_seconds": 10}}
+ delete_option_kwargs =
+ 
++# Define the ``image`` used by the ``PodDefaults.SIDECAR_CONTAINER`` to allow private repositories,
++# as well as custom image overrides.
++sidecar_container_image = alpine
++
+ # Enables TCP keepalive mechanism. This prevents Kubernetes API requests to hang indefinitely
+ # when idle connection is time-outed on services like cloud load balancers or firewalls.
+ enable_tcp_keepalive = True
+diff --git a/airflow/kubernetes/pod_generator.py b/airflow/kubernetes/pod_generator.py
+index c3a5f91bd65cb..23f52b2cfa74b 100644
+--- a/airflow/kubernetes/pod_generator.py
++++ b/airflow/kubernetes/pod_generator.py
+@@ -36,6 +36,7 @@
+ from kubernetes.client import models as k8s
+ from kubernetes.client.api_client import ApiClient
+ 
++from airflow.configuration import conf
+ from airflow.exceptions import AirflowConfigException, PodReconciliationError, RemovedInAirflow3Warning
+ from airflow.kubernetes.pod_generator_deprecated import PodDefaults, PodGenerator as PodGeneratorDeprecated
+ from airflow.utils import yaml
+@@ -146,7 +147,10 @@ def add_xcom_sidecar(pod: k8s.V1Pod) -> k8s.V1Pod:
+         pod_cp.spec.volumes.insert(0, PodDefaults.VOLUME)
+         pod_cp.spec.containers[0].volume_mounts = pod_cp.spec.containers[0].volume_mounts or []
+         pod_cp.spec.containers[0].volume_mounts.insert(0, PodDefaults.VOLUME_MOUNT)
+-        pod_cp.spec.containers.append(PodDefaults.SIDECAR_CONTAINER)
++
++        sidecar = copy.deepcopy(PodDefaults.SIDECAR_CONTAINER)
++        sidecar.image = conf.get('kubernetes', 'sidecar_container_image', fallback=sidecar.image)
++        pod_cp.spec.containers.append(sidecar)
+ 
+         return pod_cp
+ 
+diff --git a/airflow/kubernetes/pod_generator_deprecated.py b/airflow/kubernetes/pod_generator_deprecated.py
+index f9fa2785060e1..d77f3485b3d16 100644
+--- a/airflow/kubernetes/pod_generator_deprecated.py
++++ b/airflow/kubernetes/pod_generator_deprecated.py
+@@ -29,6 +29,8 @@
+ 
+ from kubernetes.client import models as k8s
+ 
++from airflow.configuration import conf
++
+ MAX_POD_ID_LEN = 253
+ 
+ MAX_LABEL_LEN = 63
+@@ -236,7 +238,10 @@ def add_sidecar(pod: k8s.V1Pod) -> k8s.V1Pod:
+         pod_cp.spec.volumes.insert(0, PodDefaults.VOLUME)
+         pod_cp.spec.containers[0].volume_mounts = pod_cp.spec.containers[0].volume_mounts or []
+         pod_cp.spec.containers[0].volume_mounts.insert(0, PodDefaults.VOLUME_MOUNT)
+-        pod_cp.spec.containers.append(PodDefaults.SIDECAR_CONTAINER)
++
++        sidecar = copy.deepcopy(PodDefaults.SIDECAR_CONTAINER)
++        sidecar.image = conf.get('kubernetes', 'sidecar_container_image', fallback=sidecar.image)
++        pod_cp.spec.containers.append(sidecar)
+ 
+         return pod_cp
+ 
+diff --git a/airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py b/airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py
+index 921ea28a768a1..7cacf78295f81 100644
+--- a/airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py
++++ b/airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py
+@@ -25,6 +25,8 @@
+ 
+ from kubernetes.client import models as k8s
+ 
++from airflow.configuration import conf
++
+ 
+ class PodDefaults:
+     """Static defaults for Pods"""
+@@ -54,6 +56,9 @@ def add_xcom_sidecar(pod: k8s.V1Pod) -> k8s.V1Pod:
+     pod_cp.spec.volumes.insert(0, PodDefaults.VOLUME)
+     pod_cp.spec.containers[0].volume_mounts = pod_cp.spec.containers[0].volume_mounts or []
+     pod_cp.spec.containers[0].volume_mounts.insert(0, PodDefaults.VOLUME_MOUNT)
+-    pod_cp.spec.containers.append(PodDefaults.SIDECAR_CONTAINER)
++
++    sidecar = copy.deepcopy(PodDefaults.SIDECAR_CONTAINER)
++    sidecar.image = conf.get('kubernetes', 'sidecar_container_image', fallback=sidecar.image)
++    pod_cp.spec.containers.append(sidecar)
+ 
+     return pod_cp
+diff --git a/tests/kubernetes/test_pod_generator.py b/tests/kubernetes/test_pod_generator.py
+index 57039c04e8600..901219ba19f98 100644
+--- a/tests/kubernetes/test_pod_generator.py
++++ b/tests/kubernetes/test_pod_generator.py
+@@ -38,6 +38,7 @@
+     merge_objects,
+ )
+ from airflow.kubernetes.secret import Secret
++from tests.test_utils.config import conf_vars
+ 
+ 
+ class TestPodGenerator:
+@@ -777,3 +778,11 @@ def test_validate_pod_generator(self):
+             PodGenerator()
+         PodGenerator(pod_template_file='tests/kubernetes/pod.yaml')
+         PodGenerator(pod=k8s.V1Pod())
++
++    @conf_vars({('kubernetes', 'sidecar_container_image'): 'private.repo.com/alpine:3.16.2'})
++    def test_customize_sidecar_container_image(self):
++        pod = PodGenerator.add_xcom_sidecar(
++            PodGenerator(pod_template_file='tests/kubernetes/pod.yaml').gen_pod()
++        )
++
++        assert pod.spec.containers[-1].image == 'private.repo.com/alpine:3.16.2'
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,238 @@
+  Task-ID: python__cpython-117297@e37c1a9
+  Please checkout to this commit first: 262fb911ab7df8e890ebd0efb0773c3e0b5a757f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  DocTestCase should report as skipped if the doctest itself is skipped
+# Feature or enhancement
+
+### Proposal:
+
+When a doctest is run through `unittest`, each docstring is wrapped in a `DocTestCase`. Currently, if the docstring's examples are all skipped (either with a `# doctest: +SKIP` comment, or the `optionflags` argument), the `DocTestCase` still reports as a test pass. Even in the verbose unittest log, there's no indication that anything has been skipped.
+
+It would make sense for the `DocTestCase` to report as skipped in this situation.
+
+### Has this already been discussed elsewhere?
+
+This is a minor feature, which does not need previous discussion elsewhere
+
+<!-- gh-linked-prs -->
+### Linked PRs
+* gh-117297
+<!-- /gh-linked-prs -->
+  </issue>
+  
+  <patch>
+  diff --git a/Doc/library/doctest.rst b/Doc/library/doctest.rst
+index 835a3a76806148..d3dcf9c4e5743c 100644
+--- a/Doc/library/doctest.rst
++++ b/Doc/library/doctest.rst
+@@ -1021,7 +1021,8 @@ from text files and modules with doctests:
+    and runs the interactive examples in each file.  If an example in any file
+    fails, then the synthesized unit test fails, and a :exc:`failureException`
+    exception is raised showing the name of the file containing the test and a
+-   (sometimes approximate) line number.
++   (sometimes approximate) line number.  If all the examples in a file are
++   skipped, then the synthesized unit test is also marked as skipped.
+ 
+    Pass one or more paths (as strings) to text files to be examined.
+ 
+@@ -1087,7 +1088,8 @@ from text files and modules with doctests:
+    and runs each doctest in the module.  If any of the doctests fail, then the
+    synthesized unit test fails, and a :exc:`failureException` exception is raised
+    showing the name of the file containing the test and a (sometimes approximate)
+-   line number.
++   line number.  If all the examples in a docstring are skipped, then the
++   synthesized unit test is also marked as skipped.
+ 
+    Optional argument *module* provides the module to be tested.  It can be a module
+    object or a (possibly dotted) module name.  If not specified, the module calling
+diff --git a/Lib/doctest.py b/Lib/doctest.py
+index 6049423b5147a5..cac50f9d23439a 100644
+--- a/Lib/doctest.py
++++ b/Lib/doctest.py
+@@ -2262,12 +2262,13 @@ def runTest(self):
+ 
+         try:
+             runner.DIVIDER = "-"*70
+-            failures, tries = runner.run(
+-                test, out=new.write, clear_globs=False)
++            results = runner.run(test, out=new.write, clear_globs=False)
++            if results.skipped == results.attempted:
++                raise unittest.SkipTest(f"all examples were skipped")
+         finally:
+             sys.stdout = old
+ 
+-        if failures:
++        if results.failed:
+             raise self.failureException(self.format_failure(new.getvalue()))
+ 
+     def format_failure(self, err):
+diff --git a/Lib/test/test_doctest/sample_doctest_skip.py b/Lib/test/test_doctest/sample_doctest_skip.py
+new file mode 100644
+index 00000000000000..1b83dec1f8c4dc
+--- /dev/null
++++ b/Lib/test/test_doctest/sample_doctest_skip.py
+@@ -0,0 +1,49 @@
++"""This is a sample module used for testing doctest.
++
++This module includes various scenarios involving skips.
++"""
++
++def no_skip_pass():
++    """
++    >>> 2 + 2
++    4
++    """
++
++def no_skip_fail():
++    """
++    >>> 2 + 2
++    5
++    """
++
++def single_skip():
++    """
++    >>> 2 + 2  # doctest: +SKIP
++    4
++    """
++
++def double_skip():
++    """
++    >>> 2 + 2  # doctest: +SKIP
++    4
++    >>> 3 + 3  # doctest: +SKIP
++    6
++    """
++
++def partial_skip_pass():
++    """
++    >>> 2 + 2  # doctest: +SKIP
++    4
++    >>> 3 + 3
++    6
++    """
++
++def partial_skip_fail():
++    """
++    >>> 2 + 2  # doctest: +SKIP
++    4
++    >>> 2 + 2
++    5
++    """
++
++def no_examples():
++    """A docstring with no examples should not be counted as run or skipped."""
+diff --git a/Lib/test/test_doctest/test_doctest.py b/Lib/test/test_doctest/test_doctest.py
+index 43be200b983227..8737618018785d 100644
+--- a/Lib/test/test_doctest/test_doctest.py
++++ b/Lib/test/test_doctest/test_doctest.py
+@@ -2247,6 +2247,16 @@ def test_DocTestSuite():
+          >>> suite.run(unittest.TestResult())
+          <unittest.result.TestResult run=0 errors=0 failures=0>
+ 
++       If all examples in a docstring are skipped, unittest will report it as a
++       skipped test:
++
++         >>> suite = doctest.DocTestSuite('test.test_doctest.sample_doctest_skip')
++         >>> result = suite.run(unittest.TestResult())
++         >>> result
++         <unittest.result.TestResult run=6 errors=0 failures=2>
++        >>> len(result.skipped)
++        2
++
+        We can use the current module:
+ 
+          >>> suite = test.test_doctest.sample_doctest.test_suite()
+@@ -2418,6 +2428,18 @@ def test_DocFileSuite():
+          Traceback (most recent call last):
+          ValueError: Package may only be specified for module-relative paths.
+ 
++       If all examples in a file are skipped, unittest will report it as a
++       skipped test:
++
++         >>> suite = doctest.DocFileSuite('test_doctest.txt',
++         ...                              'test_doctest4.txt',
++         ...                              'test_doctest_skip.txt')
++         >>> result = suite.run(unittest.TestResult())
++         >>> result
++         <unittest.result.TestResult run=3 errors=0 failures=1>
++        >>> len(result.skipped)
++        1
++
+        You can specify initial global variables:
+ 
+          >>> suite = doctest.DocFileSuite('test_doctest.txt',
+diff --git a/Lib/test/test_doctest/test_doctest_skip.txt b/Lib/test/test_doctest/test_doctest_skip.txt
+new file mode 100644
+index 00000000000000..f340e2b8141253
+--- /dev/null
++++ b/Lib/test/test_doctest/test_doctest_skip.txt
+@@ -0,0 +1,4 @@
++This is a sample doctest in a text file, in which all examples are skipped.
++
++  >>> 2 + 2  # doctest: +SKIP
++  5
+diff --git a/Lib/test/test_zipimport_support.py b/Lib/test/test_zipimport_support.py
+index 71039d2a8e7ab9..ae8a8c99762313 100644
+--- a/Lib/test/test_zipimport_support.py
++++ b/Lib/test/test_zipimport_support.py
+@@ -31,7 +31,7 @@
+ # Retrieve some helpers from other test cases
+ from test.test_doctest import (test_doctest,
+                                sample_doctest, sample_doctest_no_doctests,
+-                               sample_doctest_no_docstrings)
++                               sample_doctest_no_docstrings, sample_doctest_skip)
+ 
+ 
+ def _run_object_doctest(obj, module):
+@@ -110,7 +110,7 @@ def test_doctest_issue4197(self):
+         # The sample doctest files rewritten to include in the zipped version.
+         sample_sources = {}
+         for mod in [sample_doctest, sample_doctest_no_doctests,
+-                    sample_doctest_no_docstrings]:
++                    sample_doctest_no_docstrings, sample_doctest_skip]:
+             src = inspect.getsource(mod)
+             src = src.replace("test.test_doctest.test_doctest", "test_zipped_doctest")
+             # Rewrite the module name so that, for example,
+diff --git a/Misc/NEWS.d/next/Library/2024-03-27-16-43-42.gh-issue-117294.wbXNFv.rst b/Misc/NEWS.d/next/Library/2024-03-27-16-43-42.gh-issue-117294.wbXNFv.rst
+new file mode 100644
+index 00000000000000..bb351e6399a765
+--- /dev/null
++++ b/Misc/NEWS.d/next/Library/2024-03-27-16-43-42.gh-issue-117294.wbXNFv.rst
+@@ -0,0 +1,2 @@
++A ``DocTestCase`` now reports as skipped if all examples in the doctest are
++skipped.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

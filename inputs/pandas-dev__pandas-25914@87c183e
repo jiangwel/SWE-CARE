@@ -1,0 +1,115 @@
+  Task-ID: pandas-dev__pandas-25914@87c183e
+  Please checkout to this commit first: 4814a2875d078d6e9e9300bd1f77af15ef4f0f0a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  display.precision not honored for column headers
+#### Code Sample, a copy-pastable example if possible
+
+```python
+import pandas as pd
+import numpy as np
+pd.options.display.precision = 3
+labels = np.random.rand(10)
+p = pd.DataFrame(np.random.randn(10,10),index=labels,columns=labels)
+p
+
+```
+#### Problem description
+
+The above code works just fine in a standard console, but in a jupyter notebook the float valued column headers are not displayed with a precision of 3.  This appears to be due to the notebook_repr_html option, since setting that to False again honors the precision.  Note that the same applies to other formatting options, and if I switch to a MultiIndex it looks fine. I posted this as a question on the pydata discussion site and Joris Van den Bossche confirmed that it was an issue and suggested that I report it here.
+
+#### Expected Output
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+[paste the output of ``pd.show_versions()`` here below this line]
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.25.0.rst b/doc/source/whatsnew/v0.25.0.rst
+index c7554a70bea91..3a0063a0aca09 100644
+--- a/doc/source/whatsnew/v0.25.0.rst
++++ b/doc/source/whatsnew/v0.25.0.rst
+@@ -353,6 +353,7 @@ I/O
+ - Bug in :meth:`DataFrame.to_string` and :meth:`DataFrame.to_latex` that would lead to incorrect output when the ``header`` keyword is used (:issue:`16718`)
+ - Bug in :func:`read_csv` not properly interpreting the UTF8 encoded filenames on Windows on Python 3.6+ (:issue:`15086`)
+ - Improved performance in :meth:`pandas.read_stata` and :class:`pandas.io.stata.StataReader` when converting columns that have missing values (:issue:`25772`)
++- Bug in :meth:`DataFrame.to_html` where header numbers would ignore display options when rounding (:issue:`17280`)
+ 
+ 
+ Plotting
+diff --git a/pandas/io/formats/html.py b/pandas/io/formats/html.py
+index 6ba24a95032f8..2b399377f9fea 100644
+--- a/pandas/io/formats/html.py
++++ b/pandas/io/formats/html.py
+@@ -491,6 +491,15 @@ class NotebookFormatter(HTMLFormatter):
+     DataFrame._repr_html_() and DataFrame.to_html(notebook=True)
+     """
+ 
++    def __init__(self, formatter, classes=None, border=None):
++        super(NotebookFormatter, self).__init__(formatter,
++                                                classes=classes,
++                                                border=border)
++        precision = get_option('display.precision')
++        fmt = lambda f: '{float:.{p}f}'.format(float=f, p=precision)
++        fmt_floats = lambda f: fmt(f) if isinstance(f, float) else f
++        self.columns = self.columns.map(fmt_floats)
++
+     def _get_formatted_values(self):
+         return {i: self.fmt._format_col(i) for i in range(self.ncols)}
+ 
+diff --git a/pandas/tests/io/formats/test_to_html.py b/pandas/tests/io/formats/test_to_html.py
+index 148a42a332661..6b0487d239d4a 100644
+--- a/pandas/tests/io/formats/test_to_html.py
++++ b/pandas/tests/io/formats/test_to_html.py
+@@ -633,3 +633,12 @@ def test_to_html_invalid_classes_type(classes):
+ 
+     with pytest.raises(TypeError, match=msg):
+         df.to_html(classes=classes)
++
++
++def test_to_html_round_column_headers():
++    df = DataFrame([1], columns=[0.55555])
++    with pd.option_context('display.precision', 3):
++        html = df.to_html(notebook=False)
++        notebook = df.to_html(notebook=True)
++    assert "0.55555" in html
++    assert "0.556" in notebook
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

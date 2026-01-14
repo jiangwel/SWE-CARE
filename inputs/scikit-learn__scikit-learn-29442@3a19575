@@ -1,0 +1,363 @@
+  Task-ID: scikit-learn__scikit-learn-29442@3a19575
+  Please checkout to this commit first: f9776619f1144075289813634c5d450d5b31fa71
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Calculation of alphas in ElasticNetCV doesn't use sample_weight
+### Describe the bug
+
+In ElasticNetCV, the first and largest value of `alpha`, call it `alpha_max`, should be just large enough to force all of the coefficients to become zero. The existing code works correctly when `sample_weight` is not specified. However, the computation of `alpha_max` does not take into account `sample_weight`.
+
+### Steps/Code to Reproduce
+
+```python
+import numpy as np
+from sklearn.linear_model import ElasticNet, ElasticNetCV
+
+X = np.array([[3, 1], [2, 5], [5, 3], [1, 4]])
+beta = np.array([1, 1])
+y = X @ beta
+w = np.array([10, 1, 10, 1])
+
+# Fit ElasticNetCV just to get the .alphas_ attribute
+enetCV = ElasticNetCV(cv=2)
+enetCV.fit(X, y, sample_weight=w)
+
+# The coefficient of ElasticNet fitted at alpha_max should be [0.  0.].
+alpha_max = enetCV.alphas_[0]
+enet = ElasticNet(alpha=alpha_max)
+enet.fit(X, y, sample_weight=w)
+print(enet.coef_)  # [0.1970807  0.19708023]
+```
+
+### Expected Results
+
+If the correct value of `alpha_max` is computed, then `enet.coef_` should be right at the cusp of zero, such that any smaller value of `alpha` makes it nonzero:
+```python
+def get_alpha_max(X, y, w, l1_ratio=0.5):
+    wn = w / w.sum()
+    Xn = X - np.dot(wn, X)
+    yn = (y - np.dot(wn, y)) * wn
+    return np.max(np.abs(yn @ Xn)) / l1_ratio
+
+
+enet = ElasticNet(alpha=get_alpha_max(X, y, w))
+enet.fit(X, y, sample_weight=w)
+print(enet.coef_)  # [6.70427878e-17 6.70427878e-17]
+```
+
+### Actual Results
+
+`enet.coef_` is `[0.1970807  0.19708023]`.
+
+### Versions
+
+```shell
+System:
+    python: 3.9.7 (default, Sep 16 2021, 13:09:58)  [GCC 7.5.0]
+executable: /home/jhopfens/.conda/envs/jhop39/bin/python
+   machine: Linux-3.10.0-1160.53.1.el7.x86_64-x86_64-with-glibc2.17
+
+Python dependencies:
+          pip: 21.2.4
+   setuptools: 58.0.4
+      sklearn: 1.0.2
+        numpy: 1.21.5
+        scipy: 1.7.2
+       Cython: 0.29.24
+       pandas: 1.3.5
+   matplotlib: 3.5.1
+       joblib: 1.1.0
+threadpoolctl: 3.0.0
+
+Built with OpenMP: True
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/whats_new/v1.6.rst b/doc/whats_new/v1.6.rst
+index c98314d5ca1de..0153de68662c4 100644
+--- a/doc/whats_new/v1.6.rst
++++ b/doc/whats_new/v1.6.rst
+@@ -103,6 +103,12 @@ Changelog
+     :pr:`123456` by :user:`Joe Bloggs <joeongithub>`.
+     where 123455 is the *pull request* number, not the issue number.
+ 
++:mod:`sklearn.linear_model`
++..........................
++- |Fix| :func:`_coordinate_descent._alpha_grid` adapted to account for sample weights.
++  :pr:`23045`by :user:`John Hopfensperger <s-banach>`and :pr:`29308`by :user:`Shruti Nath <snath-xoc>`.
++
++
+ :mod:`sklearn.base`
+ ...................
+ 
+diff --git a/sklearn/linear_model/_coordinate_descent.py b/sklearn/linear_model/_coordinate_descent.py
+index c23527de9e07b..0f19636dcdb06 100644
+--- a/sklearn/linear_model/_coordinate_descent.py
++++ b/sklearn/linear_model/_coordinate_descent.py
+@@ -98,6 +98,7 @@ def _alpha_grid(
+     eps=1e-3,
+     n_alphas=100,
+     copy_X=True,
++    sample_weight=None,
+ ):
+     """Compute the grid of alpha values for elastic net parameter search
+ 
+@@ -132,6 +133,8 @@ def _alpha_grid(
+ 
+     copy_X : bool, default=True
+         If ``True``, X will be copied; else, it may be overwritten.
++
++    sample_weight : ndarray of shape (n_samples,)
+     """
+     if l1_ratio == 0:
+         raise ValueError(
+@@ -140,43 +143,40 @@ def _alpha_grid(
+             "your estimator with the appropriate `alphas=` "
+             "argument."
+         )
+-    n_samples = len(y)
+-
+-    sparse_center = False
+-    if Xy is None:
+-        X_sparse = sparse.issparse(X)
+-        sparse_center = X_sparse and fit_intercept
+-        X = check_array(
+-            X, accept_sparse="csc", copy=(copy_X and fit_intercept and not X_sparse)
++    if Xy is not None:
++        Xyw = Xy
++    else:
++        X, y, X_offset, _, _ = _preprocess_data(
++            X,
++            y,
++            fit_intercept=fit_intercept,
++            copy=copy_X,
++            sample_weight=sample_weight,
++            check_input=False,
+         )
+-        if not X_sparse:
+-            # X can be touched inplace thanks to the above line
+-            X, y, _, _, _ = _preprocess_data(
+-                X, y, fit_intercept=fit_intercept, copy=False
+-            )
+-        Xy = safe_sparse_dot(X.T, y, dense_output=True)
+-
+-        if sparse_center:
+-            # Workaround to find alpha_max for sparse matrices.
+-            # since we should not destroy the sparsity of such matrices.
+-            _, _, X_offset, _, X_scale = _preprocess_data(
+-                X, y, fit_intercept=fit_intercept
+-            )
+-            mean_dot = X_offset * np.sum(y)
+-
+-    if Xy.ndim == 1:
+-        Xy = Xy[:, np.newaxis]
++        if sample_weight is not None:
++            if y.ndim > 1:
++                yw = y * np.broadcast_to(sample_weight.reshape(-1, 1), y.shape)
+ 
+-    if sparse_center:
+-        if fit_intercept:
+-            Xy -= mean_dot[:, np.newaxis]
++            else:
++                yw = y * sample_weight
++        else:
++            yw = y
++        if sparse.issparse(X):
++            Xyw = safe_sparse_dot(X.T, yw, dense_output=True) - np.sum(yw) * X_offset
++        else:
++            Xyw = np.dot(X.T, yw)
+ 
+-    alpha_max = np.sqrt(np.sum(Xy**2, axis=1)).max() / (n_samples * l1_ratio)
++    if Xyw.ndim == 1:
++        Xyw = Xyw[:, np.newaxis]
++    if sample_weight is not None:
++        n_samples = sample_weight.sum()
++    else:
++        n_samples = X.shape[0]
++    alpha_max = np.sqrt(np.sum(Xyw**2, axis=1)).max() / (n_samples * l1_ratio)
+ 
+-    if alpha_max <= np.finfo(float).resolution:
+-        alphas = np.empty(n_alphas)
+-        alphas.fill(np.finfo(float).resolution)
+-        return alphas
++    if alpha_max <= np.finfo(np.float64).resolution:
++        return np.full(n_alphas, np.finfo(np.float64).resolution)
+ 
+     return np.geomspace(alpha_max, alpha_max * eps, num=n_alphas)
+ 
+@@ -1702,6 +1702,7 @@ def fit(self, X, y, sample_weight=None, **params):
+                     eps=self.eps,
+                     n_alphas=self.n_alphas,
+                     copy_X=self.copy_X,
++                    sample_weight=sample_weight,
+                 )
+                 for l1_ratio in l1_ratios
+             ]
+diff --git a/sklearn/linear_model/tests/test_coordinate_descent.py b/sklearn/linear_model/tests/test_coordinate_descent.py
+index 6e2b35a5590cb..fffe9759fde0a 100644
+--- a/sklearn/linear_model/tests/test_coordinate_descent.py
++++ b/sklearn/linear_model/tests/test_coordinate_descent.py
+@@ -48,6 +48,7 @@
+     assert_almost_equal,
+     assert_array_almost_equal,
+     assert_array_equal,
++    assert_array_less,
+     ignore_warnings,
+ )
+ from sklearn.utils.fixes import COO_CONTAINERS, CSC_CONTAINERS, CSR_CONTAINERS
+@@ -1306,55 +1307,60 @@ def test_enet_sample_weight_consistency(
+ 
+ @pytest.mark.parametrize("fit_intercept", [True, False])
+ @pytest.mark.parametrize("sparse_container", [None] + CSC_CONTAINERS)
+-def test_enet_cv_sample_weight_correctness(fit_intercept, sparse_container):
++def test_enet_cv_sample_weight_correctness(
++    fit_intercept, sparse_container, global_random_seed
++):
+     """Test that ElasticNetCV with sample weights gives correct results."""
+-    rng = np.random.RandomState(42)
++    rng = np.random.RandomState(global_random_seed)
+     n_splits, n_samples, n_features = 3, 10, 5
+-    X = rng.rand(n_splits * n_samples, n_features)
++    X_with_weights = rng.rand(n_splits * n_samples, n_features)
+     beta = rng.rand(n_features)
+     beta[0:2] = 0
+-    y = X @ beta + rng.rand(n_splits * n_samples)
+-    sw = np.ones_like(y)
++    y_with_weights = X_with_weights @ beta + rng.rand(n_splits * n_samples)
++    sw = np.ones_like(y_with_weights)
+     if sparse_container is not None:
+-        X = sparse_container(X)
++        X_with_weights = sparse_container(X_with_weights)
+     params = dict(tol=1e-6)
+ 
+-    # Set alphas, otherwise the two cv models might use different ones.
+-    if fit_intercept:
+-        alphas = np.linspace(0.001, 0.01, num=91)
+-    else:
+-        alphas = np.linspace(0.01, 0.1, num=91)
+-
+-    # We weight the first fold 2 times more.
+-    sw[:n_samples] = 2
+-    groups_sw = np.r_[
++    # Inspect the total number of random repetitions so as to adjust the size of
++    # the first cross-validation group accordingly.
++    sw[:n_samples] = rng.randint(0, 5, size=n_samples)
++    groups_with_weights = np.r_[
+         np.full(n_samples, 0), np.full(n_samples, 1), np.full(n_samples, 2)
+     ]
+-    splits_sw = list(LeaveOneGroupOut().split(X, groups=groups_sw))
+-    reg_sw = ElasticNetCV(
+-        alphas=alphas, cv=splits_sw, fit_intercept=fit_intercept, **params
++    splits_with_weights = list(
++        LeaveOneGroupOut().split(X_with_weights, groups=groups_with_weights)
++    )
++    reg_with_weights = ElasticNetCV(
++        cv=splits_with_weights, fit_intercept=fit_intercept, **params
+     )
+-    reg_sw.fit(X, y, sample_weight=sw)
++    reg_with_weights.fit(X_with_weights, y_with_weights, sample_weight=sw)
+ 
+     # We repeat the first fold 2 times and provide splits ourselves
+     if sparse_container is not None:
+-        X = X.toarray()
+-    X = np.r_[X[:n_samples], X]
++        X_with_weights = X_with_weights.toarray()
++    X_with_repetitions = np.repeat(X_with_weights, sw.astype(int), axis=0)
++
+     if sparse_container is not None:
+-        X = sparse_container(X)
+-    y = np.r_[y[:n_samples], y]
+-    groups = np.r_[
+-        np.full(2 * n_samples, 0), np.full(n_samples, 1), np.full(n_samples, 2)
+-    ]
+-    splits = list(LeaveOneGroupOut().split(X, groups=groups))
+-    reg = ElasticNetCV(alphas=alphas, cv=splits, fit_intercept=fit_intercept, **params)
+-    reg.fit(X, y)
++        X_with_repetitions = sparse_container(X_with_repetitions)
++
++    y_with_repetitions = np.repeat(y_with_weights, sw.astype(int), axis=0)
++    groups_with_repetitions = np.repeat(groups_with_weights, sw.astype(int), axis=0)
++
++    splits_with_repetitions = list(
++        LeaveOneGroupOut().split(X_with_repetitions, groups=groups_with_repetitions)
++    )
++    reg_with_repetitions = ElasticNetCV(
++        cv=splits_with_repetitions, fit_intercept=fit_intercept, **params
++    )
++    reg_with_repetitions.fit(X_with_repetitions, y_with_repetitions)
+ 
+     # ensure that we chose meaningful alphas, i.e. not boundaries
+-    assert alphas[0] < reg.alpha_ < alphas[-1]
+-    assert reg_sw.alpha_ == reg.alpha_
+-    assert_allclose(reg_sw.coef_, reg.coef_)
+-    assert reg_sw.intercept_ == pytest.approx(reg.intercept_)
++    assert_allclose(reg_with_weights.mse_path_, reg_with_repetitions.mse_path_)
++    assert_allclose(reg_with_weights.alphas_, reg_with_repetitions.alphas_)
++    assert reg_with_weights.alpha_ == reg_with_repetitions.alpha_
++    assert_allclose(reg_with_weights.coef_, reg_with_repetitions.coef_)
++    assert reg_with_weights.intercept_ == pytest.approx(reg_with_repetitions.intercept_)
+ 
+ 
+ @pytest.mark.parametrize("sample_weight", [False, True])
+@@ -1392,6 +1398,26 @@ def test_enet_cv_grid_search(sample_weight):
+     assert reg.alpha_ == pytest.approx(gs.best_params_["alpha"])
+ 
+ 
++@pytest.mark.parametrize("sparseX", [False, True])
++@pytest.mark.parametrize("fit_intercept", [False, True])
++@pytest.mark.parametrize("sample_weight", [np.array([10, 1, 10, 1]), None])
++def test_enet_alpha_max_sample_weight(sparseX, fit_intercept, sample_weight):
++    X = np.array([[3.0, 1.0], [2.0, 5.0], [5.0, 3.0], [1.0, 4.0]])
++    beta = np.array([1, 1])
++    y = X @ beta
++    if sparseX:
++        X = sparse.csc_matrix(X)
++    # Test alpha_max makes coefs zero.
++    reg = ElasticNetCV(n_alphas=1, cv=2, eps=1, fit_intercept=fit_intercept)
++    reg.fit(X, y, sample_weight=sample_weight)
++    assert_almost_equal(reg.coef_, 0)
++    alpha_max = reg.alpha_
++    # Test smaller alpha makes coefs nonzero.
++    reg = ElasticNet(alpha=0.99 * alpha_max, fit_intercept=fit_intercept)
++    reg.fit(X, y, sample_weight=sample_weight)
++    assert_array_less(1e-3, np.max(np.abs(reg.coef_)))
++
++
+ @pytest.mark.parametrize("fit_intercept", [True, False])
+ @pytest.mark.parametrize("l1_ratio", [0, 0.5, 1])
+ @pytest.mark.parametrize("precompute", [False, True])
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

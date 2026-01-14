@@ -1,0 +1,260 @@
+  Task-ID: netbox-community__netbox-14754@44cf93a
+  Please checkout to this commit first: e1e198ec4f9b4d6bb70b8cebd91dceaff0394e78
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Script job count is incorrect
+### Deployment Type
+
+Self-hosted
+
+### NetBox Version
+
+v3.6.7
+
+### Python Version
+
+3.10
+
+### Steps to Reproduce
+
+1. Create a script file:
+
+```python
+from extras.scripts import Script
+
+
+class TestScript(Script):
+    name = 'Test'
+    description = ''
+
+    def run(self, data, commit=True):
+        self.log_success('Finished Script')
+
+
+class TestScriptNew(Script):
+    name = 'Test New'
+    description = ''
+
+    def run(self, data, commit=True):
+        self.log_success('Finished Script 2')
+```
+2. Upload to NetBox
+3. Run `Test`
+5. View `Test New`
+
+### Expected Behavior
+
+Job tab badge has "0"
+
+### Observed Behavior
+
+Job tab badge has >0
+  </issue>
+  
+  <patch>
+  diff --git a/netbox/extras/views.py b/netbox/extras/views.py
+index a3dd7f193cf..8b4467f191d 100644
+--- a/netbox/extras/views.py
++++ b/netbox/extras/views.py
+@@ -1007,6 +1007,23 @@ def post(self, request, id):
+         return redirect(reverse('home'))
+ 
+ 
++#
++# Function for returning job data - used in scripts and reports
++#
++
++# Return jobs filtered for job model type (Example: `scriptmodule`)
++def get_jobs(module, job_object, jobtype):
++    # Check if it is a supported module.  Return an empty queryset if not
++    object_type = ContentType.objects.get(app_label='extras', model=jobtype)
++    jobs = Job.objects.filter(
++        object_type=object_type,
++        object_id=module.pk,
++        name=job_object.class_name,
++    )
++
++    return jobs
++
++
+ #
+ # Reports
+ #
+@@ -1057,16 +1074,12 @@ def get_required_permission(self):
+     def get(self, request, module, name):
+         module = get_report_module(module, request)
+         report = module.reports[name]()
++        jobs = get_jobs(module, report, 'reportmodule')
+ 
+-        object_type = ContentType.objects.get(app_label='extras', model='reportmodule')
+-        report.result = Job.objects.filter(
+-            object_type=object_type,
+-            object_id=module.pk,
+-            name=report.name,
+-            status__in=JobStatusChoices.TERMINAL_STATE_CHOICES
+-        ).first()
++        report.result = jobs.first()
+ 
+         return render(request, 'extras/report.html', {
++            'jobs': jobs,
+             'module': module,
+             'report': report,
+             'form': ReportForm(scheduling_enabled=report.scheduling_enabled),
+@@ -1103,6 +1116,7 @@ def post(self, request, module, name):
+             return redirect('extras:report_result', job_pk=job.pk)
+ 
+         return render(request, 'extras/report.html', {
++            'jobs': get_jobs(module, report, 'reportmodule'),
+             'module': module,
+             'report': report,
+             'form': form,
+@@ -1119,6 +1133,7 @@ def get(self, request, module, name):
+         report = module.reports[name]()
+ 
+         return render(request, 'extras/report/source.html', {
++            'jobs': get_jobs(module, report, 'reportmodule'),
+             'module': module,
+             'report': report,
+             'tab': 'source',
+@@ -1135,11 +1150,7 @@ def get(self, request, module, name):
+         report = module.reports[name]()
+ 
+         object_type = ContentType.objects.get(app_label='extras', model='reportmodule')
+-        jobs = Job.objects.filter(
+-            object_type=object_type,
+-            object_id=module.pk,
+-            name=report.class_name
+-        )
++        jobs = get_jobs(module, report, 'reportmodule')
+ 
+         jobs_table = JobTable(
+             data=jobs,
+@@ -1149,6 +1160,7 @@ def get(self, request, module, name):
+         jobs_table.configure(request)
+ 
+         return render(request, 'extras/report/jobs.html', {
++            'jobs': jobs,
+             'module': module,
+             'report': report,
+             'table': jobs_table,
+@@ -1233,18 +1245,15 @@ def get(self, request, module, name):
+         module = get_script_module(module, request)
+         script = module.scripts[name]()
+         form = script.as_form(initial=normalize_querydict(request.GET))
++        jobs = get_jobs(module, script, 'scriptmodule')
+ 
+         # Look for a pending Job (use the latest one by creation timestamp)
+-        object_type = ContentType.objects.get(app_label='extras', model='scriptmodule')
+-        script.result = Job.objects.filter(
+-            object_type=object_type,
+-            object_id=module.pk,
+-            name=script.name,
+-        ).exclude(
++        script.result = jobs.exclude(
+             status__in=JobStatusChoices.TERMINAL_STATE_CHOICES
+         ).first()
+ 
+         return render(request, 'extras/script.html', {
++            'jobs': jobs,
+             'module': module,
+             'script': script,
+             'form': form,
+@@ -1279,6 +1288,7 @@ def post(self, request, module, name):
+             return redirect('extras:script_result', job_pk=job.pk)
+ 
+         return render(request, 'extras/script.html', {
++            'jobs': get_jobs(module, script, 'scriptmodule'),
+             'module': module,
+             'script': script,
+             'form': form,
+@@ -1295,6 +1305,7 @@ def get(self, request, module, name):
+         script = module.scripts[name]()
+ 
+         return render(request, 'extras/script/source.html', {
++            'jobs': get_jobs(module, script, 'scriptmodule'),
+             'module': module,
+             'script': script,
+             'tab': 'source',
+@@ -1309,13 +1320,7 @@ def get_required_permission(self):
+     def get(self, request, module, name):
+         module = get_script_module(module, request)
+         script = module.scripts[name]()
+-
+-        object_type = ContentType.objects.get(app_label='extras', model='scriptmodule')
+-        jobs = Job.objects.filter(
+-            object_type=object_type,
+-            object_id=module.pk,
+-            name=script.class_name
+-        )
++        jobs = get_jobs(module, script, 'scriptmodule')
+ 
+         jobs_table = JobTable(
+             data=jobs,
+@@ -1325,6 +1330,7 @@ def get(self, request, module, name):
+         jobs_table.configure(request)
+ 
+         return render(request, 'extras/script/jobs.html', {
++            'jobs': jobs,
+             'module': module,
+             'script': script,
+             'table': jobs_table,
+diff --git a/netbox/templates/extras/report/base.html b/netbox/templates/extras/report/base.html
+index ff1c6a10fd7..eaa980484d7 100644
+--- a/netbox/templates/extras/report/base.html
++++ b/netbox/templates/extras/report/base.html
+@@ -34,7 +34,7 @@
+     </li>
+     <li class="nav-item" role="presentation">
+       <a class="nav-link{% if tab == 'jobs' %} active{% endif %}" href="{% url 'extras:report_jobs' module=report.module name=report.class_name %}">
+-        {% trans "Jobs" %} {% badge module.jobs.count %}
++        {% trans "Jobs" %} {% badge jobs.count %}
+       </a>
+     </li>
+   </ul>
+diff --git a/netbox/templates/extras/script/base.html b/netbox/templates/extras/script/base.html
+index 5aaa5016a11..7435254b465 100644
+--- a/netbox/templates/extras/script/base.html
++++ b/netbox/templates/extras/script/base.html
+@@ -33,7 +33,7 @@
+     </li>
+     <li class="nav-item" role="presentation">
+       <a class="nav-link{% if tab == 'jobs' %} active{% endif %}" href="{% url 'extras:script_jobs' module=script.module name=script.class_name %}">
+-        {% trans "Jobs" %} {% badge module.jobs.count %}
++        {% trans "Jobs" %} {%  badge jobs.count %}
+       </a>
+     </li>
+   </ul>
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

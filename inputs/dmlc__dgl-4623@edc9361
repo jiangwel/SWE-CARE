@@ -1,0 +1,809 @@
+  Task-ID: dmlc__dgl-4623@edc9361
+  Please checkout to this commit first: 72cfb9342f0bf53f50d928008a808a9d39c116b9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support graphs with edge features
+## 🚀 Feature
+<!-- A brief description of the feature proposal -->
+
+## Motivation
+
+<!-- Please outline the motivation for the proposal. Is your feature request
+related to a problem? e.g., I'm always frustrated when [...]. If this is
+related to another GitHub issue, please link here too -->
+
+## Alternatives
+
+<!-- A clear and concise description of any alternative solutions or features you've considered, if any. -->
+
+## Pitch
+
+<!-- A clear and concise description of what you want to happen. -->
+
+## Additional context
+
+<!-- Add any other context or screenshots about the feature request here. -->
+  </issue>
+  
+  <patch>
+  diff --git a/tests/tools/test_edges_with_features.py b/tests/tools/test_edges_with_features.py
+new file mode 100644
+index 000000000000..b62ad5f68356
+--- /dev/null
++++ b/tests/tools/test_edges_with_features.py
+@@ -0,0 +1,344 @@
++import argparse
++import json
++import logging
++import os
++import platform
++import sys
++import tempfile
++
++import dgl
++import numpy as np
++import torch
++from chunk_graph import chunk_graph
++from dgl.data.utils import load_graphs, load_tensors
++
++
++def test_edges_with_features():
++    """
++    This function is a unit test for testing edges with features data.
++    This will be triggered by the CI test framework or can be launched
++    individually as follows:
++
++    python3 -m pytest tests/tools/test_edges_with_features.py
++
++    Please note that, this is based on the test_dist_part.py unit test.
++    This file also uses the same dataset, in chunked format. But, while validating
++    the results in this unit test additional checks are made in each of the graph
++    partitions to validate the feature data stored in each partition to make sure
++    that it matches with the data stored in the original graph.
++    """
++    # Step0: prepare chunked graph data format.
++    print('Starting edge feature tests...')
++
++    # A synthetic mini MAG240.
++    num_institutions = 20
++    num_authors = 100
++    num_papers = 600
++
++    def rand_edges(num_src, num_dst, num_edges):
++        eids = np.random.choice(num_src * num_dst, num_edges, replace=False)
++        src = torch.from_numpy(eids // num_dst)
++        dst = torch.from_numpy(eids % num_dst)
++
++        return src, dst
++
++    num_cite_edges = 2000
++    num_write_edges = 1000
++    num_affiliate_edges = 200
++
++    # Structure.
++    data_dict = {
++        ('paper', 'cites', 'paper'): rand_edges(
++            num_papers, num_papers, num_cite_edges
++        ),
++        ('author', 'writes', 'paper'): rand_edges(
++            num_authors, num_papers, num_write_edges
++        ),
++        ('author', 'affiliated_with', 'institution'): rand_edges(
++            num_authors, num_institutions, num_affiliate_edges
++        ),
++    }
++    src, dst = data_dict[('author', 'writes', 'paper')]
++    data_dict[('paper', 'rev_writes', 'author')] = (dst, src)
++    g = dgl.heterograph(data_dict)
++
++    # paper feat, label, year
++    num_paper_feats = 3
++    paper_feat = np.random.randn(num_papers, num_paper_feats)
++    num_classes = 4
++    paper_label = np.random.choice(num_classes, num_papers)
++    paper_year = np.random.choice(2022, num_papers)
++
++    # Edge features.
++    cite_count = np.random.choice(10, num_cite_edges)
++    write_year = np.random.choice(2022, num_write_edges)
++
++    # Save features.
++    with tempfile.TemporaryDirectory() as root_dir:
++        print('root_dir: ', root_dir)
++        input_dir = os.path.join(root_dir, 'data_test')
++        os.makedirs(input_dir)
++        for sub_d in ['paper', 'cites', 'writes']:
++            os.makedirs(os.path.join(input_dir, sub_d))
++
++        paper_feat_path = os.path.join(input_dir, 'paper/feat.npy')
++        with open(paper_feat_path, 'wb') as f:
++            np.save(f, paper_feat)
++
++        paper_label_path = os.path.join(input_dir, 'paper/label.npy')
++        with open(paper_label_path, 'wb') as f:
++            np.save(f, paper_label)
++
++        paper_year_path = os.path.join(input_dir, 'paper/year.npy')
++        with open(paper_year_path, 'wb') as f:
++            np.save(f, paper_year)
++
++        cite_count_path = os.path.join(input_dir, 'cites/count.npy')
++        with open(cite_count_path, 'wb') as f:
++            np.save(f, cite_count)
++
++        write_year_path = os.path.join(input_dir, 'writes/year.npy')
++        with open(write_year_path, 'wb') as f:
++            np.save(f, write_year)
++
++        output_dir = os.path.join(root_dir, 'chunked-data')
++        num_chunks = 2
++        chunk_graph(
++            g,
++            'mag240m',
++            {
++                'paper': {
++                    'feat': paper_feat_path,
++                    'label': paper_label_path,
++                    'year': paper_year_path,
++                }
++            },
++            {
++                'cites': {'count': cite_count_path},
++                'writes': {'year': write_year_path},
++                'rev_writes': {'year': write_year_path},
++            },
++            num_chunks=num_chunks,
++            output_path=output_dir,
++        )
++        print('Done with creating chunked graph')
++
++        # check metadata.json
++        json_file = os.path.join(output_dir, 'metadata.json')
++        assert os.path.isfile(json_file)
++        with open(json_file, 'rb') as f:
++            meta_data = json.load(f)
++        assert meta_data['graph_name'] == 'mag240m'
++        assert len(meta_data['num_nodes_per_chunk'][0]) == num_chunks
++
++        print('Metadata Source file: ', meta_data["edge_type"])
++
++        # Create Id Map here.
++        edge_dict = {
++            "author:affiliated_with:institution": np.array([0, 200]).reshape(
++                1, 2
++            ),
++            "author:writes:paper": np.array([200, 1200]).reshape(1, 2),
++            "paper:cites:paper": np.array([1200, 3200]).reshape(1, 2),
++            "paper:rev_writes:author": np.array([3200, 4200]).reshape(1, 2),
++        }
++        id_map = dgl.distributed.id_map.IdMap(edge_dict)
++
++        # check edge_index
++        output_edge_index_dir = os.path.join(output_dir, 'edge_index')
++        for utype, etype, vtype in data_dict.keys():
++            fname = ':'.join([utype, etype, vtype])
++            for i in range(num_chunks):
++                chunk_f_name = os.path.join(
++                    output_edge_index_dir, fname + str(i) + '.txt'
++                )
++                assert os.path.isfile(chunk_f_name)
++                with open(chunk_f_name, 'r') as f:
++                    header = f.readline()
++                    num1, num2 = header.rstrip().split(' ')
++                    assert isinstance(int(num1), int)
++                    assert isinstance(int(num2), int)
++
++        # check node_data
++        output_node_data_dir = os.path.join(output_dir, 'node_data', 'paper')
++        for feat in ['feat', 'label', 'year']:
++            for i in range(num_chunks):
++                chunk_f_name = '{}-{}.npy'.format(feat, i)
++                chunk_f_name = os.path.join(output_node_data_dir, chunk_f_name)
++                assert os.path.isfile(chunk_f_name)
++                feat_array = np.load(chunk_f_name)
++                assert feat_array.shape[0] == num_papers // num_chunks
++
++        # check edge_data
++        edge_data_gold = {}
++        num_edges = {
++            'paper:cites:paper': num_cite_edges,
++            'author:writes:paper': num_write_edges,
++            'paper:rev_writes:author': num_write_edges,
++        }
++        output_edge_data_dir = os.path.join(output_dir, 'edge_data')
++        for etype, feat in [
++            ['paper:cites:paper', 'count'],
++            ['author:writes:paper', 'year'],
++            ['paper:rev_writes:author', 'year'],
++        ]:
++            output_edge_sub_dir = os.path.join(output_edge_data_dir, etype)
++            features = []
++            for i in range(num_chunks):
++                chunk_f_name = '{}-{}.npy'.format(feat, i)
++                chunk_f_name = os.path.join(output_edge_sub_dir, chunk_f_name)
++                assert os.path.isfile(chunk_f_name)
++                feat_array = np.load(chunk_f_name)
++                assert feat_array.shape[0] == num_edges[etype] // num_chunks
++                features.append(feat_array)
++            if len(features) > 0:
++                if len(features[0].shape) == 1:
++                    edge_data_gold[etype + '/' + feat] = np.concatenate(
++                        features
++                    )
++                else:
++                    edge_data_gold[etype + '/' + feat] = np.row_stack(features)
++
++        # Step1: graph partition
++        in_dir = os.path.join(root_dir, 'chunked-data')
++        output_dir = os.path.join(root_dir, '2parts')
++        os.system(
++            'python tools-parmetis-tests/partition_algo/random_partition.py '
++            '--metadata {}/metadata.json --output_path {} --num_partitions {}'.format(
++                in_dir, output_dir, num_chunks
++            )
++        )
++        for ntype in ['author', 'institution', 'paper']:
++            fname = os.path.join(output_dir, '{}.txt'.format(ntype))
++            with open(fname, 'r') as f:
++                header = f.readline().rstrip()
++                assert isinstance(int(header), int)
++
++        # Step2: data dispatch
++        partition_dir = os.path.join(root_dir, '2parts')
++        out_dir = os.path.join(root_dir, 'partitioned')
++        ip_config = os.path.join(root_dir, 'ip_config.txt')
++        with open(ip_config, 'w') as f:
++            f.write('127.0.0.1\n')
++            f.write('127.0.0.2\n')
++
++        os.system(
++            'python tools/dispatch_data.py '
++            '--in-dir {} --partitions-dir {} --out-dir {} --ip-config {}'.format(
++                in_dir, partition_dir, out_dir, ip_config
++            )
++        )
++        print('Graph partitioning pipeline complete...')
++
++        # check metadata.json
++        meta_fname = os.path.join(out_dir, 'metadata.json')
++        with open(meta_fname, 'rb') as f:
++            meta_data = json.load(f)
++
++        all_etypes = ['affiliated_with', 'writes', 'cites', 'rev_writes']
++        for etype in all_etypes:
++            assert len(meta_data['edge_map'][etype]) == num_chunks
++        assert meta_data['etypes'].keys() == set(all_etypes)
++        assert meta_data['graph_name'] == 'mag240m'
++
++        all_ntypes = ['author', 'institution', 'paper']
++        for ntype in all_ntypes:
++            assert len(meta_data['node_map'][ntype]) == num_chunks
++        assert meta_data['ntypes'].keys() == set(all_ntypes)
++        assert meta_data['num_edges'] == 4200
++        assert meta_data['num_nodes'] == 720
++        assert meta_data['num_parts'] == num_chunks
++
++        etype_id, type_eid = id_map(np.arange(4200))
++
++        for i in range(num_chunks):
++            sub_dir = 'part-' + str(i)
++            sub_dir = os.path.join(out_dir, 'part' + str(i))
++
++            # graph.dgl
++            fname = os.path.join(sub_dir, 'graph.dgl')
++            assert os.path.isfile(fname)
++            g_list, data_dict = load_graphs(fname)
++            g = g_list[0]
++
++            # edge_feat.dgl
++            fname = os.path.join(sub_dir, 'edge_feat.dgl')
++            assert os.path.isfile(fname)
++            tensor_dict = load_tensors(fname)
++
++            # get orig_eids
++            orig_type_eids = g.edata['orig_id'].numpy()
++            orig_etype_ids = g.edata[dgl.ETYPE].numpy()
++            print(f'[Rank: {i}] orig_etype_ids: {np.bincount(orig_etype_ids)}')
++
++        for i in range(num_chunks):
++            sub_dir = 'part-' + str(i)
++            assert meta_data[sub_dir][
++                'node_feats'
++            ] == 'part{}/node_feat.dgl'.format(i)
++            assert meta_data[sub_dir][
++                'edge_feats'
++            ] == 'part{}/edge_feat.dgl'.format(i)
++            assert meta_data[sub_dir][
++                'part_graph'
++            ] == 'part{}/graph.dgl'.format(i)
++
++            # check data
++            sub_dir = os.path.join(out_dir, 'part' + str(i))
++
++            # Read graph.dgl
++            fname = os.path.join(sub_dir, 'graph.dgl')
++            assert os.path.isfile(fname)
++            g_list, data_dict = load_graphs(fname)
++            g = g_list[0]
++            assert isinstance(g, dgl.DGLGraph)
++
++            # Read node_feat.dgl
++            fname = os.path.join(sub_dir, 'node_feat.dgl')
++            assert os.path.isfile(fname)
++            tensor_dict = load_tensors(fname)
++            all_tensors = ['paper/feat', 'paper/label', 'paper/year']
++            assert tensor_dict.keys() == set(all_tensors)
++            for key in all_tensors:
++                assert isinstance(tensor_dict[key], torch.Tensor)
++
++            # Read edge_feat.dgl
++            fname = os.path.join(sub_dir, 'edge_feat.dgl')
++            assert os.path.isfile(fname)
++            tensor_dict = load_tensors(fname)
++            all_tensors = [
++                'paper:cites:paper/count',
++                'author:writes:paper/year',
++                'paper:rev_writes:author/year',
++            ]
++            assert tensor_dict.keys() == set(all_tensors)
++            for key in all_tensors:
++                assert isinstance(tensor_dict[key], torch.Tensor)
++
++            # Get orig_eids
++            orig_type_eids = g.edata['orig_id'].numpy()
++            orig_etype_ids = g.edata[dgl.ETYPE].numpy()
++
++            # Compare the data stored as edge features in this partition with the data
++            # from the original graph.
++            etype_names = list(edge_dict.keys())
++            for idx, etype_name in enumerate(etype_names):
++                part_data = None
++                key = None
++                if etype_name + '/count' in tensor_dict:
++                    key = etype_name + '/count'
++                    part_data = tensor_dict[etype_name + '/count'].numpy()
++                if etype_name + '/year' in tensor_dict:
++                    key = etype_name + '/year'
++                    part_data = tensor_dict[etype_name + '/year'].numpy()
++
++                if part_data is None:
++                    continue
++
++                gold_type_ids = orig_type_eids[orig_etype_ids == idx]
++                gold_data = edge_data_gold[key][gold_type_ids]
++                assert np.all(gold_data == part_data)
++
++
++if __name__ == '__main__':
++    test_edges_with_features()
+diff --git a/tools/distpartitioning/constants.py b/tools/distpartitioning/constants.py
+index 5c979d19f1dd..a405d4f2c655 100644
+--- a/tools/distpartitioning/constants.py
++++ b/tools/distpartitioning/constants.py
+@@ -32,3 +32,6 @@
+ STR_NUMPY = "numpy"
+ STR_CSV = "csv"
+ STR_NAME = "name"
++
++STR_NODE_FEATURES = "node_features"
++STR_EDGE_FEATURES = "edge_features"
+diff --git a/tools/distpartitioning/convert_partition.py b/tools/distpartitioning/convert_partition.py
+index db7b05c76aab..1c7a8428a1f3 100644
+--- a/tools/distpartitioning/convert_partition.py
++++ b/tools/distpartitioning/convert_partition.py
+@@ -141,11 +141,14 @@ def create_dgl_object(graph_name, num_parts, \
+ 
+     # It's not guaranteed that the edges are sorted based on edge type.
+     # Let's sort edges and all attributes on the edges.
+-    sort_idx = np.argsort(etype_ids)
+-    shuffle_global_src_id, shuffle_global_dst_id, global_src_id, global_dst_id, global_edge_id, etype_ids = \
+-            shuffle_global_src_id[sort_idx], shuffle_global_dst_id[sort_idx], global_src_id[sort_idx], \
+-            global_dst_id[sort_idx], global_edge_id[sort_idx], etype_ids[sort_idx]
+-    assert np.all(np.diff(etype_ids) >= 0)
++    if not np.all(np.diff(etype_ids) >= 0):
++        sort_idx = np.argsort(etype_ids)
++        shuffle_global_src_id, shuffle_global_dst_id, global_src_id, global_dst_id, global_edge_id, etype_ids = \
++                shuffle_global_src_id[sort_idx], shuffle_global_dst_id[sort_idx], global_src_id[sort_idx], \
++                global_dst_id[sort_idx], global_edge_id[sort_idx], etype_ids[sort_idx]
++        assert np.all(np.diff(etype_ids) >= 0)
++    else:
++        print(f'[Rank: {part_id} Edge data is already sorted !!!')
+ 
+     # Determine the edge ID range of different edge types.
+     edge_id_start = edgeid_offset 
+@@ -231,6 +234,7 @@ def create_dgl_object(graph_name, num_parts, \
+     part_graph.edata[dgl.ETYPE] = th.as_tensor(etype_ids)
+     part_graph.edata['inner_edge'] = th.ones(part_graph.number_of_edges(), dtype=th.bool)
+ 
++
+     #compute per_type_ids and ntype for all the nodes in the graph.
+     global_ids = np.concatenate(
+             [global_src_id, global_dst_id, global_homo_nid])
+diff --git a/tools/distpartitioning/data_shuffle.py b/tools/distpartitioning/data_shuffle.py
+index 1dadbccebe63..ef428abbbf00 100644
+--- a/tools/distpartitioning/data_shuffle.py
++++ b/tools/distpartitioning/data_shuffle.py
+@@ -15,7 +15,7 @@
+ from utils import read_ntype_partition_files, read_json, get_node_types, \
+                     augment_edge_data, get_gnid_range_map, \
+                     write_dgl_objects, write_metadata_json, get_ntype_featnames, \
+-                    get_idranges
++                    get_idranges, get_edge_types, get_etype_featnames
+ from gloo_wrapper import allgather_sizes, gather_metadata_json,\
+                     alltoallv_cpu
+ from globalids import assign_shuffle_global_nids_nodes, \
+@@ -172,7 +172,7 @@ def exchange_edge_data(rank, world_size, edge_data):
+     edge_data.pop(constants.OWNER_PROCESS)
+     return edge_data
+ 
+-def exchange_node_features(rank, world_size, node_feature_tids, ntype_gnid_map, id_lookup, node_features):
++def exchange_node_features(rank, world_size, node_feature_tids, ntype_gnid_map, id_lookup, node_features, feat_type, data):
+     """
+     This function is used to shuffle node features so that each process will receive
+     all the node features whose corresponding nodes are owned by the same process.
+@@ -261,7 +261,24 @@ def exchange_node_features(rank, world_size, node_feature_tids, ntype_gnid_map,
+ 
+             node_feats = node_features[feat_key]
+             for part_id in range(world_size):
+-                partid_slice = id_lookup.get_partition_ids(np.arange(gnid_start, gnid_end, dtype=np.int64))
++                # Get the partition ids for the range of global nids.
++                if feat_type == constants.STR_NODE_FEATURES:
++                    partid_slice = id_lookup.get_partition_ids(np.arange(gnid_start, gnid_end, dtype=np.int64))
++                else:
++                    #Edge data case. 
++                    #Ownership is determined by the destination node.
++                    assert data is not None
++                    global_eids = np.arange(gnid_start, gnid_end, dtype=np.int64)
++
++                    #Now use `data` to extract destination nodes' global id 
++                    #and use that to get the ownership
++                    common, idx1, idx2 = np.intersect1d(data[constants.GLOBAL_EID], global_eids, return_indices=True)
++                    assert common.shape[0] == idx2.shape[0]
++
++                    global_dst_nids = data[constants.GLOBAL_DST_ID][idx1]
++                    assert np.all(global_eids == data[constants.GLOBAL_EID][idx1])
++                    partid_slice = id_lookup.get_partition_ids(global_dst_nids)
++                    
+                 cond = (partid_slice == part_id)
+                 gnids_per_partid = gnids_feat[cond]
+                 tnids_per_partid = tnids_feat[cond]
+@@ -287,8 +304,11 @@ def exchange_node_features(rank, world_size, node_feature_tids, ntype_gnid_map,
+     logging.info(f'[Rank: {rank}] Total time for node feature exchange: {timedelta(seconds = end - start)}')
+     return own_node_features, own_global_nids
+ 
+-def exchange_graph_data(rank, world_size, node_features, node_feat_tids, edge_data,
+-        id_lookup, ntypes_ntypeid_map, ntypes_gnid_range_map, ntid_ntype_map, schema_map):
++def exchange_graph_data(rank, world_size, node_features, edge_features, 
++        node_feat_tids, edge_feat_tids, 
++        edge_data, id_lookup, ntypes_ntypeid_map, 
++        ntypes_gnid_range_map, etypes_geid_range_map, 
++        ntid_ntype_map, schema_map):
+     """
+     Wrapper function which is used to shuffle graph data on all the processes.
+ 
+@@ -337,12 +357,18 @@ def exchange_graph_data(rank, world_size, node_features, node_feat_tids, edge_da
+         in the world. The edge data is received by each rank in the process of data shuffling.
+     """
+     rcvd_node_features, rcvd_global_nids = exchange_node_features(rank, world_size, node_feat_tids, \
+-                                                ntypes_gnid_range_map, id_lookup, node_features)
++                                                ntypes_gnid_range_map, id_lookup, node_features, \
++                                                constants.STR_NODE_FEATURES, None)
+     logging.info(f'[Rank: {rank}] Done with node features exchange.')
+ 
++    rcvd_edge_features, rcvd_global_eids = exchange_node_features(rank, world_size, edge_feat_tids, \
++                                                etypes_geid_range_map, id_lookup, edge_features, \
++                                                constants.STR_EDGE_FEATURES, edge_data)
++    logging.info(f'[Rank: {rank}] Done with edge features exchange.')
++
+     node_data = gen_node_data(rank, world_size, id_lookup, ntid_ntype_map, schema_map)
+     edge_data = exchange_edge_data(rank, world_size, edge_data)
+-    return node_data, rcvd_node_features, rcvd_global_nids, edge_data
++    return node_data, rcvd_node_features, rcvd_global_nids, edge_data, rcvd_edge_features, rcvd_global_eids
+ 
+ def read_dataset(rank, world_size, id_lookup, params, schema_map):
+     """
+@@ -384,17 +410,24 @@ def read_dataset(rank, world_size, id_lookup, params, schema_map):
+         owner process for each edge.
+     dictionary
+         edge features which is also a dictionary, similar to node features dictionary
++    dictionary
++        a dictionary in which keys are edge-type names and values are tuples indicating the range of ids
++        for edges read by the current process.
++    dictionary
++        a dictionary in which keys are edge-type names and values are triplets, 
++        (edge-feature-name, start_type_id, end_type_id). These type_ids are indices in the edge-features
++        read by the current process. Note that each edge-type may have several edge-features.
+     """
+     edge_features = {}
+     #node_tids, node_features, edge_datadict, edge_tids
+-    node_tids, node_features, node_feat_tids, edge_data, edge_tids = \
++    node_tids, node_features, node_feat_tids, edge_data, edge_tids, edge_features, edge_feat_tids = \
+         get_dataset(params.input_dir, params.graph_name, rank, world_size, schema_map)
+     logging.info(f'[Rank: {rank}] Done reading dataset deom {params.input_dir}')
+ 
+     edge_data = augment_edge_data(edge_data, id_lookup, edge_tids, rank, world_size)
+     logging.info(f'[Rank: {rank}] Done augmenting edge_data: {len(edge_data)}, {edge_data[constants.GLOBAL_SRC_ID].shape}')
+ 
+-    return node_tids, node_features, node_feat_tids, edge_data, edge_features
++    return node_tids, node_features, node_feat_tids, edge_data, edge_features, edge_tids, edge_feat_tids
+ 
+ def gen_dist_partitions(rank, world_size, params):
+     """
+@@ -536,11 +569,12 @@ def gen_dist_partitions(rank, world_size, params):
+                                     id_map, rank, world_size)
+ 
+     ntypes_ntypeid_map, ntypes, ntypeid_ntypes_map = get_node_types(schema_map)
++    etypes_etypeid_map, etypes, etypeid_etypes_map = get_edge_types(schema_map)
+     logging.info(f'[Rank: {rank}] Initialized metis partitions and node_types map...')
+ 
+     #read input graph files and augment these datastructures with
+     #appropriate information (global_nid and owner process) for node and edge data
+-    node_tids, node_features, node_feat_tids, edge_data, edge_features = \
++    node_tids, node_features, node_feat_tids, edge_data, edge_features, edge_tids, edge_feat_tids = \
+         read_dataset(rank, world_size, id_lookup, params, schema_map)
+     logging.info(f'[Rank: {rank}] Done augmenting file input data with auxilary columns')
+ 
+@@ -548,10 +582,12 @@ def gen_dist_partitions(rank, world_size, params):
+     #this function will also stitch the data recvd from other processes
+     #and return the aggregated data
+     ntypes_gnid_range_map = get_gnid_range_map(node_tids)
+-    node_data, rcvd_node_features, rcvd_global_nids, edge_data  = \
+-                    exchange_graph_data(rank, world_size, node_features, node_feat_tids, \
+-                                        edge_data, id_lookup, ntypes_ntypeid_map, ntypes_gnid_range_map, \
+-                                        ntypeid_ntypes_map, schema_map)
++    etypes_geid_range_map = get_gnid_range_map(edge_tids)
++    node_data, rcvd_node_features, rcvd_global_nids, edge_data, rcvd_edge_features, rcvd_global_eids  = \
++                    exchange_graph_data(rank, world_size, node_features, edge_features, \
++                            node_feat_tids, edge_feat_tids, edge_data, id_lookup, ntypes_ntypeid_map, \
++                            ntypes_gnid_range_map, etypes_geid_range_map, \
++                            ntypeid_ntypes_map, schema_map)
+     logging.info(f'[Rank: {rank}] Done with data shuffling...')
+ 
+     #sort node_data by ntype
+@@ -586,6 +622,21 @@ def gen_dist_partitions(rank, world_size, params):
+     shuffle_global_eid_start = assign_shuffle_global_nids_edges(rank, world_size, edge_data)
+     logging.info(f'[Rank: {rank}] Done assigning global_ids to edges ...')
+ 
++    #Shuffle edge features according to the edge order on each rank.
++    for etype_name in etypes:
++        featnames = get_etype_featnames(etype_name, schema_map)
++        for featname in featnames:
++            assert etype_name+'/'+featname in rcvd_global_eids
++            global_eids = rcvd_global_eids[etype_name+'/'+featname]
++
++            common, idx1, idx2 = np.intersect1d(edge_data[constants.GLOBAL_EID], global_eids, return_indices=True)
++            shuffle_global_ids = edge_data[constants.SHUFFLE_GLOBAL_EID][idx1]
++            feature_idx = shuffle_global_ids.argsort()
++            rcvd_edge_features[etype_name+'/'+featname] = rcvd_edge_features[etype_name+'/'+featname][feature_idx]
++
++    for k, v in rcvd_edge_features.items():
++        logging.info(f'[Rank: {rank}] key: {k} v: {v.numpy().shape}')
++
+     #determine global-ids for edge end-points
+     edge_data = lookup_shuffle_global_nids_edges(rank, world_size, edge_data, id_lookup, node_data)
+     logging.info(f'[Rank: {rank}] Done resolving orig_node_id for local node_ids...')
+@@ -597,7 +648,7 @@ def gen_dist_partitions(rank, world_size, params):
+     graph_obj, ntypes_map_val, etypes_map_val, ntypes_ntypeid_map, etypes_map = create_dgl_object(\
+             params.graph_name, params.num_parts, \
+             schema_map, rank, node_data, edge_data, num_nodes, num_edges)
+-    write_dgl_objects(graph_obj, rcvd_node_features, edge_features, params.output, rank)
++    write_dgl_objects(graph_obj, rcvd_node_features, rcvd_edge_features, params.output, rank)
+ 
+     #get the meta-data
+     json_metadata = create_metadata_json(params.graph_name, len(node_data[constants.NTYPE_ID]), len(edge_data[constants.ETYPE_ID]), \
+diff --git a/tools/distpartitioning/dataset_utils.py b/tools/distpartitioning/dataset_utils.py
+index 3034e739ae62..ffcd507775d1 100644
+--- a/tools/distpartitioning/dataset_utils.py
++++ b/tools/distpartitioning/dataset_utils.py
+@@ -164,6 +164,54 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+         for k, v in node_features.items():
+             logging.info(f'[Rank: {rank}] node feature name: {k}, feature data shape: {v.size()}')
+ 
++    '''
++    Reading edge features now.
++    '''
++    edge_features = {}
++    edge_feature_tids = {}
++
++    #iterate over the "edge_data" dictionary in the schema_map
++    #read the edge features if exists
++    #also keep track of the type_eids for which the edge_features are read.
++    dataset_features = schema_map[constants.STR_EDGE_DATA]
++    if((dataset_features is not None) and (len(dataset_features) > 0)):
++        for etype_name, etype_feature_data in dataset_features.items():
++            #etype_feature_data is a dictionary
++            #where key: feature_name, value: dictionary in which keys are "format", "data"
++            edge_feature_tids[etype_name] = []
++            for feat_name, feat_data in etype_feature_data.items():
++                assert len(feat_data[constants.STR_DATA]) == world_size
++                assert feat_data[constants.STR_FORMAT][constants.STR_NAME] == constants.STR_NUMPY
++                my_feat_data_fname = feat_data[constants.STR_DATA][rank] #this will be just the file name
++                if (os.path.isabs(my_feat_data_fname)):
++                    logging.info(f'Loading numpy from {my_feat_data_fname}')
++                    edge_features[etype_name+'/'+feat_name] = \
++                            torch.from_numpy(np.load(my_feat_data_fname))
++                else:
++                    numpy_path = os.path.join(input_dir, my_feat_data_fname)
++                    logging.info(f'Loading numpy from {numpy_path}')
++                    edge_features[etype_name+'/'+feat_name] = \
++                            torch.from_numpy(np.load(numpy_path))
++
++                edge_feature_tids[etype_name].append([feat_name, -1, -1])
++
++    # Read edges for each node types that are processed by the currnet process.
++    edge_tids, etype_geid_offset = get_idranges(schema_map[constants.STR_EDGE_TYPE], 
++                                    schema_map[constants.STR_NUM_EDGES_PER_CHUNK])
++    for etype_name in schema_map[constants.STR_EDGE_TYPE]: 
++        if etype_name in edge_feature_tids: 
++            for item in edge_feature_tids[etype_name]:
++                item[1] = edge_tids[etype_name][rank][0]
++                item[2] = edge_tids[etype_name][rank][1]
++
++    # Done with building node_features locally. 
++    if len(edge_features) <= 0:
++        logging.info(f'[Rank: {rank}] This dataset does not have any edge features')
++    else:
++        for k, v in edge_features.items():
++            logging.info(f'[Rank: {rank}] edge feature name: {k}, feature data shape: {v.size()}')
++
++
+     '''
+     Code below is used to read edges from the input dataset with the help of the metadata json file
+     for the input graph dataset. 
+@@ -209,7 +257,7 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+     #read my edges for each edge type
+     etype_names = schema_map[constants.STR_EDGE_TYPE]
+     etype_name_idmap = {e : idx for idx, e in enumerate(etype_names)}
+-    edge_tids, _ = get_idranges(schema_map[constants.STR_EDGE_TYPE], 
++    edge_tids, etype_geid_offset = get_idranges(schema_map[constants.STR_EDGE_TYPE], 
+                                     schema_map[constants.STR_NUM_EDGES_PER_CHUNK])
+ 
+     edge_datadict = {}
+@@ -254,5 +302,5 @@ def get_dataset(input_dir, graph_name, rank, world_size, schema_map):
+     assert edge_datadict[constants.GLOBAL_TYPE_EID].shape == edge_datadict[constants.ETYPE_ID].shape
+     logging.info(f'[Rank: {rank}] Done reading edge_file: {len(edge_datadict)}, {edge_datadict[constants.GLOBAL_SRC_ID].shape}')
+ 
+-    return node_tids, node_features, node_feature_tids, edge_datadict, edge_tids
++    return node_tids, node_features, node_feature_tids, edge_datadict, edge_tids, edge_features, edge_feature_tids
+ 
+diff --git a/tools/distpartitioning/dist_lookup.py b/tools/distpartitioning/dist_lookup.py
+index 7ac32b242913..8c5861730033 100644
+--- a/tools/distpartitioning/dist_lookup.py
++++ b/tools/distpartitioning/dist_lookup.py
+@@ -2,6 +2,7 @@
+ import os
+ import pyarrow
+ import torch
++import logging
+ 
+ from pyarrow import csv
+ from gloo_wrapper import alltoallv_cpu
+@@ -55,7 +56,8 @@ def __init__(self, input_dir, ntype_names, id_map, rank, world_size):
+ 
+         # Iterate over the node types and extract the partition id mappings.
+         for ntype in ntype_names:
+-            print('[Rank: ', rank, '] Reading file: ', os.path.join(input_dir, '{}.txt'.format(ntype)))
++            filename = f'{ntype}.txt'
++            logging.info(f'[Rank: {rank}] Reading file: {os.path.join(input_dir, filename)}')
+             df = csv.read_csv(os.path.join(input_dir, '{}.txt'.format(ntype)), \
+                 read_options=pyarrow.csv.ReadOptions(autogenerate_column_names=True), \
+                 parse_options=pyarrow.csv.ParseOptions(delimiter=' '))
+@@ -82,6 +84,7 @@ def __init__(self, input_dir, ntype_names, id_map, rank, world_size):
+         self.ntype_count = np.array(ntype_count, dtype=np.int64)
+         self.rank = rank
+         self.world_size = world_size
++        
+ 
+     def get_partition_ids(self, global_nids):
+         '''
+diff --git a/tools/distpartitioning/utils.py b/tools/distpartitioning/utils.py
+index d2d27eaebd96..f902e034b223 100644
+--- a/tools/distpartitioning/utils.py
++++ b/tools/distpartitioning/utils.py
+@@ -63,6 +63,28 @@ def read_json(json_file):
+ 
+     return val
+ 
++def get_etype_featnames(etype_name, schema_map):
++    """
++    Retrieves edge feature names for a given edge_type
++
++    Parameters:
++    -----------
++    eype_name : string
++        a string specifying a edge_type name
++
++    schema : dictionary
++        metadata json object as a dictionary, which is read from the input
++        metadata file from the input dataset
++
++    Returns:
++    --------
++    list : 
++        a list of feature names for a given edge_type
++    """
++	edge_data = schema_map[constants.STR_EDGE_DATA]
++	feats = edge_data.get(etype_name, {})
++	return [feat for feat in feats]
++
+ def get_ntype_featnames(ntype_name, schema_map): 
+     """
+     Retrieves node feature names for a given node_type
+@@ -81,15 +103,34 @@ def get_ntype_featnames(ntype_name, schema_map):
+     list : 
+         a list of feature names for a given node_type
+     """
+-    ntype_featdict = schema_map[constants.STR_NODE_DATA]
+-    if (ntype_name in ntype_featdict):
+-        featnames = []
+-        ntype_info = ntype_featdict[ntype_name]
+-        for k, v in ntype_info.items(): 
+-            featnames.append(k)
+-        return featnames
+-    else: 
+-        return []
++	node_data = schema_map[constants.STR_NODE_DATA]
++	feats = node_data.get(ntype_name, {})
++	return [feat for feat in feats]
++
++def get_edge_types(schema_map):
++    """
++    Utility method to extract edge_typename -> edge_type mappings
++    as defined by the input schema
++
++    Parameters:
++    -----------
++    schema_map : dictionary
++        Input schema from which the edge_typename -> edge_typeid
++        dictionary is created.
++
++    Returns:
++    --------
++    dictionary
++        with keys as edge type names and values as ids (integers)
++    list
++        list of etype name strings
++    dictionary
++        with keys as etype ids (integers) and values as edge type names
++    """
++    etypes = schema_map[constants.STR_EDGE_TYPE]
++    etype_etypeid_map = {e : i for i, e in enumerate(etypes)}
++    etypeid_etype_map = {i : e for i, e in enumerate(etypes)}
++    return etype_etypeid_map, etypes, etypeid_etype_map
+ 
+ def get_node_types(schema_map):
+     """ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

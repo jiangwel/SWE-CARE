@@ -1,0 +1,156 @@
+  Task-ID: pandas-dev__pandas-24968@0ea6653
+  Please checkout to this commit first: 6e0f9a971bcd07a4a6283dc03190b4363d42e292
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: Expose symlog scaling in plotting API
+The default log-scaled axes, activated by the `logx`, `logy`, and `loglog` methods to the Pandas plotting API, do the straightforward thing and take the log of 0 values. It then attempt to plot with these infinite logs, and makes the entire plot unusable without warning in the presence of 0s.
+
+For example:
+
+```python
+draws = pd.DataFrame({'freq': np.random.zipf(1.7, 1000) - 1})
+draws['rank'] = (-draws['freq']).rank()
+draws.plot(x='rank', y='freq', kind='scatter', loglog=True)
+```
+
+Matplotlib provides another scale, the `symlog` scale, that makes a small region near 0 linear to avoid these problems. For quick-and-dirty 'look at my data on a log axis' plotting, `symlog` is significantly more useful.
+
+I can access it like this:
+
+```
+draws = pd.DataFrame({'freq': np.random.zipf(1.7, 1000) - 1})
+draws['rank'] = (-draws['freq']).rank()
+p = draws.plot(x='rank', y='freq', kind='scatter', loglog=True)
+p.set_xscale('symlog')
+p.set_yscale('symlog')
+p
+```
+
+Either making the `symlog` scale the default log scale for plotting, or supporting a `loglog='sym'` option, would make it significantly easier to do quick data inspection with Pandas' convenience plotting.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.25.0.rst b/doc/source/whatsnew/v0.25.0.rst
+index 124ec8f4ab92c..f0646363595fb 100644
+--- a/doc/source/whatsnew/v0.25.0.rst
++++ b/doc/source/whatsnew/v0.25.0.rst
+@@ -18,7 +18,7 @@ including other versions of pandas.
+ 
+ Other Enhancements
+ ^^^^^^^^^^^^^^^^^^
+-
++- :func:`DataFrame.plot` keywords ``logy``, ``logx`` and ``loglog`` can now accept the value ``'sym'`` for symlog scaling. (:issue:`24867`)
+ - Indexing of ``DataFrame`` and ``Series`` now accepts zerodim ``np.ndarray`` (:issue:`24919`)
+ - :meth:`Timestamp.replace` now supports the ``fold`` argument to disambiguate DST transition times (:issue:`25017`)
+ - :meth:`DataFrame.at_time` and :meth:`Series.at_time` now support :meth:`datetime.time` objects with timezones (:issue:`24043`)
+diff --git a/pandas/plotting/_core.py b/pandas/plotting/_core.py
+index 48d870bfc2e03..e49a066725147 100644
+--- a/pandas/plotting/_core.py
++++ b/pandas/plotting/_core.py
+@@ -308,10 +308,24 @@ def _setup_subplots(self):
+ 
+         axes = _flatten(axes)
+ 
+-        if self.logx or self.loglog:
++        valid_log = {False, True, 'sym', None}
++        input_log = {self.logx, self.logy, self.loglog}
++        if input_log - valid_log:
++            invalid_log = next(iter((input_log - valid_log)))
++            raise ValueError(
++                "Boolean, None and 'sym' are valid options,"
++                " '{}' is given.".format(invalid_log)
++            )
++
++        if self.logx is True or self.loglog is True:
+             [a.set_xscale('log') for a in axes]
+-        if self.logy or self.loglog:
++        elif self.logx == 'sym' or self.loglog == 'sym':
++            [a.set_xscale('symlog') for a in axes]
++
++        if self.logy is True or self.loglog is True:
+             [a.set_yscale('log') for a in axes]
++        elif self.logy == 'sym' or self.loglog == 'sym':
++            [a.set_yscale('symlog') for a in axes]
+ 
+         self.fig = fig
+         self.axes = axes
+diff --git a/pandas/tests/plotting/test_frame.py b/pandas/tests/plotting/test_frame.py
+index 98b241f5c8206..15e4b911d0568 100644
+--- a/pandas/tests/plotting/test_frame.py
++++ b/pandas/tests/plotting/test_frame.py
+@@ -231,14 +231,41 @@ def test_plot_xy(self):
+     @pytest.mark.slow
+     def test_logscales(self):
+         df = DataFrame({'a': np.arange(100)}, index=np.arange(100))
++
+         ax = df.plot(logy=True)
+         self._check_ax_scales(ax, yaxis='log')
++        assert ax.get_yscale() == 'log'
++
++        ax = df.plot(logy='sym')
++        self._check_ax_scales(ax, yaxis='symlog')
++        assert ax.get_yscale() == 'symlog'
+ 
+         ax = df.plot(logx=True)
+         self._check_ax_scales(ax, xaxis='log')
++        assert ax.get_xscale() == 'log'
++
++        ax = df.plot(logx='sym')
++        self._check_ax_scales(ax, xaxis='symlog')
++        assert ax.get_xscale() == 'symlog'
+ 
+         ax = df.plot(loglog=True)
+         self._check_ax_scales(ax, xaxis='log', yaxis='log')
++        assert ax.get_xscale() == 'log'
++        assert ax.get_yscale() == 'log'
++
++        ax = df.plot(loglog='sym')
++        self._check_ax_scales(ax, xaxis='symlog', yaxis='symlog')
++        assert ax.get_xscale() == 'symlog'
++        assert ax.get_yscale() == 'symlog'
++
++    @pytest.mark.parametrize("input_param", ["logx", "logy", "loglog"])
++    def test_invalid_logscale(self, input_param):
++        # GH: 24867
++        df = DataFrame({'a': np.arange(100)}, index=np.arange(100))
++
++        msg = "Boolean, None and 'sym' are valid options, 'sm' is given."
++        with pytest.raises(ValueError, match=msg):
++            df.plot(**{input_param: "sm"})
+ 
+     @pytest.mark.slow
+     def test_xcompat(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

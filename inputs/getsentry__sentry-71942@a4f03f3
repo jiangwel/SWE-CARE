@@ -1,0 +1,300 @@
+  Task-ID: getsentry__sentry-71942@a4f03f3
+  Please checkout to this commit first: 3f9d8460d6cfbdb862426abdbe32e138dc2ea0af
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Custom Views: Create GET Endpoint 
+Create `GET` `<ORG_ID_OR_SLUG>/user-views/` endpoint 
+
+This endpoint will be responsible for retrieving an org member's custom tabs from the database. This endpoint will also need to be responsible for returning the default views if an org member has no custom views. It will also need to be gated behind a feature flag until GA. 
+
+Logic: 
+* Query database for an org member's views. 
+* Return found rows, or default rows if none found
+  </issue>
+  
+  <patch>
+  diff --git a/src/sentry/api/serializers/models/groupsearchview.py b/src/sentry/api/serializers/models/groupsearchview.py
+new file mode 100644
+index 00000000000000..ccec673ee935b0
+--- /dev/null
++++ b/src/sentry/api/serializers/models/groupsearchview.py
+@@ -0,0 +1,16 @@
++from sentry.api.serializers import Serializer, register
++from sentry.models.groupsearchview import GroupSearchView
++
++
++@register(GroupSearchView)
++class GroupSearchViewSerializer(Serializer):
++    def serialize(self, obj, attrs, user):
++        return {
++            "id": str(obj.id),
++            "name": obj.name,
++            "query": obj.query,
++            "querySort": obj.query_sort,
++            "position": obj.position,
++            "dateCreated": obj.date_added,
++            "dateUpdated": obj.date_updated,
++        }
+diff --git a/src/sentry/api/urls.py b/src/sentry/api/urls.py
+index 50378033204b90..c004989222c1a8 100644
+--- a/src/sentry/api/urls.py
++++ b/src/sentry/api/urls.py
+@@ -115,6 +115,7 @@
+     GroupEventsEndpoint,
+     OrganizationActivityEndpoint,
+     OrganizationGroupIndexEndpoint,
++    OrganizationGroupSearchViewsEndpoint,
+     OrganizationReleasePreviousCommitsEndpoint,
+     OrganizationSearchesEndpoint,
+     ProjectStacktraceLinkEndpoint,
+@@ -1703,6 +1704,11 @@ def create_group_urls(name_prefix: str) -> list[URLPattern | URLResolver]:
+         ),
+         name="sentry-api-0-organization-monitor-check-in-attachment",
+     ),
++    re_path(
++        r"^(?P<organization_id_or_slug>[^\/]+)/group-search-views/$",
++        OrganizationGroupSearchViewsEndpoint.as_view(),
++        name="sentry-api-0-organization-group-search-views",
++    ),
+     # Pinned and saved search
+     re_path(
+         r"^(?P<organization_id_or_slug>[^\/]+)/pinned-searches/$",
+diff --git a/src/sentry/issues/endpoints/__init__.py b/src/sentry/issues/endpoints/__init__.py
+index d8f10edf83a16b..811a8ded212ef7 100644
+--- a/src/sentry/issues/endpoints/__init__.py
++++ b/src/sentry/issues/endpoints/__init__.py
+@@ -2,6 +2,7 @@
+ from .group_events import GroupEventsEndpoint
+ from .organization_activity import OrganizationActivityEndpoint
+ from .organization_group_index import OrganizationGroupIndexEndpoint
++from .organization_group_search_views import OrganizationGroupSearchViewsEndpoint
+ from .organization_release_previous_commits import OrganizationReleasePreviousCommitsEndpoint
+ from .organization_searches import OrganizationSearchesEndpoint
+ from .project_stacktrace_link import ProjectStacktraceLinkEndpoint
+@@ -12,6 +13,7 @@
+     "GroupEventsEndpoint",
+     "OrganizationActivityEndpoint",
+     "OrganizationGroupIndexEndpoint",
++    "OrganizationGroupSearchViewsEndpoint",
+     "OrganizationReleasePreviousCommitsEndpoint",
+     "OrganizationSearchesEndpoint",
+     "ProjectStacktraceLinkEndpoint",
+diff --git a/src/sentry/issues/endpoints/organization_group_search_views.py b/src/sentry/issues/endpoints/organization_group_search_views.py
+new file mode 100644
+index 00000000000000..2fa8400cd962f5
+--- /dev/null
++++ b/src/sentry/issues/endpoints/organization_group_search_views.py
+@@ -0,0 +1,68 @@
++from rest_framework import status
++from rest_framework.request import Request
++from rest_framework.response import Response
++
++from sentry import features
++from sentry.api.api_owners import ApiOwner
++from sentry.api.api_publish_status import ApiPublishStatus
++from sentry.api.base import region_silo_endpoint
++from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
++from sentry.api.paginator import SequencePaginator
++from sentry.api.serializers import serialize
++from sentry.api.serializers.models.groupsearchview import GroupSearchViewSerializer
++from sentry.models.groupsearchview import GroupSearchView
++from sentry.models.organization import Organization
++
++DEFAULT_VIEWS = [
++    {
++        "id": "",
++        "name": "Prioritized",
++        "query": "is:unresolved issue.priority:[high, medium]",
++        "querySort": "date",
++        "position": 0,
++    }
++]
++
++
++class MemberPermission(OrganizationPermission):
++    scope_map = {
++        "GET": ["member:read", "member:write"],
++    }
++
++
++@region_silo_endpoint
++class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
++    publish_status = {
++        "GET": ApiPublishStatus.EXPERIMENTAL,
++    }
++    owner = ApiOwner.ISSUES
++    permission_classes = (MemberPermission,)
++
++    def get(self, request: Request, organization: Organization) -> Response:
++        """
++        List the current organization member's custom views
++        `````````````````````````````````````````
++
++        Retrieve a list of custom views for the current organization member.
++        """
++        if not features.has("organizations:issue-stream-custom-views", organization):
++            return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
++
++        query = GroupSearchView.objects.filter(organization=organization, user_id=request.user.id)
++
++        # Return only the prioritized view if user has no custom views yet
++        if not query.exists():
++            return self.paginate(
++                request=request,
++                paginator=SequencePaginator(
++                    [(idx, view) for idx, view in enumerate(DEFAULT_VIEWS)]
++                ),
++                on_results=lambda results: serialize(results, request.user),
++            )
++
++        return self.paginate(
++            request=request,
++            queryset=query,
++            order_by="position",
++            on_results=lambda x: serialize(x, request.user, serializer=GroupSearchViewSerializer()),
++        )
+diff --git a/tests/sentry/issues/endpoints/test_organization_group_search_views.py b/tests/sentry/issues/endpoints/test_organization_group_search_views.py
+new file mode 100644
+index 00000000000000..609597f8ad5a10
+--- /dev/null
++++ b/tests/sentry/issues/endpoints/test_organization_group_search_views.py
+@@ -0,0 +1,105 @@
++from sentry.api.serializers.base import serialize
++from sentry.models.groupsearchview import GroupSearchView
++from sentry.testutils.cases import APITestCase
++from sentry.testutils.helpers.features import with_feature
++
++
++class OrganizationGroupSearchViewsTest(APITestCase):
++    endpoint = "sentry-api-0-organization-group-search-views"
++    method = "get"
++
++    def create_base_data(self):
++        user_1 = self.user
++        self.user_2 = self.create_user()
++        self.user_3 = self.create_user()
++
++        self.create_member(organization=self.organization, user=self.user_2)
++        self.create_member(organization=self.organization, user=self.user_3)
++
++        first_custom_view_user_one = GroupSearchView.objects.create(
++            name="Custom View One",
++            organization=self.organization,
++            user_id=user_1.id,
++            query="is:unresolved",
++            query_sort="date",
++            position=0,
++        )
++
++        # This is out of order to test that the endpoint returns the views in the correct order
++        third_custom_view_user_one = GroupSearchView.objects.create(
++            name="Custom View Three",
++            organization=self.organization,
++            user_id=user_1.id,
++            query="is:ignored",
++            query_sort="freq",
++            position=2,
++        )
++
++        second_custom_view_user_one = GroupSearchView.objects.create(
++            name="Custom View Two",
++            organization=self.organization,
++            user_id=user_1.id,
++            query="is:resolved",
++            query_sort="new",
++            position=1,
++        )
++
++        first_custom_view_user_two = GroupSearchView.objects.create(
++            name="Custom View One",
++            organization=self.organization,
++            user_id=self.user_2.id,
++            query="is:unresolved",
++            query_sort="date",
++            position=0,
++        )
++
++        second_custom_view_user_two = GroupSearchView.objects.create(
++            name="Custom View Two",
++            organization=self.organization,
++            user_id=self.user_2.id,
++            query="is:resolved",
++            query_sort="new",
++            position=1,
++        )
++
++        return {
++            "user_one_views": [
++                first_custom_view_user_one,
++                second_custom_view_user_one,
++                third_custom_view_user_one,
++            ],
++            "user_two_views": [first_custom_view_user_two, second_custom_view_user_two],
++        }
++
++    @with_feature({"organizations:issue-stream-custom-views": True})
++    def test_get_user_one_custom_views(self):
++        objs = self.create_base_data()
++
++        self.login_as(user=self.user)
++        response = self.get_success_response(self.organization.slug)
++
++        assert response.data == serialize(objs["user_one_views"])
++
++    @with_feature({"organizations:issue-stream-custom-views": True})
++    def test_get_user_two_custom_views(self):
++        objs = self.create_base_data()
++
++        self.login_as(user=self.user_2)
++        response = self.get_success_response(self.organization.slug)
++
++        assert response.data == serialize(objs["user_two_views"])
++
++    @with_feature({"organizations:issue-stream-custom-views": True})
++    def test_get_default_views(self):
++        self.create_base_data()
++
++        self.login_as(user=self.user_3)
++        response = self.get_success_response(self.organization.slug)
++        assert len(response.data) == 1
++
++        view = response.data[0]
++
++        assert view["name"] == "Prioritized"
++        assert view["query"] == "is:unresolved issue.priority:[high, medium]"
++        assert view["querySort"] == "date"
++        assert view["position"] == 0
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,167 @@
+  Task-ID: scipy__scipy-18152@d349c38
+  Please checkout to this commit first: 204ff51bdc8f020525950eed9553a56befa5ea3c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: Compute non centraled moments with `stats.moment`?
+### Is your feature request related to a problem? Please describe.
+
+To compute a non-central moment of order `n>2`, one can't use the current implementation, but has to reside to implement their own.
+
+### Describe the solution you'd like.
+
+I'd like the `stats.moment` function to perhaps support a `central: Bool` argument, that will tell it whether the input vectors should be centralized around their average or not.
+
+### Describe alternatives you've considered.
+
+Implement this myself:
+
+```python
+def nmoment(arr, n):
+	return np.sum(arr**n)/len(arr)
+```
+
+### Additional context (e.g. screenshots, GIFs)
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/stats/_stats_py.py b/scipy/stats/_stats_py.py
+index 290118c41b6e..ffbeb1e9dc35 100644
+--- a/scipy/stats/_stats_py.py
++++ b/scipy/stats/_stats_py.py
+@@ -1009,7 +1009,7 @@ def _moment_result_object(*args):
+     _moment_result_object, n_samples=1, result_to_tuple=lambda x: (x,),
+     n_outputs=_moment_outputs
+ )
+-def moment(a, moment=1, axis=0, nan_policy='propagate'):
++def moment(a, moment=1, axis=0, nan_policy='propagate', *, center=None):
+     r"""Calculate the nth moment about the mean for a sample.
+ 
+     A moment is a specific quantitative measure of the shape of a set of
+@@ -1033,9 +1033,14 @@ def moment(a, moment=1, axis=0, nan_policy='propagate'):
+           * 'raise': throws an error
+           * 'omit': performs the calculations ignoring nan values
+ 
++    center : float or None, optional
++       The point about which moments are taken. This can be the sample mean,
++       the origin, or any other be point. If `None` (default) compute the
++       center as the sample mean.
++
+     Returns
+     -------
+-    n-th central moment : ndarray or float
++    n-th moment about the `center` : ndarray or float
+        The appropriate moment along the given axis or over all values if axis
+        is None. The denominator for the moment calculation is the number of
+        observations, no degrees of freedom correction is done.
+@@ -1046,14 +1051,15 @@ def moment(a, moment=1, axis=0, nan_policy='propagate'):
+ 
+     Notes
+     -----
+-    The k-th central moment of a data sample is:
++    The k-th moment of a data sample is:
+ 
+     .. math::
+ 
+-        m_k = \frac{1}{n} \sum_{i = 1}^n (x_i - \bar{x})^k
++        m_k = \frac{1}{n} \sum_{i = 1}^n (x_i - c)^k
+ 
+-    Where n is the number of samples and x-bar is the mean. This function uses
+-    exponentiation by squares [1]_ for efficiency.
++    Where `n` is the number of samples, and `c` is the center around which the
++    moment is calculated. This function uses exponentiation by squares [1]_ for
++    efficiency.
+ 
+     Note that, if `a` is an empty array (``a.size == 0``), array `moment` with
+     one element (`moment.size == 1`) is treated the same as scalar `moment`
+@@ -1074,19 +1080,14 @@ def moment(a, moment=1, axis=0, nan_policy='propagate'):
+     """
+     a, axis = _chk_asarray(a, axis)
+ 
+-    contains_nan, nan_policy = _contains_nan(a, nan_policy)
+-
+-    if contains_nan and nan_policy == 'omit':
+-        a = ma.masked_invalid(a)
+-        return mstats_basic.moment(a, moment, axis)
+-
++    if center is None:
++        center = a.mean(axis, keepdims=True)
+     # for array_like moment input, return a value for each.
+     if not np.isscalar(moment):
+-        mean = a.mean(axis, keepdims=True)
+-        mmnt = [_moment(a, i, axis, mean=mean) for i in moment]
++        mmnt = [_moment(a, i, axis, mean=center) for i in moment]
+         return np.array(mmnt)
+     else:
+-        return _moment(a, moment, axis)
++        return _moment(a, moment, axis, mean=center)
+ 
+ 
+ # Moment with optional pre-computed mean, equal to a.mean(axis, keepdims=True)
+diff --git a/scipy/stats/tests/test_stats.py b/scipy/stats/tests/test_stats.py
+index 79f0dfb2fe48..fb28e7e45823 100644
+--- a/scipy/stats/tests/test_stats.py
++++ b/scipy/stats/tests/test_stats.py
+@@ -3001,6 +3001,27 @@ def _assert_equal(self, actual, expect, *, shape=None, dtype=None):
+             dtype = expect.dtype
+         assert actual.dtype == dtype
+ 
++    def test_moment_center(self):
++        # mean((testcase-mean(testcase))**power,axis=0),axis=0))**power))
++        y = stats.moment(self.testcase, 1, center=0)
++        assert_approx_equal(y, 2.5)
++        y = stats.moment(self.testcase, 1, center=2)
++        assert_approx_equal(y, 0.5)
++        y = stats.moment(self.testcase, 2, center=0)
++        assert_approx_equal(y, 7.5)
++        y = stats.moment(self.testcase, 2, center=1)
++        assert_approx_equal(y, 3.5)
++        y = stats.moment(self.testcase, 3, center=1)
++        assert_approx_equal(y, 9)
++        y = stats.moment(self.testcase, 3, center=2)
++        assert_approx_equal(y, 2)
++        # Compare against the naive np.sum implementation:
++        x = self.testmathworks
++        y = stats.moment(x, 3, center=0)
++        assert_approx_equal(y, np.sum(x**3)/len(x))
++        y = stats.moment(x, 2, center=0)
++        assert_approx_equal(y, np.sum(x**2)/len(x))
++
+     def test_moment(self):
+         # mean((testcase-mean(testcase))**power,axis=0),axis=0))**power))
+         y = stats.moment(self.scalar_testcase)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

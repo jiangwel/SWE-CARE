@@ -1,0 +1,143 @@
+  Task-ID: ansible__ansible-56679@5e79e31
+  Please checkout to this commit first: 493cf817a920542fc3d791e1bafdc52c05cbc06d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  hostname fails when systemd is installed but dbus is not running
+##### ISSUE TYPE
+ - Bug Report
+
+##### COMPONENT NAME
+hostname module
+
+##### ANSIBLE VERSION
+```
+ansible 2.2.1.0
+```
+
+##### OS / ENVIRONMENT
+Debian Jessie
+
+##### SUMMARY
+
+On systems without dbus, ansible's hostname module fails with error:
+
+```
+Command failed rc=1, out=, err=Failed to create bus connection
+```
+
+
+With ansible 1.7 and the same system and playbook it works. Installing dbus workarounds this issue.
+
+##### STEPS TO REPRODUCE
+Run hostname task agains a machine without dbus installed.
+
+<!--- Paste example playbooks or commands between quotes below -->
+```
+hosts: all
+tasks:
+  - hostname: name=myhost
+```
+
+##### EXPECTED RESULTS
+Hostname should be set
+
+##### ACTUAL RESULTS
+```
+Command failed rc=1, out=, err=Failed to create bus connection
+```
+  </issue>
+  
+  <patch>
+  diff --git a/changelogs/fragments/hostname_use.yml b/changelogs/fragments/hostname_use.yml
+new file mode 100644
+index 00000000000000..bcf4e83625513b
+--- /dev/null
++++ b/changelogs/fragments/hostname_use.yml
+@@ -0,0 +1,2 @@
++minor_changes:
++    - added ``use`` option to ``hostname`` module to allow user to override autodetection.
+diff --git a/lib/ansible/modules/system/hostname.py b/lib/ansible/modules/system/hostname.py
+index 9a92bfd73020ca..5db14f0b61f1f8 100644
+--- a/lib/ansible/modules/system/hostname.py
++++ b/lib/ansible/modules/system/hostname.py
+@@ -29,6 +29,12 @@
+         description:
+             - Name of the host
+         required: true
++    use:
++        description:
++            - Which strategy to use to update the hostname.
++            - If not set we try to autodetect, but this can be problematic, specially with containers as they can present misleading information.
++        choices: ['generic', 'debian','sles', 'redhat', 'alpine', 'systemd', 'openrc', 'openbsd', 'solaris', 'freebsd']
++        version_added: '2.9'
+ '''
+ 
+ EXAMPLES = '''
+@@ -50,6 +56,9 @@
+ from ansible.module_utils.facts.system.service_mgr import ServiceMgrFactCollector
+ from ansible.module_utils._text import to_native
+ 
++STRATS = {'generic': 'Generic', 'debian': 'Debian', 'sles': 'SLES', 'redhat': 'RedHat', 'alpine': 'Alpine',
++          'systemd': 'Systemd', 'openrc': 'OpenRC', 'openbsd': 'OpenBSD', 'solaris': 'Solaris', 'freebsd': 'FreeBSD'}
++
+ 
+ class UnimplementedStrategy(object):
+     def __init__(self, module):
+@@ -107,7 +116,12 @@ def __new__(cls, *args, **kwargs):
+     def __init__(self, module):
+         self.module = module
+         self.name = module.params['name']
+-        if self.platform == 'Linux' and ServiceMgrFactCollector.is_systemd_managed(module):
++        self.use = module.params['use']
++
++        if self.use is not None:
++            strat = globals()['%sStrategy' % STRATS[self.use]]
++            self.strategy = strat(module)
++        elif self.platform == 'Linux' and ServiceMgrFactCollector.is_systemd_managed(module):
+             self.strategy = SystemdStrategy(module)
+         else:
+             self.strategy = self.strategy_class(module)
+@@ -724,7 +738,8 @@ class NeonHostname(Hostname):
+ def main():
+     module = AnsibleModule(
+         argument_spec=dict(
+-            name=dict(required=True)
++            name=dict(type='str', required=True),
++            use=dict(type='str', choices=['generic', 'debian', 'sles', 'redhat', 'alpine', 'systemd', 'openrc', 'openbsd', 'solaris', 'freebsd'])
+         ),
+         supports_check_mode=True,
+     )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

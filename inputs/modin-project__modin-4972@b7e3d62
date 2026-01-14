@@ -1,0 +1,87 @@
+  Task-ID: modin-project__modin-4972@b7e3d62
+  Please checkout to this commit first: af6f8277cf9caeb7dec8b390ef3652ec0fa04774
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Don't correctly work `dtype` for `column` in `exchange df_protocol` for OmniSci
+If we run:
+```
+import modin.pandas as pd
+from modin.test.exchange.dataframe_protocol.omnisci.utils import split_df_into_chunks
+import modin.config as cfg
+cfg.StorageFormat.put('omnisci')
+
+pd_df = pd.DataFrame({"a": pd.Categorical(list("testdataforexchangedataframeprotocol"))})
+pd_chunks = split_df_into_chunks(pd_df, 2)
+md_df = pd.concat(pd_chunks)
+print(" ")
+print("md_df.dtype = ", md_df["a"].dtype)
+protocol_df = md_df.__dataframe__()
+df_col = protocol_df.get_column_by_name(" ")
+print("protocol_df.num_chunks() = ", df_col.num_chunks())
+print("protocol_df.dtype = ", df_col.dtype)
+```
+We have result:
+```
+md_df.dtype =  category
+protocol_df.num_chunks() =  2
+protocol_df.dtype =  (<DTypeKind.INT: 0>, 64, 'l', '=')
+```
+This is because when converting df from an arrow table, the index column replaces the actual null column.
+  </issue>
+  
+  <patch>
+  diff --git a/modin/test/interchange/dataframe_protocol/omnisci/test_protocol.py b/modin/test/interchange/dataframe_protocol/omnisci/test_protocol.py
+index d0f202f272a..ccb0e14b0b1 100644
+--- a/modin/test/interchange/dataframe_protocol/omnisci/test_protocol.py
++++ b/modin/test/interchange/dataframe_protocol/omnisci/test_protocol.py
+@@ -310,3 +310,16 @@ def test_buffer_of_chunked_at(data_has_nulls, n_chunks):
+         # Catch exception on attempt of doing a copy due to chunks combining
+         with pytest.raises(RuntimeError):
+             col.get_buffers()
++
++
++def test_concat_chunks():
++    """Regression test for https://github.com/modin-project/modin/issues/4366"""
++    pd_df = pd.DataFrame(
++        {"a": pd.Categorical(list("testdataforexchangedataframeprotocol"))}
++    )
++    pd_chunks = split_df_into_chunks(pd_df, 2)
++    md_df = pd.concat(pd_chunks)
++    assert md_df["a"].dtype.name == "category"
++    protocol_df = md_df.__dataframe__()
++    df_col = protocol_df.get_column_by_name("a")
++    assert df_col.num_chunks() == 2
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,636 @@
+  Task-ID: getsentry__sentry-73239@4060eaa
+  Please checkout to this commit first: d05c55014f628ef263ff1fcce28cf9512d3e5efc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Custom Views: MVP for dnd tabs component 
+Drag and drop tabs must be implemented to support custom views. This ticket tracks the progress of creating the basic drag and drop tab component that will eventually be used to for custom views. 
+
+MVP features include:
+- [ ] Unstyled tabs that can be dragged with the cursor 
+- [ ] Unstyled tabs that can be dropped between any other tabs in the tab bar 
+- [ ] A basic drop indicator indicating where a dragged tab will drop 
+- [ ] A storybook entry displaying this component
+  </issue>
+  
+  <patch>
+  diff --git a/static/app/components/draggableTabs/draggableTab.tsx b/static/app/components/draggableTabs/draggableTab.tsx
+index 9f5cd4bfdf1c7b..640c8c5fcb7a28 100644
+--- a/static/app/components/draggableTabs/draggableTab.tsx
++++ b/static/app/components/draggableTabs/draggableTab.tsx
+@@ -1,9 +1,19 @@
+-import {forwardRef, useCallback} from 'react';
++import type React from 'react';
++import {forwardRef, Fragment, useCallback, useRef} from 'react';
+ import type {Theme} from '@emotion/react';
+ import styled from '@emotion/styled';
++import {useButton} from '@react-aria/button';
++import {
++  type DropIndicatorProps,
++  useDrag,
++  useDropIndicator,
++  useDroppableItem,
++} from '@react-aria/dnd';
++import {useFocusRing} from '@react-aria/focus';
+ import type {AriaTabProps} from '@react-aria/tabs';
+ import {useTab} from '@react-aria/tabs';
+-import {useObjectRef} from '@react-aria/utils';
++import {mergeProps, useObjectRef} from '@react-aria/utils';
++import type {DroppableCollectionState} from '@react-stately/dnd';
+ import type {TabListState} from '@react-stately/tabs';
+ import type {Node, Orientation} from '@react-types/shared';
+ 
+@@ -13,7 +23,8 @@ import {space} from 'sentry/styles/space';
+ 
+ import {tabsShouldForwardProp} from './utils';
+ 
+-interface TabProps extends AriaTabProps {
++interface DraggableTabProps extends AriaTabProps {
++  dropState: DroppableCollectionState;
+   item: Node<any>;
+   orientation: Orientation;
+   /**
+@@ -25,6 +36,11 @@ interface TabProps extends AriaTabProps {
+   state: TabListState<any>;
+ }
+ 
++interface BaseDropIndicatorProps {
++  dropState: DroppableCollectionState;
++  target: DropIndicatorProps['target'];
++}
++
+ /**
+  * Stops event propagation if the command/ctrl/shift key is pressed, in effect
+  * preventing any state change. This is useful because when a user
+@@ -37,17 +53,40 @@ function handleLinkClick(e: React.PointerEvent<HTMLAnchorElement>) {
+   }
+ }
+ 
++function TabDropIndicator(props: BaseDropIndicatorProps) {
++  const ref = useRef(null);
++  const {dropIndicatorProps, isHidden, isDropTarget} = useDropIndicator(
++    props,
++    props.dropState,
++    ref
++  );
++  if (isHidden) {
++    return null;
++  }
++
++  return (
++    <TabSeparator
++      {...dropIndicatorProps}
++      role="option"
++      ref={ref}
++      className={`drop-indicator ${isDropTarget ? 'drop-target' : ''}`}
++    />
++  );
++}
++
+ /**
+  * Renders a single tab item. This should not be imported directly into any
+  * page/view – it's only meant to be used by <TabsList />. See the correct
+  * usage in tabs.stories.js
+  */
+-function BaseTab(
+-  {item, state, orientation, overflowing}: TabProps,
++function BaseDraggableTab(
++  {item, state, orientation, overflowing, dropState}: DraggableTabProps,
+   forwardedRef: React.ForwardedRef<HTMLLIElement>
+ ) {
+   const ref = useObjectRef(forwardedRef);
+ 
++  const {isFocusVisible} = useFocusRing();
++
+   const {
+     key,
+     rendered,
+@@ -73,28 +112,80 @@ function BaseTab(
+     [to, orientation]
+   );
+ 
++  const {dropProps, isDropTarget} = useDroppableItem(
++    {
++      target: {type: 'item', key: item.key, dropPosition: 'on'},
++    },
++    dropState,
++    ref
++  );
++
++  function Draggable({children}) {
++    const {dragProps, dragButtonProps, isDragging} = useDrag({
++      getAllowedDropOperations: () => ['move'],
++      getItems() {
++        return [
++          {
++            tab: JSON.stringify({key: item.key, value: children}),
++          },
++        ];
++      },
++    });
++
++    const draggableRef = useRef(null);
++    const {buttonProps} = useButton(
++      {...dragButtonProps, elementType: 'div'},
++      draggableRef
++    );
++
++    return (
++      <div
++        {...mergeProps(dragProps, buttonProps)}
++        ref={draggableRef}
++        className={`draggable ${isDragging ? 'dragging' : ''}`}
++      >
++        {children}
++      </div>
++    );
++  }
++
+   return (
+-    <TabWrap
+-      {...tabProps}
+-      hidden={hidden}
+-      selected={isSelected}
+-      overflowing={overflowing}
+-      ref={ref}
+-    >
+-      <InnerWrap>
+-        <StyledInteractionStateLayer
+-          orientation={orientation}
+-          higherOpacity={isSelected}
++    <Fragment>
++      <TabDropIndicator
++        target={{type: 'item', key: item.key, dropPosition: 'before'}}
++        dropState={dropState}
++      />
++      <TabWrap
++        {...mergeProps(tabProps, dropProps)}
++        hidden={hidden}
++        selected={isSelected}
++        overflowing={overflowing}
++        ref={ref}
++        className={`option ${isFocusVisible ? 'focus-visible' : ''} ${
++          isDropTarget ? 'drop-target' : ''
++        }`}
++      >
++        <InnerWrap>
++          <StyledInteractionStateLayer
++            orientation={orientation}
++            higherOpacity={isSelected}
++          />
++          <FocusLayer orientation={orientation} />
++          <Draggable>{rendered}</Draggable>
++          <TabSelectionIndicator orientation={orientation} selected={isSelected} />
++        </InnerWrap>
++      </TabWrap>
++      {state.collection.getKeyAfter(item.key) == null && (
++        <TabDropIndicator
++          target={{type: 'item', key: item.key, dropPosition: 'after'}}
++          dropState={dropState}
+         />
+-        <FocusLayer orientation={orientation} />
+-        {rendered}
+-        <TabSelectionIndicator orientation={orientation} selected={isSelected} />
+-      </InnerWrap>
+-    </TabWrap>
++      )}
++    </Fragment>
+   );
+ }
+ 
+-export const Tab = forwardRef(BaseTab);
++export const DraggableTab = forwardRef(BaseDraggableTab);
+ 
+ const TabWrap = styled('li', {shouldForwardProp: tabsShouldForwardProp})<{
+   overflowing: boolean;
+@@ -127,6 +218,12 @@ const TabWrap = styled('li', {shouldForwardProp: tabsShouldForwardProp})<{
+     `}
+ `;
+ 
++const TabSeparator = styled('li')`
++  height: 80%;
++  width: 2px;
++  background-color: ${p => p.theme.gray200};
++`;
++
+ const innerWrapStyles = ({
+   theme,
+   orientation,
+diff --git a/static/app/components/draggableTabs/draggableTabList.tsx b/static/app/components/draggableTabs/draggableTabList.tsx
+index 2ef4d52a21c287..8b95dc29170fd6 100644
+--- a/static/app/components/draggableTabs/draggableTabList.tsx
++++ b/static/app/components/draggableTabs/draggableTabList.tsx
+@@ -1,24 +1,36 @@
+ import {useContext, useEffect, useMemo, useRef, useState} from 'react';
+ import styled from '@emotion/styled';
++import {ListDropTargetDelegate, useDroppableCollection} from '@react-aria/dnd';
++import {ListKeyboardDelegate} from '@react-aria/selection';
+ import type {AriaTabListOptions} from '@react-aria/tabs';
+ import {useTabList} from '@react-aria/tabs';
++import {mergeProps} from '@react-aria/utils';
+ import {useCollection} from '@react-stately/collections';
++import {
++  type DroppableCollectionStateOptions,
++  useDroppableCollectionState,
++} from '@react-stately/dnd';
+ import {ListCollection} from '@react-stately/list';
+ import type {TabListStateOptions} from '@react-stately/tabs';
+ import {useTabListState} from '@react-stately/tabs';
+-import type {Node, Orientation} from '@react-types/shared';
++import type {
++  DroppableCollectionInsertDropEvent,
++  Node,
++  Orientation,
++  TextDropItem,
++} from '@react-types/shared';
+ 
+ import type {SelectOption} from 'sentry/components/compactSelect';
+ import {CompactSelect} from 'sentry/components/compactSelect';
++import {type Tab, TabsContext} from 'sentry/components/draggableTabs';
+ import DropdownButton from 'sentry/components/dropdownButton';
+ import {IconEllipsis} from 'sentry/icons';
+ import {t} from 'sentry/locale';
+ import {space} from 'sentry/styles/space';
+ import {browserHistory} from 'sentry/utils/browserHistory';
+ 
+-import {Tab} from './draggableTab';
+-import {TabsContext} from './index';
+-import type {TabListItemProps} from './item';
++import {DraggableTab} from './draggableTab';
++import type {DraggableTabListItemProps} from './item';
+ import {Item} from './item';
+ import {tabsShouldForwardProp} from './utils';
+ 
+@@ -31,7 +43,7 @@ function useOverflowTabs({
+   tabItemsRef,
+   tabItems,
+ }: {
+-  tabItems: TabListItemProps[];
++  tabItems: DraggableTabListItemProps[];
+   tabItemsRef: React.RefObject<Record<string | number, HTMLLIElement | null>>;
+   tabListRef: React.RefObject<HTMLUListElement>;
+ }) {
+@@ -85,24 +97,16 @@ function useOverflowTabs({
+   return overflowTabs.filter(tabKey => !tabItemKeyToHiddenMap[tabKey]);
+ }
+ 
+-export interface TabListProps
+-  extends AriaTabListOptions<TabListItemProps>,
+-    TabListStateOptions<TabListItemProps> {
+-  className?: string;
+-  hideBorder?: boolean;
+-  outerWrapStyles?: React.CSSProperties;
++interface BaseDraggableTabListProps extends DraggableTabListProps {
++  items: DraggableTabListItemProps[];
+ }
+ 
+-interface BaseTabListProps extends TabListProps {
+-  items: TabListItemProps[];
+-}
+-
+-function BaseTabList({
++function BaseDraggableTabList({
+   hideBorder = false,
+   className,
+   outerWrapStyles,
+   ...props
+-}: BaseTabListProps) {
++}: BaseDraggableTabListProps) {
+   const tabListRef = useRef<HTMLUListElement>(null);
+   const {rootProps, setTabListState} = useContext(TabsContext);
+   const {
+@@ -142,6 +146,27 @@ function BaseTabList({
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [state.disabledKeys, state.selectedItem, state.selectedKey, props.children]);
+ 
++  const dropState = useDroppableCollectionState({
++    ...props,
++    collection: state.collection,
++    selectionManager: state.selectionManager,
++  });
++
++  const {collectionProps} = useDroppableCollection(
++    {
++      ...props,
++      // Provide drop targets for keyboard and pointer-based drag and drop.
++      keyboardDelegate: new ListKeyboardDelegate(
++        state.collection,
++        state.disabledKeys,
++        tabListRef
++      ),
++      dropTargetDelegate: new ListDropTargetDelegate(state.collection, tabListRef),
++    },
++    dropState,
++    tabListRef
++  );
++
+   // Detect tabs that overflow from the wrapper and put them in an overflow menu
+   const tabItemsRef = useRef<Record<string | number, HTMLLIElement | null>>({});
+   const overflowTabs = useOverflowTabs({
+@@ -176,19 +201,20 @@ function BaseTabList({
+   return (
+     <TabListOuterWrap style={outerWrapStyles}>
+       <TabListWrap
+-        {...tabListProps}
++        {...mergeProps(tabListProps, collectionProps)}
+         orientation={orientation}
+         hideBorder={hideBorder}
+         className={className}
+         ref={tabListRef}
+       >
+         {[...state.collection].map(item => (
+-          <Tab
++          <DraggableTab
+             key={item.key}
+             item={item}
+             state={state}
+             orientation={orientation}
+             overflowing={orientation === 'horizontal' && overflowTabs.includes(item.key)}
++            dropState={dropState}
+             ref={element => (tabItemsRef.current[item.key] = element)}
+           />
+         ))}
+@@ -223,14 +249,47 @@ function BaseTabList({
+ 
+ const collectionFactory = (nodes: Iterable<Node<any>>) => new ListCollection(nodes);
+ 
++export interface DraggableTabListProps
++  extends AriaTabListOptions<DraggableTabListItemProps>,
++    TabListStateOptions<DraggableTabListItemProps>,
++    Omit<DroppableCollectionStateOptions, 'collection' | 'selectionManager'> {
++  setTabs: (tabs: Tab[]) => void;
++  tabs: Tab[];
++  className?: string;
++  hideBorder?: boolean;
++  outerWrapStyles?: React.CSSProperties;
++}
++
+ /**
+  * To be used as a direct child of the <Tabs /> component. See example usage
+  * in tabs.stories.js
+  */
+-export function TabList({items, ...props}: TabListProps) {
+-  /**
+-   * Initial, unfiltered list of tab items.
+-   */
++export function DraggableTabList({
++  items,
++  tabs,
++  setTabs,
++  ...props
++}: DraggableTabListProps) {
++  const onInsert = async (e: DroppableCollectionInsertDropEvent) => {
++    const dropItem = e.items[0] as TextDropItem;
++    const eventTab = JSON.parse(await dropItem.getText('tab'));
++    const draggedTab = tabs.find(tab => tab.key === eventTab.key);
++
++    if (draggedTab) {
++      const updatedTabs = tabs.filter(tab => tab.key !== draggedTab.key);
++      const targetTab = tabs.find(tab => tab.key === e.target.key);
++      if (targetTab) {
++        const targetIdx = updatedTabs.indexOf(targetTab);
++        if (targetTab && e.target.dropPosition === 'before') {
++          updatedTabs.splice(targetIdx, 0, draggedTab);
++        } else if (targetTab && e.target.dropPosition === 'after') {
++          updatedTabs.splice(targetIdx + 1, 0, draggedTab);
++        }
++        setTabs(updatedTabs);
++      }
++    }
++  };
++
+   const collection = useCollection({items, ...props}, collectionFactory);
+ 
+   const parsedItems = useMemo(
+@@ -248,13 +307,20 @@ export function TabList({items, ...props}: TabListProps) {
+   );
+ 
+   return (
+-    <BaseTabList items={parsedItems} disabledKeys={disabledKeys} {...props}>
++    <BaseDraggableTabList
++      tabs={tabs}
++      onInsert={onInsert}
++      items={parsedItems}
++      disabledKeys={disabledKeys}
++      setTabs={setTabs}
++      {...props}
++    >
+       {item => <Item {...item} />}
+-    </BaseTabList>
++    </BaseDraggableTabList>
+   );
+ }
+ 
+-TabList.Item = Item;
++DraggableTabList.Item = Item;
+ 
+ const TabListOuterWrap = styled('div')`
+   position: relative;
+diff --git a/static/app/components/draggableTabs/draggableTabPanels.tsx b/static/app/components/draggableTabs/draggableTabPanels.tsx
+index 38741ed667a49b..67e9eec5edcb32 100644
+--- a/static/app/components/draggableTabs/draggableTabPanels.tsx
++++ b/static/app/components/draggableTabs/draggableTabPanels.tsx
+@@ -13,7 +13,7 @@ import {tabsShouldForwardProp} from './utils';
+ 
+ const collectionFactory = (nodes: Iterable<Node<any>>) => new ListCollection(nodes);
+ 
+-interface TabPanelsProps extends AriaTabPanelProps, CollectionBase<any> {
++interface DraggableTabPanelsProps extends AriaTabPanelProps, CollectionBase<any> {
+   className?: string;
+ }
+ 
+@@ -21,7 +21,7 @@ interface TabPanelsProps extends AriaTabPanelProps, CollectionBase<any> {
+  * To be used as a direct child of the <Tabs /> component. See example usage
+  * in tabs.stories.js
+  */
+-export function TabPanels(props: TabPanelsProps) {
++export function DraggableTabPanels(props: DraggableTabPanelsProps) {
+   const {
+     rootProps: {orientation, items},
+     tabListState,
+@@ -51,7 +51,7 @@ export function TabPanels(props: TabPanelsProps) {
+   );
+ }
+ 
+-TabPanels.Item = Item;
++DraggableTabPanels.Item = Item;
+ 
+ interface TabPanelProps extends AriaTabPanelProps {
+   state: TabListState<any>;
+diff --git a/static/app/components/draggableTabs/index.stories.tsx b/static/app/components/draggableTabs/index.stories.tsx
+new file mode 100644
+index 00000000000000..29ef031a95b373
+--- /dev/null
++++ b/static/app/components/draggableTabs/index.stories.tsx
+@@ -0,0 +1,31 @@
++import {Fragment} from 'react';
++
++import {DraggableTabBar, DraggableTabs} from 'sentry/components/draggableTabs';
++import JSXNode from 'sentry/components/stories/jsxNode';
++import SizingWindow from 'sentry/components/stories/sizingWindow';
++import storyBook from 'sentry/stories/storyBook';
++
++export default storyBook(DraggableTabs, story => {
++  const TABS = [
++    {key: 'one', label: 'Tab One', content: 'This is the first Panel.'},
++    {key: 'two', label: 'Tab Two', content: 'This is the second panel'},
++    {key: 'three', label: 'Tab Three', content: 'This is the third panel'},
++  ];
++
++  story('Default', () => (
++    <Fragment>
++      <p>
++        You should be using all of <JSXNode name="Tabs" />, <JSXNode name="TabList" />,{' '}
++        <JSXNode name="TabList.Item" />, <JSXNode name="DroppableTabPanels" /> and
++        <JSXNode name="DroppableTabPanels.Item" /> components.
++      </p>
++      <p>
++        This will give you all kinds of accessibility and state tracking out of the box.
++        But you will have to render all tab content, including hooks, upfront.
++      </p>
++      <SizingWindow>
++        <DraggableTabBar tabs={TABS} />
++      </SizingWindow>
++    </Fragment>
++  ));
++});
+diff --git a/static/app/components/draggableTabs/index.tsx b/static/app/components/draggableTabs/index.tsx
+index 7ded52b54ed766..06c873bdeb2645 100644
+--- a/static/app/components/draggableTabs/index.tsx
++++ b/static/app/components/draggableTabs/index.tsx
+@@ -4,11 +4,14 @@ import {createContext, useState} from 'react';
+ import styled from '@emotion/styled';
+ import type {AriaTabListOptions} from '@react-aria/tabs';
+ import type {TabListState, TabListStateOptions} from '@react-stately/tabs';
+-import type {Orientation} from '@react-types/shared';
++import type {Key, Orientation} from '@react-types/shared';
++
++import {DraggableTabList} from 'sentry/components/draggableTabs/draggableTabList';
++import {DraggableTabPanels} from 'sentry/components/draggableTabs/draggableTabPanels';
+ 
+ import {tabsShouldForwardProp} from './utils';
+ 
+-export interface TabsProps<T>
++export interface DraggableTabsProps<T>
+   extends Omit<
+       AriaTabListOptions<any>,
+       'selectedKey' | 'defaultSelectedKey' | 'onSelectionChange' | 'isDisabled'
+@@ -40,13 +43,13 @@ export interface TabsProps<T>
+   value?: T;
+ }
+ 
+-interface TabContext {
+-  rootProps: Omit<TabsProps<any>, 'children' | 'className'>;
++interface DraggableTabContext {
++  rootProps: Omit<DraggableTabsProps<any>, 'children' | 'className'>;
+   setTabListState: (state: TabListState<any>) => void;
+   tabListState?: TabListState<any>;
+ }
+ 
+-export const TabsContext = createContext<TabContext>({
++export const TabsContext = createContext<DraggableTabContext>({
+   rootProps: {orientation: 'horizontal'},
+   setTabListState: () => {},
+ });
+@@ -56,12 +59,12 @@ export const TabsContext = createContext<TabContext>({
+  * child components (TabList and TabPanels) to work together. See example
+  * usage in tabs.stories.js
+  */
+-export function Tabs<T extends string | number>({
++export function DraggableTabs<T extends string | number>({
+   orientation = 'horizontal',
+   className,
+   children,
+   ...props
+-}: TabsProps<T>) {
++}: DraggableTabsProps<T>) {
+   const [tabListState, setTabListState] = useState<TabListState<any>>();
+ 
+   return (
+@@ -75,6 +78,35 @@ export function Tabs<T extends string | number>({
+   );
+ }
+ 
++export interface Tab {
++  content: React.ReactNode;
++  key: Key;
++  label: string;
++}
++
++export interface DragAndDropTabBarProps {
++  tabs: Tab[];
++}
++
++export function DraggableTabBar(props: DragAndDropTabBarProps) {
++  const [tabs, setTabs] = useState<Tab[]>(props.tabs);
++
++  return (
++    <DraggableTabs>
++      <DraggableTabList tabs={tabs} setTabs={setTabs}>
++        {tabs.map(tab => (
++          <DraggableTabList.Item key={tab.key}>{tab.label}</DraggableTabList.Item>
++        ))}
++      </DraggableTabList>
++      <DraggableTabPanels>
++        {tabs.map(tab => (
++          <DraggableTabPanels.Item key={tab.key}>{tab.content}</DraggableTabPanels.Item>
++        ))}
++      </DraggableTabPanels>
++    </DraggableTabs>
++  );
++}
++
+ const TabsWrap = styled('div', {shouldForwardProp: tabsShouldForwardProp})<{
+   orientation: Orientation;
+ }>`
+diff --git a/static/app/components/draggableTabs/item.tsx b/static/app/components/draggableTabs/item.tsx
+index a8aac0aa157cd9..00cd6e94e91c38 100644
+--- a/static/app/components/draggableTabs/item.tsx
++++ b/static/app/components/draggableTabs/item.tsx
+@@ -2,11 +2,11 @@ import {Item as _Item} from '@react-stately/collections';
+ import type {ItemProps} from '@react-types/shared';
+ import type {LocationDescriptor} from 'history';
+ 
+-export interface TabListItemProps extends ItemProps<any> {
++export interface DraggableTabListItemProps extends ItemProps<any> {
+   key: string | number;
+   disabled?: boolean;
+   hidden?: boolean;
+   to?: LocationDescriptor;
+ }
+ 
+-export const Item = _Item as (props: TabListItemProps) => JSX.Element;
++export const Item = _Item as (props: DraggableTabListItemProps) => JSX.Element;
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

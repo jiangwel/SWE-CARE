@@ -1,0 +1,296 @@
+  Task-ID: pydantic__pydantic-1003@0868ff7
+  Please checkout to this commit first: c6e192db04cd777629f828e406156c27001adf83
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  add skip_none argument
+# Question / Feature Request 
+
+Suppose that I have a class like this:
+
+```
+class Jake(BaseModel):
+    foo: Optional[str]
+```
+
+When I serialize it, I only want to serialize optional values when they are not null.  The `skip_defaults` flag does something _similar_ to what I am looking for but has this weird case:
+
+```
+>>> j = Jake()
+>>> 
+>>> # This is the behavior I expect: 
+... j.dict(skip_defaults=True)
+{}
+>>> 
+>>> # Set the foo property: 
+>>> j.foo = "baz"
+>>> 
+>>> # This is also the behaviour I expect: 
+... j.dict(skip_defaults=True)
+{'foo': 'baz'}
+>>> 
+>>> 
+>>> # Unfortunately, this is not the behavior that I expect:
+... j.foo = None
+>>> j.dict(skip_defaults=True)
+{'foo': None}
+```
+
+---
+
+Right now after I serialize to dict, I walk the dict and remove all of the `None` values recursively, but I would rather not have to do this.  Is this built into Pydantic?  Is the behavior that I am seeing a bug?
+  </issue>
+  
+  <patch>
+  diff --git a/changes/587-niknetniko.md b/changes/587-niknetniko.md
+new file mode 100644
+index 00000000000..326960bb4f7
+--- /dev/null
++++ b/changes/587-niknetniko.md
+@@ -0,0 +1 @@
++Add `exclude_none` option to `dict()` and friends
+diff --git a/docs/usage/exporting_models.md b/docs/usage/exporting_models.md
+index 2fb8e1b0f8e..5d9e1ab2398 100644
+--- a/docs/usage/exporting_models.md
++++ b/docs/usage/exporting_models.md
+@@ -15,6 +15,8 @@ Arguments:
+   Prior to **v1.0**, `exclude_unset` was known as `skip_defaults`; use of `skip_defaults` is now deprecated
+ * `exclude_defaults`: whether fields which are equal to their default values (whether set or otherwise) should
+   be excluded from the returned dictionary; default `False`
++* `exclude_none`: whether fields which are equal to `None` should be excluded from the returned dictionary; default
++  `False`
+ 
+ Example:
+ 
+@@ -73,6 +75,8 @@ Arguments:
+   Prior to **v1.0**, `exclude_unset` was known as `skip_defaults`; use of `skip_defaults` is now deprecated
+ * `exclude_defaults`: whether fields which are equal to their default values (whether set or otherwise) should
+   be excluded from the returned dictionary; default `False`
++* `exclude_none`: whether fields which are equal to `None` should be excluded from the returned dictionary; default
++  `False`
+ * `encoder`: a custom encoder function passed to the `default` argument of `json.dumps()`; defaults to a custom
+   encoder designed to take care of all common types
+ * `**dumps_kwargs`: any other keyword arguments are passed to `json.dumps()`, e.g. `indent`.
+diff --git a/pydantic/main.py b/pydantic/main.py
+index b6f0928bb20..5e4c53536fb 100644
+--- a/pydantic/main.py
++++ b/pydantic/main.py
+@@ -308,6 +308,7 @@ def dict(
+         skip_defaults: bool = None,
+         exclude_unset: bool = False,
+         exclude_defaults: bool = False,
++        exclude_none: bool = False,
+     ) -> 'DictStrAny':
+         """
+         Generate a dictionary representation of the model, optionally specifying which fields to include or exclude.
+@@ -332,6 +333,7 @@ def dict(
+                 exclude=exclude,
+                 exclude_unset=exclude_unset,
+                 exclude_defaults=exclude_defaults,
++                exclude_none=exclude_none,
+             )
+         }
+ 
+@@ -350,6 +352,7 @@ def json(
+         skip_defaults: bool = None,
+         exclude_unset: bool = False,
+         exclude_defaults: bool = False,
++        exclude_none: bool = False,
+         encoder: Optional[Callable[[Any], Any]] = None,
+         **dumps_kwargs: Any,
+     ) -> str:
+@@ -371,6 +374,7 @@ def json(
+             by_alias=by_alias,
+             exclude_unset=exclude_unset,
+             exclude_defaults=exclude_defaults,
++            exclude_none=exclude_none,
+         )
+         if self.__custom_root_type__:
+             data = data[ROOT_KEY]
+@@ -549,6 +553,7 @@ def _get_value(
+         exclude: Optional[Union['AbstractSetIntStr', 'DictIntStrAny']],
+         exclude_unset: bool,
+         exclude_defaults: bool,
++        exclude_none: bool,
+     ) -> Any:
+ 
+         if isinstance(v, BaseModel):
+@@ -559,6 +564,7 @@ def _get_value(
+                     exclude_defaults=exclude_defaults,
+                     include=include,
+                     exclude=exclude,
++                    exclude_none=exclude_none,
+                 )
+             else:
+                 return v.copy(include=include, exclude=exclude)
+@@ -576,6 +582,7 @@ def _get_value(
+                     exclude_defaults=exclude_defaults,
+                     include=value_include and value_include.for_element(k_),
+                     exclude=value_exclude and value_exclude.for_element(k_),
++                    exclude_none=exclude_none,
+                 )
+                 for k_, v_ in v.items()
+                 if (not value_exclude or not value_exclude.is_excluded(k_))
+@@ -592,6 +599,7 @@ def _get_value(
+                     exclude_defaults=exclude_defaults,
+                     include=value_include and value_include.for_element(i),
+                     exclude=value_exclude and value_exclude.for_element(i),
++                    exclude_none=exclude_none,
+                 )
+                 for i, v_ in enumerate(v)
+                 if (not value_exclude or not value_exclude.is_excluded(i))
+@@ -626,6 +634,7 @@ def _iter(
+         exclude: Union['AbstractSetIntStr', 'DictIntStrAny'] = None,
+         exclude_unset: bool = False,
+         exclude_defaults: bool = False,
++        exclude_none: bool = False,
+     ) -> 'TupleGenerator':
+ 
+         value_exclude = ValueItems(self, exclude) if exclude else None
+@@ -640,7 +649,7 @@ def _iter(
+ 
+         for k, v in self.__dict__.items():
+             if allowed_keys is None or k in allowed_keys:
+-                yield k, self._get_value(
++                value = self._get_value(
+                     v,
+                     to_dict=to_dict,
+                     by_alias=by_alias,
+@@ -648,7 +657,10 @@ def _iter(
+                     exclude=value_exclude and value_exclude.for_element(k),
+                     exclude_unset=exclude_unset,
+                     exclude_defaults=exclude_defaults,
++                    exclude_none=exclude_none,
+                 )
++                if (exclude_none and value is not None) or not exclude_none:
++                    yield k, value
+ 
+     def _calculate_keys(
+         self,
+diff --git a/tests/test_edge_cases.py b/tests/test_edge_cases.py
+index 2db55c3c239..be87d4b6693 100644
+--- a/tests/test_edge_cases.py
++++ b/tests/test_edge_cases.py
+@@ -1303,3 +1303,89 @@ class MyModel(BaseModel):
+ 
+     m = MyModel(foo={'x': 'a', 'y': None})
+     assert m.foo == {'x': 'a', 'y': None}
++
++
++def test_exclude_none_dict():
++    class MyModel(BaseModel):
++        a: Optional[int] = None
++        b: int = 2
++
++    m = MyModel(a=5)
++    assert m.dict(exclude_none=True) == {'a': 5, 'b': 2}
++
++    m = MyModel(b=3)
++    assert m.dict(exclude_none=True) == {'b': 3}
++
++    m = MyModel()
++    assert m.dict(exclude_none=True) == {'b': 2}
++
++
++def test_exclude_none_recursive():
++    class ModelA(BaseModel):
++        a: Optional[int] = None
++        b: int = 1
++
++    class ModelB(BaseModel):
++        c: int
++        d: int = 2
++        e: ModelA
++        f: Optional[str] = None
++
++    m = ModelB(c=5, e={'a': 0})
++    assert m.dict() == {'c': 5, 'd': 2, 'e': {'a': 0, 'b': 1}, 'f': None}
++    assert m.dict(exclude_none=True) == {'c': 5, 'd': 2, 'e': {'a': 0, 'b': 1}}
++    assert dict(m) == {'c': 5, 'd': 2, 'e': {'a': 0, 'b': 1}, 'f': None}
++
++    m = ModelB(c=5, e={'b': 20}, f='test')
++    assert m.dict() == {'c': 5, 'd': 2, 'e': {'a': None, 'b': 20}, 'f': 'test'}
++    assert m.dict(exclude_none=True) == {'c': 5, 'd': 2, 'e': {'b': 20}, 'f': 'test'}
++    assert dict(m) == {'c': 5, 'd': 2, 'e': {'a': None, 'b': 20}, 'f': 'test'}
++
++
++def test_dict_exclude_none_populated_by_alias():
++    class MyModel(BaseModel):
++        a: str = Field('default', alias='alias_a')
++        b: Optional[str] = Field(None, alias='alias_b')
++
++        class Config:
++            allow_population_by_field_name = True
++
++    m = MyModel(alias_a='a')
++
++    assert m.dict(exclude_none=True) == {'a': 'a'}
++    assert m.dict(exclude_none=True, by_alias=True) == {'alias_a': 'a'}
++    assert m.dict(by_alias=True) == {'alias_a': 'a', 'alias_b': None}
++
++
++def test_dict_exclude_none_populated_by_alias_with_extra():
++    class MyModel(BaseModel):
++        a: str = Field('default', alias='alias_a')
++        b: Optional[str] = Field(None, alias='alias_b')
++
++        class Config:
++            extra = 'allow'
++
++    m = MyModel(alias_a='a', c='c')
++
++    assert m.dict(exclude_none=True) == {'a': 'a', 'c': 'c'}
++    assert m.dict(exclude_none=True, by_alias=True) == {'alias_a': 'a', 'c': 'c'}
++    assert m.dict(by_alias=True) == {'alias_a': 'a', 'alias_b': None, 'c': 'c'}
++
++
++def test_dict_exclude_none_populated_with_extra():
++    class MyModel(BaseModel):
++        a: str = 'default'
++        b: Optional[str] = None
++
++        class Config:
++            extra = 'allow'
++
++    m = MyModel(a='a', c='c')
++
++    assert m.dict(exclude_none=True) == {'a': 'a', 'c': 'c'}
++    assert m.dict() == {'a': 'a', 'b': None, 'c': 'c'}
++
++    m = MyModel(a='a', b='b', c=None)
++
++    assert m.dict(exclude_none=True) == {'a': 'a', 'b': 'b'}
++    assert m.dict() == {'a': 'a', 'b': 'b', 'c': None}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

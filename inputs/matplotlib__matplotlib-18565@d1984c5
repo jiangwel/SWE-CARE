@@ -1,0 +1,310 @@
+  Task-ID: matplotlib__matplotlib-18565@d1984c5
+  Please checkout to this commit first: f98427d38e8f1486fc93af5f7801f63cb8569847
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  FigureCanvasTkAgg.draw() silently crashes in threaded application
+<!--To help us understand and resolve your issue, please fill out the form to the best of your ability.-->
+<!--You can feel free to delete the sections that do not apply.-->
+
+### Bug report
+
+**Bug summary**
+
+Matplotlib crashes python without rising any exceptions (python simply closes), when draw method is called on FigureCanvasTkAgg object in threaded application from thread other than main thread.
+
+**Code for reproduction**
+
+```python
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import tkinter as tk
+from threading import Thread
+
+def draw(canvas):
+    t = Thread(target=canvas.draw)
+    t.start()
+
+root = tk.Tk()
+fig = Figure()
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas.get_tk_widget().pack()
+tk.Button(root, text='Do it!', command=lambda: draw(canvas)).pack()
+root.mainloop()
+```
+
+**Actual outcome**
+
+When button from example shown above is clicked, application window freezes for a moment and than closes along with python, no exception or error is displayed.
+
+**Expected outcome**
+
+Preferably draw method should run normally, or at least an exception should be rised.
+In Matplotlib 2.2.2 same code snipped runs flawlessly.
+
+**Matplotlib version**
+  * Operating system: Windows 10 Home x64
+  * Matplotlib version: 3.0.2
+  * Matplotlib backend (`print(matplotlib.get_backend())`): TkAgg
+  * Python version: 3.6.7
+  * Other libraries: tkinter, threading
+
+Matplotlib installed with 'pip install matplotlib'.
+  </issue>
+  
+  <patch>
+  diff --git a/lib/matplotlib/backends/_backend_tk.py b/lib/matplotlib/backends/_backend_tk.py
+index 69b57fc15d2a..326df873214e 100644
+--- a/lib/matplotlib/backends/_backend_tk.py
++++ b/lib/matplotlib/backends/_backend_tk.py
+@@ -1,3 +1,4 @@
++import uuid
+ from contextlib import contextmanager
+ import logging
+ import math
+@@ -44,6 +45,28 @@ def _restore_foreground_window_at_end():
+             _c_internal_utils.Win32_SetForegroundWindow(foreground)
+ 
+ 
++_blit_args = {}
++# Initialize to a non-empty string that is not a Tcl command
++_blit_tcl_name = "mpl_blit_" + uuid.uuid4().hex
++
++
++def _blit(argsid):
++    """
++    Thin wrapper to blit via tkapp.call
++
++    *argsid* is a unique string identifier to fetch the correct arguments from
++    the _blit_args dict, since args cannot be passed directly
++
++    photoimage blanking must occur in the same event and thread as blitting
++    to avoid flickering.
++    """
++    photoimage, dataptr, offsets, bboxptr, blank = _blit_args.pop(argsid)
++    if blank:
++        photoimage.blank()
++    _tkagg.blit(
++        photoimage.tk.interpaddr(), str(photoimage), dataptr, offsets, bboxptr)
++
++
+ def blit(photoimage, aggimage, offsets, bbox=None):
+     """
+     Blit *aggimage* to *photoimage*.
+@@ -53,7 +76,10 @@ def blit(photoimage, aggimage, offsets, bbox=None):
+     (2, 1, 0, 3) for little-endian ARBG32 (i.e. GBRA8888) data and (1, 2, 3, 0)
+     for big-endian ARGB32 (i.e. ARGB8888) data.
+ 
+-    If *bbox* is passed, it defines the region that gets blitted.
++    If *bbox* is passed, it defines the region that gets blitted. That region
++    will NOT be blanked before blitting.
++
++    Tcl events must be dispatched to trigger a blit from a non-Tcl thread.
+     """
+     data = np.asarray(aggimage)
+     height, width = data.shape[:2]
+@@ -65,11 +91,30 @@ def blit(photoimage, aggimage, offsets, bbox=None):
+         y1 = max(math.floor(y1), 0)
+         y2 = min(math.ceil(y2), height)
+         bboxptr = (x1, x2, y1, y2)
++        blank = False
+     else:
+-        photoimage.blank()
+         bboxptr = (0, width, 0, height)
+-    _tkagg.blit(
+-        photoimage.tk.interpaddr(), str(photoimage), dataptr, offsets, bboxptr)
++        blank = True
++
++    # NOTE: _tkagg.blit is thread unsafe and will crash the process if called
++    # from a thread (GH#13293). Instead of blanking and blitting here,
++    # use tkapp.call to post a cross-thread event if this function is called
++    # from a non-Tcl thread.
++
++    # tkapp.call coerces all arguments to strings, so to avoid string parsing
++    # within _blit, pack up the arguments into a global data structure.
++    args = photoimage, dataptr, offsets, bboxptr, blank
++    # Need a unique key to avoid thread races.
++    # Again, make the key a string to avoid string parsing in _blit.
++    argsid = repr(id(args))
++    _blit_args[argsid] = args
++
++    try:
++        photoimage.tk.call(_blit_tcl_name, argsid)
++    except tk.TclError:
++        # register _blit with code copied from tkinter.Misc._register
++        photoimage.tk.createcommand(_blit_tcl_name, _blit)
++        photoimage.tk.call(_blit_tcl_name, argsid)
+ 
+ 
+ class TimerTk(TimerBase):
+@@ -402,10 +447,18 @@ def destroy(self, *args):
+         if self.canvas._idle_callback:
+             self.canvas._tkcanvas.after_cancel(self.canvas._idle_callback)
+ 
+-        self.window.destroy()
++        # NOTE: events need to be flushed before issuing destroy (GH #9956),
++        # however, self.window.update() can break user code. This is the
++        # safest way to achieve a complete draining of the event queue,
++        # but it may require users to update() on their own to execute the
++        # completion in obscure corner cases.
++        def delayed_destroy():
++            self.window.destroy()
++
++            if self._owns_mainloop and not Gcf.get_num_fig_managers():
++                self.window.quit()
+ 
+-        if self._owns_mainloop and not Gcf.get_num_fig_managers():
+-            self.window.quit()
++        self.window.after_idle(delayed_destroy)
+ 
+     def get_window_title(self):
+         return self.window.wm_title()
+diff --git a/lib/matplotlib/backends/backend_tkagg.py b/lib/matplotlib/backends/backend_tkagg.py
+index 484d5a40edbe..ca15bf818142 100644
+--- a/lib/matplotlib/backends/backend_tkagg.py
++++ b/lib/matplotlib/backends/backend_tkagg.py
+@@ -7,7 +7,7 @@
+ class FigureCanvasTkAgg(FigureCanvasAgg, FigureCanvasTk):
+     def draw(self):
+         super().draw()
+-        _backend_tk.blit(self._tkphoto, self.renderer._renderer, (0, 1, 2, 3))
++        self.blit()
+ 
+     def blit(self, bbox=None):
+         _backend_tk.blit(
+diff --git a/lib/matplotlib/tests/test_backends_interactive.py b/lib/matplotlib/tests/test_backends_interactive.py
+index 000ff971bc97..ecf9c513bd1b 100644
+--- a/lib/matplotlib/tests/test_backends_interactive.py
++++ b/lib/matplotlib/tests/test_backends_interactive.py
+@@ -67,7 +67,6 @@ def _get_testable_interactive_backends():
+ # early.  Also, gtk3 redefines key_press_event with a different signature, so
+ # we directly invoke it from the superclass instead.
+ _test_script = """\
+-import importlib
+ import importlib.util
+ import io
+ import json
+@@ -173,6 +172,90 @@ def test_interactive_backend(backend, toolbar):
+     assert proc.stdout.count("CloseEvent") == 1
+ 
+ 
++_thread_test_script = """\
++import json
++import sys
++import threading
++
++from matplotlib import pyplot as plt, rcParams
++rcParams.update({
++    "webagg.open_in_browser": False,
++    "webagg.port_retries": 1,
++})
++if len(sys.argv) >= 2:  # Second argument is json-encoded rcParams.
++    rcParams.update(json.loads(sys.argv[1]))
++
++# Test artist creation and drawing does not crash from thread
++# No other guarantees!
++fig, ax = plt.subplots()
++# plt.pause needed vs plt.show(block=False) at least on toolbar2-tkagg
++plt.pause(0.5)
++
++exc_info = None
++
++def thread_artist_work():
++    try:
++        ax.plot([1,3,6])
++    except:
++        # Propagate error to main thread
++        import sys
++        global exc_info
++        exc_info = sys.exc_info()
++
++def thread_draw_work():
++    try:
++        fig.canvas.draw()
++    except:
++        # Propagate error to main thread
++        import sys
++        global exc_info
++        exc_info = sys.exc_info()
++
++t = threading.Thread(target=thread_artist_work)
++t.start()
++# artists never wait for the event loop to run, so just join
++t.join()
++
++if exc_info:  # Raise thread error
++    raise exc_info[1].with_traceback(exc_info[2])
++
++t = threading.Thread(target=thread_draw_work)
++fig.canvas.mpl_connect("close_event", print)
++t.start()
++plt.pause(0.5)  # flush_events fails here on at least Tkagg (bpo-41176)
++t.join()
++plt.close()
++fig.canvas.flush_events()  # pause doesn't process events after close
++
++if exc_info:  # Raise thread error
++    raise exc_info[1].with_traceback(exc_info[2])
++"""
++
++_thread_safe_backends = _get_testable_interactive_backends()
++# Known unsafe backends. Remove the xfails if they start to pass!
++if "wx" in _thread_safe_backends:
++    _thread_safe_backends.remove("wx")
++    _thread_safe_backends.append(
++        pytest.param("wx", marks=pytest.mark.xfail(
++            raises=subprocess.CalledProcessError, strict=True)))
++if "macosx" in _thread_safe_backends:
++    _thread_safe_backends.remove("macosx")
++    _thread_safe_backends.append(
++        pytest.param("macosx", marks=pytest.mark.xfail(
++            raises=subprocess.TimeoutExpired, strict=True)))
++
++
++@pytest.mark.parametrize("backend", _thread_safe_backends)
++@pytest.mark.flaky(reruns=3)
++def test_interactive_thread_safety(backend):
++    proc = subprocess.run(
++        [sys.executable, "-c", _thread_test_script],
++        env={**os.environ, "MPLBACKEND": backend, "SOURCE_DATE_EPOCH": "0"},
++        timeout=_test_timeout, check=True,
++        stdout=subprocess.PIPE, universal_newlines=True)
++    assert proc.stdout.count("CloseEvent") == 1
++
++
+ @pytest.mark.skipif('TF_BUILD' in os.environ,
+                     reason="this test fails an azure for unknown reasons")
+ @pytest.mark.skipif(os.name == "nt", reason="Cannot send SIGINT on Windows.")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

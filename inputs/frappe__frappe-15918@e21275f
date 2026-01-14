@@ -1,0 +1,307 @@
+  Task-ID: frappe__frappe-15918@e21275f
+  Please checkout to this commit first: ec5dd7995789ab470fdb1b44217d6fec5b5223db
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Allow all users to save customized reports
+### User story
+If a user can see a report (type: Report Builder), he can add or remove columns and filters to customize his view. Consequently he should also be able to save this current view for future use.
+
+### Situation
+At the moment, only users with role "Report Manager" can save customized reports. A report manager can create, edit, delete all custom reports. This is way too permissive for a normal user.
+
+### Proposed solution
+A user can always customize the reports he can see, for himself. So everybody should have the permission to create, edit, delete his _own reports_ as long as this only means narrowing down an existing report.
+  </issue>
+  
+  <patch>
+  diff --git a/frappe/core/doctype/report/test_report.py b/frappe/core/doctype/report/test_report.py
+index 36e3b09254ac..5a22304f321a 100644
+--- a/frappe/core/doctype/report/test_report.py
++++ b/frappe/core/doctype/report/test_report.py
+@@ -4,7 +4,9 @@
+ import frappe, json, os
+ import unittest
+ from frappe.desk.query_report import run, save_report
++from frappe.desk.reportview import delete_report, save_report as _save_report
+ from frappe.custom.doctype.customize_form.customize_form import reset_customization
++from frappe.core.doctype.user_permission.test_user_permission import create_user
+ 
+ test_records = frappe.get_test_records('Report')
+ test_dependencies = ['User']
+@@ -30,6 +32,60 @@ def test_query_report(self):
+ 		self.assertEqual(columns[1].get('label'), 'Module')
+ 		self.assertTrue('User' in [d.get('name') for d in data])
+ 
++	def test_save_or_delete_report(self):
++		'''Test for validations when editing / deleting report of type Report Builder'''
++
++		try:
++			report = frappe.get_doc({
++				'doctype': 'Report',
++				'ref_doctype': 'User',
++				'report_name': 'Test Delete Report',
++				'report_type': 'Report Builder',
++				'is_standard': 'No',
++			}).insert()
++
++			# Check for PermissionError
++			create_user("test_report_owner@example.com", "Website Manager")
++			frappe.set_user("test_report_owner@example.com")
++			self.assertRaises(frappe.PermissionError, delete_report, report.name)
++
++			# Check for Report Type
++			frappe.set_user("Administrator")
++			report.db_set("report_type", "Custom Report")
++			self.assertRaisesRegex(
++				frappe.ValidationError,
++				"Only reports of type Report Builder can be deleted",
++				delete_report,
++				report.name
++			)
++
++			# Check if creating and deleting works with proper validations
++			frappe.set_user("test@example.com")
++			report_name = _save_report(
++				'Dummy Report',
++				'User',
++				json.dumps([{
++					'fieldname': 'email',
++					'fieldtype': 'Data',
++					'label': 'Email',
++					'insert_after_index': 0,
++					'link_field': 'name',
++					'doctype': 'User',
++					'options': 'Email',
++					'width': 100,
++					'id':'email',
++					'name': 'Email'
++				}])
++			)
++
++			doc = frappe.get_doc("Report", report_name)
++			delete_report(doc.name)
++
++		finally:
++			frappe.set_user("Administrator")
++			frappe.db.rollback()
++
++
+ 	def test_custom_report(self):
+ 		reset_customization('User')
+ 		custom_report_name = save_report(
+diff --git a/frappe/desk/reportview.py b/frappe/desk/reportview.py
+index c45fc9bfdd03..880afae489c6 100644
+--- a/frappe/desk/reportview.py
++++ b/frappe/desk/reportview.py
+@@ -262,22 +262,62 @@ def compress(data, args=None):
+ 	}
+ 
+ @frappe.whitelist()
+-def save_report():
+-	"""save report"""
+-
+-	data = frappe.local.form_dict
+-	if frappe.db.exists('Report', data['name']):
+-		d = frappe.get_doc('Report', data['name'])
++def save_report(name, doctype, report_settings):
++	"""Save reports of type Report Builder from Report View"""
++
++	if frappe.db.exists('Report', name):
++		report = frappe.get_doc('Report', name)
++		if report.is_standard == "Yes":
++			frappe.throw(_("Standard Reports cannot be edited"))
++
++		if report.report_type != "Report Builder":
++			frappe.throw(_("Only reports of type Report Builder can be edited"))
++
++		if (
++			report.owner != frappe.session.user
++			and not frappe.has_permission("Report", "write")
++		):
++			frappe.throw(
++				_("Insufficient Permissions for editing Report"),
++				frappe.PermissionError
++			)
+ 	else:
+-		d = frappe.new_doc('Report')
+-		d.report_name = data['name']
+-		d.ref_doctype = data['doctype']
+-
+-	d.report_type = "Report Builder"
+-	d.json = data['json']
+-	frappe.get_doc(d).save()
+-	frappe.msgprint(_("{0} is saved").format(d.name), alert=True)
+-	return d.name
++		report = frappe.new_doc('Report')
++		report.report_name = name
++		report.ref_doctype = doctype
++
++	report.report_type = "Report Builder"
++	report.json = report_settings
++	report.save(ignore_permissions=True)
++	frappe.msgprint(_("{0} saved").format(frappe.bold(report.name)), alert=True)
++	return report.name
++
++@frappe.whitelist()
++def delete_report(name):
++	"""Delete reports of type Report Builder from Report View"""
++
++	report = frappe.get_doc("Report", name)
++	if report.is_standard == "Yes":
++		frappe.throw(_("Standard Reports cannot be deleted"))
++
++	if report.report_type != "Report Builder":
++		frappe.throw(_("Only reports of type Report Builder can be deleted"))
++
++	if (
++		report.owner != frappe.session.user
++		and not frappe.has_permission("Report", "delete")
++	):
++		frappe.throw(
++			_("Insufficient Permissions for deleting Report"),
++			frappe.PermissionError
++		)
++
++	report.delete(ignore_permissions=True)
++	frappe.msgprint(
++		_("{0} deleted").format(frappe.bold(report.name)),
++		indicator="red",
++		alert=True,
++	)
+ 
+ @frappe.whitelist()
+ @frappe.read_only()
+diff --git a/frappe/public/js/frappe/views/reports/report_view.js b/frappe/public/js/frappe/views/reports/report_view.js
+index 23e415ed3e6a..1291e6354311 100644
+--- a/frappe/public/js/frappe/views/reports/report_view.js
++++ b/frappe/public/js/frappe/views/reports/report_view.js
+@@ -18,7 +18,6 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
+ 	setup_defaults() {
+ 		super.setup_defaults();
+ 		this.page_title = __('Report:') + ' ' + this.page_title;
+-		this.menu_items = this.report_menu_items();
+ 		this.view = 'Report';
+ 
+ 		const route = frappe.get_route();
+@@ -52,6 +51,11 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
+ 		this.page.main.addClass('report-view');
+ 	}
+ 
++	setup_page() {
++		this.menu_items = this.report_menu_items();
++		super.setup_page();
++	}
++
+ 	toggle_side_bar() {
+ 		super.toggle_side_bar();
+ 		// refresh datatable when sidebar is toggled to accomodate extra space
+@@ -1207,7 +1211,7 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
+ 				args: {
+ 					name: name,
+ 					doctype: this.doctype,
+-					json: JSON.stringify(report_settings)
++					report_settings: JSON.stringify(report_settings)
+ 				},
+ 				callback:(r) => {
+ 					if(r.exc) {
+@@ -1244,6 +1248,17 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
+ 		}
+ 	}
+ 
++	delete_report() {
++		return frappe.call({
++			method: 'frappe.desk.reportview.delete_report',
++			args: { name: this.report_name },
++			callback(response) {
++				if (response.exc) return;
++				window.history.back();
++			}
++		});
++	}
++
+ 	get_column_widths() {
+ 		if (this.datatable) {
+ 			return this.datatable
+@@ -1465,12 +1480,42 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
+ 			}
+ 		});
+ 
+-		// save buttons
+-		if(frappe.user.is_report_manager()) {
+-			items = items.concat([
+-				{ label: __('Save'), action: () => this.save_report('save') },
+-				{ label: __('Save As'), action: () => this.save_report('save_as') }
+-			]);
++		const can_edit_or_delete = (action) => {
++			const method = action == "delete" ? "can_delete" : "can_write";
++			return (
++				this.report_doc
++				&& this.report_doc.is_standard !== "Yes"
++				&& (
++					frappe.model[method]("Report")
++					|| this.report_doc.owner === frappe.session.user
++				)
++			);
++		};
++
++		// A user with role Report Manager or Report Owner can save
++		if (can_edit_or_delete()) {
++			items.push({
++				label: __("Save"),
++				action: () => this.save_report('save')
++			});
++		}
++
++		// anyone can save as
++		items.push({
++			label: __('Save As'),
++			action: () => this.save_report('save_as')
++		});
++
++		// A user with role Report Manager or Report Owner can delete
++		if (can_edit_or_delete("delete")) {
++			items.push({
++				label: __("Delete"),
++				action: () => frappe.confirm(
++					"Are you sure you want to delete this report?",
++					() => this.delete_report(),
++				),
++				shortcut: "Shift+Ctrl+D"
++			});
+ 		}
+ 
+ 		// user permissions
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

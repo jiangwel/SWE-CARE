@@ -1,0 +1,191 @@
+  Task-ID: pandas-dev__pandas-16428@0bdc8ed
+  Please checkout to this commit first: 49ec31bbaeca81a6f58fc1be26fe80f3ac188cdd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Error with .drop([]) on non-unique index
+#### Code Sample, a copy-pastable example if possible
+
+```python
+In [2]: pd.DataFrame([[1,2], [3,4], [5,6]], index=['a','a','b']).drop(['a'])
+Out[2]: 
+   0  1
+b  5  6
+
+In [3]: pd.DataFrame([[1,2], [3,4], [5,6]], index=['a','a','b']).drop(['b'])
+Out[3]: 
+   0  1
+a  1  2
+a  3  4
+
+In [4]: pd.DataFrame([[1,2], [3,4], [5,6]], index=['a','a','b']).drop([])
+---------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+<ipython-input-4-ae217de2434b> in <module>()
+----> 1 pd.DataFrame([[1,2], [3,4], [5,6]], index=['a','a','b']).drop([])
+
+/home/pietro/.local/lib/python3.5/site-packages/pandas/core/generic.py in drop(self, labels, axis, level, inplace, errors)
+   2063                 indexer = ~axis.get_level_values(level).isin(labels)
+   2064             else:
+-> 2065                 indexer = ~axis.isin(labels)
+   2066 
+   2067             slicer = [slice(None)] * self.ndim
+
+/home/pietro/.local/lib/python3.5/site-packages/pandas/core/indexes/base.py in isin(self, values, level)
+   2766         if level is not None:
+   2767             self._validate_index_level(level)
+-> 2768         return algos.isin(np.array(self), values)
+   2769 
+   2770     def _can_reindex(self, indexer):
+
+/home/pietro/.local/lib/python3.5/site-packages/pandas/core/algorithms.py in isin(comps, values)
+    419             comps = comps.astype(object)
+    420 
+--> 421     return f(comps, values)
+    422 
+    423 
+
+/home/pietro/.local/lib/python3.5/site-packages/pandas/core/algorithms.py in <lambda>(x, y)
+    397     # work-around for numpy < 1.8 and comparisions on py3
+    398     # faster for larger cases to use np.in1d
+--> 399     f = lambda x, y: htable.ismember_object(x, values)
+    400     if (_np_version_under1p8 and compat.PY3) or len(comps) > 1000000:
+    401         f = lambda x, y: np.in1d(x, y)
+
+/home/pietro/nobackup/repo/pandas/pandas/_libs/hashtable_func_helper.pxi in pandas._libs.hashtable.ismember_object (pandas/_libs/hashtable.c:29677)()
+
+ValueError: Buffer dtype mismatch, expected 'Python object' but got 'double'
+
+
+
+```
+#### Problem description
+
+Notice ``pd.DataFrame([[1,2], [3,4], [5,6]], index=['a','b', 'c']).drop([])`` works just fine.
+
+#### Expected Output
+
+Just the original ``DataFrame``.
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 3.5.3.final.0
+python-bits: 64
+OS: Linux
+OS-release: 4.7.0-1-amd64
+machine: x86_64
+processor: 
+byteorder: little
+LC_ALL: None
+LANG: it_IT.utf8
+LOCALE: it_IT.UTF-8
+
+pandas: 0.20.1
+pytest: 3.0.6
+pip: 9.0.1
+setuptools: None
+Cython: 0.25.2
+numpy: 1.12.1
+scipy: 0.19.0
+xarray: 0.9.2
+IPython: 5.1.0.dev
+sphinx: 1.5.6
+patsy: 0.4.1
+dateutil: 2.6.0
+pytz: 2017.2
+blosc: None
+bottleneck: 1.2.1
+tables: 3.3.0
+numexpr: 2.6.1
+feather: 0.3.1
+matplotlib: 2.0.2
+openpyxl: 2.3.0
+xlrd: 1.0.0
+xlwt: 1.1.2
+xlsxwriter: 0.9.6
+lxml: 3.7.1
+bs4: 4.5.3
+html5lib: 0.999999999
+sqlalchemy: 1.0.15
+pymysql: None
+psycopg2: None
+jinja2: 2.9.6
+s3fs: None
+pandas_gbq: None
+pandas_datareader: 0.2.1
+
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.20.2.txt b/doc/source/whatsnew/v0.20.2.txt
+index e0857019d2fd4..21a4fedb89b39 100644
+--- a/doc/source/whatsnew/v0.20.2.txt
++++ b/doc/source/whatsnew/v0.20.2.txt
+@@ -93,3 +93,5 @@ Categorical
+ 
+ Other
+ ^^^^^
++
++- Fix ``pd.drop([])`` for dataframes with non-unique indices (:issue:`16270`)
+diff --git a/pandas/core/generic.py b/pandas/core/generic.py
+index 2e7d8693d48dd..b19a0751ea2e4 100644
+--- a/pandas/core/generic.py
++++ b/pandas/core/generic.py
+@@ -12,6 +12,7 @@
+ from pandas._libs import tslib, lib
+ from pandas.core.dtypes.common import (
+     _ensure_int64,
++    _ensure_object,
+     needs_i8_conversion,
+     is_scalar,
+     is_number,
+@@ -2076,7 +2077,7 @@ def drop(self, labels, axis=0, level=None, inplace=False, errors='raise'):
+             result = dropped
+ 
+         else:
+-            labels = com._index_labels_to_array(labels)
++            labels = _ensure_object(com._index_labels_to_array(labels))
+             if level is not None:
+                 if not isinstance(axis, MultiIndex):
+                     raise AssertionError('axis must be a MultiIndex')
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

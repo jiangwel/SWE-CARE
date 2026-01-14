@@ -1,0 +1,248 @@
+  Task-ID: conan-io__conan-15914@98b9e18
+  Please checkout to this commit first: 59029095e86eacd402083fca7c308b06889f6301
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [feature] CMakeToolchain: add a variable with all runtime library directories
+### What is your suggestion?
+
+In a consumer CMake project, I would like Conan to provide me with a variable to be able to call either:
+* `install(RUNTIME_DEPENDENCY_SET ...)`
+* `file(GET_RUNTIME_DEPENDENCIES ...`)
+
+example:
+```
+install(TARGETS my_app
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME_DEPENDENCY_SET my_app_deps
+)
+
+install(RUNTIME_DEPENDENCY_SET my_app_deps
+    PRE_EXCLUDE_REGEXES
+        [[api-ms-win-.*]]
+        [[ext-ms-.*]]
+        [[kernel32\.dll]]
+        [[libc\.so\..*]] [[libgcc_s\.so\..*]] [[libm\.so\..*]] [[libstdc\+\+\.so\..*]]
+    POST_EXCLUDE_REGEXES
+        [[.*/system32/.*\.dll]]
+        [[^/lib.*]]
+        [[^/usr/lib.*]]
+    DIRECTORIES ${CONAN_RUNTIME_LIB_DIRS}
+)
+```
+
+
+### Have you read the CONTRIBUTING guide?
+
+- [ ] I've read the CONTRIBUTING guide
+  </issue>
+  
+  <patch>
+  diff --git a/conan/tools/cmake/toolchain/blocks.py b/conan/tools/cmake/toolchain/blocks.py
+index 36f725ae7c9..0c56193b20e 100644
+--- a/conan/tools/cmake/toolchain/blocks.py
++++ b/conan/tools/cmake/toolchain/blocks.py
+@@ -480,6 +480,9 @@ class FindFiles(Block):
+         {% if cmake_include_path %}
+         list(PREPEND CMAKE_INCLUDE_PATH {{ cmake_include_path }})
+         {% endif %}
++        {% if lib_dirs %}
++        list(PREPEND CONAN_RUNTIME_LIB_DIRS {{ lib_dirs }})
++        {% endif %}
+ 
+         {% if cross_building %}
+         if(NOT DEFINED CMAKE_FIND_ROOT_PATH_MODE_PACKAGE OR CMAKE_FIND_ROOT_PATH_MODE_PACKAGE STREQUAL "ONLY")
+@@ -518,12 +521,14 @@ def context(self):
+             find_package_prefer_config = "OFF"
+ 
+         is_apple_ = is_apple_os(self._conanfile)
++        is_win = self._conanfile.settings.get_safe("os") == "Windows"
+ 
+         # Read information from host context
+         # TODO: Add here in 2.0 the "skip": False trait
+         host_req = self._conanfile.dependencies.filter({"build": False}).values()
+         build_paths = []
+         host_lib_paths = []
++        host_lib_dirs = []
+         host_framework_paths = []
+         host_include_paths = []
+         for req in host_req:
+@@ -533,6 +538,10 @@ def context(self):
+             if is_apple_:
+                 host_framework_paths.extend(cppinfo.frameworkdirs)
+             host_include_paths.extend(cppinfo.includedirs)
++            if is_win:
++                host_lib_dirs.extend(cppinfo.bindirs)
++            else:
++                host_lib_dirs.extend(cppinfo.libdirs)
+ 
+         # Read information from build context
+         build_req = self._conanfile.dependencies.build.values()
+@@ -552,6 +561,7 @@ def context(self):
+             "cmake_include_path": self._join_paths(host_include_paths),
+             "is_apple": is_apple_,
+             "cross_building": cross_building(self._conanfile),
++            "lib_dirs": self._join_paths(host_lib_dirs)
+         }
+ 
+ 
+diff --git a/conans/test/integration/lockfile/test_lock_requires_revisions.py b/conans/test/integration/lockfile/test_lock_requires_revisions.py
+index e84680c0839..1f6e16ab7ad 100644
+--- a/conans/test/integration/lockfile/test_lock_requires_revisions.py
++++ b/conans/test/integration/lockfile/test_lock_requires_revisions.py
+@@ -132,20 +132,20 @@ def requirements(self):
+     client.run("install consumer --lockfile=consumer.lock -s os=Windows -s:b os=Windows")
+     assert "REV1!!!" in client.out
+     assert "REV2!!!" not in client.out
+-    assert "nix" not in client.out
++    assert "nix/0.1" not in client.out
+     client.run("install consumer -s os=Windows -s:b os=Windows")
+     assert "REV2!!!" in client.out
+     assert "REV1!!!" not in client.out
+-    assert "nix" not in client.out
++    assert "nix/0.1" not in client.out
+ 
+     client.run("install consumer --lockfile=consumer.lock -s os=Linux -s:b os=Linux")
+     assert "REV1!!!" in client.out
+     assert "REV2!!!" not in client.out
+-    assert "win" not in client.out
++    assert "win/0.1" not in client.out
+     client.run("install consumer -s os=Linux -s:b os=Linux")
+     assert "REV2!!!" in client.out
+     assert "REV1!!!" not in client.out
+-    assert "win" not in client.out
++    assert "win/0.1" not in client.out
+ 
+ 
+ @pytest.mark.parametrize("requires", ["requires", "tool_requires"])
+diff --git a/conans/test/integration/toolchains/cmake/test_cmaketoolchain.py b/conans/test/integration/toolchains/cmake/test_cmaketoolchain.py
+index ebaf4164929..824173921a8 100644
+--- a/conans/test/integration/toolchains/cmake/test_cmaketoolchain.py
++++ b/conans/test/integration/toolchains/cmake/test_cmaketoolchain.py
+@@ -1,6 +1,7 @@
+ import json
+ import os
+ import platform
++import re
+ import textwrap
+ 
+ import pytest
+@@ -352,6 +353,85 @@ def generate(self):
+         assert "/path/to/builddir" in contents
+ 
+ 
++@pytest.mark.skipif(platform.system() != "Windows", reason="Only Windows")
++def test_lib_dirs_windows():
++    client = TestClient()
++    conanfile = textwrap.dedent("""
++        from conan import ConanFile
++
++        class Conan(ConanFile):
++
++            def package_info(self):
++                self.cpp_info.builddirs = ["/path/to/builddir"]
++        """)
++    client.save({"conanfile.py": conanfile})
++    client.run("create . --name=dep --version=1.0")
++
++    conanfile = textwrap.dedent("""
++            from conan import ConanFile
++            from conan.tools.cmake import CMakeToolchain
++
++            class Conan(ConanFile):
++                settings = "os", "arch", "compiler", "build_type"
++                requires = "dep/1.0@"
++
++                def generate(self):
++                    cmake = CMakeToolchain(self)
++                    cmake.generate()
++            """)
++
++    client.save({"conanfile.py": conanfile})
++    client.run("install . ")
++    with open(os.path.join(client.current_folder, "conan_toolchain.cmake")) as f:
++        contents = f.read()
++        pattern_lib_path = r'list\(PREPEND CMAKE_LIBRARY_PATH "(.*?)"\)'
++        pattern_lib_dirs = r'list\(PREPEND CONAN_RUNTIME_LIB_DIRS "(.*?)"\)'
++        lib_path_group = re.search(pattern_lib_path, contents).groups()
++        lib_dirs_group = re.search(pattern_lib_dirs, contents).groups()
++
++        assert len(lib_path_group) == len(lib_dirs_group)
++        assert all(lib_dir[-3:] == "bin" for lib_dir in lib_dirs_group)
++
++
++@pytest.mark.skipif(platform.system() == "Windows", reason="Only Linux and OSX")
++def test_lib_dirs_no_windows():
++    client = TestClient()
++    conanfile = textwrap.dedent("""
++        from conan import ConanFile
++
++        class Conan(ConanFile):
++
++            def package_info(self):
++                self.cpp_info.builddirs = ["/path/to/builddir"]
++        """)
++    client.save({"conanfile.py": conanfile})
++    client.run("create . --name=dep --version=1.0")
++
++    conanfile = textwrap.dedent("""
++            from conan import ConanFile
++            from conan.tools.cmake import CMakeToolchain
++
++            class Conan(ConanFile):
++                settings = "os", "arch", "compiler", "build_type"
++                requires = "dep/1.0@"
++
++                def generate(self):
++                    cmake = CMakeToolchain(self)
++                    cmake.generate()
++            """)
++
++    client.save({"conanfile.py": conanfile})
++    client.run("install . ")
++    with open(os.path.join(client.current_folder, "conan_toolchain.cmake")) as f:
++        contents = f.read()
++        pattern_lib_path = r'list\(PREPEND CMAKE_LIBRARY_PATH (.*)\)'
++        pattern_lib_dirs = r'list\(PREPEND CONAN_RUNTIME_LIB_DIRS (.*)\)'
++        lib_path = re.search(pattern_lib_path, contents).group(1)
++        lib_dirs = re.search(pattern_lib_dirs, contents).group(1)
++
++        assert lib_path == lib_dirs
++
++
+ @pytest.mark.skipif(platform.system() != "Darwin", reason="Only OSX")
+ def test_cmaketoolchain_cmake_system_processor_cross_apple():
+     """
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

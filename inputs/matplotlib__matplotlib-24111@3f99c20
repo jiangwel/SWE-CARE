@@ -1,0 +1,208 @@
+  Task-ID: matplotlib__matplotlib-24111@3f99c20
+  Please checkout to this commit first: 239386650a2c3a537d36de9cd85d09bd0f6796cf
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [ENH]: Default `matplotlib.colormaps[None]` to call `matplotlib.colormaps[matplotlib.rcParams['image.cmap']]`?
+### Problem
+
+While addressing the `matplotlib.cm.get_cmap` deprecation in 3.6:
+
+```
+PendingDeprecationWarning: The get_cmap function will be deprecated in a future version. Use ``matplotlib.colormaps[name]`` instead.
+```
+I noticed that `None` isn't directly migrate-able 
+
+```
+In [1]: import matplotlib
+
+In [2]: matplotlib.cm.get_cmap(None)
+Out[2]: <matplotlib.colors.ListedColormap at 0x11e609e20>
+
+In [3]: matplotlib.colormaps[None]
+KeyError: 'None is not a known colormap name'
+```
+
+### Proposed solution
+
+It appears from the source that `get_cmap(None)` defaults to  `matplotlib.rcParams['image.cmap']` so it would be nice if `colormaps[None]` could default to that as well.
+
+Otherwise, it would be nice if this was better documented.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/api/prev_api_changes/api_changes_3.6.0/deprecations.rst b/doc/api/prev_api_changes/api_changes_3.6.0/deprecations.rst
+index d59077d2b2d2..028262af43d0 100644
+--- a/doc/api/prev_api_changes/api_changes_3.6.0/deprecations.rst
++++ b/doc/api/prev_api_changes/api_changes_3.6.0/deprecations.rst
+@@ -52,7 +52,13 @@ In Matplotlib 3.6 we have marked those top level functions as pending
+ deprecation with the intention of deprecation in Matplotlib 3.7. The following
+ functions have been marked for pending deprecation:
+ 
+-- ``matplotlib.cm.get_cmap``; use ``matplotlib.colormaps[name]`` instead
++- ``matplotlib.cm.get_cmap``; use ``matplotlib.colormaps[name]`` instead if you
++  have a `str`.
++
++  **Added 3.6.1** Use `matplotlib.cm.ColormapRegistry.get_cmap` if you
++  have a string, `None` or a `matplotlib.colors.Colormap` object that you want
++  to convert to a `matplotlib.colors.Colormap` instance.  Raises `KeyError`
++  rather than `ValueError` for missing strings.
+ - ``matplotlib.cm.register_cmap``; use `matplotlib.colormaps.register
+   <.ColormapRegistry.register>` instead
+ - ``matplotlib.cm.unregister_cmap``; use `matplotlib.colormaps.unregister
+@@ -305,7 +311,7 @@ Backend-specific deprecations
+   private functions if you rely on it.
+ - ``backend_svg.generate_transform`` and ``backend_svg.generate_css``
+ - ``backend_tk.NavigationToolbar2Tk.lastrect`` and
+-  ``backend_tk.RubberbandTk.lastrect`` 
++  ``backend_tk.RubberbandTk.lastrect``
+ - ``backend_tk.NavigationToolbar2Tk.window``; use ``toolbar.master`` instead.
+ - ``backend_tools.ToolBase.destroy``; To run code upon tool removal, connect to
+   the ``tool_removed_event`` event.
+diff --git a/lib/matplotlib/cm.py b/lib/matplotlib/cm.py
+index f6e5ee8b7156..20842f0e19c7 100644
+--- a/lib/matplotlib/cm.py
++++ b/lib/matplotlib/cm.py
+@@ -61,12 +61,6 @@ class ColormapRegistry(Mapping):
+     r"""
+     Container for colormaps that are known to Matplotlib by name.
+ 
+-    .. admonition:: Experimental
+-
+-       While we expect the API to be final, we formally mark it as
+-       experimental for 3.5 because we want to keep the option to still adapt
+-       the API for 3.6 should the need arise.
+-
+     The universal registry instance is `matplotlib.colormaps`. There should be
+     no need for users to instantiate `.ColormapRegistry` themselves.
+ 
+@@ -193,6 +187,39 @@ def unregister(self, name):
+                              "colormap.")
+         self._cmaps.pop(name, None)
+ 
++    def get_cmap(self, cmap):
++        """
++        Ensure that at given object is a converted to a color map.
++
++        If *cmap* in `None`, returns the Colormap named by :rc:`image.cmap`.
++
++        Parameters
++        ----------
++        cmap : str, Colormap, None
++
++            - if a `~matplotlib.colors.Colormap`, return it
++            - if a string, look it up in mpl.colormaps
++            - if None, look up the default color map in mpl.colormaps
++
++        Returns
++        -------
++        Colormap
++
++        Raises
++        ------
++        KeyError
++        """
++        # get the default color map
++        if cmap is None:
++            return self[mpl.rcParams["image.cmap"]]
++
++        # if the user passed in a Colormap, simply return it
++        if isinstance(cmap, colors.Colormap):
++            return cmap
++
++        # otherwise, it must be a string so look it up
++        return self[cmap]
++
+ 
+ # public access to the colormaps should be via `matplotlib.colormaps`. For now,
+ # we still create the registry here, but that should stay an implementation
+@@ -281,7 +308,12 @@ def _get_cmap(name=None, lut=None):
+ # pyplot.
+ get_cmap = _api.deprecated(
+     '3.6',
+-    name='get_cmap', pending=True, alternative="``matplotlib.colormaps[name]``"
++    name='get_cmap',
++    pending=True,
++    alternative=(
++        "``matplotlib.colormaps[name]`` " +
++        "or ``matplotlib.colormaps.get_cmap(obj)``"
++    )
+ )(_get_cmap)
+ 
+ 
+@@ -687,6 +719,8 @@ def _ensure_cmap(cmap):
+     """
+     Ensure that we have a `.Colormap` object.
+ 
++    For internal use to preserve type stability of errors.
++
+     Parameters
+     ----------
+     cmap : None, str, Colormap
+@@ -698,6 +732,7 @@ def _ensure_cmap(cmap):
+     Returns
+     -------
+     Colormap
++
+     """
+     if isinstance(cmap, colors.Colormap):
+         return cmap
+diff --git a/lib/matplotlib/tests/test_colors.py b/lib/matplotlib/tests/test_colors.py
+index f0c23038e11a..711fecf43e11 100644
+--- a/lib/matplotlib/tests/test_colors.py
++++ b/lib/matplotlib/tests/test_colors.py
+@@ -109,6 +109,21 @@ def test_register_cmap():
+             cm.register_cmap('nome', cmap='not a cmap')
+ 
+ 
++def test_ensure_cmap():
++    cr = mpl.colormaps
++    new_cm = mcolors.ListedColormap(cr["viridis"].colors, name='v2')
++
++    # check None, str, and Colormap pass
++    assert cr.get_cmap('plasma') == cr["plasma"]
++    assert cr.get_cmap(cr["magma"]) == cr["magma"]
++
++    # check default default
++    assert cr.get_cmap(None) == cr[mpl.rcParams['image.cmap']]
++    bad_cmap = 'AardvarksAreAwkward'
++    with pytest.raises(KeyError, match=bad_cmap):
++        cr.get_cmap(bad_cmap)
++
++
+ def test_double_register_builtin_cmap():
+     name = "viridis"
+     match = f"Re-registering the builtin cmap {name!r}."
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

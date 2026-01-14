@@ -1,0 +1,1287 @@
+  Task-ID: ManimCommunity__manim-1140@ed7dc3d
+  Please checkout to this commit first: 196045b471acb8ad2a9bffaa9bca078624526174
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Flake8 Support
+I suggest that manim start using the flake8 linter. It would allow for cleaner code. It could be integrated with the pre-commit function. The only issue I see with this is that it needs a special config to work with black, but that issue is a small one.
+  </issue>
+  
+  <patch>
+  diff --git a/.flake8 b/.flake8
+new file mode 100644
+index 0000000000..a52fb2eedc
+--- /dev/null
++++ b/.flake8
+@@ -0,0 +1,9 @@
++[flake8]
++max-line-length = 88
++                #Required
++extend-ignore = E203, E266, E501, B006, A003, 
++                #Code Changes - Remove later
++                W503, F403, F401, F405, W605, F821, E731, B009, B008, 
++                #Docstring Formatting - Remove Later
++                RST304, D400, D401, D205, D105, D103, RST210, RST303, D102, D102, D107, RST212, D200, D100, D101, D412, D202, RST305, 
++                RST301, D301, RST213, D104, RST201,  RST215, RST203, D104, D209, RST205, D402, D210, RST202
+\ No newline at end of file
+diff --git a/manim/__main__.py b/manim/__main__.py
+index b448e891c7..83dcdf4a5c 100644
+--- a/manim/__main__.py
++++ b/manim/__main__.py
+@@ -91,7 +91,7 @@ def main():
+                 server = frame_server_impl.get(input_file)
+                 server.start()
+                 server.wait_for_termination()
+-            except ModuleNotFoundError as e:
++            except ModuleNotFoundError:
+                 console.print(
+                     "Dependencies for the WebGL render are missing. Run "
+                     "pip install manim[webgl_renderer] to install them."
+diff --git a/manim/_config/utils.py b/manim/_config/utils.py
+index c11c8bf41f..c2b0d3c9f5 100644
+--- a/manim/_config/utils.py
++++ b/manim/_config/utils.py
+@@ -570,11 +570,11 @@ def digest_parser(self, parser: configparser.ConfigParser) -> "ManimConfig":
+         # other logic
+         val = parser["CLI"].get("tex_template_file")
+         if val:
+-            setattr(self, "tex_template_file", val)
++            self.tex_template_file = val
+ 
+         val = parser["ffmpeg"].get("loglevel")
+         if val:
+-            setattr(self, "ffmpeg_loglevel", val)
++            self.ffmpeg_loglevel = val
+ 
+         return self
+ 
+diff --git a/manim/animation/creation.py b/manim/animation/creation.py
+index 42ce65babd..32bafbd0d6 100644
+--- a/manim/animation/creation.py
++++ b/manim/animation/creation.py
+@@ -331,8 +331,6 @@ def __init__(
+         **kwargs,
+     ) -> None:
+ 
+-        backwards_rate_func = lambda t: -rate_func(t) + 1
+-
+         self.vmobject = vmobject
+         self.run_time = run_time
+         self.lag_ratio = lag_ratio
+@@ -342,7 +340,7 @@ def __init__(
+             vmobject,
+             run_time=run_time,
+             lag_ratio=lag_ratio,
+-            rate_func=backwards_rate_func,
++            rate_func=lambda t: -rate_func(t) + 1,
+             **kwargs,
+         )
+ 
+diff --git a/manim/animation/indication.py b/manim/animation/indication.py
+index 1434a1b071..c8e0bafa29 100644
+--- a/manim/animation/indication.py
++++ b/manim/animation/indication.py
+@@ -38,7 +38,6 @@
+ from ..utils.rate_functions import there_and_back, wiggle
+ 
+ if typing.TYPE_CHECKING:
+-    from ..mobject.geometry import Dot
+     from ..mobject.mobject import Mobject
+ 
+ 
+diff --git a/manim/animation/transform.py b/manim/animation/transform.py
+index 8030d97ee4..064e71193b 100644
+--- a/manim/animation/transform.py
++++ b/manim/animation/transform.py
+@@ -200,7 +200,7 @@ def __init__(
+         self, method: types.MethodType, *args, **kwargs
+     ) -> None:  # method typing? for args?
+         """
+-        method is a method of Mobject, ``args`` are arguments for
++        Method is a method of Mobject, ``args`` are arguments for
+         that method.  Key word arguments should be passed in
+         as the last arg, as a dict, since ``kwargs`` is for
+         configuration of the transform itself
+diff --git a/manim/camera/camera.py b/manim/camera/camera.py
+index c054bcc796..8f65850448 100644
+--- a/manim/camera/camera.py
++++ b/manim/camera/camera.py
+@@ -1,4 +1,4 @@
+-"A camera converts the mobjects contained in a Scene into an array of pixels."
++"""A camera converts the mobjects contained in a Scene into an array of pixels."""
+ 
+ 
+ __all__ = ["Camera", "BackgroundColoredVMobjectDisplayer"]
+@@ -649,7 +649,7 @@ def set_cairo_context_path(self, ctx, vmobject):
+             ctx.new_sub_path()
+             start = subpath[0]
+             ctx.move_to(*start[:2])
+-            for p0, p1, p2, p3 in quads:
++            for _p0, p1, p2, p3 in quads:
+                 ctx.curve_to(*p1[:2], *p2[:2], *p3[:2])
+             if vmobject.consider_points_equals_2d(subpath[0], subpath[-1]):
+                 ctx.close_path()
+diff --git a/manim/camera/moving_camera.py b/manim/camera/moving_camera.py
+index 0690d1ea02..22f2d0e136 100644
+--- a/manim/camera/moving_camera.py
++++ b/manim/camera/moving_camera.py
+@@ -44,7 +44,7 @@ def __init__(
+         **kwargs
+     ):
+         """
+-        frame is a Mobject, (should almost certainly be a rectangle)
++        Frame is a Mobject, (should almost certainly be a rectangle)
+         determining which region of space the camera displays
+         """
+         self.fixed_dimension = fixed_dimension
+diff --git a/manim/camera/three_d_camera.py b/manim/camera/three_d_camera.py
+index f1316f1a28..55462fd2f5 100644
+--- a/manim/camera/three_d_camera.py
++++ b/manim/camera/three_d_camera.py
+@@ -61,7 +61,7 @@ def __init__(
+         self.theta_tracker = ValueTracker(self.theta)
+         self.distance_tracker = ValueTracker(self.distance)
+         self.gamma_tracker = ValueTracker(self.gamma)
+-        self.fixed_orientation_mobjects = dict()
++        self.fixed_orientation_mobjects = {}
+         self.fixed_in_frame_mobjects = set()
+         self.reset_rotation_matrix()
+ 
+diff --git a/manim/grpc/impl/frame_server_impl.py b/manim/grpc/impl/frame_server_impl.py
+index 97b1042ebc..be4d116ef2 100644
+--- a/manim/grpc/impl/frame_server_impl.py
++++ b/manim/grpc/impl/frame_server_impl.py
+@@ -215,7 +215,7 @@ def GetFrameAtTime(self, request, context):
+                 self.previous_scene = requested_scene
+                 self.previous_scene_index = requested_scene_index
+             return resp
+-        except Exception as e:
++        except Exception:
+             traceback.print_exc()
+ 
+     def FetchSceneData(self, request, context):
+@@ -238,13 +238,12 @@ def FetchSceneData(self, request, context):
+             else:
+                 request.scene.background_color = "#000000"
+             return request
+-        except Exception as e:
++        except Exception:
+             traceback.print_exc()
+ 
+     def ScriptUpdated(self, request, context):
+         self.load_scene_module()
+-        with grpc.insecure_channel("localhost:50052") as channel:
+-            stub = renderserver_pb2_grpc.RenderServerStub(channel)
++        with grpc.insecure_channel("localhost:50052"):
+             try:
+                 self.update_renderer_scene_data()
+             except grpc._channel._InactiveRpcError:
+diff --git a/manim/mobject/graph.py b/manim/mobject/graph.py
+index 98e215807e..4fc22d3e5a 100644
+--- a/manim/mobject/graph.py
++++ b/manim/mobject/graph.py
+@@ -48,7 +48,7 @@ def _determine_graph_layout(
+         auto_layout = automatic_layouts[layout](
+             nx_graph, scale=layout_scale, **layout_config
+         )
+-        return dict([(k, np.append(v, [0])) for k, v in auto_layout.items()])
++        return {k: np.append(v, [0]) for k, v in auto_layout.items()}
+     elif layout == "tree":
+         return _tree_layout(
+             nx_graph,
+@@ -76,14 +76,14 @@ def _determine_graph_layout(
+         auto_layout = automatic_layouts["partite"](
+             nx_graph, scale=layout_scale, **layout_config
+         )
+-        return dict([(k, np.append(v, [0])) for k, v in auto_layout.items()])
++        return {k: np.append(v, [0]) for k, v in auto_layout.items()}
+     elif layout == "random":
+         # the random layout places coordinates in [0, 1)
+         # we need to rescale manually afterwards...
+         auto_layout = automatic_layouts["random"](nx_graph, **layout_config)
+         for k, v in auto_layout.items():
+             auto_layout[k] = 2 * layout_scale * (v - np.array([0.5, 0.5]))
+-        return dict([(k, np.append(v, [0])) for k, v in auto_layout.items()])
++        return {k: np.append(v, [0]) for k, v in auto_layout.items()}
+     else:
+         raise ValueError(
+             f"The layout '{layout}' is neither a recognized automatic layout, "
+@@ -143,12 +143,10 @@ def _recursive_position_for_row(
+ 
+     height = max(map(lambda v: result[v][1], result))
+ 
+-    return dict(
+-        [
+-            (v, np.array([pos[0], 1 - 2 * pos[1] / height, pos[2]]) * scale / 2)
+-            for v, pos in result.items()
+-        ]
+-    )
++    return {
++        v: np.array([pos[0], 1 - 2 * pos[1] / height, pos[2]]) * scale / 2
++        for v, pos in result.items()
++    }
+ 
+ 
+ class Graph(VMobject):
+@@ -377,11 +375,11 @@ def __init__(
+             self._labels = labels
+         elif isinstance(labels, bool):
+             if labels:
+-                self._labels = dict(
+-                    [(v, MathTex(v, fill_color=label_fill_color)) for v in vertices]
+-                )
++                self._labels = {
++                    v: MathTex(v, fill_color=label_fill_color) for v in vertices
++                }
+             else:
+-                self._labels = dict()
++                self._labels = {}
+ 
+         if self._labels and vertex_type is Dot:
+             vertex_type = LabeledDot
+@@ -391,18 +389,16 @@ def __init__(
+             vertex_config = {}
+         default_vertex_config = {}
+         if vertex_config:
+-            default_vertex_config = dict(
+-                [(k, v) for k, v in vertex_config.items() if k not in vertices]
+-            )
+-        self._vertex_config = dict(
+-            [(v, vertex_config.get(v, copy(default_vertex_config))) for v in vertices]
+-        )
++            default_vertex_config = {
++                k: v for k, v in vertex_config.items() if k not in vertices
++            }
++        self._vertex_config = {
++            v: vertex_config.get(v, copy(default_vertex_config)) for v in vertices
++        }
+         for v, label in self._labels.items():
+             self._vertex_config[v]["label"] = label
+ 
+-        self.vertices = dict(
+-            [(v, vertex_type(**self._vertex_config[v])) for v in vertices]
+-        )
++        self.vertices = {v: vertex_type(**self._vertex_config[v]) for v in vertices}
+         for v in self.vertices:
+             self[v].move_to(self._layout[v])
+ 
+@@ -411,11 +407,11 @@ def __init__(
+             edge_config = {}
+         default_edge_config = {}
+         if edge_config:
+-            default_edge_config = dict(
+-                (k, v)
++            default_edge_config = {
++                k: v
+                 for k, v in edge_config.items()
+                 if k not in edges and k[::-1] not in edges
+-            )
++            }
+         self._edge_config = {}
+         for e in edges:
+             if e in edge_config:
+@@ -425,20 +421,15 @@ def __init__(
+             else:
+                 self._edge_config[e] = copy(default_edge_config)
+ 
+-        self.edges = dict(
+-            [
+-                (
+-                    (u, v),
+-                    edge_type(
+-                        self[u].get_center(),
+-                        self[v].get_center(),
+-                        z_index=-1,
+-                        **self._edge_config[(u, v)],
+-                    ),
+-                )
+-                for (u, v) in edges
+-            ]
+-        )
++        self.edges = {
++            (u, v): edge_type(
++                self[u].get_center(),
++                self[v].get_center(),
++                z_index=-1,
++                **self._edge_config[(u, v)],
++            )
++            for (u, v) in edges
++        }
+ 
+         self.add(*self.vertices.values())
+         self.add(*self.edges.values())
+diff --git a/manim/mobject/mobject.py b/manim/mobject/mobject.py
+index b9ac7a0c5e..742a073ae9 100644
+--- a/manim/mobject/mobject.py
++++ b/manim/mobject/mobject.py
+@@ -68,7 +68,7 @@ def __init__(self, color=WHITE, name=None, dim=3, target=None, z_index=0, **kwar
+         self.init_colors()
+ 
+         # OpenGL data.
+-        self.data = dict()
++        self.data = {}
+         self.depth_test = False
+         self.is_fixed_in_frame = False
+         self.gloss = 0.0
+@@ -378,7 +378,9 @@ def __sub__(self, other):
+     def __isub__(self, other):
+         raise NotImplementedError
+ 
+-    def set(self, **kwargs) -> "Mobject":
++    def set(
++        self, **kwargs
++    ) -> "Mobject":  # This should be renamed and/or depricated as set is a function in the standerd libary and cuases a flake error
+         """Sets attributes.
+ 
+         Mainly to be used along with :attr:`animate` to
+@@ -1860,7 +1862,7 @@ def arrange(
+         center=True,
+         **kwargs,
+     ):
+-        """sort mobjects next to each other on screen.
++        """Sorts mobjects next to each other on screen.
+ 
+         Examples
+         --------
+@@ -2005,7 +2007,7 @@ def add_n_more_submobjects(self, n):
+         new_submobs = []
+         for submob, sf in zip(self.submobjects, split_factors):
+             new_submobs.append(submob)
+-            for k in range(1, sf):
++            for _ in range(1, sf):
+                 new_submobs.append(submob.copy().fade(1))
+         self.submobjects = new_submobs
+         return self
+diff --git a/manim/mobject/numbers.py b/manim/mobject/numbers.py
+index 81c7828b2a..e7104eff3a 100644
+--- a/manim/mobject/numbers.py
++++ b/manim/mobject/numbers.py
+@@ -133,16 +133,14 @@ def get_formatter(self, **kwargs):
+         - num_decimal_places
+         - field_name (e.g. 0 or 0.real)
+         """
+-        config = dict(
+-            [
+-                (attr, getattr(self, attr))
+-                for attr in [
+-                    "include_sign",
+-                    "group_with_commas",
+-                    "num_decimal_places",
+-                ]
++        config = {
++            attr: getattr(self, attr)
++            for attr in [
++                "include_sign",
++                "group_with_commas",
++                "num_decimal_places",
+             ]
+-        )
++        }
+         config.update(kwargs)
+         return "".join(
+             [
+@@ -168,7 +166,7 @@ def get_complex_formatter(self, **kwargs):
+         )
+ 
+     def set_value(self, number, **config):
+-        full_config = dict()
++        full_config = {}
+         full_config.update(self.initial_config)
+         full_config.update(config)
+         new_decimal = DecimalNumber(number, **full_config)
+diff --git a/manim/mobject/opengl_geometry.py b/manim/mobject/opengl_geometry.py
+index f0f8f17886..ae34c8fae5 100644
+--- a/manim/mobject/opengl_geometry.py
++++ b/manim/mobject/opengl_geometry.py
+@@ -88,7 +88,7 @@ def get_unpositioned_tip(self, **kwargs):
+         Returns a tip that has been stylistically configured,
+         but has not yet been given a position in space.
+         """
+-        config = dict()
++        config = {}
+         config.update(self.tip_config)
+         config.update(kwargs)
+         return OpenGLArrowTip(**config)
+diff --git a/manim/mobject/opengl_mobject.py b/manim/mobject/opengl_mobject.py
+index 9679fc22fe..f84ccc682a 100644
+--- a/manim/mobject/opengl_mobject.py
++++ b/manim/mobject/opengl_mobject.py
+@@ -5,19 +5,12 @@
+ import moderngl
+ from functools import wraps
+ from ..utils.color import *
+-from ..utils.iterables import listify
+ 
+ import numpy as np
+ 
+ from .. import config
+ from ..constants import *
+ 
+-from ..utils.color import color_gradient
+-
+-# from ..utils.color import get_colormap_list
+-from ..utils.color import rgb_to_hex
+-from ..utils.color import color_to_rgb
+-
+ # from ..utils.iterables import batch_by_property
+ from ..utils.iterables import list_update
+ from ..utils.iterables import resize_array
+@@ -1225,7 +1218,7 @@ def add_n_more_submobjects(self, n):
+         new_submobs = []
+         for submob, sf in zip(self.submobjects, split_factors):
+             new_submobs.append(submob)
+-            for k in range(1, sf):
++            for _ in range(1, sf):
+                 new_submob = submob.copy()
+                 # If the submobject is at all transparent, then
+                 # make the copy completely transparent
+@@ -1416,7 +1409,7 @@ def get_shader_wrapper_list(self):
+         batches = batch_by_property(shader_wrappers, lambda sw: sw.get_id())
+ 
+         result = []
+-        for wrapper_group, sid in batches:
++        for wrapper_group, _ in batches:
+             shader_wrapper = wrapper_group[0]
+             if not shader_wrapper.is_valid():
+                 continue
+diff --git a/manim/mobject/probability.py b/manim/mobject/probability.py
+index 5a38438a0a..3c76148d51 100644
+--- a/manim/mobject/probability.py
++++ b/manim/mobject/probability.py
+@@ -199,7 +199,7 @@ def add_axes(self, width, height):
+         ticks = VGroup()
+         heights = np.linspace(0, height, self.n_ticks + 1)
+         values = np.linspace(0, self.max_value, self.n_ticks + 1)
+-        for y, value in zip(heights, values):
++        for y, _value in zip(heights, values):
+             tick = Line(LEFT, RIGHT)
+             tick.width = self.tick_width
+             tick.move_to(y * UP)
+diff --git a/manim/mobject/svg/code_mobject.py b/manim/mobject/svg/code_mobject.py
+index 75b44c2ab6..264ef7ea49 100644
+--- a/manim/mobject/svg/code_mobject.py
++++ b/manim/mobject/svg/code_mobject.py
+@@ -310,7 +310,7 @@ def gen_line_numbers(self):
+             number = str(self.line_no_from + line_no)
+             line_numbers_array.append(number)
+         line_numbers = Paragraph(
+-            *[i for i in line_numbers_array],
++            *list(line_numbers_array),
+             line_spacing=self.line_spacing,
+             alignment="right",
+             font=self.font,
+@@ -336,7 +336,7 @@ def gen_colored_lines(self):
+                 line_str = line_str + self.code_json[line_no][word_index][0]
+             lines_text.append(self.tab_spaces[line_no] * "\t" + line_str)
+         code = Paragraph(
+-            *[i for i in lines_text],
++            *list(lines_text),
+             line_spacing=self.line_spacing,
+             tab_width=self.tab_width,
+             font=self.font,
+@@ -597,8 +597,8 @@ def insert_line_numbers_in_html(html, line_no_from):
+ 
+     html = html.replace(pre_close, "</pre></td></tr></table>")
+     numbers = range(line_no_from, line_no_from + pre.count("\n") + 1)
+-    format = "%" + str(len(str(numbers[-1]))) + "i"
+-    lines = "\n".join(format % i for i in numbers)
++    f_string = "%" + str(len(str(numbers[-1]))) + "i"
++    lines = "\n".join(f_string % i for i in numbers)
+     html = html.replace(
+         pre_open, "<table><tr><td>" + pre_open + lines + "</pre></td><td>" + pre_open
+     )
+diff --git a/manim/mobject/svg/text_mobject.py b/manim/mobject/svg/text_mobject.py
+index eb3a43c890..4676480631 100644
+--- a/manim/mobject/svg/text_mobject.py
++++ b/manim/mobject/svg/text_mobject.py
+@@ -1223,7 +1223,7 @@ def __init__(
+         colormap = self.extract_color_tags()
+         if len(colormap) > 0:
+             logger.warning(
+-                f'Using <color> tags in MarkupText is deprecated. Please use <span foreground="..."> instead.'
++                'Using <color> tags in MarkupText is deprecated. Please use <span foreground="..."> instead.'
+             )
+         gradientmap = self.extract_gradient_tags()
+ 
+@@ -1361,7 +1361,7 @@ def extract_gradient_tags(self):
+         Removes the ``<gradient>`` tag, as it is not part of Pango's markup and would cause an error.
+         """
+         tags = re.finditer(
+-            '<gradient\s+from="([^"]+)"\s+to="([^"]+)"(\s+offset="([^"]+)")?>(.+?)</gradient>',
++            r'<gradient\s+from="([^"]+)"\s+to="([^"]+)"(\s+offset="([^"]+)")?>(.+?)</gradient>',
+             self.original_text,
+             re.S,
+         )
+@@ -1403,7 +1403,7 @@ def extract_color_tags(self):
+         will be removed.
+         """
+         tags = re.finditer(
+-            '<color\s+col="([^"]+)"(\s+offset="([^"]+)")?>(.+?)</color>',
++            r'<color\s+col="([^"]+)"(\s+offset="([^"]+)")?>(.+?)</color>',
+             self.original_text,
+             re.S,
+         )
+diff --git a/manim/mobject/types/image_mobject.py b/manim/mobject/types/image_mobject.py
+index 8a69a1f563..572bff62d0 100644
+--- a/manim/mobject/types/image_mobject.py
++++ b/manim/mobject/types/image_mobject.py
+@@ -56,7 +56,7 @@ def reset_points(self):
+         if self.scale_to_resolution:
+             height = h / self.scale_to_resolution * config["frame_height"]
+         else:
+-            height = 3  ## this is the case for ImageMobjectFromCamera
++            height = 3  # this is the case for ImageMobjectFromCamera
+         self.stretch_to_fit_height(height)
+         self.stretch_to_fit_width(height * w / h)
+ 
+diff --git a/manim/mobject/types/opengl_vectorized_mobject.py b/manim/mobject/types/opengl_vectorized_mobject.py
+index 7290e627cd..ba0a14a0a1 100644
+--- a/manim/mobject/types/opengl_vectorized_mobject.py
++++ b/manim/mobject/types/opengl_vectorized_mobject.py
+@@ -560,7 +560,7 @@ def point_from_proportion(self, alpha):
+ 
+     def get_anchors_and_handles(self):
+         """
+-        returns anchors1, handles, anchors2,
++        Returns anchors1, handles, anchors2,
+         where (anchors1[i], handles[i], anchors2[i])
+         will be three points defining a quadratic bezier curve
+         for any i in range(0, len(anchors1))
+@@ -733,9 +733,9 @@ def insert_n_curves_to_point_list(self, n, points):
+             ipc = np.round(n * norms / sum(norms)).astype(int)
+ 
+         diff = n - sum(ipc)
+-        for x in range(diff):
++        for _ in range(diff):
+             ipc[np.argmin(ipc)] += 1
+-        for x in range(-diff):
++        for _ in range(-diff):
+             ipc[np.argmax(ipc)] -= 1
+ 
+         new_points = []
+@@ -995,11 +995,11 @@ def get_stroke_uniforms(self):
+         return result
+ 
+     def get_fill_uniforms(self):
+-        return dict(
+-            is_fixed_in_frame=float(self.is_fixed_in_frame),
+-            gloss=self.gloss,
+-            shadow=self.shadow,
+-        )
++        return {
++            "is_fixed_in_frame": float(self.is_fixed_in_frame),
++            "gloss": self.gloss,
++            "shadow": self.shadow,
++        }
+ 
+     def get_stroke_shader_data(self):
+         points = self.data["points"]
+diff --git a/manim/mobject/types/point_cloud_mobject.py b/manim/mobject/types/point_cloud_mobject.py
+index fe7be9dbef..59eb803c1c 100644
+--- a/manim/mobject/types/point_cloud_mobject.py
++++ b/manim/mobject/types/point_cloud_mobject.py
+@@ -28,7 +28,7 @@ def get_array_attrs(self):
+ 
+     def add_points(self, points, rgbas=None, color=None, alpha=1):
+         """
+-        points must be a Nx3 numpy array, as must rgbas if it is not None
++        Points must be a Nx3 numpy array, as must rgbas if it is not None
+         """
+         if not isinstance(points, np.ndarray):
+             points = np.array(points)
+@@ -115,7 +115,7 @@ def thin_out(self, factor=5):
+ 
+     def sort_points(self, function=lambda p: p[0]):
+         """
+-        function is any map from R^3 to R
++        Function is any map from R^3 to R
+         """
+         for mob in self.family_members_with_points():
+             indices = np.argsort(np.apply_along_axis(function, 1, mob.points))
+diff --git a/manim/mobject/types/vectorized_mobject.py b/manim/mobject/types/vectorized_mobject.py
+index 357bae5702..d14a4676f5 100644
+--- a/manim/mobject/types/vectorized_mobject.py
++++ b/manim/mobject/types/vectorized_mobject.py
+@@ -1084,7 +1084,6 @@ def insert_n_curves_to_point_list(self, n: int, points: np.ndarray) -> np.ndarra
+             Points generated.
+         """
+ 
+-    def insert_n_curves_to_point_list(self, n, points):
+         if len(points) == 1:
+             nppcc = self.n_points_per_cubic_curve
+             return np.repeat(points, nppcc * n, 0)
+diff --git a/manim/mobject/vector_field.py b/manim/mobject/vector_field.py
+index bc7278f159..2d1c6aa7a1 100644
+--- a/manim/mobject/vector_field.py
++++ b/manim/mobject/vector_field.py
+@@ -261,7 +261,7 @@ def __init__(
+         start_points = self.get_start_points(**self.start_points_generator_config)
+         for point in start_points:
+             points = [point]
+-            for t in np.arange(0, self.virtual_time, dt):
++            for _ in np.arange(0, self.virtual_time, dt):
+                 last_point = points[-1]
+                 points.append(last_point + dt * func(last_point))
+                 if get_norm(last_point) > self.cutoff_norm:
+diff --git a/manim/plugins/import_plugins.py b/manim/plugins/import_plugins.py
+index 2afdfee7bc..a1ea1d515e 100644
+--- a/manim/plugins/import_plugins.py
++++ b/manim/plugins/import_plugins.py
+@@ -33,9 +33,9 @@
+         # it will return a list of modules to add globally
+         # finally add it
+         lists = loaded_plugin()
+-        for l in lists:
+-            exec(f"{l.__name__}=l")
+-            __all__.append(l.__name__)
++        for x in lists:
++            exec(f"{x.__name__}=x")
++            __all__.append(x.__name__)
+     plugins_requested.remove(plugin.name)
+ else:
+     if plugins_requested != []:
+diff --git a/manim/plugins/plugins_flags.py b/manim/plugins/plugins_flags.py
+index 5905b30162..0101b631a6 100644
+--- a/manim/plugins/plugins_flags.py
++++ b/manim/plugins/plugins_flags.py
+@@ -10,7 +10,7 @@
+ 
+ from manim import console
+ 
+-__all__ = ["list_plugins", "update"]
++__all__ = ["list_plugins"]
+ 
+ 
+ def get_plugins():
+diff --git a/manim/renderer/opengl_renderer.py b/manim/renderer/opengl_renderer.py
+index 113b25d78f..8c734be78d 100644
+--- a/manim/renderer/opengl_renderer.py
++++ b/manim/renderer/opengl_renderer.py
+@@ -258,7 +258,7 @@ def render_mobjects(self, mobs):
+ 
+     def render_render_group(self, render_group):
+         shader_wrapper = render_group["shader_wrapper"]
+-        shader_program = render_group["prog"]
++        # shader_program = render_group["prog"] Unused?
+         self.set_shader_uniforms(render_group["prog"], render_group["shader_wrapper"])
+         self.update_depth_test(self.context, shader_wrapper)
+         render_group["vao"].render(int(shader_wrapper.render_primitive))
+@@ -427,7 +427,8 @@ def get_raw_frame_buffer_object_data(self, dtype="f1"):
+     # Returns offset from the bottom left corner in pixels.
+     def pixel_coords_to_space_coords(self, px, py, relative=False):
+         pw, ph = config["pixel_width"], config["pixel_height"]
+-        fw, fh = config["frame_width"], config["frame_height"]
++        fh = config["frame_height"]
++        # fw = config["frame_width"] Unused?
+         fc = self.camera.get_center()
+         if relative:
+             return 2 * np.array([px / pw, py / ph, 0])
+diff --git a/manim/renderer/shader_wrapper.py b/manim/renderer/shader_wrapper.py
+index fb15c8fae8..e1eb756f10 100644
+--- a/manim/renderer/shader_wrapper.py
++++ b/manim/renderer/shader_wrapper.py
+@@ -48,8 +48,8 @@ def __init__(
+         self.vert_indices = vert_indices
+         self.vert_attributes = vert_data.dtype.names
+         self.shader_folder = shader_folder
+-        self.uniforms = uniforms or dict()
+-        self.texture_paths = texture_paths or dict()
++        self.uniforms = uniforms or {}
++        self.texture_paths = texture_paths or {}
+         self.depth_test = depth_test
+         self.render_primitive = str(render_primitive)
+         self.init_program_code()
+@@ -127,7 +127,7 @@ def get_program_code(self):
+ 
+     def replace_code(self, old, new):
+         code_map = self.program_code
+-        for (name, code) in code_map.items():
++        for (name, _code) in code_map.items():
+             if code_map[name] is None:
+                 continue
+             code_map[name] = re.sub(old, new, code_map[name])
+diff --git a/manim/scene/graph_scene.py b/manim/scene/graph_scene.py
+index bfbff48938..a9915b54be 100644
+--- a/manim/scene/graph_scene.py
++++ b/manim/scene/graph_scene.py
+@@ -303,7 +303,8 @@ def construct(self):
+                         dot = Dot().move_to(self.coords_to_point(time, dat))
+                         self.add(dot)
+         """
+-        assert hasattr(self, "x_axis") and hasattr(self, "y_axis")
++        assert hasattr(self, "x_axis")
++        assert hasattr(self, "y_axis")
+         result = self.x_axis.number_to_point(x)[0] * RIGHT
+         result += self.y_axis.number_to_point(y)[1] * UP
+         return result
+@@ -618,7 +619,7 @@ def get_riemann_rectangles(
+             else:
+                 raise ValueError("Invalid input sample type")
+             graph_point = self.input_to_graph_point(sample_input, graph)
+-            if bounded_graph == None:
++            if bounded_graph is None:
+                 y_point = 0
+             else:
+                 y_point = bounded_graph.underlying_function(x)
+diff --git a/manim/scene/scene.py b/manim/scene/scene.py
+index 7cfc1b7dd5..6e377bbd21 100644
+--- a/manim/scene/scene.py
++++ b/manim/scene/scene.py
+@@ -134,7 +134,7 @@ def __deepcopy__(self, clone_from_id):
+                 free_variable_map = inspect.getclosurevars(updater).nonlocals
+                 cloned_co_freevars = []
+                 cloned_closure = []
+-                for i, free_variable_name in enumerate(updater.__code__.co_freevars):
++                for free_variable_name in updater.__code__.co_freevars:
+                     free_variable_value = free_variable_map[free_variable_name]
+ 
+                     # If the referenced variable has not been cloned, raise.
+diff --git a/manim/scene/scene_file_writer.py b/manim/scene/scene_file_writer.py
+index f10d0c049e..412d078c24 100644
+--- a/manim/scene/scene_file_writer.py
++++ b/manim/scene/scene_file_writer.py
+@@ -548,7 +548,7 @@ def clean_cache(self):
+                 len(cached_partial_movies) - config["max_files_cached"]
+             )
+             oldest_files_to_delete = sorted(
+-                [partial_movie_file for partial_movie_file in cached_partial_movies],
++                cached_partial_movies,
+                 key=os.path.getatime,
+             )[:number_files_to_delete]
+             # oldest_file_path = min(cached_partial_movies, key=os.path.getatime)
+diff --git a/manim/scene/vector_space_scene.py b/manim/scene/vector_space_scene.py
+index f0c7dbbe5c..f46251d579 100644
+--- a/manim/scene/vector_space_scene.py
++++ b/manim/scene/vector_space_scene.py
+@@ -522,9 +522,6 @@ def __init__(
+         include_foreground_plane=True,
+         background_plane_kwargs={
+             "color": GREY,
+-            "axis_config": {
+-                "stroke_color": LIGHT_GREY,
+-            },
+             "axis_config": {
+                 "color": GREY,
+             },
+@@ -972,8 +969,8 @@ def get_transformable_label_movement(self):
+         Animation
+             The animation of the movement.
+         """
+-        for l in self.transformable_labels:
+-            l.target = self.get_vector_label(l.vector.target, l.target_text, **l.kwargs)
++        for x in self.transformable_labels:
++            x.target = self.get_vector_label(x.vector.target, x.target_text, **x.kwargs)
+         return self.get_piece_movement(self.transformable_labels)
+ 
+     def apply_matrix(self, matrix, **kwargs):
+diff --git a/manim/utils/bezier.py b/manim/utils/bezier.py
+index 29eb33758e..bceb92fe74 100644
+--- a/manim/utils/bezier.py
++++ b/manim/utils/bezier.py
+@@ -111,7 +111,7 @@ def interpolate(start: int, end: int, alpha: float) -> float:
+ 
+ def integer_interpolate(start: float, end: float, alpha: float) -> int:
+     """
+-    alpha is a float between 0 and 1.  This returns
++    Alpha is a float between 0 and 1.  This returns
+     an integer between start and end (inclusive) representing
+     appropriate interpolation between them, along with a
+     "residue" representing a new proportion between the
+diff --git a/manim/utils/color.py b/manim/utils/color.py
+index f1065ed772..cbd749453f 100644
+--- a/manim/utils/color.py
++++ b/manim/utils/color.py
+@@ -289,7 +289,7 @@ def color_to_rgba(color, alpha=1):
+ def rgb_to_color(rgb):
+     try:
+         return Color(rgb=rgb)
+-    except:
++    except Exception:
+         return Color(WHITE)
+ 
+ 
+diff --git a/manim/utils/config_ops.py b/manim/utils/config_ops.py
+index e7741054c7..a3ee8bad15 100644
+--- a/manim/utils/config_ops.py
++++ b/manim/utils/config_ops.py
+@@ -20,7 +20,7 @@ def merge_dicts_recursively(*dicts):
+ 
+     When values are dictionaries, it is applied recursively
+     """
+-    result = dict()
++    result = {}
+     all_items = it.chain(*[d.items() for d in dicts])
+     for key, value in all_items:
+         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+@@ -40,5 +40,5 @@ def update_dict_recursively(current_dict, *others):
+ 
+ 
+ class DictAsObject(object):
+-    def __init__(self, dict):
+-        self.__dict__ = dict
++    def __init__(self, dictin):
++        self.__dict__ = dictin
+diff --git a/manim/utils/ipython_magic.py b/manim/utils/ipython_magic.py
+index 4fd9cc745b..ec1e9bccf9 100644
+--- a/manim/utils/ipython_magic.py
++++ b/manim/utils/ipython_magic.py
+@@ -27,7 +27,7 @@
+     class ManimMagic(Magics):
+         def __init__(self, shell):
+             super(ManimMagic, self).__init__(shell)
+-            self.rendered_files = dict()
++            self.rendered_files = {}
+ 
+         @needs_local_scope
+         @line_cell_magic
+diff --git a/manim/utils/iterables.py b/manim/utils/iterables.py
+index c561180b85..b277311661 100644
+--- a/manim/utils/iterables.py
++++ b/manim/utils/iterables.py
+@@ -49,14 +49,14 @@ def resize_with_interpolation(nparray, length):
+     )
+ 
+ 
+-def remove_list_redundancies(l):
++def remove_list_redundancies(i):
+     """
+     Used instead of list(set(l)) to maintain order
+     Keeps the last occurrence of each element
+     """
+     reversed_result = []
+     used = set()
+-    for x in reversed(l):
++    for x in reversed(i):
+         if x not in used:
+             reversed_result.append(x)
+             used.add(x)
+@@ -169,4 +169,4 @@ def remove_nones(sequence):
+ 
+ 
+ def concatenate_lists(*list_of_lists):
+-    return [item for l in list_of_lists for item in l]
++    return [item for i in list_of_lists for item in i]
+diff --git a/manim/utils/space_ops.py b/manim/utils/space_ops.py
+index ecdcdf03cc..443a6a6a8e 100644
+--- a/manim/utils/space_ops.py
++++ b/manim/utils/space_ops.py
+@@ -318,7 +318,7 @@ def midpoint(point1, point2):
+ 
+ def line_intersection(line1, line2):
+     """
+-    return intersection point of two lines,
++    Returns intersection point of two lines,
+     each defined with a pair of vectors determining
+     the end points
+     """
+@@ -428,7 +428,7 @@ def earclip_triangulation(verts, ring_ends):
+     rings = [list(range(e0, e1)) for e0, e1 in zip([0, *ring_ends], ring_ends)]
+     attached_rings = rings[:1]
+     detached_rings = rings[1:]
+-    loop_connections = dict()
++    loop_connections = {}
+ 
+     while detached_rings:
+         i_range, j_range = [
+@@ -474,7 +474,7 @@ def earclip_triangulation(verts, ring_ends):
+     # Find an ordering of indices walking around the polygon
+     indices = []
+     i = 0
+-    for x in range(len(verts) + len(ring_ends) - 1):
++    for _ in range(len(verts) + len(ring_ends) - 1):
+         # starting = False
+         if i in loop_connections:
+             j = loop_connections[i]
+diff --git a/poetry.lock b/poetry.lock
+index 6a3329e3a8..82ba10e59a 100644
+--- a/poetry.lock
++++ b/poetry.lock
+@@ -205,7 +205,7 @@ optional = false
+ python-versions = "*"
+ 
+ [package.extras]
+-test = ["flake8 (3.7.8)", "hypothesis (3.55.3)"]
++test = ["flake8 (==3.7.8)", "hypothesis (==3.55.3)"]
+ 
+ [[package]]
+ name = "contextvars"
+@@ -269,6 +269,112 @@ category = "main"
+ optional = true
+ python-versions = ">=2.7"
+ 
++[[package]]
++name = "flake8"
++version = "3.9.0"
++description = "the modular source code checker: pep8 pyflakes and co"
++category = "dev"
++optional = false
++python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,>=2.7"
++
++[package.dependencies]
++importlib-metadata = {version = "*", markers = "python_version < \"3.8\""}
++mccabe = ">=0.6.0,<0.7.0"
++pycodestyle = ">=2.7.0,<2.8.0"
++pyflakes = ">=2.3.0,<2.4.0"
++
++[[package]]
++name = "flake8-bugbear"
++version = "21.3.2"
++description = "A plugin for flake8 finding likely bugs and design problems in your program. Contains warnings that don't belong in pyflakes and pycodestyle."
++category = "dev"
++optional = false
++python-versions = ">=3.6"
++
++[package.dependencies]
++attrs = ">=19.2.0"
++flake8 = ">=3.0.0"
++
++[package.extras]
++dev = ["coverage", "black", "hypothesis", "hypothesmith"]
++
++[[package]]
++name = "flake8-builtins"
++version = "1.5.3"
++description = "Check for python builtins being used as variables or parameters."
++category = "dev"
++optional = false
++python-versions = "*"
++
++[package.dependencies]
++flake8 = "*"
++
++[package.extras]
++test = ["coverage", "coveralls", "mock", "pytest", "pytest-cov"]
++
++[[package]]
++name = "flake8-comprehensions"
++version = "3.4.0"
++description = "A flake8 plugin to help you write better list/set/dict comprehensions."
++category = "dev"
++optional = false
++python-versions = ">=3.6"
++
++[package.dependencies]
++flake8 = ">=3.0,<3.2.0 || >3.2.0,<4"
++importlib-metadata = {version = "*", markers = "python_version < \"3.8\""}
++
++[[package]]
++name = "flake8-docstrings"
++version = "1.6.0"
++description = "Extension for flake8 which uses pydocstyle to check docstrings"
++category = "dev"
++optional = false
++python-versions = "*"
++
++[package.dependencies]
++flake8 = ">=3"
++pydocstyle = ">=2.1"
++
++[[package]]
++name = "flake8-logging-format"
++version = "0.6.0"
++description = "Flake8 extension to validate (lack of) logging format strings"
++category = "dev"
++optional = false
++python-versions = "*"
++
++[[package]]
++name = "flake8-plugin-utils"
++version = "1.3.1"
++description = "The package provides base classes and utils for flake8 plugin writing"
++category = "dev"
++optional = false
++python-versions = ">=3.6,<4.0"
++
++[[package]]
++name = "flake8-pytest-style"
++version = "1.4.0"
++description = "A flake8 plugin checking common style issues or inconsistencies with pytest-based tests."
++category = "dev"
++optional = false
++python-versions = ">=3.6,<4.0"
++
++[package.dependencies]
++flake8-plugin-utils = ">=1.3.1,<2.0.0"
++
++[[package]]
++name = "flake8-rst-docstrings"
++version = "0.0.14"
++description = "Python docstring reStructuredText (RST) validator"
++category = "dev"
++optional = false
++python-versions = "*"
++
++[package.dependencies]
++flake8 = ">=3.0.0"
++restructuredtext_lint = "*"
++
+ [[package]]
+ name = "glcontext"
+ version = "2.3.3"
+@@ -355,7 +461,7 @@ zipp = ">=0.5"
+ 
+ [package.extras]
+ docs = ["sphinx", "jaraco.packaging (>=8.2)", "rst.linker (>=1.9)"]
+-testing = ["pytest (>=3.5,<3.7.3 || >3.7.3)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pytest-cov", "pytest-enabler", "packaging", "pep517", "pyfakefs", "flufl.flake8", "pytest-black (>=0.3.7)", "pytest-mypy", "importlib-resources (>=1.3)"]
++testing = ["pytest (>=3.5,!=3.7.3)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pytest-cov", "pytest-enabler", "packaging", "pep517", "pyfakefs", "flufl.flake8", "pytest-black (>=0.3.7)", "pytest-mypy", "importlib-resources (>=1.3)"]
+ 
+ [[package]]
+ name = "iniconfig"
+@@ -447,7 +553,7 @@ python-versions = ">=3.6"
+ parso = ">=0.8.0,<0.9.0"
+ 
+ [package.extras]
+-qa = ["flake8 (3.8.3)", "mypy (0.782)"]
++qa = ["flake8 (==3.8.3)", "mypy (==0.782)"]
+ testing = ["Django (<3.1)", "colorama", "docopt", "pytest (<6.0.0)"]
+ 
+ [[package]]
+@@ -724,7 +830,7 @@ pyrr = ">=0.10.3,<1"
+ pysdl2 = ["pysdl2"]
+ pyside2 = ["PySide2 (<6)"]
+ glfw = ["glfw"]
+-pygame = ["pygame (2.0.0.dev10)"]
++pygame = ["pygame (==2.0.0.dev10)"]
+ pyqt5 = ["pyqt5"]
+ pywavefront = ["pywavefront (>=1.2.0,<2)"]
+ tk = ["pyopengltk (>=0.0.3)"]
+@@ -808,11 +914,11 @@ testpath = "*"
+ traitlets = ">=4.2"
+ 
+ [package.extras]
+-all = ["pytest", "pytest-cov", "pytest-dependency", "ipykernel", "ipywidgets (>=7)", "pyppeteer (0.2.2)", "tornado (>=4.0)", "sphinx (>=1.5.1)", "sphinx-rtd-theme", "nbsphinx (>=0.2.12)", "ipython"]
++all = ["pytest", "pytest-cov", "pytest-dependency", "ipykernel", "ipywidgets (>=7)", "pyppeteer (==0.2.2)", "tornado (>=4.0)", "sphinx (>=1.5.1)", "sphinx-rtd-theme", "nbsphinx (>=0.2.12)", "ipython"]
+ docs = ["sphinx (>=1.5.1)", "sphinx-rtd-theme", "nbsphinx (>=0.2.12)", "ipython"]
+ serve = ["tornado (>=4.0)"]
+-test = ["pytest", "pytest-cov", "pytest-dependency", "ipykernel", "ipywidgets (>=7)", "pyppeteer (0.2.2)"]
+-webpdf = ["pyppeteer (0.2.2)"]
++test = ["pytest", "pytest-cov", "pytest-dependency", "ipykernel", "ipywidgets (>=7)", "pyppeteer (==0.2.2)"]
++webpdf = ["pyppeteer (==0.2.2)"]
+ 
+ [[package]]
+ name = "nbformat"
+@@ -929,7 +1035,7 @@ optional = true
+ python-versions = ">=3.6"
+ 
+ [package.extras]
+-qa = ["flake8 (3.8.3)", "mypy (0.782)"]
++qa = ["flake8 (==3.8.3)", "mypy (==0.782)"]
+ testing = ["docopt", "pytest (<6.0.0)"]
+ 
+ [[package]]
+@@ -1038,6 +1144,14 @@ category = "main"
+ optional = false
+ python-versions = ">=3.6, <4"
+ 
++[[package]]
++name = "pycodestyle"
++version = "2.7.0"
++description = "Python style guide checker"
++category = "dev"
++optional = false
++python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
++
+ [[package]]
+ name = "pycparser"
+ version = "2.20"
+@@ -1046,6 +1160,17 @@ category = "main"
+ optional = true
+ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
+ 
++[[package]]
++name = "pydocstyle"
++version = "6.0.0"
++description = "Python docstring style checker"
++category = "dev"
++optional = false
++python-versions = ">=3.6"
++
++[package.dependencies]
++snowballstemmer = "*"
++
+ [[package]]
+ name = "pydub"
+ version = "0.25.1"
+@@ -1054,6 +1179,14 @@ category = "main"
+ optional = false
+ python-versions = "*"
+ 
++[[package]]
++name = "pyflakes"
++version = "2.3.0"
++description = "passive checker of Python programs"
++category = "dev"
++optional = false
++python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
++
+ [[package]]
+ name = "pyglet"
+ version = "1.5.15"
+@@ -1086,7 +1219,7 @@ mccabe = ">=0.6,<0.7"
+ toml = ">=0.7.1"
+ 
+ [package.extras]
+-docs = ["sphinx (3.5.1)", "python-docs-theme (2020.12)"]
++docs = ["sphinx (==3.5.1)", "python-docs-theme (==2020.12)"]
+ 
+ [[package]]
+ name = "pyparsing"
+@@ -1216,7 +1349,18 @@ python-versions = "*"
+ 
+ [package.extras]
+ security = ["cryptography (>=1.3.4)", "idna (>=2.0.0)", "pyOpenSSL (>=0.14)"]
+-socks = ["PySocks (>=1.5.6,<1.5.7 || >1.5.7)", "win-inet-pton"]
++socks = ["PySocks (>=1.5.6,!=1.5.7)", "win-inet-pton"]
++
++[[package]]
++name = "restructuredtext-lint"
++version = "1.3.2"
++description = "reStructuredText linter"
++category = "dev"
++optional = false
++python-versions = "*"
++
++[package.dependencies]
++docutils = ">=0.11,<1.0"
+ 
+ [[package]]
+ name = "rich"
+@@ -1523,7 +1667,7 @@ webgl_renderer = ["grpcio", "grpcio-tools", "watchdog"]
+ [metadata]
+ lock-version = "1.1"
+ python-versions = "^3.6.2"
+-content-hash = "a797ac53cad4b1e2802672221d348981018526c8fbbee0aa2786f14b9c19cd6d"
++content-hash = "b46763cf01316ccac3f762570dc6e8c9a2f758bdd7448015b784bb4552b79c0c"
+ 
+ [metadata.files]
+ alabaster = [
+@@ -1675,6 +1819,40 @@ entrypoints = [
+     {file = "entrypoints-0.3-py2.py3-none-any.whl", hash = "sha256:589f874b313739ad35be6e0cd7efde2a4e9b6fea91edcc34e58ecbb8dbe56d19"},
+     {file = "entrypoints-0.3.tar.gz", hash = "sha256:c70dd71abe5a8c85e55e12c19bd91ccfeec11a6e99044204511f9ed547d48451"},
+ ]
++flake8 = [
++    {file = "flake8-3.9.0-py2.py3-none-any.whl", hash = "sha256:12d05ab02614b6aee8df7c36b97d1a3b2372761222b19b58621355e82acddcff"},
++    {file = "flake8-3.9.0.tar.gz", hash = "sha256:78873e372b12b093da7b5e5ed302e8ad9e988b38b063b61ad937f26ca58fc5f0"},
++]
++flake8-bugbear = [
++    {file = "flake8-bugbear-21.3.2.tar.gz", hash = "sha256:cadce434ceef96463b45a7c3000f23527c04ea4b531d16c7ac8886051f516ca0"},
++    {file = "flake8_bugbear-21.3.2-py36.py37.py38-none-any.whl", hash = "sha256:5d6ccb0c0676c738a6e066b4d50589c408dcc1c5bf1d73b464b18b73cd6c05c2"},
++]
++flake8-builtins = [
++    {file = "flake8-builtins-1.5.3.tar.gz", hash = "sha256:09998853b2405e98e61d2ff3027c47033adbdc17f9fe44ca58443d876eb00f3b"},
++    {file = "flake8_builtins-1.5.3-py2.py3-none-any.whl", hash = "sha256:7706babee43879320376861897e5d1468e396a40b8918ed7bccf70e5f90b8687"},
++]
++flake8-comprehensions = [
++    {file = "flake8-comprehensions-3.4.0.tar.gz", hash = "sha256:c00039be9f3959a26a98da3024f0fe809859bf1753ccb90e228cc40f3ac31ca7"},
++    {file = "flake8_comprehensions-3.4.0-py3-none-any.whl", hash = "sha256:7258a28e229fb9a8d16370b9c47a7d66396ba0201abb06c9d11df41b18ed64c4"},
++]
++flake8-docstrings = [
++    {file = "flake8-docstrings-1.6.0.tar.gz", hash = "sha256:9fe7c6a306064af8e62a055c2f61e9eb1da55f84bb39caef2b84ce53708ac34b"},
++    {file = "flake8_docstrings-1.6.0-py2.py3-none-any.whl", hash = "sha256:99cac583d6c7e32dd28bbfbef120a7c0d1b6dde4adb5a9fd441c4227a6534bde"},
++]
++flake8-logging-format = [
++    {file = "flake8-logging-format-0.6.0.tar.gz", hash = "sha256:ca5f2b7fc31c3474a0aa77d227e022890f641a025f0ba664418797d979a779f8"},
++]
++flake8-plugin-utils = [
++    {file = "flake8-plugin-utils-1.3.1.tar.gz", hash = "sha256:6e996bc24ebe327558f24efd106f1be5f0c033c8cbb6eed815631f73d487f1c9"},
++    {file = "flake8_plugin_utils-1.3.1-py3-none-any.whl", hash = "sha256:efdbf9d15b18f72b7c348dd360f30e7cf3e73aa67ff832d5343eb5aa1115f250"},
++]
++flake8-pytest-style = [
++    {file = "flake8-pytest-style-1.4.0.tar.gz", hash = "sha256:f51bf5c8f657ad4b4938bfedb9a5b84fb0885f72ac07b406ebb7f5ea83f8b74e"},
++    {file = "flake8_pytest_style-1.4.0-py3-none-any.whl", hash = "sha256:f8b6f24b15b28f317eee1bd354f38427007d527774e2ac8ae8b936e6e7eda604"},
++]
++flake8-rst-docstrings = [
++    {file = "flake8-rst-docstrings-0.0.14.tar.gz", hash = "sha256:8f8bcb18f1408b506dd8ba2c99af3eac6128f6911d4bf6ff874b94caa70182a2"},
++]
+ glcontext = [
+     {file = "glcontext-2.3.3-cp35-cp35m-macosx_10_9_x86_64.whl", hash = "sha256:f518379551a2b60d45c1eec23759cb1ee85517d4b943fc31530b6ab13e304fe4"},
+     {file = "glcontext-2.3.3-cp35-cp35m-manylinux1_i686.whl", hash = "sha256:d3a8fbc27f43766d168bae02474790459f4050adeb25832ff0a227cc5006c933"},
+@@ -2312,14 +2490,26 @@ pycairo = [
+     {file = "pycairo-1.20.0-cp39-cp39-win_amd64.whl", hash = "sha256:57166119e424d71eccdba6b318bd731bdabd17188e2ba10d4f315f7bf16ace3f"},
+     {file = "pycairo-1.20.0.tar.gz", hash = "sha256:5695a10cb7f9ae0d01f665b56602a845b0a8cb17e2123bfece10c2e58552468c"},
+ ]
++pycodestyle = [
++    {file = "pycodestyle-2.7.0-py2.py3-none-any.whl", hash = "sha256:514f76d918fcc0b55c6680472f0a37970994e07bbb80725808c17089be302068"},
++    {file = "pycodestyle-2.7.0.tar.gz", hash = "sha256:c389c1d06bf7904078ca03399a4816f974a1d590090fecea0c63ec26ebaf1cef"},
++]
+ pycparser = [
+     {file = "pycparser-2.20-py2.py3-none-any.whl", hash = "sha256:7582ad22678f0fcd81102833f60ef8d0e57288b6b5fb00323d101be910e35705"},
+     {file = "pycparser-2.20.tar.gz", hash = "sha256:2d475327684562c3a96cc71adf7dc8c4f0565175cf86b6d7a404ff4c771f15f0"},
+ ]
++pydocstyle = [
++    {file = "pydocstyle-6.0.0-py3-none-any.whl", hash = "sha256:d4449cf16d7e6709f63192146706933c7a334af7c0f083904799ccb851c50f6d"},
++    {file = "pydocstyle-6.0.0.tar.gz", hash = "sha256:164befb520d851dbcf0e029681b91f4f599c62c5cd8933fd54b1bfbd50e89e1f"},
++]
+ pydub = [
+     {file = "pydub-0.25.1-py2.py3-none-any.whl", hash = "sha256:65617e33033874b59d87db603aa1ed450633288aefead953b30bded59cb599a6"},
+     {file = "pydub-0.25.1.tar.gz", hash = "sha256:980a33ce9949cab2a569606b65674d748ecbca4f0796887fd6f46173a7b0d30f"},
+ ]
++pyflakes = [
++    {file = "pyflakes-2.3.0-py2.py3-none-any.whl", hash = "sha256:910208209dcea632721cb58363d0f72913d9e8cf64dc6f8ae2e02a3609aba40d"},
++    {file = "pyflakes-2.3.0.tar.gz", hash = "sha256:e59fd8e750e588358f1b8885e5a4751203a0516e0ee6d34811089ac294c8806f"},
++]
+ pyglet = [
+     {file = "pyglet-1.5.15-py3-none-any.whl", hash = "sha256:4401cc176580e4e17e2df8bbf7536f27e691327dc3f38f209a12f1859c70aed2"},
+     {file = "pyglet-1.5.15.zip", hash = "sha256:da9d8337388cedabf1f1c5dc21a45bb2b0e5327fba47f996c8573818c3dfa478"},
+@@ -2464,6 +2654,9 @@ requests = [
+     {file = "requests-2.15.1-py2.py3-none-any.whl", hash = "sha256:ff753b2196cd18b1bbeddc9dcd5c864056599f7a7d9a4fb5677e723efa2b7fb9"},
+     {file = "requests-2.15.1.tar.gz", hash = "sha256:e5659b9315a0610505e050bb7190bf6fa2ccee1ac295f2b760ef9d8a03ebbb2e"},
+ ]
++restructuredtext-lint = [
++    {file = "restructuredtext_lint-1.3.2.tar.gz", hash = "sha256:d3b10a1fe2ecac537e51ae6d151b223b78de9fafdd50e5eb6b08c243df173c80"},
++]
+ rich = [
+     {file = "rich-6.2.0-py3-none-any.whl", hash = "sha256:fa55d5d6ba9a0df1f1c95518891b57b13f1d45548a9a198a87b093fceee513ec"},
+     {file = "rich-6.2.0.tar.gz", hash = "sha256:f99c877277906e1ff83b135c564920590ba31188f424dcdb5d1cae652a519b4b"},
+diff --git a/pyproject.toml b/pyproject.toml
+index b2839b8de9..626881a9ec 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -56,6 +56,14 @@ pylint = "*"
+ guzzle_sphinx_theme = "*"
+ recommonmark = "*"
+ matplotlib = "^3.3.2"
++flake8 = "^3.9.0"
++flake8-bugbear = "^21.3.2"
++flake8-builtins = "^1.5.3"
++flake8-comprehensions = "^3.4.0"
++flake8-pytest-style = "^1.4.0"
++flake8-logging-format = "^0.6.0"
++flake8-rst-docstrings = "^0.0.14"
++flake8-docstrings = "^1.6.0"
+ 
+ [tool.poetry.dev-dependencies.black]
+ version = "^20.8b1"
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

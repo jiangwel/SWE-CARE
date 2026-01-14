@@ -1,0 +1,158 @@
+  Task-ID: saltstack__salt-63938@7c1aa93
+  Please checkout to this commit first: 18b99263cd5e635993a5e35ee9f4f7ebb229e1ce
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [TECH DEBT] Add windows re-auth test to test suite.
+Add windows re-auth test the test suite.
+
+Make sure Linux master and Windows minion are connected and talking to each other.
+
+Stop the Linux master and start the windows minion in debug mode:
+It should just continue to restart the minion and attempt to re-authenticate. The process should not die in a 20 minutes time frame. 
+Then restart the master and connection should resume.
+  </issue>
+  
+  <patch>
+  diff --git a/tests/pytests/scenarios/reauth/__init__.py b/tests/pytests/scenarios/reauth/__init__.py
+new file mode 100644
+index 000000000000..e69de29bb2d1
+diff --git a/tests/pytests/scenarios/reauth/conftest.py b/tests/pytests/scenarios/reauth/conftest.py
+new file mode 100644
+index 000000000000..bbefa71e1818
+--- /dev/null
++++ b/tests/pytests/scenarios/reauth/conftest.py
+@@ -0,0 +1,44 @@
++import pytest
++from saltfactories.utils import random_string
++
++
++@pytest.fixture(scope="package")
++def salt_master_factory(salt_factories):
++    factory = salt_factories.salt_master_daemon(
++        random_string("reauth-master-"),
++        extra_cli_arguments_after_first_start_failure=["--log-level=info"],
++    )
++    return factory
++
++
++@pytest.fixture(scope="package")
++def salt_master(salt_master_factory):
++    with salt_master_factory.started():
++        yield salt_master_factory
++
++
++@pytest.fixture(scope="package")
++def salt_minion_factory(salt_master):
++    factory = salt_master.salt_minion_daemon(
++        random_string("reauth-minion-"),
++        extra_cli_arguments_after_first_start_failure=["--log-level=info"],
++    )
++    return factory
++
++
++@pytest.fixture(scope="package")
++def salt_minion(salt_minion_factory):
++    with salt_minion_factory.started():
++        yield salt_minion_factory
++
++
++@pytest.fixture(scope="package")
++def salt_key_cli(salt_master):
++    assert salt_master.is_running()
++    return salt_master.salt_key_cli()
++
++
++@pytest.fixture(scope="package")
++def salt_cli(salt_master):
++    assert salt_master.is_running()
++    return salt_master.salt_cli()
+diff --git a/tests/pytests/scenarios/reauth/test_reauth.py b/tests/pytests/scenarios/reauth/test_reauth.py
+new file mode 100644
+index 000000000000..31fa4155f205
+--- /dev/null
++++ b/tests/pytests/scenarios/reauth/test_reauth.py
+@@ -0,0 +1,50 @@
++import logging
++import os
++import threading
++import time
++
++import pytest
++
++pytestmark = [
++    pytest.mark.slow_test,
++    pytest.mark.windows_whitelisted,
++]
++
++log = logging.getLogger(__name__)
++
++
++@pytest.fixture(scope="module")
++def timeout():
++    return os.environ.get("SALT_CI_REAUTH_MASTER_WAIT", 100)
++
++
++def test_reauth(salt_cli, salt_minion, salt_master, timeout, event_listener):
++    # Make sure they can communicate
++    assert salt_cli.run("test.ping", minion_tgt=salt_minion.id).data is True
++    # Stop the master and minion
++    salt_master.terminate()
++    salt_minion.terminate()
++    log.debug(
++        "Master and minion stopped for reauth test, waiting for %s seconds", timeout
++    )
++    log.debug("Restarting the reauth minion")
++
++    def minion_func():
++        start = time.time()
++        with salt_minion.started(start_timeout=timeout * 2):
++            new_start = time.time()
++            while time.time() < new_start + (timeout * 2):
++                if event_listener.get_events(
++                    [(salt_master.id, f"salt/job/*/ret/{salt_minion.id}")],
++                    after_time=start,
++                ):
++                    break
++                time.sleep(5)
++
++    minion_thread = threading.Thread(target=minion_func)
++    minion_thread.start()
++    time.sleep(timeout)
++    log.debug("Restarting the reauth master")
++    salt_master.start()
++    assert salt_cli.run("test.ping", minion_tgt=salt_minion.id).data is True
++    minion_thread.join()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

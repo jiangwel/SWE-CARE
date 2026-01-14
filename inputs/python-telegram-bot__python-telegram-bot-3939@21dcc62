@@ -1,0 +1,241 @@
+  Task-ID: python-telegram-bot__python-telegram-bot-3939@21dcc62
+  Please checkout to this commit first: c82a0808d18cc3ed62b30398cfb33b2b92520ae8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [FEATURE] SSL verification + custom proxies
+### What kind of feature are you missing? Where do you notice a shortcoming of PTB?
+
+There is no way to disable ssl verification for proxies and pass a custom httpx.Proxy, instead of just a string.
+
+### Describe the solution you'd like
+
+Some proxies work as a man-in-the-middle and may lead to errors, like: ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1006). 
+
+Due to this reason, I think it's necessary to allow control over ssl verification in HTTPXRequest. Just add an argument like `ssl_verify: bool = True` and add `verify=ssl_verify` to `self._client_kwargs`.
+
+Another thing I'd love to see, is to change the type of:
+`proxy_url: Optional[str] = None,`
+to
+`proxy_url: Optional[Union[str, httpx.Proxy] = None,`
+
+This is due to some proxies requiring authorization through headers, which could be passed as:
+```
+httpx.Proxy(
+    url=proxy_url,
+    headers={
+        "x-secret-header": "secret value"
+    },
+)
+```
+(moreover it might be used for passing logging headers to the proxy and so on)
+
+
+### Describe alternatives you've considered
+
+_No response_
+
+### Additional context
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/telegram/request/_httpxrequest.py b/telegram/request/_httpxrequest.py
+index 09898b65e71..09062a2ac56 100644
+--- a/telegram/request/_httpxrequest.py
++++ b/telegram/request/_httpxrequest.py
+@@ -17,16 +17,18 @@
+ # You should have received a copy of the GNU Lesser Public License
+ # along with this program.  If not, see [http://www.gnu.org/licenses/].
+ """This module contains methods to make POST and GET requests using the httpx library."""
+-from typing import Optional, Tuple
++from typing import Optional, Tuple, Union
+ 
+ import httpx
+ 
+ from telegram._utils.defaultvalue import DefaultValue
+ from telegram._utils.logging import get_logger
+ from telegram._utils.types import HTTPVersion, ODVInput
++from telegram._utils.warnings import warn
+ from telegram.error import NetworkError, TimedOut
+ from telegram.request._baserequest import BaseRequest
+ from telegram.request._requestdata import RequestData
++from telegram.warnings import PTBDeprecationWarning
+ 
+ # Note to future devs:
+ # Proxies are currently only tested manually. The httpx development docs have a nice guide on that:
+@@ -49,17 +51,10 @@ class HTTPXRequest(BaseRequest):
+             Note:
+                 Independent of the value, one additional connection will be reserved for
+                 :meth:`telegram.Bot.get_updates`.
+-        proxy_url (:obj:`str`, optional): The URL to the proxy server. For example
+-            ``'http://127.0.0.1:3128'`` or ``'socks5://127.0.0.1:3128'``. Defaults to :obj:`None`.
++        proxy_url (:obj:`str`, optional): Legacy name for :paramref:`proxy`, kept for backward
++            compatibility. Defaults to :obj:`None`.
+ 
+-            Note:
+-                * The proxy URL can also be set via the environment variables ``HTTPS_PROXY`` or
+-                  ``ALL_PROXY``. See `the docs of httpx`_ for more info.
+-                * For Socks5 support, additional dependencies are required. Make sure to install
+-                  PTB via :command:`pip install "python-telegram-bot[socks]"` in this case.
+-                * Socks5 proxies can not be set via environment variables.
+-
+-            .. _the docs of httpx: https://www.python-httpx.org/environment_variables/#proxies
++            .. deprecated:: NEXT.VERSION
+         read_timeout (:obj:`float` | :obj:`None`, optional): If passed, specifies the maximum
+             amount of time (in seconds) to wait for a response from Telegram's server.
+             This value is used unless a different value is passed to :meth:`do_request`.
+@@ -91,6 +86,20 @@ class HTTPXRequest(BaseRequest):
+ 
+             .. versionchanged:: 20.5
+                 Accept ``"2"`` as a valid value.
++        proxy (:obj:`str` | ``httpx.Proxy``, optional): The URL to a proxy server or an
++            ``httpx.Proxy`` object. For example ``'http://127.0.0.1:3128'`` or
++            ``'socks5://127.0.0.1:3128'``. Defaults to :obj:`None`.
++
++            Note:
++                * The proxy URL can also be set via the environment variables ``HTTPS_PROXY`` or
++                  ``ALL_PROXY``. See `the docs of httpx`_ for more info.
++                * For Socks5 support, additional dependencies are required. Make sure to install
++                  PTB via :command:`pip install "python-telegram-bot[socks]"` in this case.
++                * Socks5 proxies can not be set via environment variables.
++
++            .. _the docs of httpx: https://www.python-httpx.org/environment_variables/#proxies
++
++            .. versionadded:: NEXT.VERSION
+ 
+     """
+ 
+@@ -99,13 +108,26 @@ class HTTPXRequest(BaseRequest):
+     def __init__(
+         self,
+         connection_pool_size: int = 1,
+-        proxy_url: Optional[str] = None,
++        proxy_url: Optional[Union[str, httpx.Proxy]] = None,
+         read_timeout: Optional[float] = 5.0,
+         write_timeout: Optional[float] = 5.0,
+         connect_timeout: Optional[float] = 5.0,
+         pool_timeout: Optional[float] = 1.0,
+         http_version: HTTPVersion = "1.1",
++        proxy: Optional[Union[str, httpx.Proxy]] = None,
+     ):
++        if proxy_url is not None and proxy is not None:
++            raise ValueError("The parameters `proxy_url` and `proxy` are mutually exclusive.")
++
++        if proxy_url is not None:
++            proxy = proxy_url
++            warn(
++                "The parameter `proxy_url` is deprecated since version NEXT.VERSION. Use `proxy` "
++                "instead.",
++                PTBDeprecationWarning,
++                stacklevel=2,
++            )
++
+         self._http_version = http_version
+         timeout = httpx.Timeout(
+             connect=connect_timeout,
+@@ -127,7 +149,7 @@ def __init__(
+         # for why we need to use `dict()` here.
+         self._client_kwargs = dict(  # pylint: disable=use-dict-literal  # noqa: C408
+             timeout=timeout,
+-            proxies=proxy_url,
++            proxies=proxy,
+             limits=limits,
+             http1=http1,
+             http2=not http1,
+diff --git a/tests/request/test_request.py b/tests/request/test_request.py
+index 9334f7b769b..984b3ffaa07 100644
+--- a/tests/request/test_request.py
++++ b/tests/request/test_request.py
+@@ -42,6 +42,7 @@
+     TimedOut,
+ )
+ from telegram.request._httpxrequest import HTTPXRequest
++from telegram.warnings import PTBDeprecationWarning
+ from tests.auxil.envvars import TEST_WITH_OPT_DEPS
+ from tests.auxil.slots import mro_slots
+ 
+@@ -78,7 +79,7 @@ async def httpx_request():
+ class TestNoSocksHTTP2WithoutRequest:
+     async def test_init(self, bot):
+         with pytest.raises(RuntimeError, match=r"python-telegram-bot\[socks\]"):
+-            HTTPXRequest(proxy_url="socks5://foo")
++            HTTPXRequest(proxy="socks5://foo")
+         with pytest.raises(RuntimeError, match=r"python-telegram-bot\[http2\]"):
+             HTTPXRequest(http_version="2")
+ 
+@@ -117,7 +118,7 @@ def __init__(self, *args, **kwargs):
+ 
+         # Make sure that other exceptions are forwarded
+         with pytest.raises(ImportError, match=r"Other Error Message"):
+-            HTTPXRequest(proxy_url="socks5://foo")
++            HTTPXRequest(proxy="socks5://foo")
+ 
+     def test_slot_behaviour(self):
+         inst = HTTPXRequest()
+@@ -380,18 +381,29 @@ class Client:
+ 
+         request = HTTPXRequest(
+             connection_pool_size=42,
+-            proxy_url="proxy_url",
++            proxy="proxy",
+             connect_timeout=43,
+             read_timeout=44,
+             write_timeout=45,
+             pool_timeout=46,
+         )
+-        assert request._client.proxies == "proxy_url"
++        assert request._client.proxies == "proxy"
+         assert request._client.limits == httpx.Limits(
+             max_connections=42, max_keepalive_connections=42
+         )
+         assert request._client.timeout == httpx.Timeout(connect=43, read=44, write=45, pool=46)
+ 
++    def test_proxy_mutually_exclusive(self):
++        with pytest.raises(ValueError, match="mutually exclusive"):
++            HTTPXRequest(proxy="proxy", proxy_url="proxy_url")
++
++    def test_proxy_url_deprecation_warning(self, recwarn):
++        HTTPXRequest(proxy_url="http://127.0.0.1:3128")
++        assert len(recwarn) == 1
++        assert recwarn[0].category is PTBDeprecationWarning
++        assert "`proxy_url` is deprecated" in str(recwarn[0].message)
++        assert recwarn[0].filename == __file__, "incorrect stacklevel"
++
+     async def test_multiple_inits_and_shutdowns(self, monkeypatch):
+         self.test_flag = defaultdict(int)
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

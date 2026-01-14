@@ -1,0 +1,2172 @@
+  Task-ID: cvat-ai__cvat-4062@ff04d8f
+  Please checkout to this commit first: 40f05b27f1a8592cc872ede7aa33591fd3f82e28
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Circle/Ellipse-shape annotation
+Hi,
+
+I am trying to label some circular objects. It would be nice if CVAT supports ellipse and/or circle annotation. 
+
+The following shapes would be useful:
+- Center circle (two points: center and point on circle)
+- Three-point circle (three points on circle)
+- Center ellipse (three points: center, long axis point, and short axis point)
+
+Thank you!
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 2d6f3b2a75fb..7bdd38a997a8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ - User is able to customize information that text labels show (<https://github.com/openvinotoolkit/cvat/pull/4029>)
+ - Support for uploading manifest with any name (<https://github.com/openvinotoolkit/cvat/pull/4041>)
+ - Added information about OpenVINO toolkit to login page (<https://github.com/openvinotoolkit/cvat/pull/4077>)
++- Support for working with ellipses (<https://github.com/openvinotoolkit/cvat/pull/4062>)
+ 
+ ### Changed
+ - Users don't have access to a task object anymore if they are assigneed only on some jobs of the task (<https://github.com/openvinotoolkit/cvat/pull/3788>)
+diff --git a/cvat-canvas/package-lock.json b/cvat-canvas/package-lock.json
+index fc32d85d1cdf..6806cf71dc1f 100644
+--- a/cvat-canvas/package-lock.json
++++ b/cvat-canvas/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "cvat-canvas",
+-  "version": "2.11.1",
++  "version": "2.12.0",
+   "lockfileVersion": 2,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "cvat-canvas",
+-      "version": "2.11.1",
++      "version": "2.12.0",
+       "license": "MIT",
+       "dependencies": {
+         "@types/polylabel": "^1.0.5",
+diff --git a/cvat-canvas/package.json b/cvat-canvas/package.json
+index 4f0d4b72253c..0cfc1bc4ee3c 100644
+--- a/cvat-canvas/package.json
++++ b/cvat-canvas/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cvat-canvas",
+-  "version": "2.11.1",
++  "version": "2.12.0",
+   "description": "Part of Computer Vision Annotation Tool which presents its canvas library",
+   "main": "src/canvas.ts",
+   "scripts": {
+diff --git a/cvat-canvas/src/typescript/autoborderHandler.ts b/cvat-canvas/src/typescript/autoborderHandler.ts
+index e6f8fe0adb47..625317cf3cce 100644
+--- a/cvat-canvas/src/typescript/autoborderHandler.ts
++++ b/cvat-canvas/src/typescript/autoborderHandler.ts
+@@ -253,6 +253,10 @@ export class AutoborderHandlerImpl implements AutoborderHandler {
+                 let points = '';
+                 if (shape.tagName === 'polyline' || shape.tagName === 'polygon') {
+                     points = shape.getAttribute('points');
++                } else if (shape.tagName === 'ellipse') {
++                    const cx = +shape.getAttribute('cx');
++                    const cy = +shape.getAttribute('cy');
++                    points = `${cx},${cy}`;
+                 } else if (shape.tagName === 'rect') {
+                     const x = +shape.getAttribute('x');
+                     const y = +shape.getAttribute('y');
+diff --git a/cvat-canvas/src/typescript/canvasView.ts b/cvat-canvas/src/typescript/canvasView.ts
+index 220a82100eef..08b877e3d677 100644
+--- a/cvat-canvas/src/typescript/canvasView.ts
++++ b/cvat-canvas/src/typescript/canvasView.ts
+@@ -25,6 +25,7 @@ import {
+     translateToSVG,
+     translateFromSVG,
+     translateToCanvas,
++    translateFromCanvas,
+     pointsToNumberArray,
+     parsePoints,
+     displayShapeSize,
+@@ -33,6 +34,7 @@ import {
+     ShapeSizeElement,
+     DrawnState,
+     rotate2DPoints,
++    readPointsFromShape,
+ } from './shared';
+ import {
+     CanvasModel,
+@@ -88,7 +90,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+     private activeElement: ActiveElement;
+     private configuration: Configuration;
+     private snapToAngleResize: number;
+-    private serviceFlags: {
++    private innerObjectsFlags: {
+         drawHidden: Record<number, boolean>;
+     };
+ 
+@@ -112,7 +114,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+ 
+     private translateFromCanvas(points: number[]): number[] {
+         const { offset } = this.controller.geometry;
+-        return points.map((coord: number): number => coord - offset);
++        return translateFromCanvas(offset, points);
+     }
+ 
+     private translatePointsFromRotatedShape(shape: SVG.Shape, points: number[]): number[] {
+@@ -158,12 +160,12 @@ export class CanvasViewImpl implements CanvasView, Listener {
+         }, '');
+     }
+ 
+-    private isServiceHidden(clientID: number): boolean {
+-        return this.serviceFlags.drawHidden[clientID] || false;
++    private isInnerHidden(clientID: number): boolean {
++        return this.innerObjectsFlags.drawHidden[clientID] || false;
+     }
+ 
+-    private setupServiceHidden(clientID: number, value: boolean): void {
+-        this.serviceFlags.drawHidden[clientID] = value;
++    private setupInnerFlags(clientID: number, path: 'drawHidden', value: boolean): void {
++        this.innerObjectsFlags[path][clientID] = value;
+         const shape = this.svgShapes[clientID];
+         const text = this.svgTexts[clientID];
+         const state = this.drawnStates[clientID];
+@@ -179,7 +181,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                 text.addClass('cvat_canvas_hidden');
+             }
+         } else {
+-            delete this.serviceFlags.drawHidden[clientID];
++            delete this.innerObjectsFlags[path][clientID];
+ 
+             if (state) {
+                 if (!state.outside && !state.hidden) {
+@@ -236,10 +238,11 @@ export class CanvasViewImpl implements CanvasView, Listener {
+     }
+ 
+     private onDrawDone(data: any | null, duration: number, continueDraw?: boolean): void {
+-        const hiddenBecauseOfDraw = Object.keys(this.serviceFlags.drawHidden).map((_clientID): number => +_clientID);
++        const hiddenBecauseOfDraw = Object.keys(this.innerObjectsFlags.drawHidden)
++            .map((_clientID): number => +_clientID);
+         if (hiddenBecauseOfDraw.length) {
+             for (const hidden of hiddenBecauseOfDraw) {
+-                this.setupServiceHidden(hidden, false);
++                this.setupInnerFlags(hidden, 'drawHidden', false);
+             }
+         }
+ 
+@@ -967,7 +970,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+         this.configuration = model.configuration;
+         this.mode = Mode.IDLE;
+         this.snapToAngleResize = consts.SNAP_TO_ANGLE_RESIZE_DEFAULT;
+-        this.serviceFlags = {
++        this.innerObjectsFlags = {
+             drawHidden: {},
+         };
+ 
+@@ -1367,7 +1370,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                 this.canvas.style.cursor = 'crosshair';
+                 this.mode = Mode.DRAW;
+                 if (typeof data.redraw === 'number') {
+-                    this.setupServiceHidden(data.redraw, true);
++                    this.setupInnerFlags(data.redraw, 'drawHidden', true);
+                 }
+                 this.drawHandler.draw(data, this.geometry);
+             } else {
+@@ -1544,6 +1547,12 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                     ctx.fill();
+                 }
+ 
++                if (state.shapeType === 'ellipse') {
++                    const [cx, cy, rightX, topY] = state.points;
++                    ctx.ellipse(cx, cy, rightX - cx, cy - topY, 0, 0, 2 * Math.PI);
++                    ctx.fill();
++                }
++
+                 if (state.shapeType === 'cuboid') {
+                     for (let i = 0; i < 5; i++) {
+                         const points = [
+@@ -1596,7 +1605,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+             const drawnState = this.drawnStates[clientID];
+             const shape = this.svgShapes[state.clientID];
+             const text = this.svgTexts[state.clientID];
+-            const isInvisible = state.hidden || state.outside || this.isServiceHidden(state.clientID);
++            const isInvisible = state.hidden || state.outside || this.isInnerHidden(state.clientID);
+ 
+             if (drawnState.hidden !== state.hidden || drawnState.outside !== state.outside) {
+                 if (isInvisible) {
+@@ -1659,6 +1668,12 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                         width: xbr - xtl,
+                         height: ybr - ytl,
+                     });
++                } else if (state.shapeType === 'ellipse') {
++                    const [cx, cy] = translatedPoints;
++                    const [rx, ry] = [translatedPoints[2] - cx, cy - translatedPoints[3]];
++                    shape.attr({
++                        cx, cy, rx, ry,
++                    });
+                 } else {
+                     const stringified = this.stringifyToCanvas(translatedPoints);
+                     if (state.shapeType !== 'cuboid') {
+@@ -1728,6 +1743,8 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                     this.svgShapes[state.clientID] = this.addPolyline(stringified, state);
+                 } else if (state.shapeType === 'points') {
+                     this.svgShapes[state.clientID] = this.addPoints(stringified, state);
++                } else if (state.shapeType === 'ellipse') {
++                    this.svgShapes[state.clientID] = this.addEllipse(stringified, state);
+                 } else if (state.shapeType === 'cuboid') {
+                     this.svgShapes[state.clientID] = this.addCuboid(stringified, state);
+                 } else {
+@@ -1933,10 +1950,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                     if (Math.sqrt(dx2 + dy2) >= delta) {
+                         // these points does not take into account possible transformations, applied on the element
+                         // so, if any (like rotation) we need to map them to canvas coordinate space
+-                        let points = pointsToNumberArray(
+-                            shape.attr('points') || `${shape.attr('x')},${shape.attr('y')} ` +
+-                                `${shape.attr('x') + shape.attr('width')},${shape.attr('y') + shape.attr('height')}`,
+-                        );
++                        let points = readPointsFromShape(shape);
+ 
+                         // let's keep current points, but they could be rewritten in updateObjects
+                         this.drawnStates[clientID].points = this.translateFromCanvas(points);
+@@ -2021,10 +2035,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+ 
+                     // these points does not take into account possible transformations, applied on the element
+                     // so, if any (like rotation) we need to map them to canvas coordinate space
+-                    let points = pointsToNumberArray(
+-                        shape.attr('points') || `${shape.attr('x')},${shape.attr('y')} ` +
+-                            `${shape.attr('x') + shape.attr('width')},${shape.attr('y') + shape.attr('height')}`,
+-                    );
++                    let points = readPointsFromShape(shape);
+ 
+                     // let's keep current points, but they could be rewritten in updateObjects
+                     this.drawnStates[clientID].points = this.translateFromCanvas(points);
+@@ -2101,6 +2112,10 @@ export class CanvasViewImpl implements CanvasView, Listener {
+                 // for rectangle finding a center is simple
+                 cx = +shape.attr('x') + +shape.attr('width') / 2;
+                 cy = +shape.attr('y') + +shape.attr('height') / 2;
++            } else if (shape.type === 'ellipse') {
++                // even simpler for ellipses
++                cx = +shape.attr('cx');
++                cy = +shape.attr('cy');
+             } else {
+                 // for polyshapes we use special algorithm
+                 const points = parsePoints(pointsToNumberArray(shape.attr('points')));
+@@ -2247,7 +2262,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+             rect.addClass('cvat_canvas_shape_occluded');
+         }
+ 
+-        if (state.hidden || state.outside || this.isServiceHidden(state.clientID)) {
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
+             rect.addClass('cvat_canvas_hidden');
+         }
+ 
+@@ -2273,7 +2288,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+             polygon.addClass('cvat_canvas_shape_occluded');
+         }
+ 
+-        if (state.hidden || state.outside || this.isServiceHidden(state.clientID)) {
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
+             polygon.addClass('cvat_canvas_hidden');
+         }
+ 
+@@ -2299,7 +2314,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+             polyline.addClass('cvat_canvas_shape_occluded');
+         }
+ 
+-        if (state.hidden || state.outside || this.isServiceHidden(state.clientID)) {
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
+             polyline.addClass('cvat_canvas_hidden');
+         }
+ 
+@@ -2326,7 +2341,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+             cube.addClass('cvat_canvas_shape_occluded');
+         }
+ 
+-        if (state.hidden || state.outside || this.isServiceHidden(state.clientID)) {
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
+             cube.addClass('cvat_canvas_hidden');
+         }
+ 
+@@ -2359,6 +2374,39 @@ export class CanvasViewImpl implements CanvasView, Listener {
+         return group;
+     }
+ 
++    private addEllipse(points: string, state: any): SVG.Rect {
++        const [cx, cy, rightX, topY] = points.split(/[/,\s]/g).map((coord) => +coord);
++        const [rx, ry] = [rightX - cx, cy - topY];
++        const rect = this.adoptedContent
++            .ellipse(rx * 2, ry * 2)
++            .attr({
++                clientID: state.clientID,
++                'color-rendering': 'optimizeQuality',
++                id: `cvat_canvas_shape_${state.clientID}`,
++                fill: state.color,
++                'shape-rendering': 'geometricprecision',
++                stroke: state.color,
++                'stroke-width': consts.BASE_STROKE_WIDTH / this.geometry.scale,
++                'data-z-order': state.zOrder,
++            })
++            .center(cx, cy)
++            .addClass('cvat_canvas_shape');
++
++        if (state.rotation) {
++            rect.rotate(state.rotation);
++        }
++
++        if (state.occluded) {
++            rect.addClass('cvat_canvas_shape_occluded');
++        }
++
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
++            rect.addClass('cvat_canvas_hidden');
++        }
++
++        return rect;
++    }
++
+     private addPoints(points: string, state: any): SVG.PolyLine {
+         const shape = this.adoptedContent
+             .polyline(points)
+@@ -2375,7 +2423,7 @@ export class CanvasViewImpl implements CanvasView, Listener {
+ 
+         const group = this.setupPoints(shape, state);
+ 
+-        if (state.hidden || state.outside || this.isServiceHidden(state.clientID)) {
++        if (state.hidden || state.outside || this.isInnerHidden(state.clientID)) {
+             group.addClass('cvat_canvas_hidden');
+         }
+ 
+diff --git a/cvat-canvas/src/typescript/drawHandler.ts b/cvat-canvas/src/typescript/drawHandler.ts
+index 2f49eeb15af5..ce573af7a8d8 100644
+--- a/cvat-canvas/src/typescript/drawHandler.ts
++++ b/cvat-canvas/src/typescript/drawHandler.ts
+@@ -16,6 +16,7 @@ import {
+     Box,
+     Point,
+     readPointsFromShape,
++    clamp,
+ } from './shared';
+ import Crosshair from './crosshair';
+ import consts from './consts';
+@@ -56,6 +57,11 @@ function checkConstraint(shapeType: string, points: number[], box: Box | null =
+         return points.length > 2 || (points.length === 2 && points[0] !== 0 && points[1] !== 0);
+     }
+ 
++    if (shapeType === 'ellipse') {
++        const [rx, ry] = [points[2] - points[0], points[1] - points[3]];
++        return rx * ry * Math.PI >= consts.AREA_THRESHOLD;
++    }
++
+     if (shapeType === 'cuboid') {
+         return points.length === 4 * 2 || points.length === 8 * 2 ||
+             (points.length === 2 * 2 && (points[2] - points[0]) * (points[3] - points[1]) >= consts.AREA_THRESHOLD);
+@@ -89,6 +95,19 @@ export class DrawHandlerImpl implements DrawHandler {
+     private pointsGroup: SVG.G | null;
+     private shapeSizeElement: ShapeSizeElement;
+ 
++    private getFinalEllipseCoordinates(points: number[], fitIntoFrame: boolean): number[] {
++        const { offset } = this.geometry;
++        const [cx, cy, rightX, topY] = points.map((coord: number) => coord - offset);
++        const [rx, ry] = [rightX - cx, cy - topY];
++        const frameWidth = this.geometry.image.width;
++        const frameHeight = this.geometry.image.height;
++        const [fitCX, fitCY] = fitIntoFrame ?
++            [clamp(cx, 0, frameWidth), clamp(cy, 0, frameHeight)] : [cx, cy];
++        const [fitRX, fitRY] = fitIntoFrame ?
++            [Math.min(rx, frameWidth - cx, cx), Math.min(ry, frameHeight - cy, cy)] : [rx, ry];
++        return [fitCX, fitCY, fitCX + fitRX, fitCY - fitRY];
++    }
++
+     private getFinalRectCoordinates(points: number[], fitIntoFrame: boolean): number[] {
+         const frameWidth = this.geometry.image.width;
+         const frameHeight = this.geometry.image.height;
+@@ -403,6 +422,34 @@ export class DrawHandlerImpl implements DrawHandler {
+             });
+     }
+ 
++    private drawEllipse(): void {
++        this.drawInstance = (this.canvas as any).ellipse()
++            .addClass('cvat_canvas_shape_drawing')
++            .attr({
++                'stroke-width': consts.BASE_STROKE_WIDTH / this.geometry.scale,
++                'fill-opacity': this.configuration.creationOpacity,
++            })
++            .on('drawstop', (e: Event): void => {
++                const points = this.getFinalEllipseCoordinates(
++                    readPointsFromShape((e.target as any as { instance: SVG.Ellipse }).instance), false,
++                );
++                const { shapeType, redraw: clientID } = this.drawData;
++                this.release();
++
++                if (this.canceled) return;
++                if (checkConstraint('ellipse', points)) {
++                    this.onDrawDone(
++                        {
++                            clientID,
++                            shapeType,
++                            points,
++                        },
++                        Date.now() - this.startTimestamp,
++                    );
++                }
++            });
++    }
++
+     private drawBoxBy4Points(): void {
+         let numberOfPoints = 0;
+         this.drawInstance = (this.canvas as any)
+@@ -505,7 +552,7 @@ export class DrawHandlerImpl implements DrawHandler {
+             }
+         });
+ 
+-        // We need scale just drawn points
++        // We need to scale points that have been just drawn
+         this.drawInstance.on('drawstart drawpoint', (e: CustomEvent): void => {
+             this.transform(this.geometry);
+             lastDrawnPoint.x = e.detail.event.clientX;
+@@ -704,6 +751,45 @@ export class DrawHandlerImpl implements DrawHandler {
+         });
+     }
+ 
++    private pasteEllipse([cx, cy, rx, ry]: number[], rotation: number): void {
++        this.drawInstance = (this.canvas as any)
++            .ellipse(rx * 2, ry * 2)
++            .center(cx, cy)
++            .addClass('cvat_canvas_shape_drawing')
++            .attr({
++                'stroke-width': consts.BASE_STROKE_WIDTH / this.geometry.scale,
++                'fill-opacity': this.configuration.creationOpacity,
++            }).rotate(rotation);
++        this.pasteShape();
++
++        this.drawInstance.on('done', (e: CustomEvent): void => {
++            const points = this.getFinalEllipseCoordinates(
++                readPointsFromShape((e.target as any as { instance: SVG.Ellipse }).instance), false,
++            );
++
++            if (!e.detail.originalEvent.ctrlKey) {
++                this.release();
++            }
++
++            if (checkConstraint('ellipse', points)) {
++                this.onDrawDone(
++                    {
++                        shapeType: this.drawData.initialState.shapeType,
++                        objectType: this.drawData.initialState.objectType,
++                        points,
++                        occluded: this.drawData.initialState.occluded,
++                        attributes: { ...this.drawData.initialState.attributes },
++                        label: this.drawData.initialState.label,
++                        color: this.drawData.initialState.color,
++                        rotation: this.drawData.initialState.rotation,
++                    },
++                    Date.now() - this.startTimestamp,
++                    e.detail.originalEvent.ctrlKey,
++                );
++            }
++        });
++    }
++
+     private pastePolygon(points: string): void {
+         this.drawInstance = (this.canvas as any)
+             .polygon(points)
+@@ -819,6 +905,12 @@ export class DrawHandlerImpl implements DrawHandler {
+                     width: xbr - xtl,
+                     height: ybr - ytl,
+                 }, this.drawData.initialState.rotation);
++            } else if (this.drawData.shapeType === 'ellipse') {
++                const [cx, cy, rightX, topY] = this.drawData.initialState.points.map(
++                    (coord: number): number => coord + offset,
++                );
++
++                this.pasteEllipse([cx, cy, rightX - cx, cy - topY], this.drawData.initialState.rotation);
+             } else {
+                 const points = this.drawData.initialState.points.map((coord: number): number => coord + offset);
+                 const stringifiedPoints = stringifyPoints(points);
+@@ -837,12 +929,10 @@ export class DrawHandlerImpl implements DrawHandler {
+         } else {
+             if (this.drawData.shapeType === 'rectangle') {
+                 if (this.drawData.rectDrawingMethod === RectDrawingMethod.EXTREME_POINTS) {
+-                    // draw box by extreme clicking
+-                    this.drawBoxBy4Points();
++                    this.drawBoxBy4Points(); // draw box by extreme clicking
+                 } else {
+-                    // default box drawing
+-                    this.drawBox();
+-                    // Draw instance was initialized after drawBox();
++                    this.drawBox(); // default box drawing
++                    // draw instance was initialized after drawBox();
+                     this.shapeSizeElement = displayShapeSize(this.canvas, this.text);
+                 }
+             } else if (this.drawData.shapeType === 'polygon') {
+@@ -851,6 +941,8 @@ export class DrawHandlerImpl implements DrawHandler {
+                 this.drawPolyline();
+             } else if (this.drawData.shapeType === 'points') {
+                 this.drawPoints();
++            } else if (this.drawData.shapeType === 'ellipse') {
++                this.drawEllipse();
+             } else if (this.drawData.shapeType === 'cuboid') {
+                 if (this.drawData.cuboidDrawingMethod === CuboidDrawingMethod.CORNER_POINTS) {
+                     this.drawCuboidBy4Points();
+diff --git a/cvat-canvas/src/typescript/shared.ts b/cvat-canvas/src/typescript/shared.ts
+index d4c65b5383cd..cd19634c2ba9 100644
+--- a/cvat-canvas/src/typescript/shared.ts
++++ b/cvat-canvas/src/typescript/shared.ts
+@@ -235,4 +235,8 @@ export function translateToCanvas(offset: number, points: number[]): number[] {
+     return points.map((coord: number): number => coord + offset);
+ }
+ 
++export function translateFromCanvas(offset: number, points: number[]): number[] {
++    return points.map((coord: number): number => coord - offset);
++}
++
+ export type PropType<T, Prop extends keyof T> = T[Prop];
+diff --git a/cvat-core/package-lock.json b/cvat-core/package-lock.json
+index 83da7a13a26a..04aef69db26b 100644
+--- a/cvat-core/package-lock.json
++++ b/cvat-core/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "cvat-core",
+-  "version": "4.0.1",
++  "version": "4.1.0",
+   "lockfileVersion": 2,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "cvat-core",
+-      "version": "4.0.1",
++      "version": "4.1.0",
+       "license": "MIT",
+       "dependencies": {
+         "axios": "^0.21.4",
+diff --git a/cvat-core/package.json b/cvat-core/package.json
+index 3374b7f07fd9..2f9c6d62ca27 100644
+--- a/cvat-core/package.json
++++ b/cvat-core/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cvat-core",
+-  "version": "4.0.1",
++  "version": "4.1.0",
+   "description": "Part of Computer Vision Tool which presents an interface for client-side integration",
+   "main": "babel.config.js",
+   "scripts": {
+diff --git a/cvat-core/src/annotations-collection.js b/cvat-core/src/annotations-collection.js
+index baae718b3176..e4097adb48bc 100644
+--- a/cvat-core/src/annotations-collection.js
++++ b/cvat-core/src/annotations-collection.js
+@@ -8,11 +8,13 @@
+         PolygonShape,
+         PolylineShape,
+         PointsShape,
++        EllipseShape,
+         CuboidShape,
+         RectangleTrack,
+         PolygonTrack,
+         PolylineTrack,
+         PointsTrack,
++        EllipseTrack,
+         CuboidTrack,
+         Track,
+         Shape,
+@@ -48,6 +50,9 @@
+             case 'points':
+                 shapeModel = new PointsShape(shapeData, clientID, color, injection);
+                 break;
++            case 'ellipse':
++                shapeModel = new EllipseShape(shapeData, clientID, color, injection);
++                break;
+             case 'cuboid':
+                 shapeModel = new CuboidShape(shapeData, clientID, color, injection);
+                 break;
+@@ -77,6 +82,9 @@
+                 case 'points':
+                     trackModel = new PointsTrack(trackData, clientID, color, injection);
+                     break;
++                case 'ellipse':
++                    trackModel = new EllipseTrack(trackData, clientID, color, injection);
++                    break;
+                 case 'cuboid':
+                     trackModel = new CuboidTrack(trackData, clientID, color, injection);
+                     break;
+@@ -615,6 +623,10 @@
+                     shape: 0,
+                     track: 0,
+                 },
++                ellipse: {
++                    shape: 0,
++                    track: 0,
++                },
+                 cuboid: {
+                     shape: 0,
+                     track: 0,
+diff --git a/cvat-core/src/annotations-objects.js b/cvat-core/src/annotations-objects.js
+index f33221446970..c0bb48770c25 100644
+--- a/cvat-core/src/annotations-objects.js
++++ b/cvat-core/src/annotations-objects.js
+@@ -47,13 +47,28 @@
+             }
+         } else if (shapeType === ObjectShape.CUBOID) {
+             if (points.length / 2 !== 8) {
+-                throw new DataError(`Points must have exact 8 points, but got ${points.length / 2}`);
++                throw new DataError(`Cuboid must have 8 points, but got ${points.length / 2}`);
++            }
++        } else if (shapeType === ObjectShape.ELLIPSE) {
++            if (points.length / 2 !== 2) {
++                throw new DataError(`Ellipse must have 1 point, rx and ry but got ${points.toString()}`);
+             }
+         } else {
+             throw new ArgumentError(`Unknown value of shapeType has been received ${shapeType}`);
+         }
+     }
+ 
++    function findAngleDiff(rightAngle, leftAngle) {
++        let angleDiff = rightAngle - leftAngle;
++        angleDiff = ((angleDiff + 180) % 360) - 180;
++        if (Math.abs(angleDiff) >= 180) {
++            // if the main arc is bigger than 180, go another arc
++            // to find it, just substract absolute value from 360 and inverse sign
++            angleDiff = 360 - Math.abs(angleDiff) * Math.sign(angleDiff) * -1;
++        }
++        return angleDiff;
++    }
++
+     function checkShapeArea(shapeType, points) {
+         const MIN_SHAPE_LENGTH = 3;
+         const MIN_SHAPE_AREA = 9;
+@@ -62,6 +77,12 @@
+             return true;
+         }
+ 
++        if (shapeType === ObjectShape.ELLIPSE) {
++            const [cx, cy, rightX, topY] = points;
++            const [rx, ry] = [rightX - cx, cy - topY];
++            return rx * ry * Math.PI > MIN_SHAPE_AREA;
++        }
++
+         let xmin = Number.MAX_SAFE_INTEGER;
+         let xmax = Number.MIN_SAFE_INTEGER;
+         let ymin = Number.MAX_SAFE_INTEGER;
+@@ -76,7 +97,6 @@
+ 
+         if (shapeType === ObjectShape.POLYLINE) {
+             const length = Math.max(xmax - xmin, ymax - ymin);
+-
+             return length >= MIN_SHAPE_LENGTH;
+         }
+ 
+@@ -96,7 +116,7 @@
+         checkObjectType('rotation', rotation, 'number', null);
+         points.forEach((coordinate) => checkObjectType('coordinate', coordinate, 'number', null));
+ 
+-        if (shapeType === ObjectShape.CUBOID || !!rotation) {
++        if (shapeType === ObjectShape.CUBOID || ObjectShape.ELLIPSE || !!rotation) {
+             // cuboids and rotated bounding boxes cannot be fitted
+             return points;
+         }
+@@ -1393,6 +1413,62 @@
+         }
+     }
+ 
++    class EllipseShape extends Shape {
++        constructor(data, clientID, color, injection) {
++            super(data, clientID, color, injection);
++            this.shapeType = ObjectShape.ELLIPSE;
++            this.pinned = false;
++            checkNumberOfPoints(this.shapeType, this.points);
++        }
++
++        static distance(points, x, y, angle) {
++            const [cx, cy, rightX, topY] = points;
++            const [rx, ry] = [rightX - cx, cy - topY];
++            const [rotX, rotY] = rotatePoint(x, y, -angle, cx, cy);
++            // https://math.stackexchange.com/questions/76457/check-if-a-point-is-within-an-ellipse
++            const pointWithinEllipse = (_x, _y) => (
++                ((_x - cx) ** 2) / rx ** 2) + (((_y - cy) ** 2) / ry ** 2
++            ) <= 1;
++
++            if (!pointWithinEllipse(rotX, rotY)) {
++                // Cursor is outside of an ellipse
++                return null;
++            }
++
++            if (Math.abs(x - cx) < Number.EPSILON && Math.abs(y - cy) < Number.EPSILON) {
++                // cursor is near to the center, just return minimum of height, width
++                return Math.min(rx, ry);
++            }
++
++            // ellipse equation is x^2/rx^2 + y^2/ry^2 = 1
++            // from this equation:
++            // x^2 = ((rx * ry)^2 - (y * rx)^2) / ry^2
++            // y^2 = ((rx * ry)^2 - (x * ry)^2) / rx^2
++
++            // we have one point inside the ellipse, let's build two lines (horizontal and vertical) through the point
++            // and find their interception with ellipse
++            const x2Equation = (_y) => (((rx * ry) ** 2) - ((_y * rx) ** 2)) / (ry ** 2);
++            const y2Equation = (_x) => (((rx * ry) ** 2) - ((_x * ry) ** 2)) / (rx ** 2);
++
++            // shift x,y to the ellipse coordinate system to compute equation correctly
++            // y axis is inverted
++            const [shiftedX, shiftedY] = [x - cx, cy - y];
++            const [x1, x2] = [Math.sqrt(x2Equation(shiftedY)), -Math.sqrt(x2Equation(shiftedY))];
++            const [y1, y2] = [Math.sqrt(y2Equation(shiftedX)), -Math.sqrt(y2Equation(shiftedX))];
++
++            // found two points on ellipse edge
++            const ellipseP1X = shiftedX >= 0 ? x1 : x2; // ellipseP1Y is shiftedY
++            const ellipseP2Y = shiftedY >= 0 ? y1 : y2; // ellipseP1X is shiftedX
++
++            // found diffs between two points on edges and target point
++            const diff1X = ellipseP1X - shiftedX;
++            const diff2Y = ellipseP2Y - shiftedY;
++
++            // return minimum, get absolute value because we need distance, not diff
++            return Math.min(Math.abs(diff1X), Math.abs(diff2Y));
++        }
++    }
++
+     class PolyShape extends Shape {
+         constructor(data, clientID, color, injection) {
+             super(data, clientID, color, injection);
+@@ -1668,17 +1744,31 @@
+         }
+ 
+         interpolatePosition(leftPosition, rightPosition, offset) {
+-            function findAngleDiff(rightAngle, leftAngle) {
+-                let angleDiff = rightAngle - leftAngle;
+-                angleDiff = ((angleDiff + 180) % 360) - 180;
+-                if (Math.abs(angleDiff) >= 180) {
+-                    // if the main arc is bigger than 180, go another arc
+-                    // to find it, just substract absolute value from 360 and inverse sign
+-                    angleDiff = 360 - Math.abs(angleDiff) * Math.sign(angleDiff) * -1;
+-                }
+-                return angleDiff;
++            const positionOffset = leftPosition.points.map((point, index) => rightPosition.points[index] - point);
++            return {
++                points: leftPosition.points.map((point, index) => point + positionOffset[index] * offset),
++                rotation:
++                    (leftPosition.rotation + findAngleDiff(
++                        rightPosition.rotation, leftPosition.rotation,
++                    ) * offset + 360) % 360,
++                occluded: leftPosition.occluded,
++                outside: leftPosition.outside,
++                zOrder: leftPosition.zOrder,
++            };
++        }
++    }
++
++    class EllipseTrack extends Track {
++        constructor(data, clientID, color, injection) {
++            super(data, clientID, color, injection);
++            this.shapeType = ObjectShape.ELLIPSE;
++            this.pinned = false;
++            for (const shape of Object.values(this.shapes)) {
++                checkNumberOfPoints(this.shapeType, shape.points);
+             }
++        }
+ 
++        interpolatePosition(leftPosition, rightPosition, offset) {
+             const positionOffset = leftPosition.points.map((point, index) => rightPosition.points[index] - point);
+ 
+             return {
+@@ -2061,6 +2151,7 @@
+     PolygonTrack.distance = PolygonShape.distance;
+     PolylineTrack.distance = PolylineShape.distance;
+     PointsTrack.distance = PointsShape.distance;
++    EllipseTrack.distance = EllipseShape.distance;
+     CuboidTrack.distance = CuboidShape.distance;
+ 
+     module.exports = {
+@@ -2068,11 +2159,13 @@
+         PolygonShape,
+         PolylineShape,
+         PointsShape,
++        EllipseShape,
+         CuboidShape,
+         RectangleTrack,
+         PolygonTrack,
+         PolylineTrack,
+         PointsTrack,
++        EllipseTrack,
+         CuboidTrack,
+         Track,
+         Shape,
+diff --git a/cvat-core/src/enums.js b/cvat-core/src/enums.js
+index 81cf1099bff0..88d7d5b55330 100644
+--- a/cvat-core/src/enums.js
++++ b/cvat-core/src/enums.js
+@@ -168,6 +168,7 @@
+         POLYGON: 'polygon',
+         POLYLINE: 'polyline',
+         POINTS: 'points',
++        ELLIPSE: 'ellipse',
+         CUBOID: 'cuboid',
+     });
+ 
+diff --git a/cvat-core/src/statistics.js b/cvat-core/src/statistics.js
+index b6ac87d12fb0..2ad6c56914e6 100644
+--- a/cvat-core/src/statistics.js
++++ b/cvat-core/src/statistics.js
+@@ -1,4 +1,4 @@
+-// Copyright (C) 2019-2020 Intel Corporation
++// Copyright (C) 2019-2021 Intel Corporation
+ //
+ // SPDX-License-Identifier: MIT
+ 
+@@ -14,80 +14,88 @@
+                 this,
+                 Object.freeze({
+                     /**
+-                     * Statistics by labels with a structure:
+-                     * @example
+-                     * {
+-                     *     label: {
+-                     *         boxes: {
+-                     *             tracks: 10,
+-                     *             shapes: 11,
+-                     *         },
+-                     *         polygons: {
+-                     *             tracks: 13,
+-                     *             shapes: 14,
+-                     *         },
+-                     *         polylines: {
+-                     *             tracks: 16,
+-                     *             shapes: 17,
+-                     *         },
+-                     *         points: {
+-                     *             tracks: 19,
+-                     *             shapes: 20,
+-                     *         },
+-                     *         cuboids: {
+-                     *             tracks: 21,
+-                     *             shapes: 22,
+-                     *         },
+-                     *         tags: 66,
+-                     *         manually: 186,
+-                     *         interpolated: 500,
+-                     *         total: 608,
+-                     *     }
+-                     * }
+-                     * @name label
+-                     * @type {Object}
+-                     * @memberof module:API.cvat.classes.Statistics
+-                     * @readonly
+-                     * @instance
+-                     */
++                    * Statistics by labels with a structure:
++                    * @example
++                    * {
++                    *     label: {
++                    *         boxes: {
++                    *             tracks: 10,
++                    *             shapes: 11,
++                    *         },
++                    *         polygons: {
++                    *             tracks: 13,
++                    *             shapes: 14,
++                    *         },
++                    *         polylines: {
++                    *             tracks: 16,
++                    *             shapes: 17,
++                    *         },
++                    *         points: {
++                    *             tracks: 19,
++                    *             shapes: 20,
++                    *         },
++                    *         ellipse: {
++                    *             tracks: 13,
++                    *             shapes: 15,
++                    *         },
++                    *         cuboids: {
++                    *             tracks: 21,
++                    *             shapes: 22,
++                    *         },
++                    *         tags: 66,
++                    *         manually: 186,
++                    *         interpolated: 500,
++                    *         total: 608,
++                    *     }
++                    * }
++                    * @name label
++                    * @type {Object}
++                    * @memberof module:API.cvat.classes.Statistics
++                    * @readonly
++                    * @instance
++                    */
+                     label: {
+                         get: () => JSON.parse(JSON.stringify(label)),
+                     },
+                     /**
+-                     * Total statistics (covers all labels) with a structure:
+-                     * @example
+-                     * {
+-                     *     boxes: {
+-                     *             tracks: 10,
+-                     *             shapes: 11,
+-                     *     },
+-                     *     polygons: {
+-                     *         tracks: 13,
+-                     *         shapes: 14,
+-                     *     },
+-                     *     polylines: {
+-                     *        tracks: 16,
+-                     *        shapes: 17,
+-                     *    },
+-                     *    points: {
+-                     *        tracks: 19,
+-                     *        shapes: 20,
+-                     *    },
+-                     *    cuboids: {
+-                     *        tracks: 21,
+-                     *        shapes: 22,
+-                     *    },
+-                     *    tags: 66,
+-                     *    manually: 186,
+-                     *    interpolated: 500,
+-                     *    total: 608,
+-                     * }
+-                     * @name total
+-                     * @type {Object}
+-                     * @memberof module:API.cvat.classes.Statistics
+-                     * @readonly
+-                     * @instance
+-                     */
++                    * Total statistics (covers all labels) with a structure:
++                    * @example
++                    * {
++                    *     boxes: {
++                    *             tracks: 10,
++                    *             shapes: 11,
++                    *     },
++                    *     polygons: {
++                    *         tracks: 13,
++                    *         shapes: 14,
++                    *     },
++                    *     polylines: {
++                    *        tracks: 16,
++                    *        shapes: 17,
++                    *    },
++                    *    points: {
++                    *        tracks: 19,
++                    *        shapes: 20,
++                    *    },
++                    *    ellipse: {
++                    *        tracks: 13,
++                    *        shapes: 15,
++                    *    },
++                    *    cuboids: {
++                    *        tracks: 21,
++                    *        shapes: 22,
++                    *    },
++                    *    tags: 66,
++                    *    manually: 186,
++                    *    interpolated: 500,
++                    *    total: 608,
++                    * }
++                    * @name total
++                    * @type {Object}
++                    * @memberof module:API.cvat.classes.Statistics
++                    * @readonly
++                    * @instance
++                    */
+                     total: {
+                         get: () => JSON.parse(JSON.stringify(total)),
+                     },
+diff --git a/cvat-core/tests/api/annotations.js b/cvat-core/tests/api/annotations.js
+index 4df92a21207d..ab0d716e388f 100644
+--- a/cvat-core/tests/api/annotations.js
++++ b/cvat-core/tests/api/annotations.js
+@@ -30,8 +30,8 @@ describe('Feature: get annotations', () => {
+         const annotations10 = await job.annotations.get(10);
+         expect(Array.isArray(annotations0)).toBeTruthy();
+         expect(Array.isArray(annotations10)).toBeTruthy();
+-        expect(annotations0).toHaveLength(1);
+-        expect(annotations10).toHaveLength(2);
++        expect(annotations0).toHaveLength(2);
++        expect(annotations10).toHaveLength(3);
+         for (const state of annotations0.concat(annotations10)) {
+             expect(state).toBeInstanceOf(window.cvat.classes.ObjectState);
+         }
+@@ -57,7 +57,13 @@ describe('Feature: get annotations', () => {
+         expect(job.annotations.get(-1)).rejects.toThrow(window.cvat.exceptions.ArgumentError);
+     });
+ 
+-    // TODO: Test filter (hasn't been implemented yet)
++    test('get only ellipses', async () => {
++        const job = (await window.cvat.jobs.get({ jobID: 101 }))[0];
++        const annotations = await job.annotations.get(5, false, JSON.parse('[{"and":[{"==":[{"var":"shape"},"ellipse"]}]}]'));
++        expect(Array.isArray(annotations)).toBeTruthy();
++        expect(annotations).toHaveLength(1);
++        expect(annotations[0].shapeType).toBe('ellipse');
++    });
+ });
+ 
+ describe('Feature: get interpolated annotations', () => {
+@@ -65,7 +71,7 @@ describe('Feature: get interpolated annotations', () => {
+         const task = (await window.cvat.tasks.get({ id: 101 }))[0];
+         let annotations = await task.annotations.get(5);
+         expect(Array.isArray(annotations)).toBeTruthy();
+-        expect(annotations).toHaveLength(1);
++        expect(annotations).toHaveLength(2);
+ 
+         const [xtl, ytl, xbr, ybr] = annotations[0].points;
+         const { rotation } = annotations[0];
+@@ -78,7 +84,7 @@ describe('Feature: get interpolated annotations', () => {
+ 
+         annotations = await task.annotations.get(15);
+         expect(Array.isArray(annotations)).toBeTruthy();
+-        expect(annotations).toHaveLength(2); // there is also a polygon on these frames (up to frame 22)
++        expect(annotations).toHaveLength(3);
+         expect(annotations[1].rotation).toBe(40);
+         expect(annotations[1].shapeType).toBe('rectangle');
+ 
+@@ -89,6 +95,19 @@ describe('Feature: get interpolated annotations', () => {
+         expect(annotations[0].rotation).toBe(0);
+         expect(annotations[0].shapeType).toBe('rectangle');
+     });
++
++    test('get interpolated ellipse', async () => {
++        const task = (await window.cvat.tasks.get({ id: 101 }))[0];
++        const annotations = await task.annotations.get(5);
++        expect(Array.isArray(annotations)).toBeTruthy();
++        expect(annotations).toHaveLength(2);
++        expect(annotations[1].shapeType).toBe('ellipse');
++        const [cx, cy, rightX, topY] = annotations[1].points;
++        expect(Math.round(cx)).toBe(550);
++        expect(Math.round(cy)).toBe(550);
++        expect(Math.round(rightX)).toBe(900);
++        expect(Math.round(topY)).toBe(150);
++    });
+ });
+ 
+ describe('Feature: put annotations', () => {
+@@ -136,6 +155,28 @@ describe('Feature: put annotations', () => {
+         expect(annotations).toHaveLength(length + 1);
+     });
+ 
++    test('put an ellipse shape to a job', async () => {
++        const job = (await window.cvat.jobs.get({ jobID: 100 }))[0];
++        let annotations = await job.annotations.get(5);
++        const { length } = annotations;
++
++        const state = new window.cvat.classes.ObjectState({
++            frame: 5,
++            objectType: window.cvat.enums.ObjectType.SHAPE,
++            shapeType: window.cvat.enums.ObjectShape.ELLIPSE,
++            points: [500, 500, 800, 100],
++            occluded: true,
++            label: job.labels[0],
++            zOrder: 0,
++        });
++
++        const indexes = await job.annotations.put([state]);
++        expect(indexes).toBeInstanceOf(Array);
++        expect(indexes).toHaveLength(1);
++        annotations = await job.annotations.get(5);
++        expect(annotations).toHaveLength(length + 1);
++    });
++
+     test('put a track to a task', async () => {
+         const task = (await window.cvat.tasks.get({ id: 101 }))[0];
+         let annotations = await task.annotations.get(1);
+@@ -593,7 +634,7 @@ describe('Feature: split annotations', () => {
+         await task.annotations.split(annotations5[0], 5);
+         const splitted4 = await task.annotations.get(4);
+         const splitted5 = (await task.annotations.get(5)).filter((state) => !state.outside);
+-        expect(splitted4[0].clientID).not.toBe(splitted5[0].clientID);
++        expect(splitted4[1].clientID).not.toBe(splitted5[1].clientID);
+     });
+ 
+     test('split annotations in a job', async () => {
+@@ -605,7 +646,7 @@ describe('Feature: split annotations', () => {
+         await job.annotations.split(annotations5[0], 5);
+         const splitted4 = await job.annotations.get(4);
+         const splitted5 = (await job.annotations.get(5)).filter((state) => !state.outside);
+-        expect(splitted4[0].clientID).not.toBe(splitted5[0].clientID);
++        expect(splitted4[1].clientID).not.toBe(splitted5[1].clientID);
+     });
+ 
+     test('split on a bad frame', async () => {
+@@ -733,7 +774,7 @@ describe('Feature: get statistics', () => {
+         await job.annotations.clear(true);
+         const statistics = await job.annotations.statistics();
+         expect(statistics).toBeInstanceOf(window.cvat.classes.Statistics);
+-        expect(statistics.total.total).toBe(512);
++        expect(statistics.total.total).toBe(1012);
+     });
+ });
+ 
+diff --git a/cvat-core/tests/mocks/dummy-data.mock.js b/cvat-core/tests/mocks/dummy-data.mock.js
+index 18849599216a..f4fdd7895bd5 100644
+--- a/cvat-core/tests/mocks/dummy-data.mock.js
++++ b/cvat-core/tests/mocks/dummy-data.mock.js
+@@ -1830,6 +1830,38 @@ const taskAnnotationsDummyData = {
+                     },
+                 ],
+             },
++
++            {
++                id: 61,
++                frame: 0,
++                label_id: 19,
++                group: 0,
++                shapes: [
++                    {
++                        type: 'ellipse',
++                        occluded: false,
++                        z_order: 1,
++                        points: [500, 500, 800, 100],
++                        rotation: 0,
++                        id: 611,
++                        frame: 0,
++                        outside: false,
++                        attributes: [],
++                    },
++                    {
++                        type: 'ellipse',
++                        occluded: false,
++                        z_order: 1,
++                        points: [600, 600, 1000, 200],
++                        rotation: 0,
++                        id: 612,
++                        frame: 10,
++                        outside: false,
++                        attributes: [],
++                    },
++                ],
++                attributes: [],
++            },
+         ],
+     },
+     100: {
+diff --git a/cvat-ui/package-lock.json b/cvat-ui/package-lock.json
+index fc7c7325d28d..18c2629cfc70 100644
+--- a/cvat-ui/package-lock.json
++++ b/cvat-ui/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "cvat-ui",
+-  "version": "1.32.2",
++  "version": "1.33.0",
+   "lockfileVersion": 2,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "cvat-ui",
+-      "version": "1.32.2",
++      "version": "1.33.0",
+       "license": "MIT",
+       "dependencies": {
+         "@ant-design/icons": "^4.6.3",
+diff --git a/cvat-ui/package.json b/cvat-ui/package.json
+index f6cc3c3b3f0c..c91697277baa 100644
+--- a/cvat-ui/package.json
++++ b/cvat-ui/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cvat-ui",
+-  "version": "1.32.2",
++  "version": "1.33.0",
+   "description": "CVAT single-page application",
+   "main": "src/index.tsx",
+   "scripts": {
+diff --git a/cvat-ui/src/actions/annotation-actions.ts b/cvat-ui/src/actions/annotation-actions.ts
+index f52135e8302a..3911b4e7cc06 100644
+--- a/cvat-ui/src/actions/annotation-actions.ts
++++ b/cvat-ui/src/actions/annotation-actions.ts
+@@ -1515,7 +1515,10 @@ export function repeatDrawShapeAsync(): ThunkAction {
+             activeControl = ActiveControl.DRAW_POLYLINE;
+         } else if (activeShapeType === ShapeType.CUBOID) {
+             activeControl = ActiveControl.DRAW_CUBOID;
++        } else if (activeShapeType === ShapeType.ELLIPSE) {
++            activeControl = ActiveControl.DRAW_ELLIPSE;
+         }
++
+         dispatch({
+             type: AnnotationActionTypes.REPEAT_DRAW_SHAPE,
+             payload: {
+@@ -1533,7 +1536,7 @@ export function repeatDrawShapeAsync(): ThunkAction {
+                 frame: frameNumber,
+             });
+             dispatch(createAnnotationsAsync(jobInstance, frameNumber, [objectState]));
+-        } else {
++        } else if (canvasInstance) {
+             canvasInstance.draw({
+                 enabled: true,
+                 rectDrawingMethod: activeRectDrawingMethod,
+diff --git a/cvat-ui/src/assets/ellipse-icon.svg b/cvat-ui/src/assets/ellipse-icon.svg
+new file mode 100644
+index 000000000000..e617cb6ec897
+--- /dev/null
++++ b/cvat-ui/src/assets/ellipse-icon.svg
+@@ -0,0 +1,22 @@
++<!-- Downloaded from: https://www.svgrepo.com/svg/253277/vector-ellipse, CC0 License -->
++<svg width="40" height="40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 512 512" style="enable-background:new 0 0 512 512;" xml:space="preserve">
++	<g>
++		<g>
++			<path d="M503.47,231.292h-19.628c-22.657-62.638-105.58-108.515-210.691-116.371V94.806c0-4.709-3.822-8.53-8.53-8.53h-51.182
++				c-4.709,0-8.53,3.822-8.53,8.53v21.138C87.138,128.714,0,193.264,0,269.678c0,86.046,111.014,156.046,247.465,156.046
++				c127.776,0,221.943-50.389,237.766-126.189h18.238c4.709,0,8.53-3.822,8.53-8.53v-51.182
++				C512,235.113,508.187,231.292,503.47,231.292z M221.968,103.337h34.121v34.121h-34.121V103.337z M247.465,408.663
++				c-127.051,0-230.405-62.348-230.405-138.985c0-67.236,79.742-124.355,187.847-136.571v12.881c0,4.709,3.822,8.53,8.53,8.53h51.182
++				c4.709,0,8.53-3.822,8.53-8.53v-13.964c94.508,7.328,169.336,46.072,192.556,99.268h-13.41c-4.709,0-8.53,3.822-8.53,8.53v51.182
++				c0,4.709,3.822,8.53,8.53,8.53h15.235C451.025,364.246,362.821,408.663,247.465,408.663z M494.939,282.474h-34.121v-34.121h34.121
++				V282.474z"/>
++		</g>
++	</g>
++	<g>
++		<g>
++			<path d="M256.09,256.883h-8.53v-8.53c0-4.709-3.813-8.53-8.53-8.53c-4.709,0-8.53,3.822-8.53,8.53v8.53h-8.53
++				c-4.709,0-8.53,3.822-8.53,8.53c0,4.709,3.822,8.53,8.53,8.53h8.53v8.53c0,4.709,3.822,8.53,8.53,8.53s8.53-3.822,8.53-8.53v-8.53
++				h8.53c4.709,0,8.53-3.822,8.53-8.53C264.62,260.704,260.798,256.883,256.09,256.883z"/>
++		</g>
++	</g>
++</svg>
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
+index 47d76e24a80b..606cf9c6d14d 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
+@@ -21,6 +21,7 @@ import DrawRectangleControl, { Props as DrawRectangleControlProps } from './draw
+ import DrawPolygonControl, { Props as DrawPolygonControlProps } from './draw-polygon-control';
+ import DrawPolylineControl, { Props as DrawPolylineControlProps } from './draw-polyline-control';
+ import DrawPointsControl, { Props as DrawPointsControlProps } from './draw-points-control';
++import DrawEllipseControl, { Props as DrawEllipseControlProps } from './draw-ellipse-control';
+ import DrawCuboidControl, { Props as DrawCuboidControlProps } from './draw-cuboid-control';
+ import SetupTagControl, { Props as SetupTagControlProps } from './setup-tag-control';
+ import MergeControl, { Props as MergeControlProps } from './merge-control';
+@@ -57,6 +58,7 @@ const ObservedDrawRectangleControl = ControlVisibilityObserver<DrawRectangleCont
+ const ObservedDrawPolygonControl = ControlVisibilityObserver<DrawPolygonControlProps>(DrawPolygonControl);
+ const ObservedDrawPolylineControl = ControlVisibilityObserver<DrawPolylineControlProps>(DrawPolylineControl);
+ const ObservedDrawPointsControl = ControlVisibilityObserver<DrawPointsControlProps>(DrawPointsControl);
++const ObservedDrawEllipseControl = ControlVisibilityObserver<DrawEllipseControlProps>(DrawEllipseControl);
+ const ObservedDrawCuboidControl = ControlVisibilityObserver<DrawCuboidControlProps>(DrawCuboidControl);
+ const ObservedSetupTagControl = ControlVisibilityObserver<SetupTagControlProps>(SetupTagControl);
+ const ObservedMergeControl = ControlVisibilityObserver<MergeControlProps>(MergeControl);
+@@ -241,6 +243,11 @@ export default function ControlsSideBarComponent(props: Props): JSX.Element {
+                 isDrawing={activeControl === ActiveControl.DRAW_POINTS}
+                 disabled={!labels.length}
+             />
++            <ObservedDrawEllipseControl
++                canvasInstance={canvasInstance}
++                isDrawing={activeControl === ActiveControl.DRAW_ELLIPSE}
++                disabled={!labels.length}
++            />
+             <ObservedDrawCuboidControl
+                 canvasInstance={canvasInstance}
+                 isDrawing={activeControl === ActiveControl.DRAW_CUBOID}
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-cuboid-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-cuboid-control.tsx
+index c0c113f1c312..d94bd3d7e027 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-cuboid-control.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-cuboid-control.tsx
+@@ -24,24 +24,20 @@ export interface Props {
+ const CustomPopover = withVisibilityHandling(Popover, 'draw-cuboid');
+ function DrawPolygonControl(props: Props): JSX.Element {
+     const { canvasInstance, isDrawing, disabled } = props;
+-    const dynamcPopoverPros = isDrawing ?
+-        {
+-            overlayStyle: {
+-                display: 'none',
+-            },
+-        } :
+-        {};
+-
+-    const dynamicIconProps = isDrawing ?
+-        {
+-            className: 'cvat-draw-cuboid-control cvat-active-canvas-control',
+-            onClick: (): void => {
+-                canvasInstance.draw({ enabled: false });
+-            },
+-        } :
+-        {
+-            className: 'cvat-draw-cuboid-control',
+-        };
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-cuboid-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-cuboid-control',
++    };
+ 
+     return disabled ? (
+         <Icon className='cvat-draw-cuboid-control cvat-disabled-canvas-control' component={CubeIcon} />
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-ellipse-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-ellipse-control.tsx
+new file mode 100644
+index 000000000000..9ea05fbbd810
+--- /dev/null
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-ellipse-control.tsx
+@@ -0,0 +1,54 @@
++// Copyright (C) 2020-2021 Intel Corporation
++//
++// SPDX-License-Identifier: MIT
++
++import React from 'react';
++import Popover from 'antd/lib/popover';
++import Icon from '@ant-design/icons';
++
++import { Canvas } from 'cvat-canvas-wrapper';
++import { EllipseIcon } from 'icons';
++import { ShapeType } from 'reducers/interfaces';
++
++import DrawShapePopoverContainer from 'containers/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover';
++import withVisibilityHandling from './handle-popover-visibility';
++
++export interface Props {
++    canvasInstance: Canvas;
++    isDrawing: boolean;
++    disabled?: boolean;
++}
++
++const CustomPopover = withVisibilityHandling(Popover, 'draw-ellipse');
++function DrawPointsControl(props: Props): JSX.Element {
++    const { canvasInstance, isDrawing, disabled } = props;
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-ellipse-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-ellipse-control',
++    };
++
++    return disabled ? (
++        <Icon className='cvat-draw-ellipse-control cvat-disabled-canvas-control' component={EllipseIcon} />
++    ) : (
++        <CustomPopover
++            {...dynamcPopoverPros}
++            overlayClassName='cvat-draw-shape-popover'
++            placement='right'
++            content={<DrawShapePopoverContainer shapeType={ShapeType.ELLIPSE} />}
++        >
++            <Icon {...dynamicIconProps} component={EllipseIcon} />
++        </CustomPopover>
++    );
++}
++
++export default React.memo(DrawPointsControl);
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-points-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-points-control.tsx
+index cdda99677e60..043888698cf5 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-points-control.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-points-control.tsx
+@@ -22,24 +22,20 @@ export interface Props {
+ const CustomPopover = withVisibilityHandling(Popover, 'draw-points');
+ function DrawPointsControl(props: Props): JSX.Element {
+     const { canvasInstance, isDrawing, disabled } = props;
+-    const dynamcPopoverPros = isDrawing ?
+-        {
+-            overlayStyle: {
+-                display: 'none',
+-            },
+-        } :
+-        {};
+-
+-    const dynamicIconProps = isDrawing ?
+-        {
+-            className: 'cvat-draw-points-control cvat-active-canvas-control',
+-            onClick: (): void => {
+-                canvasInstance.draw({ enabled: false });
+-            },
+-        } :
+-        {
+-            className: 'cvat-draw-points-control',
+-        };
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-points-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-points-control',
++    };
+ 
+     return disabled ? (
+         <Icon className='cvat-draw-points-control cvat-disabled-canvas-control' component={PointIcon} />
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polygon-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polygon-control.tsx
+index 19acb7f13945..37150fc52f4d 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polygon-control.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polygon-control.tsx
+@@ -22,24 +22,20 @@ export interface Props {
+ const CustomPopover = withVisibilityHandling(Popover, 'draw-polygon');
+ function DrawPolygonControl(props: Props): JSX.Element {
+     const { canvasInstance, isDrawing, disabled } = props;
+-    const dynamcPopoverPros = isDrawing ?
+-        {
+-            overlayStyle: {
+-                display: 'none',
+-            },
+-        } :
+-        {};
+-
+-    const dynamicIconProps = isDrawing ?
+-        {
+-            className: 'cvat-draw-polygon-control cvat-active-canvas-control',
+-            onClick: (): void => {
+-                canvasInstance.draw({ enabled: false });
+-            },
+-        } :
+-        {
+-            className: 'cvat-draw-polygon-control',
+-        };
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-polygon-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-polygon-control',
++    };
+ 
+     return disabled ? (
+         <Icon className='cvat-draw-polygon-control cvat-disabled-canvas-control' component={PolygonIcon} />
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polyline-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polyline-control.tsx
+index 04b210408fab..a593c6fc6a57 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polyline-control.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-polyline-control.tsx
+@@ -22,24 +22,20 @@ export interface Props {
+ const CustomPopover = withVisibilityHandling(Popover, 'draw-polyline');
+ function DrawPolylineControl(props: Props): JSX.Element {
+     const { canvasInstance, isDrawing, disabled } = props;
+-    const dynamcPopoverPros = isDrawing ?
+-        {
+-            overlayStyle: {
+-                display: 'none',
+-            },
+-        } :
+-        {};
+-
+-    const dynamicIconProps = isDrawing ?
+-        {
+-            className: 'cvat-draw-polyline-control cvat-active-canvas-control',
+-            onClick: (): void => {
+-                canvasInstance.draw({ enabled: false });
+-            },
+-        } :
+-        {
+-            className: 'cvat-draw-polyline-control',
+-        };
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-polyline-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-polyline-control',
++    };
+ 
+     return disabled ? (
+         <Icon className='cvat-draw-polyline-control cvat-disabled-canvas-control' component={PolylineIcon} />
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-rectangle-control.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-rectangle-control.tsx
+index 946a97d9b2ae..1e5403a807ff 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-rectangle-control.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-rectangle-control.tsx
+@@ -22,24 +22,20 @@ export interface Props {
+ const CustomPopover = withVisibilityHandling(Popover, 'draw-rectangle');
+ function DrawRectangleControl(props: Props): JSX.Element {
+     const { canvasInstance, isDrawing, disabled } = props;
+-    const dynamcPopoverPros = isDrawing ?
+-        {
+-            overlayStyle: {
+-                display: 'none',
+-            },
+-        } :
+-        {};
+-
+-    const dynamicIconProps = isDrawing ?
+-        {
+-            className: 'cvat-draw-rectangle-control cvat-active-canvas-control',
+-            onClick: (): void => {
+-                canvasInstance.draw({ enabled: false });
+-            },
+-        } :
+-        {
+-            className: 'cvat-draw-rectangle-control',
+-        };
++    const dynamcPopoverPros = isDrawing ? {
++        overlayStyle: {
++            display: 'none',
++        },
++    } : {};
++
++    const dynamicIconProps = isDrawing ? {
++        className: 'cvat-draw-rectangle-control cvat-active-canvas-control',
++        onClick: (): void => {
++            canvasInstance.draw({ enabled: false });
++        },
++    } : {
++        className: 'cvat-draw-rectangle-control',
++    };
+ 
+     return disabled ? (
+         <Icon className='cvat-draw-rectangle-control cvat-disabled-canvas-control' component={RectangleIcon} />
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
+index ff7d660ab299..0e1a1c9ae78e 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
+@@ -126,7 +126,7 @@ function DrawShapePopoverComponent(props: Props): JSX.Element {
+                     </Row>
+                 </>
+             )}
+-            {is2D && shapeType !== ShapeType.RECTANGLE && shapeType !== ShapeType.CUBOID && (
++            {is2D && ![ShapeType.RECTANGLE, ShapeType.CUBOID, ShapeType.ELLIPSE].includes(shapeType) ? (
+                 <Row justify='space-around' align='middle'>
+                     <Col span={14}>
+                         <Text className='cvat-text-color'> Number of points: </Text>
+@@ -147,7 +147,7 @@ function DrawShapePopoverComponent(props: Props): JSX.Element {
+                         />
+                     </Col>
+                 </Row>
+-            )}
++            ) : null}
+             <Row justify='space-around'>
+                 <Col span={12}>
+                     <CVATTooltip title={`Press ${repeatShapeShortcut} to draw again`}>
+diff --git a/cvat-ui/src/components/annotation-page/standard-workspace/styles.scss b/cvat-ui/src/components/annotation-page/standard-workspace/styles.scss
+index 1adb7a32863e..80f204e8b0be 100644
+--- a/cvat-ui/src/components/annotation-page/standard-workspace/styles.scss
++++ b/cvat-ui/src/components/annotation-page/standard-workspace/styles.scss
+@@ -114,6 +114,7 @@
+ .cvat-draw-polygon-control,
+ .cvat-draw-polyline-control,
+ .cvat-draw-points-control,
++.cvat-draw-ellipse-control,
+ .cvat-draw-cuboid-control,
+ .cvat-setup-tag-control,
+ .cvat-merge-control,
+diff --git a/cvat-ui/src/components/annotation-page/top-bar/filters-modal.tsx b/cvat-ui/src/components/annotation-page/top-bar/filters-modal.tsx
+index 3d4bdb8b05f0..8744e9f66c21 100644
+--- a/cvat-ui/src/components/annotation-page/top-bar/filters-modal.tsx
++++ b/cvat-ui/src/components/annotation-page/top-bar/filters-modal.tsx
+@@ -109,7 +109,8 @@ function FiltersModalComponent(): JSX.Element {
+                         { value: 'points', title: 'Points' },
+                         { value: 'polyline', title: 'Polyline' },
+                         { value: 'polygon', title: 'Polygon' },
+-                        { value: 'cuboids', title: 'Cuboids' },
++                        { value: 'cuboid', title: 'Cuboid' },
++                        { value: 'ellipse', title: 'Ellipse' },
+                     ],
+                 },
+             },
+diff --git a/cvat-ui/src/components/annotation-page/top-bar/statistics-modal.tsx b/cvat-ui/src/components/annotation-page/top-bar/statistics-modal.tsx
+index 7399bd4c5180..7bf286269793 100644
+--- a/cvat-ui/src/components/annotation-page/top-bar/statistics-modal.tsx
++++ b/cvat-ui/src/components/annotation-page/top-bar/statistics-modal.tsx
+@@ -111,6 +111,7 @@ function StatisticsModalComponent(props: StateToProps & DispatchToProps): JSX.El
+         polygon: `${data.label[key].polygon.shape} / ${data.label[key].polygon.track}`,
+         polyline: `${data.label[key].polyline.shape} / ${data.label[key].polyline.track}`,
+         points: `${data.label[key].points.shape} / ${data.label[key].points.track}`,
++        ellipse: `${data.label[key].ellipse.shape} / ${data.label[key].ellipse.track}`,
+         cuboid: `${data.label[key].cuboid.shape} / ${data.label[key].cuboid.track}`,
+         tags: data.label[key].tags,
+         manually: data.label[key].manually,
+@@ -125,6 +126,7 @@ function StatisticsModalComponent(props: StateToProps & DispatchToProps): JSX.El
+         polygon: `${data.total.polygon.shape} / ${data.total.polygon.track}`,
+         polyline: `${data.total.polyline.shape} / ${data.total.polyline.track}`,
+         points: `${data.total.points.shape} / ${data.total.points.track}`,
++        ellipse: `${data.total.ellipse.shape} / ${data.total.ellipse.track}`,
+         cuboid: `${data.total.cuboid.shape} / ${data.total.cuboid.track}`,
+         tags: data.total.tags,
+         manually: data.total.manually,
+@@ -167,6 +169,11 @@ function StatisticsModalComponent(props: StateToProps & DispatchToProps): JSX.El
+             dataIndex: 'points',
+             key: 'points',
+         },
++        {
++            title: makeShapesTracksTitle('Ellipse'),
++            dataIndex: 'ellipse',
++            key: 'ellipse',
++        },
+         {
+             title: makeShapesTracksTitle('Cuboids'),
+             dataIndex: 'cuboid',
+diff --git a/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx b/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
+index f057ae6413d0..8105c7e56fb7 100644
+--- a/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
++++ b/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/controls-side-bar.tsx
+@@ -53,7 +53,7 @@ function mapStateToProps(state: CombinedState): StateToProps {
+ 
+     return {
+         rotateAll,
+-        canvasInstance,
++        canvasInstance: canvasInstance as Canvas,
+         activeControl,
+         labels,
+         normalizedKeyMap,
+diff --git a/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx b/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
+index ca5ce632b540..42d08333bc7c 100644
+--- a/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
++++ b/cvat-ui/src/containers/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover.tsx
+@@ -9,7 +9,6 @@ import { RadioChangeEvent } from 'antd/lib/radio';
+ import { CombinedState, ShapeType, ObjectType } from 'reducers/interfaces';
+ import { rememberObject } from 'actions/annotation-actions';
+ import { Canvas, RectDrawingMethod, CuboidDrawingMethod } from 'cvat-canvas-wrapper';
+-import { Canvas3d } from 'cvat-canvas3d-wrapper';
+ import DrawShapePopoverComponent from 'components/annotation-page/standard-workspace/controls-side-bar/draw-shape-popover';
+ 
+ interface OwnProps {
+@@ -29,7 +28,7 @@ interface DispatchToProps {
+ 
+ interface StateToProps {
+     normalizedKeyMap: Record<string, string>;
+-    canvasInstance: Canvas | Canvas3d;
++    canvasInstance: Canvas;
+     shapeType: ShapeType;
+     labels: any[];
+     jobInstance: any;
+@@ -70,7 +69,7 @@ function mapStateToProps(state: CombinedState, own: OwnProps): StateToProps {
+ 
+     return {
+         ...own,
+-        canvasInstance,
++        canvasInstance: canvasInstance as Canvas,
+         labels,
+         normalizedKeyMap,
+         jobInstance,
+@@ -104,11 +103,9 @@ class DrawShapePopoverContainer extends React.PureComponent<Props, State> {
+ 
+         if (shapeType === ShapeType.POLYGON) {
+             this.minimumPoints = 3;
+-        }
+-        if (shapeType === ShapeType.POLYLINE) {
++        } else if (shapeType === ShapeType.POLYLINE) {
+             this.minimumPoints = 2;
+-        }
+-        if (shapeType === ShapeType.POINTS) {
++        } else if (shapeType === ShapeType.POINTS) {
+             this.minimumPoints = 1;
+         }
+     }
+diff --git a/cvat-ui/src/icons.tsx b/cvat-ui/src/icons.tsx
+index 8e6ade00728d..feb319f1d262 100644
+--- a/cvat-ui/src/icons.tsx
++++ b/cvat-ui/src/icons.tsx
+@@ -15,6 +15,7 @@ import SVGZoomIcon from './assets/zoom-icon.svg';
+ import SVGRectangleIcon from './assets/rectangle-icon.svg';
+ import SVGPolygonIcon from './assets/polygon-icon.svg';
+ import SVGPointIcon from './assets/point-icon.svg';
++import SVGEllipseIcon from './assets/ellipse-icon.svg';
+ import SVGPolylineIcon from './assets/polyline-icon.svg';
+ import SVGTagIcon from './assets/tag-icon.svg';
+ import SVGMergeIcon from './assets/merge-icon.svg';
+@@ -65,6 +66,7 @@ export const ZoomIcon = React.memo((): JSX.Element => <SVGZoomIcon />);
+ export const RectangleIcon = React.memo((): JSX.Element => <SVGRectangleIcon />);
+ export const PolygonIcon = React.memo((): JSX.Element => <SVGPolygonIcon />);
+ export const PointIcon = React.memo((): JSX.Element => <SVGPointIcon />);
++export const EllipseIcon = React.memo((): JSX.Element => <SVGEllipseIcon />);
+ export const PolylineIcon = React.memo((): JSX.Element => <SVGPolylineIcon />);
+ export const TagIcon = React.memo((): JSX.Element => <SVGTagIcon />);
+ export const MergeIcon = React.memo((): JSX.Element => <SVGMergeIcon />);
+diff --git a/cvat-ui/src/reducers/annotation-reducer.ts b/cvat-ui/src/reducers/annotation-reducer.ts
+index cff2122ba13f..a01e895093e5 100644
+--- a/cvat-ui/src/reducers/annotation-reducer.ts
++++ b/cvat-ui/src/reducers/annotation-reducer.ts
+@@ -478,6 +478,8 @@ export default (state = defaultState, action: AnyAction): AnnotationState => {
+                 activeControl = ActiveControl.DRAW_POLYLINE;
+             } else if (payload.activeShapeType === ShapeType.POINTS) {
+                 activeControl = ActiveControl.DRAW_POINTS;
++            } else if (payload.activeShapeType === ShapeType.ELLIPSE) {
++                activeControl = ActiveControl.DRAW_ELLIPSE;
+             } else if (payload.activeShapeType === ShapeType.CUBOID) {
+                 activeControl = ActiveControl.DRAW_CUBOID;
+             } else if (payload.activeObjectType === ObjectType.TAG) {
+diff --git a/cvat-ui/src/reducers/interfaces.ts b/cvat-ui/src/reducers/interfaces.ts
+index b0fe3f10ef23..858668d4dfbe 100644
+--- a/cvat-ui/src/reducers/interfaces.ts
++++ b/cvat-ui/src/reducers/interfaces.ts
+@@ -473,6 +473,7 @@ export enum ActiveControl {
+     DRAW_POLYGON = 'draw_polygon',
+     DRAW_POLYLINE = 'draw_polyline',
+     DRAW_POINTS = 'draw_points',
++    DRAW_ELLIPSE = 'draw_ellipse',
+     DRAW_CUBOID = 'draw_cuboid',
+     MERGE = 'merge',
+     GROUP = 'group',
+@@ -489,6 +490,7 @@ export enum ShapeType {
+     POLYGON = 'polygon',
+     POLYLINE = 'polyline',
+     POINTS = 'points',
++    ELLIPSE = 'ellipse',
+     CUBOID = 'cuboid',
+ }
+ 
+diff --git a/cvat/apps/dataset_manager/annotation.py b/cvat/apps/dataset_manager/annotation.py
+index 9481bb8e3907..5bb152ea4ead 100644
+--- a/cvat/apps/dataset_manager/annotation.py
++++ b/cvat/apps/dataset_manager/annotation.py
+@@ -696,6 +696,7 @@ def polyshape_interpolation(shape0, shape1):
+         def interpolate(shape0, shape1):
+             is_same_type = shape0["type"] == shape1["type"]
+             is_rectangle = shape0["type"] == ShapeType.RECTANGLE
++            is_ellipse = shape0["type"] == ShapeType.ELLIPSE
+             is_cuboid = shape0["type"] == ShapeType.CUBOID
+             is_polygon = shape0["type"] == ShapeType.POLYGON
+             is_polyline = shape0["type"] == ShapeType.POLYLINE
+@@ -705,7 +706,7 @@ def interpolate(shape0, shape1):
+                 raise NotImplementedError()
+ 
+             shapes = []
+-            if is_rectangle or is_cuboid:
++            if is_rectangle or is_cuboid or is_ellipse:
+                 shapes = simple_interpolation(shape0, shape1)
+             elif is_points:
+                 shapes = points_interpolation(shape0, shape1)
+diff --git a/cvat/apps/dataset_manager/bindings.py b/cvat/apps/dataset_manager/bindings.py
+index 64dc1bb55f85..0c1b54512c22 100644
+--- a/cvat/apps/dataset_manager/bindings.py
++++ b/cvat/apps/dataset_manager/bindings.py
+@@ -8,6 +8,7 @@
+ import os.path as osp
+ from attr import attrib, attrs
+ from collections import namedtuple
++from types import SimpleNamespace
+ from pathlib import Path
+ from typing import (Any, Callable, DefaultDict, Dict, List, Literal, Mapping,
+     NamedTuple, OrderedDict, Tuple, Union, Set)
+@@ -26,7 +27,7 @@
+ from cvat.apps.dataset_manager.formats.utils import get_label_color
+ 
+ from .annotation import AnnotationIR, AnnotationManager, TrackManager
+-
++from .formats.transformations import EllipsesToMasks
+ 
+ CVAT_INTERNAL_ATTRIBUTES = {'occluded', 'outside', 'keyframe', 'track_id', 'rotation'}
+ 
+@@ -1325,6 +1326,17 @@ def convert_attrs(label, cvat_attrs):
+             anno = datum_annotation.Points(anno_points,
+                 label=anno_label, attributes=anno_attr, group=anno_group,
+                 z_order=shape_obj.z_order)
++        elif shape_obj.type == ShapeType.ELLIPSE:
++            # TODO: for now Datumaro does not support ellipses
++            # so, we convert an ellipse to RLE mask here
++            # instead of applying transformation in directly in formats
++            anno = EllipsesToMasks.convert_ellipse(SimpleNamespace(**{
++                "points": shape_obj.points,
++                "label": anno_label,
++                "z_order": shape_obj.z_order,
++                "group": anno_group,
++                "attributes": anno_attr,
++            }), cvat_frame_anno.height, cvat_frame_anno.width)
+         elif shape_obj.type == ShapeType.POLYLINE:
+             anno = datum_annotation.PolyLine(anno_points,
+                 label=anno_label, attributes=anno_attr, group=anno_group,
+diff --git a/cvat/apps/dataset_manager/formats/cvat.py b/cvat/apps/dataset_manager/formats/cvat.py
+index 1bc472f7a5c2..acffd532fa21 100644
+--- a/cvat/apps/dataset_manager/formats/cvat.py
++++ b/cvat/apps/dataset_manager/formats/cvat.py
+@@ -496,6 +496,11 @@ def open_box(self, box):
+             self.xmlgen.startElement("box", box)
+             self._level += 1
+ 
++        def open_ellipse(self, ellipse):
++            self._indent()
++            self.xmlgen.startElement("ellipse", ellipse)
++            self._level += 1
++
+         def open_polygon(self, polygon):
+             self._indent()
+             self.xmlgen.startElement("polygon", polygon)
+@@ -532,6 +537,11 @@ def close_box(self):
+             self._indent()
+             self.xmlgen.endElement("box")
+ 
++        def close_ellipse(self):
++            self._level -= 1
++            self._indent()
++            self.xmlgen.endElement("ellipse")
++
+         def close_polygon(self):
+             self._level -= 1
+             self._indent()
+@@ -615,6 +625,18 @@ def dump_as_cvat_annotation(dumper, annotations):
+                     ("ybr", "{:.2f}".format(shape.points[3]))
+                 ]))
+ 
++                if shape.rotation:
++                    dump_data.update(OrderedDict([
++                        ("rotation", "{:.2f}".format(shape.rotation))
++                    ]))
++            elif shape.type == "ellipse":
++                dump_data.update(OrderedDict([
++                    ("cx", "{:.2f}".format(shape.points[0])),
++                    ("cy", "{:.2f}".format(shape.points[1])),
++                    ("rx", "{:.2f}".format(shape.points[2] - shape.points[0])),
++                    ("ry", "{:.2f}".format(shape.points[1] - shape.points[3]))
++                ]))
++
+                 if shape.rotation:
+                     dump_data.update(OrderedDict([
+                         ("rotation", "{:.2f}".format(shape.rotation))
+@@ -652,9 +674,10 @@ def dump_as_cvat_annotation(dumper, annotations):
+             if shape.group:
+                 dump_data['group_id'] = str(shape.group)
+ 
+-
+             if shape.type == "rectangle":
+                 dumper.open_box(dump_data)
++            elif shape.type == "ellipse":
++                dumper.open_ellipse(dump_data)
+             elif shape.type == "polygon":
+                 dumper.open_polygon(dump_data)
+             elif shape.type == "polyline":
+@@ -674,6 +697,8 @@ def dump_as_cvat_annotation(dumper, annotations):
+ 
+             if shape.type == "rectangle":
+                 dumper.close_box()
++            elif shape.type == "ellipse":
++                dumper.close_ellipse()
+             elif shape.type == "polygon":
+                 dumper.close_polygon()
+             elif shape.type == "polyline":
+@@ -743,6 +768,18 @@ def dump_track(idx, track):
+                     ("ybr", "{:.2f}".format(shape.points[3])),
+                 ]))
+ 
++                if shape.rotation:
++                    dump_data.update(OrderedDict([
++                        ("rotation", "{:.2f}".format(shape.rotation))
++                    ]))
++            elif shape.type == "ellipse":
++                dump_data.update(OrderedDict([
++                    ("cx", "{:.2f}".format(shape.points[0])),
++                    ("cy", "{:.2f}".format(shape.points[1])),
++                    ("rx", "{:.2f}".format(shape.points[2] - shape.points[0])),
++                    ("ry", "{:.2f}".format(shape.points[1] - shape.points[3]))
++                ]))
++
+                 if shape.rotation:
+                     dump_data.update(OrderedDict([
+                         ("rotation", "{:.2f}".format(shape.rotation))
+@@ -776,6 +813,8 @@ def dump_track(idx, track):
+ 
+             if shape.type == "rectangle":
+                 dumper.open_box(dump_data)
++            elif shape.type == "ellipse":
++                dumper.open_ellipse(dump_data)
+             elif shape.type == "polygon":
+                 dumper.open_polygon(dump_data)
+             elif shape.type == "polyline":
+@@ -795,6 +834,8 @@ def dump_track(idx, track):
+ 
+             if shape.type == "rectangle":
+                 dumper.close_box()
++            elif shape.type == "ellipse":
++                dumper.close_ellipse()
+             elif shape.type == "polygon":
+                 dumper.close_polygon()
+             elif shape.type == "polyline":
+@@ -857,7 +898,7 @@ def dump_track(idx, track):
+     dumper.close_root()
+ 
+ def load_anno(file_object, annotations):
+-    supported_shapes = ('box', 'polygon', 'polyline', 'points', 'cuboid')
++    supported_shapes = ('box', 'ellipse', 'polygon', 'polyline', 'points', 'cuboid')
+     context = ElementTree.iterparse(file_object, events=("start", "end"))
+     context = iter(context)
+     next(context)
+@@ -927,6 +968,11 @@ def load_anno(file_object, annotations):
+                     shape['points'].append(el.attrib['ytl'])
+                     shape['points'].append(el.attrib['xbr'])
+                     shape['points'].append(el.attrib['ybr'])
++                elif el.tag == 'ellipse':
++                    shape['points'].append(el.attrib['cx'])
++                    shape['points'].append(el.attrib['cy'])
++                    shape['points'].append("{:.2f}".format(float(el.attrib['cx']) + float(el.attrib['rx'])))
++                    shape['points'].append("{:.2f}".format(float(el.attrib['cy']) - float(el.attrib['ry'])))
+                 elif el.tag == 'cuboid':
+                     shape['points'].append(el.attrib['xtl1'])
+                     shape['points'].append(el.attrib['ytl1'])
+diff --git a/cvat/apps/dataset_manager/formats/transformations.py b/cvat/apps/dataset_manager/formats/transformations.py
+index 7569b509064b..dad004177ff1 100644
+--- a/cvat/apps/dataset_manager/formats/transformations.py
++++ b/cvat/apps/dataset_manager/formats/transformations.py
+@@ -3,7 +3,10 @@
+ # SPDX-License-Identifier: MIT
+ 
+ import math
++import numpy as np
+ from itertools import chain
++from pycocotools import mask as mask_utils
++from PIL import Image, ImageDraw
+ 
+ from datumaro.components.extractor import ItemTransform
+ import datumaro.components.annotation as datum_annotation
+@@ -32,3 +35,16 @@ def transform_item(self, item):
+                 z_order=ann.z_order))
+ 
+         return item.wrap(annotations=annotations)
++
++class EllipsesToMasks(ItemTransform):
++    @staticmethod
++    def convert_ellipse(ellipse, img_h, img_w):
++        cx, cy, rightX, topY = ellipse.points
++        rx, ry = rightX - cx, cy - topY
++        shape = (cx - rx, cy - ry, cx + rx, cy + ry)
++        mask = Image.new('1', (img_w, img_h))
++        drawer = ImageDraw.Draw(mask)
++        drawer.ellipse(shape, fill = 1)
++        rle = mask_utils.encode(np.asfortranarray(mask))
++        return datum_annotation.RleMask(rle=rle, label=ellipse.label, z_order=ellipse.z_order,
++            attributes=ellipse.attributes, group=ellipse.group)
+diff --git a/cvat/apps/engine/models.py b/cvat/apps/engine/models.py
+index c20fc8782dd4..9ef032460d39 100644
+--- a/cvat/apps/engine/models.py
++++ b/cvat/apps/engine/models.py
+@@ -480,6 +480,7 @@ class ShapeType(str, Enum):
+     POLYGON = 'polygon'     # (x0, y0, ..., xn, yn)
+     POLYLINE = 'polyline'   # (x0, y0, ..., xn, yn)
+     POINTS = 'points'       # (x0, y0, ..., xn, yn)
++    ELLIPSE = 'ellipse'     # (cx, cy, rx, ty)
+     CUBOID = 'cuboid'       # (x0, y0, ..., x7, y7)
+ 
+     @classmethod
+diff --git a/tests/cypress/integration/actions_tasks3/case_48_issue_2663_annotations_statistics.js b/tests/cypress/integration/actions_tasks3/case_48_issue_2663_annotations_statistics.js
+index 07b27994fd30..7e920e4a04ff 100644
+--- a/tests/cypress/integration/actions_tasks3/case_48_issue_2663_annotations_statistics.js
++++ b/tests/cypress/integration/actions_tasks3/case_48_issue_2663_annotations_statistics.js
+@@ -12,7 +12,7 @@ context('Annotations statistics.', () => {
+     const createRectangleShape2Points = {
+         points: 'By 2 Points',
+         type: 'Shape',
+-        labelName: labelName,
++        labelName,
+         firstX: 250,
+         firstY: 350,
+         secondX: 350,
+@@ -21,16 +21,32 @@ context('Annotations statistics.', () => {
+     const createRectangleTrack2Points = {
+         points: 'By 2 Points',
+         type: 'Track',
+-        labelName: labelName,
++        labelName,
+         firstX: createRectangleShape2Points.firstX,
+         firstY: createRectangleShape2Points.firstY - 150,
+         secondX: createRectangleShape2Points.secondX,
+         secondY: createRectangleShape2Points.secondY - 150,
+     };
++    const createEllipseShape = {
++        type: 'Shape',
++        labelName,
++        cx: 400,
++        cy: 400,
++        rightX: 500,
++        topY: 350,
++    };
++    const createEllipseTrack = {
++        type: 'Track',
++        labelName,
++        cx: createEllipseShape.cx,
++        cy: createEllipseShape.cy - 150,
++        rightX: createEllipseShape.rightX,
++        topY: createEllipseShape.topY - 150,
++    };
+     const createCuboidShape2Points = {
+         points: 'From rectangle',
+         type: 'Shape',
+-        labelName: labelName,
++        labelName,
+         firstX: 250,
+         firstY: 350,
+         secondX: 350,
+@@ -39,7 +55,7 @@ context('Annotations statistics.', () => {
+     const createCuboidTrack2Points = {
+         points: 'From rectangle',
+         type: 'Track',
+-        labelName: labelName,
++        labelName,
+         firstX: createCuboidShape2Points.firstX,
+         firstY: createCuboidShape2Points.firstY + 150,
+         secondX: createCuboidShape2Points.secondX,
+@@ -48,7 +64,7 @@ context('Annotations statistics.', () => {
+     const createPolygonShape = {
+         reDraw: false,
+         type: 'Shape',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [
+             { x: 100, y: 100 },
+             { x: 150, y: 100 },
+@@ -60,7 +76,7 @@ context('Annotations statistics.', () => {
+     const createPolygonTrack = {
+         reDraw: false,
+         type: 'Track',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [
+             { x: 200, y: 100 },
+             { x: 250, y: 100 },
+@@ -71,7 +87,7 @@ context('Annotations statistics.', () => {
+     };
+     const createPolylinesShape = {
+         type: 'Shape',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [
+             { x: 300, y: 100 },
+             { x: 350, y: 100 },
+@@ -82,7 +98,7 @@ context('Annotations statistics.', () => {
+     };
+     const createPolylinesTrack = {
+         type: 'Track',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [
+             { x: 400, y: 100 },
+             { x: 450, y: 100 },
+@@ -93,14 +109,14 @@ context('Annotations statistics.', () => {
+     };
+     const createPointsShape = {
+         type: 'Shape',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [{ x: 200, y: 400 }],
+         complete: true,
+         numberOfPoints: null,
+     };
+     const createPointsTrack = {
+         type: 'Track',
+-        labelName: labelName,
++        labelName,
+         pointsMap: [{ x: 300, y: 400 }],
+         complete: true,
+         numberOfPoints: null,
+@@ -123,6 +139,9 @@ context('Annotations statistics.', () => {
+         cy.goToNextFrame(4);
+         cy.createPoint(createPointsShape);
+         cy.createPoint(createPointsTrack);
++        cy.goToNextFrame(5);
++        cy.createEllipse(createEllipseShape);
++        cy.createEllipse(createEllipseTrack);
+     });
+ 
+     describe(`Testing case "${caseId}"`, () => {
+@@ -142,12 +161,12 @@ context('Annotations statistics.', () => {
+                     cy.get(jobInfoTableHeader)
+                         .find('th')
+                         .then((jobInfoTableHeaderColumns) => {
+-                            jobInfoTableHeaderColumns = Array.from(jobInfoTableHeaderColumns);
+-                            const elTextContent = jobInfoTableHeaderColumns.map((el) =>
+-                                el.textContent.replace(/\s/g, ''),
+-                            ); // Removing spaces. For example: " Tags ". In Firefox, this causes an error.
++                            const elTextContent = Array.from(jobInfoTableHeaderColumns).map((el) => (
++                                el.textContent.replace(/\s/g, '')
++                            )); // Removing spaces. For example: " Tags ". In Firefox, this causes an error.
+                             for (let i = 0; i < objectTypes.length; i++) {
+-                                expect(elTextContent).to.include(objectTypes[i]); // expected [ Array(11) ] to include Cuboids, etc.
++                                expect(elTextContent)
++                                    .to.include(objectTypes[i]); // expected [ Array(11) ] to include Cuboids, etc.
+                             }
+                         });
+                 });
+@@ -162,16 +181,15 @@ context('Annotations statistics.', () => {
+                         .parents('tr')
+                         .find('td')
+                         .then((tableBodyFirstRowThs) => {
+-                            tableBodyFirstRowThs = Array.from(tableBodyFirstRowThs);
+-                            const elTextContent = tableBodyFirstRowThs.map((el) => el.textContent);
++                            const elTextContent = Array.from(tableBodyFirstRowThs).map((el) => el.textContent);
+                             expect(elTextContent[0]).to.be.equal(labelName);
+-                            for (let i = 1; i < 6; i++) {
+-                                expect(elTextContent[i]).to.be.equal('1 / 1'); // Rectangle, Polygon, Polyline, Points, Cuboids
++                            for (let i = 1; i < 7; i++) {
++                                expect(elTextContent[i]).to.be.equal('1 / 1'); // Rectangle, Polygon, Polyline, Points, Cuboids, Ellipses
+                             }
+-                            expect(elTextContent[6]).to.be.equal('1'); // Tags
+-                            expect(elTextContent[7]).to.be.equal('11'); // Manually
+-                            expect(elTextContent[8]).to.be.equal('35'); // Interpolated
+-                            expect(elTextContent[9]).to.be.equal('46'); // Total
++                            expect(elTextContent[7]).to.be.equal('1'); // Tags
++                            expect(elTextContent[8]).to.be.equal('13'); // Manually
++                            expect(elTextContent[9]).to.be.equal('39'); // Interpolated
++                            expect(elTextContent[10]).to.be.equal('52'); // Total
+                         });
+                 });
+             cy.contains('[type="button"]', 'OK').click();
+diff --git a/tests/cypress/support/commands.js b/tests/cypress/support/commands.js
+index 399b1bb32841..da64e1ef8c9a 100644
+--- a/tests/cypress/support/commands.js
++++ b/tests/cypress/support/commands.js
+@@ -334,6 +334,22 @@ Cypress.Commands.add('createPoint', (createPointParams) => {
+     cy.checkObjectParameters(createPointParams, 'POINTS');
+ });
+ 
++Cypress.Commands.add('createEllipse', (createEllipseParams) => {
++    cy.interactControlButton('draw-ellipse');
++    cy.switchLabel(createEllipseParams.labelName, 'draw-ellipse');
++    cy.get('.cvat-draw-ellipse-popover').within(() => {
++        cy.get('.ant-select-selection-item').then(($labelValue) => {
++            selectedValueGlobal = $labelValue.text();
++        });
++        cy.contains('button', createEllipseParams.type).click();
++    });
++    cy.get('.cvat-canvas-container')
++        .click(createEllipseParams.cx, createEllipseParams.cy)
++        .click(createEllipseParams.rightX, createEllipseParams.topY);
++    cy.checkPopoverHidden('draw-ellipse');
++    cy.checkObjectParameters(createEllipseParams, 'ELLIPSE');
++});
++
+ Cypress.Commands.add('changeAppearance', (colorBy) => {
+     cy.get('.cvat-appearance-color-by-radio-group').within(() => {
+         cy.get('[type="radio"]').check(colorBy, { force: true });
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

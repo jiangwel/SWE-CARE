@@ -1,0 +1,132 @@
+  Task-ID: PrefectHQ__prefect-14608@8a3d00f
+  Please checkout to this commit first: ad8e126b6a07fd6f8e08c9d50c22dabc247f765b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add `wait` utility for `PrefectFuture`s
+Add a `wait` utility that mirrors `concurrent.futures.wait`. Should accept an iterable of futures to wait for completion and a timeout. It should return a tuple of futures that have completed and those that have not yet completed.
+  </issue>
+  
+  <patch>
+  diff --git a/src/prefect/futures.py b/src/prefect/futures.py
+index d0df04ea9a5a..269cb040d39c 100644
+--- a/src/prefect/futures.py
++++ b/src/prefect/futures.py
+@@ -1,4 +1,5 @@
+ import abc
++import collections
+ import concurrent.futures
+ import inspect
+ import uuid
+@@ -297,6 +298,41 @@ def result(
+             ) from exc
+ 
+ 
++DoneAndNotDoneFutures = collections.namedtuple("DoneAndNotDoneFutures", "done not_done")
++
++
++def wait(pfs: List[PrefectFuture], timeout=None) -> DoneAndNotDoneFutures:
++    """
++    Wait for the futures in the given sequence to complete.
++
++    Args:
++        fs: The sequence of Futures to wait upon.
++        timeout: The maximum number of seconds to wait. If None, then there
++            is no limit on the wait time.
++    Returns:
++        A named 2-tuple of sets. The first set, named 'done', contains the
++        futures that completed (is finished or cancelled) before the wait
++        completed. The second set, named 'not_done', contains uncompleted
++        futures. Duplicate futures given to *fs* are removed and will be
++        returned only once.
++    """
++    pfs = set(pfs)
++    done = {f for f in pfs if f._final_state}
++    not_done = pfs - done
++    if len(done) == len(pfs):
++        return DoneAndNotDoneFutures(done, not_done)
++    try:
++        with timeout_context(timeout):
++            for f in not_done:
++                f.wait()
++                done.add(f)
++                not_done.remove(f)
++            return DoneAndNotDoneFutures(done, not_done)
++    except TimeoutError:
++        logger.debug("Timed out waiting for all futures to complete.")
++        return DoneAndNotDoneFutures(done, not_done)
++
++
+ def resolve_futures_to_states(
+     expr: Union[PrefectFuture, Any],
+ ) -> Union[State, Any]:
+diff --git a/tests/test_futures.py b/tests/test_futures.py
+index e009e0fa1716..43fcd2dc2460 100644
+--- a/tests/test_futures.py
++++ b/tests/test_futures.py
+@@ -16,6 +16,7 @@
+     PrefectFutureList,
+     PrefectWrappedFuture,
+     resolve_futures_to_states,
++    wait,
+ )
+ from prefect.states import Completed, Failed
+ from prefect.task_engine import run_task_async, run_task_sync
+@@ -37,6 +38,24 @@ def result(
+         return self._final_state.result()
+ 
+ 
++class TestUtilityFunctions:
++    def test_wait(self):
++        mock_futures = [MockFuture(data=i) for i in range(5)]
++        futures = wait(mock_futures)
++        assert futures.not_done == set()
++
++        for future in mock_futures:
++            assert future.state.is_completed()
++
++    @pytest.mark.timeout(method="thread")
++    def test_wait_with_timeout(self):
++        mock_futures = [MockFuture(data=i) for i in range(5)]
++        hanging_future = Future()
++        mock_futures.append(PrefectConcurrentFuture(uuid.uuid4(), hanging_future))
++        futures = wait(mock_futures, timeout=0.01)
++        assert futures.not_done == {mock_futures[-1]}
++
++
+ class TestPrefectConcurrentFuture:
+     def test_wait_with_timeout(self):
+         wrapped_future = Future()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

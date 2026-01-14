@@ -1,0 +1,220 @@
+  Task-ID: conan-io__conan-7867@00ee154
+  Please checkout to this commit first: 3609faaea4b56a1a3945978214eb571418762600
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [bug] deps_cpp_info.get_name returns different results with `create` and `build`
+### Environment Details (include every applicable attribute)
+  * Operating System+version: CentOS 7
+  * Compiler+version: gcc 4.8.5
+  * Conan version: 1.30.0
+  * Python version: 3.6.8
+
+### Steps to reproduce (Include if Applicable)
+
+The following conanfile.py
+
+```
+import conans
+
+class Package(conans.ConanFile):
+	name = 'package-name'
+	version = '0.0.1'
+	requires = 'gtest/1.10.0'
+	generators = 'cmake_find_package'
+
+	def build(self):
+		print(self.deps_cpp_info['gtest'].get_name('cmake_find_package'))
+```
+
+prints different gtest package name depending on which conan commands I use:
+
+`conan create .` prints `GTest`
+`conan install . && conan build .` prints `gtest`
+
+I expect the second command to print `GTest` like the first one.
+  </issue>
+  
+  <patch>
+  diff --git a/conans/client/generators/text.py b/conans/client/generators/text.py
+index 0e333a35114..f3bbeed4d7c 100644
+--- a/conans/client/generators/text.py
++++ b/conans/client/generators/text.py
+@@ -43,6 +43,8 @@ def __init__(self, cpp_info):
+         self.version = cpp_info.version
+         self.name = cpp_info.get_name(TXTGenerator.name)
+         self.rootpath = "%s" % cpp_info.rootpath.replace("\\", "/")
++        self.generatornames = "\n".join("%s:%s" % (k, v) for k, v in cpp_info.names.items())
++        self.generatorfilenames = "\n".join("%s:%s" % (k, v) for k, v in cpp_info.filenames.items())
+ 
+ 
+ class TXTGenerator(Generator):
+@@ -148,11 +150,11 @@ def _relativize_path(p, _rootpath):
+                     return p
+ 
+             def _populate_cpp_info(_cpp_info, _data, _rootpath):
+-                for key, value in _data.items():
++                for key, v in _data.items():
+                     if key.endswith('dirs'):
+-                        value = [_relativize_path(it, _rootpath) for it in value]
+-                        value = ['' if it == '.' else it for it in value]
+-                    setattr(_cpp_info, key, value)
++                        v = [_relativize_path(it, _rootpath) for it in v]
++                        v = ['' if it == '.' else it for it in v]
++                    setattr(_cpp_info, key, v)
+ 
+             if None in data:
+                 del data[None]
+@@ -164,7 +166,17 @@ def _populate_cpp_info(_cpp_info, _data, _rootpath):
+                 rootpath = no_config_data.pop('rootpath')[0]
+                 dep_cpp_info = CppInfo(dep, rootpath)
+                 dep_cpp_info.filter_empty = filter_empty
+-                dep_cpp_info.names[TXTGenerator.name] = no_config_data.pop('name')[0]
++                _ = no_config_data.pop('name')[0]
++                version = no_config_data.pop('version', [""])[0]
++                dep_cpp_info.version = version
++                generatornames = no_config_data.pop("generatornames", [])  # can be empty
++                for n in generatornames:
++                    gen, value = n.split(":")
++                    dep_cpp_info.names[gen] = value
++                generatorfilenames = no_config_data.pop("generatorfilenames", [])  # can be empty
++                for n in generatorfilenames:
++                    gen, value = n.split(":")
++                    dep_cpp_info.filenames[gen] = value
+                 dep_cpp_info.sysroot = no_config_data.pop('sysroot', [""])[0]
+                 _populate_cpp_info(dep_cpp_info, no_config_data, rootpath)
+ 
+@@ -174,8 +186,6 @@ def _populate_cpp_info(_cpp_info, _data, _rootpath):
+                     _populate_cpp_info(cpp_info_config, config_data, rootpath)
+ 
+                 # Add to the dependecy list
+-                version = no_config_data.pop('version', [""])[0]
+-                dep_cpp_info.version = version
+                 deps_cpp_info.add(dep, DepCppInfo(dep_cpp_info))
+ 
+             return deps_cpp_info
+@@ -216,7 +226,9 @@ def content(self):
+         # Makes no sense to have an accumulated rootpath
+         template_deps = (template + '[rootpath{dep}]\n{deps.rootpath}\n\n' +
+                          '[name{dep}]\n{deps.name}\n\n' +
+-                         '[version{dep}]\n{deps.version}\n\n')
++                         '[version{dep}]\n{deps.version}\n\n' +
++                         '[generatornames{dep}]\n{deps.generatornames}\n\n' +
++                         '[generatorfilenames{dep}]\n{deps.generatorfilenames}\n\n')
+ 
+         for dep_name, dep_cpp_info in self.deps_build_info.dependencies:
+             dep = "_" + dep_name
+diff --git a/conans/test/functional/generators/package_info/package_info_test.py b/conans/test/functional/generators/package_info/package_info_test.py
+index e019bc1a428..c6577a4b462 100644
+--- a/conans/test/functional/generators/package_info/package_info_test.py
++++ b/conans/test/functional/generators/package_info/package_info_test.py
+@@ -470,3 +470,39 @@ def package_requires_in_components_requires_test(self):
+                                env_info={})
+         client.save({"conanfile.py": conanfile})
+         client.run("create conanfile.py")  # Correct usage
++
++    def test_get_name_local_flow(self):
++        # https://github.com/conan-io/conan/issues/7854
++        client = TestClient()
++        conanfile = textwrap.dedent("""
++            from conans import ConanFile
++            class Package(ConanFile):
++                def package_info(self):
++                    self.cpp_info.names["cmake_find_package"] = "GTest"
++                    self.cpp_info.filenames["cmake_find_package"] = "GtesT"
++                """)
++        client.save({"conanfile.py": conanfile})
++        client.run("create . gtest/1.0@")
++
++        conanfile = textwrap.dedent("""
++            from conans import ConanFile
++            class Package(ConanFile):
++                requires = 'gtest/1.0'
++                generators = 'cmake_find_package'
++
++                def build(self):
++                    info = self.deps_cpp_info['gtest'].get_name('cmake_find_package')
++                    self.output.info("GTEST_INFO: %s" % info)
++                    fileinfo = self.deps_cpp_info['gtest'].get_filename('cmake_find_package')
++                    self.output.info("GTEST_FILEINFO: %s" % fileinfo)
++            """)
++        client.save({"conanfile.py": conanfile})
++        client.run("create . pkg/1.0@")
++        self.assertIn("pkg/1.0: GTEST_INFO: GTest", client.out)
++        self.assertIn("pkg/1.0: GTEST_FILEINFO: GtesT", client.out)
++        client.run("install . pkg/1.0@")
++        self.assertIn("Generator cmake_find_package created FindGtesT.cmake", client.out)
++        client.run("build .")
++        self.assertIn("conanfile.py (pkg/1.0): GTEST_INFO: GTest", client.out)
++        self.assertIn("conanfile.py (pkg/1.0): GTEST_FILEINFO: GtesT", client.out)
++
+diff --git a/conans/test/unittests/client/generators/txt/test_dump_load.py b/conans/test/unittests/client/generators/txt/test_dump_load.py
+index 7b5b17c7e06..f73fed90c93 100644
+--- a/conans/test/unittests/client/generators/txt/test_dump_load.py
++++ b/conans/test/unittests/client/generators/txt/test_dump_load.py
+@@ -17,7 +17,7 @@ def test_names_per_generator(self):
+         cpp_info = CppInfo("pkg_name", "root")
+         cpp_info.name = "name"
+         cpp_info.names["txt"] = "txt_name"
+-        cpp_info.names["cmake_find_package"] = "cmake_find_package"
++        cpp_info.names["cmake_find_package"] = "SpecialName"
+         conanfile = ConanFile(TestBufferConanOutput(), None)
+         conanfile.initialize(Settings({}), EnvValues())
+         conanfile.deps_cpp_info.add("pkg_name", DepCppInfo(cpp_info))
+@@ -25,9 +25,8 @@ def test_names_per_generator(self):
+         parsed_deps_cpp_info, _, _, _ = TXTGenerator.loads(content, filter_empty=False)
+ 
+         parsed_cpp_info = parsed_deps_cpp_info["pkg_name"]
+-        # FIXME: Conan v2: Remove 'txt' generator or serialize all the names
+         self.assertEqual(parsed_cpp_info.get_name("txt"), "txt_name")
+-        self.assertEqual(parsed_cpp_info.get_name("cmake_find_package"), "pkg_name")
++        self.assertEqual(parsed_cpp_info.get_name("cmake_find_package"), "SpecialName")
+         self.assertEqual(parsed_cpp_info.get_name("pkg_config"), "pkg_name")
+ 
+     def test_idempotent(self):
+diff --git a/conans/test/unittests/model/build_info_test.py b/conans/test/unittests/model/build_info_test.py
+index 7f2d4775c40..6c3931141f5 100644
+--- a/conans/test/unittests/model/build_info_test.py
++++ b/conans/test/unittests/model/build_info_test.py
+@@ -3,7 +3,7 @@
+ from collections import defaultdict, namedtuple
+ 
+ from conans.client.generators import TXTGenerator
+-from conans.model.build_info import CppInfo, DepsCppInfo
++from conans.model.build_info import DepsCppInfo
+ from conans.model.env_info import DepsEnvInfo, EnvInfo
+ from conans.model.user_info import DepsUserInfo
+ from conans.test.utils.test_files import temp_folder
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

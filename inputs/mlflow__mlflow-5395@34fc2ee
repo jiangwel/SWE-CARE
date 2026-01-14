@@ -1,0 +1,629 @@
+  Task-ID: mlflow__mlflow-5395@34fc2ee
+  Please checkout to this commit first: 2078937040654cf79d7c4c065f994ba537568561
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [FR] Simplify model registration in autolog
+## Willingness to contribute
+The MLflow Community encourages new feature contributions. Would you or another member of your organization be willing to contribute an implementation of this feature (either as an MLflow Plugin or an enhancement to the MLflow code base)?
+
+- [ ] Yes. I can contribute this feature independently.
+- [X] Yes. I would be willing to contribute this feature with guidance from the MLflow community.
+- [ ] No. I cannot contribute this feature at this time.
+
+## Proposal Summary
+
+`autolog()` makes tracking a lot simpler but it does not seem to provide an option to register models. That leads to code like this where the user needs to format a `runs:/` URL to be able to register the model, which is pretty user-unfriendly. Ideally, model registration would also not require special-casing `file:` during local runs.
+
+```python
+import mlflow
+import mlflow.sklearn
+from sklearn.datasets import load_diabetes
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+# Setup MLFlow tracking
+mlflow.sklearn.autolog()
+
+# Load data
+X, y = load_diabetes(return_X_y = True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+with mlflow.start_run() as run:
+    # Train model
+    model = Ridge(alpha=0.03)
+    model.fit(X_train, y_train)
+
+    # Test model
+    mse = mean_squared_error(model.predict(X_test), y_test)
+    mlflow.log_metric("test_mse", mse)
+
+    # Register model
+    if not(mlflow.get_tracking_uri().startswith('file:')):
+        mlflow.register_model(f"runs:/{run.info.run_id}/model", "my_model")
+```
+
+## Motivation
+- What is the use case for this feature?
+
+Simplify model registration.
+
+- Why is this use case valuable to support for MLflow users in general?
+
+This creates a barrier to entry for new users: I had to spend quite some time figuring out the right string-format incantation.
+
+- Why is this use case valuable to support for your project(s) or organization?
+
+I am trying to evangelize more rigorous MLOps processes and extra complexity reduces appeal.
+
+- Why is it currently difficult to achieve this use case? (please be as specific as possible about why related MLflow features and components are insufficient)
+
+String formatting is very low level and leads to typos difficult to debug.
+
+### What component(s), interfaces, languages, and integrations does this feature affect?
+Components 
+- [ ] `area/artifacts`: Artifact stores and artifact logging
+- [ ] `area/build`: Build and test infrastructure for MLflow
+- [ ] `area/docs`: MLflow documentation pages
+- [ ] `area/examples`: Example code
+- [ ] `area/model-registry`: Model Registry service, APIs, and the fluent client calls for Model Registry
+- [ ] `area/models`: MLmodel format, model serialization/deserialization, flavors
+- [ ] `area/projects`: MLproject format, project running backends
+- [ ] `area/scoring`: MLflow Model server, model deployment tools, Spark UDFs
+- [ ] `area/server-infra`: MLflow Tracking server backend
+- [x] `area/tracking`: Tracking Service, tracking client APIs, autologging
+
+Interfaces
+- [ ] `area/uiux`: Front-end, user experience, plotting, JavaScript, JavaScript dev server
+- [ ] `area/docker`: Docker use across MLflow's components, such as MLflow Projects and MLflow Models
+- [ ] `area/sqlalchemy`: Use of SQLAlchemy in the Tracking Service or Model Registry
+- [ ] `area/windows`: Windows support
+
+Languages 
+- [ ] `language/r`: R APIs and clients
+- [ ] `language/java`: Java APIs and clients
+- [ ] `language/new`: Proposals for new client languages
+
+Integrations
+- [ ] `integrations/azure`: Azure and Azure ML integrations
+- [ ] `integrations/sagemaker`: SageMaker integrations
+- [ ] `integrations/databricks`: Databricks integrations
+
+## Details
+
+Implementation-wise, one possibility would be for `mlflow.register_model()` to accept a `run` object as input, or for `autolog()` to give an option to register models.
+
+Note sure how to deal with the `file:` special-case. Maybe log instead of failing (or implement model registration in `file:` but that's likely larger work).
+  </issue>
+  
+  <patch>
+  diff --git a/mlflow/fastai/__init__.py b/mlflow/fastai/__init__.py
+index e92239bf1e23e..84a5bdd406c87 100644
+--- a/mlflow/fastai/__init__.py
++++ b/mlflow/fastai/__init__.py
+@@ -380,6 +380,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enable automatic logging from Fastai to MLflow.
+@@ -404,6 +405,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during Fastai
+                    autologging. If ``False``, show all events and warnings during Fastai
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+ 
+     .. code-block:: python
+         :caption: Example
+diff --git a/mlflow/fastai/callback.py b/mlflow/fastai/callback.py
+index 2366582f6b080..1b4b6d978e1af 100644
+--- a/mlflow/fastai/callback.py
++++ b/mlflow/fastai/callback.py
+@@ -7,7 +7,7 @@
+ import logging
+ 
+ import mlflow.tracking
+-from mlflow.utils.autologging_utils import ExceptionSafeClass
++from mlflow.utils.autologging_utils import ExceptionSafeClass, get_autologging_config
+ from mlflow.fastai import log_model
+ 
+ from fastai.callback.core import Callback
+@@ -140,4 +140,9 @@ def after_fit(self):
+                 cb("after_fit")
+ 
+         if self.log_models:
+-            log_model(self.learn, artifact_path="model")
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
++            log_model(
++                self.learn, artifact_path="model", registered_model_name=registered_model_name
++            )
+diff --git a/mlflow/gluon/__init__.py b/mlflow/gluon/__init__.py
+index 8ab5429a306e9..9529b8e57cd72 100644
+--- a/mlflow/gluon/__init__.py
++++ b/mlflow/gluon/__init__.py
+@@ -353,6 +353,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging from Gluon to MLflow.
+@@ -373,6 +374,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during MXNet Gluon
+                    autologging. If ``False``, show all events and warnings during MXNet Gluon
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+ 
+     from mxnet.gluon.contrib.estimator import Estimator
+diff --git a/mlflow/gluon/_autolog.py b/mlflow/gluon/_autolog.py
+index d6a5e75332a30..1685ae43949c1 100644
+--- a/mlflow/gluon/_autolog.py
++++ b/mlflow/gluon/_autolog.py
+@@ -2,7 +2,7 @@
+ from mxnet.gluon.nn import HybridSequential
+ 
+ import mlflow
+-from mlflow.utils.autologging_utils import ExceptionSafeClass
++from mlflow.utils.autologging_utils import ExceptionSafeClass, get_autologging_config
+ 
+ 
+ class __MLflowGluonCallback(EpochEnd, TrainEnd, TrainBegin, metaclass=ExceptionSafeClass):
+@@ -36,4 +36,9 @@ def train_begin(self, estimator, *args, **kwargs):
+ 
+     def train_end(self, estimator, *args, **kwargs):
+         if isinstance(estimator.net, HybridSequential) and self.log_models:
+-            mlflow.gluon.log_model(estimator.net, artifact_path="model")
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
++            mlflow.gluon.log_model(
++                estimator.net, artifact_path="model", registered_model_name=registered_model_name
++            )
+diff --git a/mlflow/keras.py b/mlflow/keras.py
+index f7c3db19afebc..7bf3634cda1e0 100644
+--- a/mlflow/keras.py
++++ b/mlflow/keras.py
+@@ -45,6 +45,7 @@
+     ExceptionSafeClass,
+     log_fn_args_as_params,
+     batch_metrics_logger,
++    get_autologging_config,
+ )
+ from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+ 
+@@ -565,6 +566,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     # pylint: disable=E0611
+     """
+@@ -627,6 +629,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during Keras
+                    autologging. If ``False``, show all events and warnings during Keras
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     import keras
+ 
+@@ -685,7 +689,14 @@ def on_epoch_end(self, epoch, logs=None):
+ 
+             def on_train_end(self, logs=None):
+                 if log_models:
+-                    log_model(self.model, artifact_path="model")
++                    registered_model_name = get_autologging_config(
++                        mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++                    )
++                    log_model(
++                        self.model,
++                        artifact_path="model",
++                        registered_model_name=registered_model_name,
++                    )
+ 
+             # As of Keras 2.4.0, Keras Callback implementations must define the following
+             # methods indicating whether or not the callback overrides functions for
+diff --git a/mlflow/lightgbm.py b/mlflow/lightgbm.py
+index f43c63fa4d4b1..56ae15b0716ef 100644
+--- a/mlflow/lightgbm.py
++++ b/mlflow/lightgbm.py
+@@ -61,6 +61,7 @@
+     ENSURE_AUTOLOGGING_ENABLED_TEXT,
+     batch_metrics_logger,
+     MlflowAutologgingQueueingClient,
++    get_autologging_config,
+ )
+ from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+ 
+@@ -369,6 +370,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging from LightGBM to MLflow. Logs the following:
+@@ -411,6 +413,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during LightGBM
+                    autologging. If ``False``, show all events and warnings during LightGBM
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     import lightgbm
+     import numpy as np
+@@ -612,11 +616,15 @@ def infer_model_signature(input_example):
+                 _logger,
+             )
+ 
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
+             log_model(
+                 model,
+                 artifact_path="model",
+                 signature=signature,
+                 input_example=input_example,
++                registered_model_name=registered_model_name,
+             )
+ 
+         param_logging_operations.await_completion()
+diff --git a/mlflow/paddle/__init__.py b/mlflow/paddle/__init__.py
+index 4380ddb199eb5..148a96b26d6ec 100644
+--- a/mlflow/paddle/__init__.py
++++ b/mlflow/paddle/__init__.py
+@@ -465,6 +465,7 @@ def autolog(
+     disable=False,
+     exclusive=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging from PaddlePaddle to MLflow.
+@@ -486,6 +487,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during PyTorch
+                    Lightning autologging. If ``False``, show all events and warnings during
+                    PaddlePaddle autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+ 
+     .. code-block:: python
+         :caption: Example
+diff --git a/mlflow/paddle/_paddle_autolog.py b/mlflow/paddle/_paddle_autolog.py
+index cd239435a47a7..830a225f2eec9 100644
+--- a/mlflow/paddle/_paddle_autolog.py
++++ b/mlflow/paddle/_paddle_autolog.py
+@@ -124,7 +124,12 @@ def patched_fit(original, self, *args, **kwargs):
+     mlflow.log_text(str(self.summary()), "model_summary.txt")
+ 
+     if log_models:
+-        mlflow.paddle.log_model(pd_model=self, artifact_path="model")
++        registered_model_name = get_autologging_config(
++            mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++        )
++        mlflow.paddle.log_model(
++            pd_model=self, artifact_path="model", registered_model_name=registered_model_name
++        )
+ 
+     client.flush(synchronous=True)
+ 
+diff --git a/mlflow/pyspark/ml/__init__.py b/mlflow/pyspark/ml/__init__.py
+index 563f8930ba5f9..e49336c3a5189 100644
+--- a/mlflow/pyspark/ml/__init__.py
++++ b/mlflow/pyspark/ml/__init__.py
+@@ -18,6 +18,7 @@
+     _get_new_training_session_class,
+     autologging_integration,
+     safe_patch,
++    get_autologging_config,
+ )
+ from mlflow.utils.autologging_utils import get_method_call_arg_value
+ from mlflow.utils.file_utils import TempDir
+@@ -679,6 +680,7 @@ def autolog(
+     disable_for_unsupported_versions=False,
+     silent=False,
+     log_post_training_metrics=True,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging for pyspark ml estimators.
+@@ -793,6 +795,8 @@ def autolog(
+     :param log_post_training_metrics: If ``True``, post training metrics are logged. Defaults to
+                                       ``True``. See the `post training metrics`_ section for more
+                                       details.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+ 
+     **The default log model allowlist in mlflow**
+         .. literalinclude:: ../../../mlflow/pyspark/ml/log_model_allowlist.txt
+@@ -894,10 +898,13 @@ def _log_posttraining_metadata(estimator, spark_model, params):
+ 
+         if log_models:
+             if _should_log_model(spark_model):
++                registered_model_name = get_autologging_config(
++                    mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++                )
++
+                 # TODO: support model signature
+                 mlflow.spark.log_model(
+-                    spark_model,
+-                    artifact_path="model",
++                    spark_model, artifact_path="model", registered_model_name=registered_model_name
+                 )
+                 if _is_parameter_search_model(spark_model):
+                     mlflow.spark.log_model(
+diff --git a/mlflow/pytorch/__init__.py b/mlflow/pytorch/__init__.py
+index f855ad5cd2769..b0e9e5fbfb75e 100644
+--- a/mlflow/pytorch/__init__.py
++++ b/mlflow/pytorch/__init__.py
+@@ -891,6 +891,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging from `PyTorch Lightning
+@@ -927,6 +928,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during PyTorch
+                    Lightning autologging. If ``False``, show all events and warnings during
+                    PyTorch Lightning autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+ 
+     .. code-block:: python
+         :caption: Example
+diff --git a/mlflow/pytorch/_pytorch_autolog.py b/mlflow/pytorch/_pytorch_autolog.py
+index 87d75fb0fcc0e..fc9e969a3e63d 100644
+--- a/mlflow/pytorch/_pytorch_autolog.py
++++ b/mlflow/pytorch/_pytorch_autolog.py
+@@ -311,7 +311,14 @@ def patched_fit(original, self, *args, **kwargs):
+         shutil.rmtree(tempdir)
+ 
+     if log_models:
+-        mlflow.pytorch.log_model(pytorch_model=self.model, artifact_path="model")
++        registered_model_name = get_autologging_config(
++            mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++        )
++        mlflow.pytorch.log_model(
++            pytorch_model=self.model,
++            artifact_path="model",
++            registered_model_name=registered_model_name,
++        )
+ 
+         if early_stop_callback is not None and self.checkpoint_callback.best_model_path:
+             mlflow.log_artifact(
+diff --git a/mlflow/sklearn/__init__.py b/mlflow/sklearn/__init__.py
+index 3699b34dc905d..c1060bb126ce2 100644
+--- a/mlflow/sklearn/__init__.py
++++ b/mlflow/sklearn/__init__.py
+@@ -58,6 +58,7 @@
+     MlflowAutologgingQueueingClient,
+     disable_autologging,
+     update_wrapper_extended,
++    get_autologging_config,
+ )
+ from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+ 
+@@ -903,6 +904,7 @@ def autolog(
+     max_tuning_runs=5,
+     log_post_training_metrics=True,
+     serialization_format=SERIALIZATION_FORMAT_CLOUDPICKLE,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures autologging for scikit-learn estimators.
+@@ -1157,6 +1159,8 @@ def fetch_logged_data(run_id):
+     :param serialization_format: The format in which to serialize the model. This should be one of
+                                  the following: ``mlflow.sklearn.SERIALIZATION_FORMAT_PICKLE`` or
+                                  ``mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE``.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     _autolog(
+         flavor_name=FLAVOR_NAME,
+@@ -1256,11 +1260,15 @@ def fit_mlflow_xgboost_and_lightgbm(original, self, *args, **kwargs):
+                 if flavor_name == mlflow.xgboost.FLAVOR_NAME
+                 else mlflow.lightgbm.log_model
+             )
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
+             log_model_func(
+                 self,
+                 artifact_path="model",
+                 signature=signature,
+                 input_example=input_example,
++                registered_model_name=registered_model_name,
+             )
+         return fit_output
+ 
+@@ -1376,13 +1384,16 @@ def _log_model_with_except_handling(*args, **kwargs):
+                 log_model_signatures,
+                 _logger,
+             )
+-
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
+             _log_model_with_except_handling(
+                 estimator,
+                 artifact_path="model",
+                 signature=signature,
+                 input_example=input_example,
+                 serialization_format=serialization_format,
++                registered_model_name=registered_model_name,
+             )
+ 
+         if _is_parameter_search_estimator(estimator):
+diff --git a/mlflow/statsmodels.py b/mlflow/statsmodels.py
+index 462dc349e3116..cdd0e730906c1 100644
+--- a/mlflow/statsmodels.py
++++ b/mlflow/statsmodels.py
+@@ -396,6 +396,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     """
+     Enables (or disables) and configures automatic logging from statsmodels to MLflow.
+@@ -422,6 +423,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during statsmodels
+                    autologging. If ``False``, show all events and warnings during statsmodels
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     import statsmodels
+ 
+@@ -508,8 +511,15 @@ def wrapper_fit(original, self, *args, **kwargs):
+                 if get_autologging_config(FLAVOR_NAME, "log_models", True):
+                     global _save_model_called_from_autolog
+                     _save_model_called_from_autolog = True
++                    registered_model_name = get_autologging_config(
++                        mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++                    )
+                     try:
+-                        log_model(model, artifact_path="model")
++                        log_model(
++                            model,
++                            artifact_path="model",
++                            registered_model_name=registered_model_name,
++                        )
+                     finally:
+                         _save_model_called_from_autolog = False
+ 
+diff --git a/mlflow/tensorflow/__init__.py b/mlflow/tensorflow/__init__.py
+index 443edf9ce5f71..4c2b3737e596b 100644
+--- a/mlflow/tensorflow/__init__.py
++++ b/mlflow/tensorflow/__init__.py
+@@ -626,6 +626,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=unused-argument
+     # pylint: disable=E0611
+     """
+@@ -692,6 +693,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during TensorFlow
+                    autologging. If ``False``, show all events and warnings during TensorFlow
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     import tensorflow
+ 
+diff --git a/mlflow/tensorflow/_autolog.py b/mlflow/tensorflow/_autolog.py
+index 2002c749c6c53..098f73fa84cc7 100644
+--- a/mlflow/tensorflow/_autolog.py
++++ b/mlflow/tensorflow/_autolog.py
+@@ -1,7 +1,7 @@
+ from tensorflow.keras.callbacks import Callback, TensorBoard
+ 
+ import mlflow
+-from mlflow.utils.autologging_utils import ExceptionSafeClass
++from mlflow.utils.autologging_utils import ExceptionSafeClass, get_autologging_config
+ 
+ 
+ class _TensorBoard(TensorBoard, metaclass=ExceptionSafeClass):
+@@ -46,4 +46,9 @@ def on_epoch_end(self, epoch, logs=None):
+ 
+     def on_train_end(self, logs=None):  # pylint: disable=unused-argument
+         if self.log_models:
+-            mlflow.keras.log_model(self.model, artifact_path="model")
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
++            mlflow.keras.log_model(
++                self.model, artifact_path="model", registered_model_name=registered_model_name
++            )
+diff --git a/mlflow/xgboost/__init__.py b/mlflow/xgboost/__init__.py
+index a64e50612c44a..4468ac32b56f1 100644
+--- a/mlflow/xgboost/__init__.py
++++ b/mlflow/xgboost/__init__.py
+@@ -59,6 +59,7 @@
+     ENSURE_AUTOLOGGING_ENABLED_TEXT,
+     batch_metrics_logger,
+     MlflowAutologgingQueueingClient,
++    get_autologging_config,
+ )
+ 
+ from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+@@ -338,6 +339,7 @@ def autolog(
+     exclusive=False,
+     disable_for_unsupported_versions=False,
+     silent=False,
++    registered_model_name=None,
+ ):  # pylint: disable=W0102,unused-argument
+     """
+     Enables (or disables) and configures autologging from XGBoost to MLflow. Logs the following:
+@@ -380,6 +382,8 @@ def autolog(
+     :param silent: If ``True``, suppress all event logs and warnings from MLflow during XGBoost
+                    autologging. If ``False``, show all events and warnings during XGBoost
+                    autologging.
++    :param registered_model_name: If given, register the fitted model as the given name, or
++                                  create a new version model under the given name.
+     """
+     import functools
+     import xgboost
+@@ -655,11 +659,15 @@ def infer_model_signature(input_example):
+                 _logger,
+             )
+ 
++            registered_model_name = get_autologging_config(
++                mlflow.paddle.FLAVOR_NAME, "registered_model_name", None
++            )
+             log_model(
+                 model,
+                 artifact_path="model",
+                 signature=signature,
+                 input_example=input_example,
++                registered_model_name=registered_model_name,
+             )
+ 
+         param_logging_operations.await_completion()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

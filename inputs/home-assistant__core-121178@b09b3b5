@@ -1,0 +1,163 @@
+  Task-ID: home-assistant__core-121178@b09b3b5
+  Please checkout to this commit first: 869f24df4978f43fd53dab16201a56da79ecb6bc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Shelly PlusUni Output switches lose connection after Core Update 2024.7.0
+### The problem
+
+I have a Shelly Plus Uni that I use its Outputs for to open the door of my apartment building every day.
+
+Right after todays core update to 2024.7.0 the Outputs can be toggled on, but not toggled off, as they become unavailable right after turning them on.
+
+Reverting back to 2024.6.4 solves the problem.
+
+### What version of Home Assistant Core has the issue?
+
+2024.6.4
+
+### What was the last working version of Home Assistant Core?
+
+2024.6.4
+
+### What type of installation are you running?
+
+Home Assistant OS
+
+### Integration causing the issue
+
+Shelly
+
+### Link to integration documentation on our website
+
+_No response_
+
+### Diagnostics information
+
+_No response_
+
+### Example YAML snippet
+
+_No response_
+
+### Anything in the logs that might be useful for us?
+
+_No response_
+
+### Additional information
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/homeassistant/components/shelly/sensor.py b/homeassistant/components/shelly/sensor.py
+index 743c7c7ff01e3..b41cb090b9827 100644
+--- a/homeassistant/components/shelly/sensor.py
++++ b/homeassistant/components/shelly/sensor.py
+@@ -991,20 +991,18 @@ class RestSensorDescription(RestEntityDescription, SensorEntityDescription):
+     ),
+     "counter_frequency": RpcSensorDescription(
+         key="input",
+-        sub_key="counts",
++        sub_key="freq",
+         name="Pulse counter frequency",
+         native_unit_of_measurement=UnitOfFrequency.HERTZ,
+         state_class=SensorStateClass.MEASUREMENT,
+-        value=lambda status, _: status["freq"],
+-        removal_condition=lambda config, status, key: (config[key]["enable"] is False),
++        removal_condition=lambda config, _, key: (config[key]["enable"] is False),
+     ),
+     "counter_frequency_value": RpcSensorDescription(
+         key="input",
+-        sub_key="counts",
++        sub_key="xfreq",
+         name="Pulse counter frequency value",
+-        value=lambda status, _: status["xfreq"],
+         removal_condition=lambda config, status, key: (
+-            config[key]["enable"] is False or status[key]["counts"].get("xfreq") is None
++            config[key]["enable"] is False or status[key].get("xfreq") is None
+         ),
+     ),
+ }
+diff --git a/tests/components/shelly/conftest.py b/tests/components/shelly/conftest.py
+index 65ebdeb6996d1..e9662b55cf5cb 100644
+--- a/tests/components/shelly/conftest.py
++++ b/tests/components/shelly/conftest.py
+@@ -228,7 +228,9 @@ def mock_white_light_set_state(
+     "input:1": {"id": 1, "percent": 89, "xpercent": 8.9},
+     "input:2": {
+         "id": 2,
+-        "counts": {"total": 56174, "xtotal": 561.74, "freq": 208.00, "xfreq": 6.11},
++        "counts": {"total": 56174, "xtotal": 561.74},
++        "freq": 208.00,
++        "xfreq": 6.11,
+     },
+     "light:0": {"output": True, "brightness": 53.0},
+     "light:1": {"output": True, "brightness": 53.0},
+diff --git a/tests/components/shelly/test_sensor.py b/tests/components/shelly/test_sensor.py
+index 513bcd875e2a1..c62a1f6f6ca92 100644
+--- a/tests/components/shelly/test_sensor.py
++++ b/tests/components/shelly/test_sensor.py
+@@ -828,3 +828,29 @@ async def test_rpc_pulse_counter_frequency_sensors(
+     entry = entity_registry.async_get(entity_id)
+     assert entry
+     assert entry.unique_id == "123456789ABC-input:2-counter_frequency_value"
++
++
++async def test_rpc_disabled_xfreq(
++    hass: HomeAssistant,
++    mock_rpc_device: Mock,
++    entity_registry: EntityRegistry,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Test RPC input with the xfreq sensor disabled."""
++    status = deepcopy(mock_rpc_device.status)
++    status["input:2"] = {
++        "id": 2,
++        "counts": {"total": 56174, "xtotal": 561.74},
++        "freq": 208.00,
++    }
++    monkeypatch.setattr(mock_rpc_device, "status", status)
++
++    await init_integration(hass, 2)
++
++    entity_id = f"{SENSOR_DOMAIN}.gas_pulse_counter_frequency_value"
++
++    state = hass.states.get(entity_id)
++    assert not state
++
++    entry = entity_registry.async_get(entity_id)
++    assert not entry
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

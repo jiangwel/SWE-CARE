@@ -1,0 +1,149 @@
+  Task-ID: deepset-ai__haystack-1413@fc3b61a
+  Please checkout to this commit first: 3deff26b6057cb9213cb1707cc04acc9849d59d9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  MostSimilarDocumentsPipeline -Functionality to get top n documents by document Id rather than a query 
+**What**
+
+Is there an existing functionality to get top n documents by document Id rather than a query or is it possible to combine existing functionality  to achieve this?
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/pipeline.py b/haystack/pipeline.py
+index 577d095559..09c74053c4 100644
+--- a/haystack/pipeline.py
++++ b/haystack/pipeline.py
+@@ -28,6 +28,7 @@
+ 
+ from haystack import BaseComponent
+ from haystack.generator.base import BaseGenerator
++from haystack.document_store.base import BaseDocumentStore
+ from haystack.reader.base import BaseReader
+ from haystack.retriever.base import BaseRetriever
+ from haystack.summarizer.base import BaseSummarizer
+@@ -1287,4 +1288,31 @@ def run(self, query, documents, **kwargs):
+         # Pass also the other incoming kwargs so that future nodes still have access to it
+         output.update(**kwargs)
+ 
+-        return output, "output_1"
+\ No newline at end of file
++        return output, "output_1"
++
++
++class MostSimilarDocumentsPipeline(BaseStandardPipeline):
++    def __init__(self, document_store: BaseDocumentStore):
++        """
++        Initialize a Pipeline for finding similar documents using document ids.
++
++        :param document_store: Document Store instance
++        """
++        self.document_store = document_store
++
++    def run(self, document_ids: List[str], top_k: int = 5):
++        """
++        :param document_ids: document ids
++        :param top_k: How many documents id to return against single document
++        """
++        return_ids: list = []
++        self.document_store.return_embedding = True  # type: ignore
++        for document in self.document_store.get_documents_by_id(ids=document_ids):
++            found_ids: list = []
++            for found_document in self.document_store.query_by_embedding(query_emb=document.embedding,
++                                                                         return_embedding=False,
++                                                                         top_k=top_k):
++                found_ids.append(found_document.id)
++            return_ids.append(found_ids)
++
++        return return_ids
+diff --git a/test/test_pipeline.py b/test/test_pipeline.py
+index ac8b28e074..e082b249b2 100644
+--- a/test/test_pipeline.py
++++ b/test/test_pipeline.py
+@@ -14,6 +14,7 @@
+     RootNode,
+     SklearnQueryClassifier,
+     TransformersQueryClassifier,
++    MostSimilarDocumentsPipeline,
+ )
+ from haystack.retriever.dense import DensePassageRetriever
+ from haystack.retriever.sparse import ElasticsearchRetriever
+@@ -547,3 +548,45 @@ def run(self, **kwargs):
+ 
+     output = pipeline.run(query="How old is John?")
+     assert output["output"] == "question"
++
++
++@pytest.mark.elasticsearch
++@pytest.mark.parametrize(
++        "retriever,document_store",
++        [
++            ("embedding", "faiss"),
++            ("embedding", "milvus"),
++            ("embedding", "elasticsearch"),
++        ],
++        indirect=True,
++)
++def test_document_search_pipeline(retriever, document_store):
++    documents = [
++        {"text": "Sample text for document-1", "meta": {"source": "wiki1"}},
++        {"text": "Sample text for document-2", "meta": {"source": "wiki2"}},
++        {"text": "Sample text for document-3", "meta": {"source": "wiki3"}},
++        {"text": "Sample text for document-4", "meta": {"source": "wiki4"}},
++        {"text": "Sample text for document-5", "meta": {"source": "wiki5"}},
++    ]
++
++    document_store.write_documents(documents)
++    document_store.update_embeddings(retriever)
++
++    docs_id: list = []
++    for index, doc in enumerate(document_store.get_all_documents(return_embedding=False)):
++        if index == 2:
++            break
++        docs_id.append(doc.id)
++
++    pipeline = MostSimilarDocumentsPipeline(document_store=document_store)
++    output = pipeline.run(document_ids=docs_id)
++
++    assert isinstance(output, list)
++    assert isinstance(output, list)
++    assert len(output) == len(docs_id)
++
++    for item in output:
++        assert isinstance(item, list)
++        if len(item) > 0:
++            for _id in item:
++                assert isinstance(_id, str)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

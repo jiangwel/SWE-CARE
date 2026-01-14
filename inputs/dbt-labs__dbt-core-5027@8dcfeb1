@@ -1,0 +1,744 @@
+  Task-ID: dbt-labs__dbt-core-5027@8dcfeb1
+  Please checkout to this commit first: f49f28c331062c824351fe1babe4e4dd146f8d71
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [CT-376] add ability to calculate metrics based off of other metrics
+In order to calculate any rate-type metrics there has to be a mechanism supported to calculate metrics based off of other metrics.
+
+This could be implemented by expanding the inputs allowed in model. Instead of just referencing a materialized model you could allow referencing a metric dynamically and passing the time aggregation info from your current metric as a variable argument. 
+
+You could also enable this functionality by natively supporting more type aggregations such as division and then allowing dynamic metric arguments to be passed in that type field. I believe that can mostly be accomplished by overwriting the type functions but it still leaves a gap where you can't pass other metrics to be used in that type agg.
+  </issue>
+  
+  <patch>
+  diff --git a/core/dbt/compilation.py b/core/dbt/compilation.py
+index 052918d42e1..c94348f7190 100644
+--- a/core/dbt/compilation.py
++++ b/core/dbt/compilation.py
+@@ -397,6 +397,8 @@ def link_node(self, linker: Linker, node: GraphMemberNode, manifest: Manifest):
+                 linker.dependency(node.unique_id, (manifest.nodes[dependency].unique_id))
+             elif dependency in manifest.sources:
+                 linker.dependency(node.unique_id, (manifest.sources[dependency].unique_id))
++            elif dependency in manifest.metrics:
++                linker.dependency(node.unique_id, (manifest.metrics[dependency].unique_id))
+             else:
+                 dependency_not_found(node, dependency)
+ 
+diff --git a/core/dbt/context/providers.py b/core/dbt/context/providers.py
+index dd3e433afcd..cacfb322a8e 100644
+--- a/core/dbt/context/providers.py
++++ b/core/dbt/context/providers.py
+@@ -40,6 +40,9 @@
+     ParsedSeedNode,
+     ParsedSourceDefinition,
+ )
++from dbt.contracts.graph.metrics import (
++    MetricReference, ResolvedMetricReference
++)
+ from dbt.exceptions import (
+     CompilationException,
+     ParsingException,
+@@ -197,7 +200,7 @@ def Relation(self):
+         return self.db_wrapper.Relation
+ 
+     @abc.abstractmethod
+-    def __call__(self, *args: str) -> Union[str, RelationProxy]:
++    def __call__(self, *args: str) -> Union[str, RelationProxy, MetricReference]:
+         pass
+ 
+ 
+@@ -263,6 +266,42 @@ def __call__(self, *args: str) -> RelationProxy:
+         return self.resolve(args[0], args[1])
+ 
+ 
++class BaseMetricResolver(BaseResolver):
++    def resolve(self, name: str, package: Optional[str] = None) -> MetricReference:
++        ...
++
++    def _repack_args(self, name: str, package: Optional[str]) -> List[str]:
++        if package is None:
++            return [name]
++        else:
++            return [package, name]
++
++    def validate_args(self, name: str, package: Optional[str]):
++        if not isinstance(name, str):
++            raise CompilationException(
++                f"The name argument to metric() must be a string, got " f"{type(name)}"
++            )
++
++        if package is not None and not isinstance(package, str):
++            raise CompilationException(
++                f"The package argument to metric() must be a string or None, got " f"{type(package)}"
++            )
++
++    def __call__(self, *args: str) -> MetricReference:
++        name: str
++        package: Optional[str] = None
++
++        if len(args) == 1:
++            name = args[0]
++        elif len(args) == 2:
++            package, name = args
++        else:
++            # TODO: Use a different error!
++            ref_invalid_args(self.model, args)
++        self.validate_args(name, package)
++        return self.resolve(name, package)
++
++
+ class Config(Protocol):
+     def __init__(self, model, context_config: Optional[ContextConfig]):
+         ...
+@@ -509,6 +548,35 @@ def resolve(self, source_name: str, table_name: str):
+         return self.Relation.create_from_source(target_source)
+ 
+ 
++# metric` implementations
++class ParseMetricResolver(BaseMetricResolver):
++    def resolve(self, name: str, package: Optional[str] = None) -> MetricReference:
++        self.model.metrics.append(self._repack_args(name, package))
++
++        return MetricReference(name, package)
++
++
++class RuntimeMetricResolver(BaseMetricResolver):
++    def resolve(self, target_name: str, target_package: Optional[str] = None) -> MetricReference:
++        target_metric = self.manifest.resolve_metric(
++            target_name,
++            target_package,
++            self.current_project,
++            self.model.package_name,
++        )
++
++        if target_metric is None or isinstance(target_metric, Disabled):
++            # TODO : Use a different exception!!
++            ref_target_not_found(
++                self.model,
++                target_name,
++                target_package,
++                disabled=isinstance(target_metric, Disabled),
++            )
++
++        return ResolvedMetricReference(target_metric)
++
++
+ # `var` implementations.
+ class ModelConfiguredVar(Var):
+     def __init__(
+@@ -566,6 +634,7 @@ class Provider(Protocol):
+     Var: Type[ModelConfiguredVar]
+     ref: Type[BaseRefResolver]
+     source: Type[BaseSourceResolver]
++    metric: Type[BaseMetricResolver]
+ 
+ 
+ class ParseProvider(Provider):
+@@ -575,6 +644,7 @@ class ParseProvider(Provider):
+     Var = ParseVar
+     ref = ParseRefResolver
+     source = ParseSourceResolver
++    metric = ParseMetricResolver
+ 
+ 
+ class GenerateNameProvider(Provider):
+@@ -584,6 +654,7 @@ class GenerateNameProvider(Provider):
+     Var = RuntimeVar
+     ref = ParseRefResolver
+     source = ParseSourceResolver
++    metric = ParseMetricResolver
+ 
+ 
+ class RuntimeProvider(Provider):
+@@ -593,6 +664,7 @@ class RuntimeProvider(Provider):
+     Var = RuntimeVar
+     ref = RuntimeRefResolver
+     source = RuntimeSourceResolver
++    metric = RuntimeMetricResolver
+ 
+ 
+ class OperationProvider(RuntimeProvider):
+@@ -776,6 +848,10 @@ def ref(self) -> Callable:
+     def source(self) -> Callable:
+         return self.provider.source(self.db_wrapper, self.model, self.config, self.manifest)
+ 
++    @contextproperty
++    def metric(self) -> Callable:
++        return self.provider.metric(self.db_wrapper, self.model, self.config, self.manifest)
++
+     @contextproperty("config")
+     def ctx_config(self) -> Config:
+         """The `config` variable exists to handle end-user configuration for
+@@ -1286,6 +1362,15 @@ def generate_runtime_macro_context(
+     return ctx.to_dict()
+ 
+ 
++def generate_runtime_metric_context(
++    metric: ParsedMetric,
++    config: RuntimeConfig,
++    manifest: Manifest,
++) -> Dict[str, Any]:
++    ctx = ProviderContext(metric, config, manifest, RuntimeProvider(), None)
++    return ctx.to_dict()
++
++
+ class ExposureRefResolver(BaseResolver):
+     def __call__(self, *args) -> str:
+         if len(args) not in (1, 2):
+@@ -1362,6 +1447,12 @@ def generate_parse_metrics(
+             project,
+             manifest,
+         ),
++        "metric": ParseMetricResolver(
++            None,
++            metric,
++            project,
++            manifest,
++        ),
+     }
+ 
+ 
+diff --git a/core/dbt/contracts/graph/manifest.py b/core/dbt/contracts/graph/manifest.py
+index 5a8309d3319..3976050e756 100644
+--- a/core/dbt/contracts/graph/manifest.py
++++ b/core/dbt/contracts/graph/manifest.py
+@@ -183,6 +183,39 @@ def perform_lookup(self, unique_id: UniqueID, manifest) -> ManifestNode:
+         return manifest.nodes[unique_id]
+ 
+ 
++class MetricLookup(dbtClassMixin):
++    def __init__(self, manifest: "Manifest"):
++        self.storage: Dict[str, Dict[PackageName, UniqueID]] = {}
++        self.populate(manifest)
++
++    def get_unique_id(self, search_name, package: Optional[PackageName]):
++        return find_unique_id_for_package(self.storage, search_name, package)
++
++    def find(self, search_name, package: Optional[PackageName], manifest: "Manifest"):
++        unique_id = self.get_unique_id(search_name, package)
++        if unique_id is not None:
++            return self.perform_lookup(unique_id, manifest)
++        return None
++
++    def add_metric(self, metric: ParsedMetric):
++        if metric.search_name not in self.storage:
++            self.storage[metric.search_name] = {}
++
++        self.storage[metric.search_name][metric.package_name] = metric.unique_id
++
++    def populate(self, manifest):
++        for metric in manifest.metrics.values():
++            if hasattr(metric, "name"):
++                self.add_metric(metric)
++
++    def perform_lookup(self, unique_id: UniqueID, manifest: "Manifest") -> ParsedMetric:
++        if unique_id not in manifest.metrics:
++            raise dbt.exceptions.InternalException(
++                f"Metric {unique_id} found in cache but not found in manifest"
++            )
++        return manifest.metrics[unique_id]
++
++
+ # This handles both models/seeds/snapshots and sources
+ class DisabledLookup(dbtClassMixin):
+     def __init__(self, manifest: "Manifest"):
+@@ -434,6 +467,9 @@ class Disabled(Generic[D]):
+     target: D
+ 
+ 
++MaybeMetricNode = Optional[ParsedMetric]
++
++
+ MaybeDocumentation = Optional[ParsedDocumentation]
+ 
+ 
+@@ -595,6 +631,9 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
+     _ref_lookup: Optional[RefableLookup] = field(
+         default=None, metadata={"serialize": lambda x: None, "deserialize": lambda x: None}
+     )
++    _metric_lookup: Optional[MetricLookup] = field(
++        default=None, metadata={"serialize": lambda x: None, "deserialize": lambda x: None}
++    )
+     _disabled_lookup: Optional[DisabledLookup] = field(
+         default=None, metadata={"serialize": lambda x: None, "deserialize": lambda x: None}
+     )
+@@ -833,6 +872,12 @@ def ref_lookup(self) -> RefableLookup:
+             self._ref_lookup = RefableLookup(self)
+         return self._ref_lookup
+ 
++    @property
++    def metric_lookup(self) -> MetricLookup:
++        if self._metric_lookup is None:
++            self._metric_lookup = MetricLookup(self)
++        return self._metric_lookup
++
+     def rebuild_ref_lookup(self):
+         self._ref_lookup = RefableLookup(self)
+ 
+@@ -908,6 +953,31 @@ def resolve_source(
+             return Disabled(disabled[0])
+         return None
+ 
++    def resolve_metric(
++        self,
++        target_metric_name: str,
++        target_metric_package: Optional[str],
++        current_project: str,
++        node_package: str,
++    ) -> MaybeMetricNode:
++        metric: Optional[ParsedMetric] = None
++        disabled: Optional[List[ParsedMetric]] = None
++
++        candidates = _search_packages(current_project, node_package, target_metric_package)
++        for pkg in candidates:
++            metric = self.metric_lookup.find(target_metric_name, pkg, self)
++            if metric is not None:
++                # Skip if the metric is disabled!
++                return metric
++
++            # TODO: Figure this part out...
++            # if disabled is None:
++            #     disabled = self.disabled_lookup.find(search_name, pkg)
++
++        if disabled:
++            return Disabled(disabled[0])
++        return None
++
+     # Called by DocsRuntimeContext.doc
+     def resolve_doc(
+         self,
+@@ -1072,6 +1142,7 @@ def __reduce_ex__(self, protocol):
+             self._doc_lookup,
+             self._source_lookup,
+             self._ref_lookup,
++            self._metric_lookup,
+             self._disabled_lookup,
+             self._analysis_lookup,
+         )
+diff --git a/core/dbt/contracts/graph/metrics.py b/core/dbt/contracts/graph/metrics.py
+new file mode 100644
+index 00000000000..78838e41447
+--- /dev/null
++++ b/core/dbt/contracts/graph/metrics.py
+@@ -0,0 +1,30 @@
++
++class MetricReference(object):
++    def __init__(self, metric_name, package_name=None):
++        self.metric_name = metric_name
++        self.package_name = package_name
++
++
++class ResolvedMetricReference(MetricReference):
++    """
++    Simple proxy over a ParsedMetric which delegates property
++    lookups to the underlying node. Also adds helper functions
++    for working with metrics (ie. __str__ and templating functions)
++    """
++    def __init__(self, node):
++        super().__init__(node.name, node.package_name)
++        self.node = node
++
++    def __getattr__(self, key):
++        return getattr(self.node, key)
++
++    @property
++    def is_derived(self):
++        return self.node.is_derived
++
++    def qualify(self, namespace):
++        return f'{namespace}.{self.metric_name}'
++
++    def __str__(self):
++        return self.node.name
++
+diff --git a/core/dbt/contracts/graph/parsed.py b/core/dbt/contracts/graph/parsed.py
+index b3803cb9eda..f4deca7f633 100644
+--- a/core/dbt/contracts/graph/parsed.py
++++ b/core/dbt/contracts/graph/parsed.py
+@@ -37,6 +37,7 @@
+     ExposureType,
+     MaturityType,
+     MetricFilter,
++    MetricRatioTerms,
+ )
+ from dbt.contracts.util import Replaceable, AdditionalPropertiesMixin
+ from dbt.exceptions import warn_or_error
+@@ -198,6 +199,7 @@ class ParsedNodeDefaults(NodeInfoMixin, ParsedNodeMandatory):
+     tags: List[str] = field(default_factory=list)
+     refs: List[List[str]] = field(default_factory=list)
+     sources: List[List[str]] = field(default_factory=list)
++    metrics: List[List[str]] = field(default_factory=list)
+     depends_on: DependsOn = field(default_factory=DependsOn)
+     description: str = field(default="")
+     columns: Dict[str, ColumnInfo] = field(default_factory=dict)
+@@ -798,9 +800,32 @@ def same_contents(self, old: Optional["ParsedExposure"]) -> bool:
+         )
+ 
+ 
++@dataclass
++class MetricReference(dbtClassMixin, Replaceable):
++    sql: str
++    unique_id: Optional[str]
++
++
++@dataclass
++class UnparsedRatioTerms(dbtClassMixin, Replaceable):
++    numerator: str
++    denominator: str
++
++
++@dataclass
++class ParsedRatioTerms(dbtClassMixin, Replaceable):
++    numerator: MetricReference
++    denominator: MetricReference
++
++
++@dataclass
++class RatioTerms(dbtClassMixin, Replaceable):
++    raw: Optional[UnparsedRatioTerms]
++    parsed: Optional[ParsedRatioTerms]
++
++
+ @dataclass
+ class ParsedMetric(UnparsedBaseNode, HasUniqueID, HasFqn):
+-    model: str
+     name: str
+     description: str
+     label: str
+@@ -810,14 +835,38 @@ class ParsedMetric(UnparsedBaseNode, HasUniqueID, HasFqn):
+     filters: List[MetricFilter]
+     time_grains: List[str]
+     dimensions: List[str]
++    model: Optional[str] = None
+     resource_type: NodeType = NodeType.Metric
+     meta: Dict[str, Any] = field(default_factory=dict)
+     tags: List[str] = field(default_factory=list)
+     sources: List[List[str]] = field(default_factory=list)
+     depends_on: DependsOn = field(default_factory=DependsOn)
+     refs: List[List[str]] = field(default_factory=list)
++    metrics: List[List[str]] = field(default_factory=list)
++    # ratio_terms: Optional[ParsedMetricRatioTerms] = None
++    ratio_terms: Optional[MetricRatioTerms] = None
++    is_derived: bool = False
+     created_at: float = field(default_factory=lambda: time.time())
+ 
++    def resolve_metric_references(self, context):
++        # TODO: Obviously don't do this...
++        from dbt.clients.jinja import get_rendered
++        if self.type == 'ratio':
++            numerator_id = get_rendered(
++                self.ratio_terms.parsed.numerator.sql,
++                context,
++                node=self,
++                native=True,
++            ).unique_id
++            denominator_id = get_rendered(
++                self.ratio_terms.parsed.denominator.sql,
++                context,
++                node=self,
++                native=True,
++            ).unique_id
++            self.ratio_terms.parsed.numerator.unique_id = numerator_id
++            self.ratio_terms.parsed.denominator.unique_id = denominator_id
++
+     @property
+     def depends_on_nodes(self):
+         return self.depends_on.nodes
+@@ -853,6 +902,10 @@ def same_timestamp(self, old: "ParsedMetric") -> bool:
+     def same_time_grains(self, old: "ParsedMetric") -> bool:
+         return self.time_grains == old.time_grains
+ 
++    def same_ratio_terms(self, old: "ParsedMetric") -> bool:
++        # TODO: Do we need a deep compare b/c this is a dict?
++        return self.ratio_terms == old.ratio_terms
++
+     def same_contents(self, old: Optional["ParsedMetric"]) -> bool:
+         # existing when it didn't before is a change!
+         # metadata/tags changes are not "changes"
+@@ -869,6 +922,7 @@ def same_contents(self, old: Optional["ParsedMetric"]) -> bool:
+             and self.same_sql(old)
+             and self.same_timestamp(old)
+             and self.same_time_grains(old)
++            and self.same_ratio_terms(old)
+             and True
+         )
+ 
+diff --git a/core/dbt/contracts/graph/unparsed.py b/core/dbt/contracts/graph/unparsed.py
+index d1c0b4a7a5a..00f388ae75b 100644
+--- a/core/dbt/contracts/graph/unparsed.py
++++ b/core/dbt/contracts/graph/unparsed.py
+@@ -444,12 +444,18 @@ class MetricFilter(dbtClassMixin, Replaceable):
+     value: str
+ 
+ 
++@dataclass
++class MetricRatioTerms(dbtClassMixin, Replaceable):
++    numerator: str
++    denominator: str
++
++
+ @dataclass
+ class UnparsedMetric(dbtClassMixin, Replaceable):
+-    model: str
+     name: str
+     label: str
+     type: str
++    model: Optional[str] = None
+     description: str = ""
+     sql: Optional[str] = None
+     timestamp: Optional[str] = None
+@@ -458,3 +464,5 @@ class UnparsedMetric(dbtClassMixin, Replaceable):
+     filters: List[MetricFilter] = field(default_factory=list)
+     meta: Dict[str, Any] = field(default_factory=dict)
+     tags: List[str] = field(default_factory=list)
++
++    ratio_terms: Optional[MetricRatioTerms] = None
+diff --git a/core/dbt/main.py b/core/dbt/main.py
+index fb926907b59..5469ea21318 100644
+--- a/core/dbt/main.py
++++ b/core/dbt/main.py
+@@ -142,6 +142,8 @@ def main(args=None):
+             exit_code = e.code
+ 
+         except BaseException as e:
++            import traceback
++            traceback.print_exc()
+             fire_event(MainEncounteredError(e=str(e)))
+             fire_event(MainStackTrace(stack_trace=traceback.format_exc()))
+             exit_code = ExitCodes.UnhandledError.value
+diff --git a/core/dbt/parser/manifest.py b/core/dbt/parser/manifest.py
+index 0f4c7e97537..4137ecc3614 100644
+--- a/core/dbt/parser/manifest.py
++++ b/core/dbt/parser/manifest.py
+@@ -48,7 +48,7 @@
+ from dbt.context.docs import generate_runtime_docs_context
+ from dbt.context.macro_resolver import MacroResolver, TestMacroNamespace
+ from dbt.context.configured import generate_macro_context
+-from dbt.context.providers import ParseProvider
++from dbt.context.providers import ParseProvider, generate_runtime_metric_context
+ from dbt.contracts.files import FileHash, ParseFileType, SchemaSourceFile
+ from dbt.parser.read_files import read_files, load_source_file
+ from dbt.parser.partial import PartialParsing, special_override_macros
+@@ -68,6 +68,9 @@
+     ParsedExposure,
+     ParsedMetric,
+ )
++from dbt.contracts.graph.metrics import (
++    MetricReference,
++)
+ from dbt.contracts.util import Writable
+ from dbt.exceptions import (
+     ref_target_not_found,
+@@ -389,6 +392,7 @@ def load(self):
+             self.process_sources(self.root_project.project_name)
+             self.process_refs(self.root_project.project_name)
+             self.process_docs(self.root_project)
++            self.process_metrics(self.root_project)
+ 
+             # update tracking data
+             self._perf_info.process_manifest_elapsed = time.perf_counter() - start_process
+@@ -831,6 +835,35 @@ def process_refs(self, current_project: str):
+                 continue
+             _process_refs_for_metric(self.manifest, current_project, metric)
+ 
++    def resolve_metric(self, unresolved_metric: MetricReference, current_project: str):
++        return self.manifest.resolve_metric(
++            unresolved_metric.metric_name,
++            unresolved_metric.package_name,
++            current_project,
++        )
++
++    # Takes references in 'metrics' array of nodes and exposures, finds the target
++    # node, and updates 'depends_on.nodes' with the unique id
++    def process_metrics(self, config: RuntimeConfig):
++        current_project = config.project_name
++        for node in self.manifest.nodes.values():
++            if node.created_at < self.started_at:
++                continue
++            _process_metrics_for_node(self.manifest, current_project, node)
++        for metric in self.manifest.metrics.values():
++            if metric.created_at < self.started_at:
++                continue
++            _process_metrics_for_node(self.manifest, current_project, metric)
++            if metric.is_derived:
++                # This mutates the metric
++                ctx = generate_runtime_metric_context(
++                    metric,
++                    config,
++                    self.manifest
++                )
++
++                metric.resolve_metric_references(ctx)
++
+     # nodes: node and column descriptions
+     # sources: source and table descriptions, column descriptions
+     # macros: macro argument descriptions
+@@ -1039,6 +1072,10 @@ def _process_docs_for_metrics(context: Dict[str, Any], metric: ParsedMetric) ->
+     metric.description = get_rendered(metric.description, context)
+ 
+ 
++def _process_derived_metrics(context: Dict[str, Any], metric: ParsedMetric) -> None:
++    metric.description = get_rendered(metric.description, context)
++
++
+ def _process_refs_for_exposure(manifest: Manifest, current_project: str, exposure: ParsedExposure):
+     """Given a manifest and exposure in that manifest, process its refs"""
+     for ref in exposure.refs:
+@@ -1121,6 +1158,49 @@ def _process_refs_for_metric(manifest: Manifest, current_project: str, metric: P
+         manifest.update_metric(metric)
+ 
+ 
++def _process_metrics_for_node(manifest: Manifest, current_project: str, node: Union[ManifestNode, ParsedMetric]):
++    """Given a manifest and a node in that manifest, process its metrics"""
++    for metric in node.metrics:
++        target_metric: Optional[Union[Disabled, ParsedMetric]] = None
++        target_metric_name: str
++        target_metric_package: Optional[str] = None
++
++        if len(metric) == 1:
++            target_metric_name = metric[0]
++        elif len(metric) == 2:
++            target_metric_package, target_metric_name = metric
++        else:
++            raise dbt.exceptions.InternalException(
++                f"Metric references should always be 1 or 2 arguments - got {len(metric)}"
++            )
++
++        # Resolve_ref
++        target_metric = manifest.resolve_metric(
++            target_metric_name,
++            target_metric_package,
++            current_project,
++            node.package_name,
++        )
++
++        if target_metric is None or isinstance(target_metric, Disabled):
++            # This may raise. Even if it doesn't, we don't want to add
++            # this node to the graph b/c there is no destination node
++            node.config.enabled = False
++            # TODO : Different error message?
++            invalid_ref_fail_unless_test(
++                node,
++                target_metric_name,
++                target_metric_package,
++                disabled=(isinstance(target_metric, Disabled)),
++            )
++
++            continue
++
++        target_metric_id = target_metric.unique_id
++
++        node.depends_on.nodes.append(target_metric_id)
++
++
+ def _process_refs_for_node(manifest: Manifest, current_project: str, node: ManifestNode):
+     """Given a manifest and a node in that manifest, process its refs"""
+     for ref in node.refs:
+diff --git a/core/dbt/parser/schema_renderer.py b/core/dbt/parser/schema_renderer.py
+index 82aab537751..52a52fefd77 100644
+--- a/core/dbt/parser/schema_renderer.py
++++ b/core/dbt/parser/schema_renderer.py
+@@ -66,6 +66,9 @@ def should_render_keypath(self, keypath: Keypath) -> bool:
+                     return False
+             elif self._is_norender_key(keypath[0:]):
+                 return False
++        elif self.key == "metrics":
++            if keypath[0] == "sql":
++                return False
+         else:  # models, seeds, snapshots, analyses
+             if self._is_norender_key(keypath[0:]):
+                 return False
+diff --git a/core/dbt/parser/schemas.py b/core/dbt/parser/schemas.py
+index 18d2eb96b46..2f7a0158199 100644
+--- a/core/dbt/parser/schemas.py
++++ b/core/dbt/parser/schemas.py
+@@ -31,6 +31,10 @@
+     UnpatchedSourceDefinition,
+     ParsedExposure,
+     ParsedMetric,
++
++    RatioTerms,
++    UnparsedRatioTerms,
++    ParsedRatioTerms
+ )
+ from dbt.contracts.graph.unparsed import (
+     HasColumnDocs,
+@@ -1042,8 +1046,42 @@ def parse_metric(self, unparsed: UnparsedMetric) -> ParsedMetric:
+             self.schema_parser.manifest,
+             package_name,
+         )
+-        model_ref = "{{ " + unparsed.model + " }}"
+-        get_rendered(model_ref, ctx, parsed, capture_macros=True)
++        if unparsed.type == 'ratio':
++            is_derived = True
++            numerator_def = "{{ " + unparsed.ratio_terms.numerator + " }}"
++            denominator_def = "{{ " + unparsed.ratio_terms.denominator + "}}"
++
++            get_rendered(numerator_def, ctx, parsed, capture_macros=True)
++            get_rendered(denominator_def, ctx, parsed, capture_macros=True)
++
++            parsed.ratio_terms = RatioTerms(
++                raw=UnparsedRatioTerms(**unparsed.ratio_terms.to_dict()),
++                parsed=ParsedRatioTerms.from_dict({
++                    "numerator": {
++                        "sql": numerator_def,
++                        "unique_id": None
++                    },
++                    "denominator": {
++                        "sql": denominator_def,
++                        "unique_id": None
++                    },
++                })
++            )
++
++            parsed.sql = f'{numerator_def} / {denominator_def}'
++
++        else:
++            is_derived = False
++            model_ref = "{{ " + unparsed.model + " }}"
++            get_rendered(model_ref, ctx, parsed, capture_macros=True)
++
++            # Only supply SQL if it's not a derived metric (ie. a ratio)
++            rendered_sql = get_rendered(unparsed.sql, ctx, parsed, capture_macros=True)
++            parsed.sql = rendered_sql
++
++        parsed.is_derived = is_derived
++        # Update rendered SQL after compilation
++
+         return parsed
+ 
+     def parse(self) -> Iterable[ParsedMetric]:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

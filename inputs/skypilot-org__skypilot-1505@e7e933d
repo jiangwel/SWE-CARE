@@ -1,0 +1,217 @@
+  Task-ID: skypilot-org__skypilot-1505@e7e933d
+  Please checkout to this commit first: d7e777fd26a2bcb720705a3946876d68711c0209
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  No usable subnets matching availability zone
+For the `us-west-1` region on AWS, my account only has access to the `us-west-1b` and `us-west-1c` zones, but SkyPilot does not take this into account. This causes the following error when running some of the smoke tests:
+
+```
++ sky status --refresh | grep test-autostop-a64f6128-dd | grep STOPPED
+Error: No usable subnets matching availability zone ['us-west-1a'] found for node type ray.head.default.
+Choose a different availability zone or try manually creating an instance in your specified region to populate the list of subnets and trying this again.
+```
+
+The `aws ec2 describe-availability-zones --region region-name` command can determine what zones a user has access to. e.g. for me:
+
+```
+❯ aws ec2 describe-availability-zones --region us-west-1
+{
+    "AvailabilityZones": [
+        {
+            "State": "available",
+            "OptInStatus": "opt-in-not-required",
+            "Messages": [],
+            "RegionName": "us-west-1",
+            "ZoneName": "us-west-1b",
+            "ZoneId": "usw1-az3",
+            "GroupName": "us-west-1",
+            "NetworkBorderGroup": "us-west-1",
+            "ZoneType": "availability-zone"
+        },
+        {
+            "State": "available",
+            "OptInStatus": "opt-in-not-required",
+            "Messages": [],
+            "RegionName": "us-west-1",
+            "ZoneName": "us-west-1c",
+            "ZoneId": "usw1-az1",
+            "GroupName": "us-west-1",
+            "NetworkBorderGroup": "us-west-1",
+            "ZoneType": "availability-zone"
+        }
+    ]
+}
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sky/clouds/service_catalog/data_fetchers/fetch_aws.py b/sky/clouds/service_catalog/data_fetchers/fetch_aws.py
+index 1b5ba766815..0e291ade9ca 100644
+--- a/sky/clouds/service_catalog/data_fetchers/fetch_aws.py
++++ b/sky/clouds/service_catalog/data_fetchers/fetch_aws.py
+@@ -5,7 +5,7 @@
+ import datetime
+ import os
+ import subprocess
+-from typing import List, Tuple, Union
++from typing import List, Optional, Tuple, Union
+ 
+ import numpy as np
+ import pandas as pd
+@@ -13,7 +13,10 @@
+ 
+ from sky.adaptors import aws
+ 
+-# Turn off the regions disabled for a new AWS account by default.
++# Enable all the regions. The regions enabled by the user's AWS account will be
++# filtered by joining with the availability zone mapping in `aws_catalog`.
++# TODO(zhwu): fix the regions with no supported AMI (maybe by finding AMIs
++# similar to the Deep Learning AMI).
+ ALL_REGIONS = [
+     'us-east-1',
+     'us-east-2',
+@@ -21,20 +24,20 @@
+     'us-west-2',
+     'ca-central-1',
+     'eu-central-1',
+-    # 'eu-central-2',
++    # 'eu-central-2', # no supported AMI
+     'eu-west-1',
+     'eu-west-2',
+-    # 'eu-south-1',
+-    # 'eu-south-2',
++    'eu-south-1',
++    # 'eu-south-2', # no supported AMI
+     'eu-west-3',
+     'eu-north-1',
+-    # 'me-south-1',
+-    # 'me-central-1',
+-    # 'af-south-1',
+-    'ap-east-1',  # enable this non-default region due to user request
+-    # 'ap-southeast-3',
++    'me-south-1',
++    'me-central-1',
++    'af-south-1',
++    'ap-east-1',
++    'ap-southeast-3',
+     'ap-south-1',
+-    # 'ap-south-2',
++    # 'ap-south-2', # no supported AMI
+     'ap-northeast-3',
+     'ap-northeast-2',
+     'ap-southeast-1',
+@@ -69,10 +72,14 @@ def _get_instance_types(region: str) -> pd.DataFrame:
+ 
+ 
+ @ray.remote
+-def _get_availability_zones(region: str) -> pd.DataFrame:
+-    client = aws.client('ec2', region_name=region)
+-    zones = []
+-    response = client.describe_availability_zones()
++def _get_availability_zones(region: str) -> Optional[pd.DataFrame]:
++    try:
++        client = aws.client('ec2', region_name=region)
++        zones = []
++        response = client.describe_availability_zones()
++    except aws.client_exception():
++        # The user's AWS account may not have access to this region.
++        return None
+     for resp in response['AvailabilityZones']:
+         zones.append({
+             'AvailabilityZoneName': resp['ZoneName'],
+@@ -133,9 +140,14 @@ def _get_spot_pricing_table(region: str) -> pd.DataFrame:
+ @ray.remote
+ def _get_instance_types_df(region: str) -> Union[str, pd.DataFrame]:
+     try:
+-        df, zone_df, pricing_df, spot_pricing_df = ray.get([
++        # Fetch the zone info first to make sure the account has access to the
++        # region.
++        zone_df = ray.get(_get_availability_zones.remote(region))
++        if zone_df is None:
++            raise RuntimeError(f'No access to region {region}')
++
++        df, pricing_df, spot_pricing_df = ray.get([
+             _get_instance_types.remote(region),
+-            _get_availability_zones.remote(region),
+             _get_pricing_table.remote(region),
+             _get_spot_pricing_table.remote(region),
+         ])
+@@ -302,6 +314,8 @@ def fetch_availability_zone_mappings() -> pd.DataFrame:
+     """
+     az_mappings = [_get_availability_zones.remote(r) for r in ALL_REGIONS]
+     az_mappings = ray.get(az_mappings)
++    # Remove the regions that the user does not have access to.
++    az_mappings = [m for m in az_mappings if m is not None]
+     az_mappings = pd.concat(az_mappings)
+     return az_mappings
+ 
+@@ -320,18 +334,35 @@ def fetch_availability_zone_mappings() -> pd.DataFrame:
+     parser.add_argument('--no-az-mappings',
+                         dest='az_mappings',
+                         action='store_false')
++    parser.add_argument('--check-regions-integrity',
++                        action='store_true',
++                        help='Check the region integrity of the fetched data.')
+     parser.set_defaults(az_mappings=True)
+     args = parser.parse_args()
+ 
+     region_filter = ALL_REGIONS if args.all_regions else US_REGIONS
+ 
++    def _check_regions_integrity(df: pd.DataFrame, name: str):
++        fetched_regions = set(df['Region'].unique())
++        requested_regions = set(region_filter)
++        if fetched_regions != requested_regions:
++            raise RuntimeError(
++                f'Fetched regions {fetched_regions} does not match '
++                f'requested regions {requested_regions} for {name}.')
++
+     ray.init()
+     instance_df = get_all_regions_instance_types_df(region_filter)
++    if args.check_regions_integrity:
++        _check_regions_integrity(instance_df, 'instance types')
++
+     os.makedirs('aws', exist_ok=True)
+     instance_df.to_csv('aws/vms.csv', index=False)
+     print('AWS Service Catalog saved to aws/vms.csv')
+ 
+     image_df = get_all_regions_images_df()
++    if args.check_regions_integrity:
++        _check_regions_integrity(image_df, 'images')
++
+     image_df.to_csv('aws/images.csv', index=False)
+     print('AWS Images saved to aws/images.csv')
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

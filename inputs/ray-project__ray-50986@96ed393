@@ -1,0 +1,128 @@
+  Task-ID: ray-project__ray-50986@96ed393
+  Please checkout to this commit first: b53dc04d0d2fbf66b890bf42cd5f9af7003408ca
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Data] Ordering of blocks after map and map_batches
+### What happened + What you expected to happen
+
+I have a dataset in files, rows are sorted within files and files are sorted by name in the same folder. After applying `map` or `map_batches`, the order of blocks is different than before applying `map` or `map_batches`.
+
+Expected behavior:  `map` and `map_batches` doesn't change the ordering of rows.
+
+### Versions / Dependencies
+
+ray==2.42.1
+
+### Reproduction script
+
+```
+import time
+
+import ray
+
+ray.init()
+
+dataset = ray.data.from_items(
+        [
+            {"time_to_sleep": 3},
+            {"time_to_sleep": 2},
+            {"time_to_sleep": 1},
+        ],
+    override_num_blocks=3
+)
+
+print(dataset.take_all())
+# output: [{'time_to_sleep': 3}, {'time_to_sleep': 2}, {'time_to_sleep': 1}]
+
+def map_simple(x):
+    time.sleep(x['time_to_sleep'])
+    return x
+
+print(dataset.map(map_simple).take_all())
+# output: [{'time_to_sleep': 1}, {'time_to_sleep': 2}, {'time_to_sleep': 3}]
+
+def my_map_batches(x):
+    time.sleep(x['time_to_sleep'][0])
+    yield {'result': [x['time_to_sleep'][0]]}
+
+mapped = dataset.map_batches(my_map_batches)
+
+print(mapped.take_all())
+# output: [{'result': 1}, {'result': 2}, {'result': 3}]
+```
+
+### Issue Severity
+
+High: It blocks me from completing my task.
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/data/transforming-data.rst b/doc/source/data/transforming-data.rst
+index 9120575485f0..a78fb3843c93 100644
+--- a/doc/source/data/transforming-data.rst
++++ b/doc/source/data/transforming-data.rst
+@@ -14,6 +14,7 @@ This guide shows you how to:
+ 
+ * :ref:`Transform rows <transforming_rows>`
+ * :ref:`Transform batches <transforming_batches>`
++* :ref:`Ordering of rows <ordering_of_rows>`
+ * :ref:`Stateful transforms <stateful_transforms>`
+ * :ref:`Groupby and transform groups <transforming_groupby>`
+ 
+@@ -218,6 +219,22 @@ NumPy functions and model inference. However, if your batch size is too large, y
+ program might run out of memory. If you encounter an out-of-memory error, decrease your
+ ``batch_size``.
+ 
++.. _ordering_of_rows:
++
++Ordering of rows
++================
++
++When transforming data, the order of :ref:`blocks <data_key_concepts>` isn't preserved by default.
++
++If the order of blocks needs to be preserved/deterministic,
++you can use :meth:`~ray.data.Dataset.sort` method, or set :attr:`ray.data.ExecutionOptions.preserve_order` to `True`.
++Note that setting this flag may negatively impact performance on larger cluster setups where stragglers are more likely.
++
++.. testcode::
++
++   # By default, this is set to False.
++   ctx.execution_options.preserve_order = True
++
+ .. _stateful_transforms:
+ 
+ Stateful Transforms
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

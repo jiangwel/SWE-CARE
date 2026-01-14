@@ -1,0 +1,398 @@
+  Task-ID: frappe__frappe-15891@ec9ae72
+  Please checkout to this commit first: 9a03c535725ea066af5cd4b4f6316d01868876d1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Data import fails on `set_only_once` fields
+## Description of the issue
+
+I'm trying to import ERPNext **Subscriptions** with **Data Import** Tool.
+
+## Context information (for bug reports)
+
+**Output of `bench version`**
+```
+ERPNext: v13.16.1 (version-13)
+Frappe Framework: v13.16.0 (version-13)
+```
+
+## Steps to reproduce the issue
+
+1. Enable "Allow Data Import" for **Subscription**
+2. Create a new **Data import**
+3. Download a Template for the following fields:
+
+Party Type | Party | Subscription Start Date | Company | Submit Invoice Automatically | Sales Taxes and Charges Template | Generate New Invoices Past Due Date | Plan (Plans) | Quantity (Plans)
+-- | -- | -- | -- | -- | -- | -- | -- | -- 
+
+4. Add some data (with child table rows)
+5. Import
+
+### Observed result
+
+Subscriptions won't get imported, errors for every row.
+
+### Expected result
+
+Subscriptions get imported correctly.
+
+### Stacktrace / full error message
+
+```
+Traceback (most recent call last):
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/core/doctype/data_import/importer.py", line 126, in import_data
+    doc = self.process_doc(doc)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/core/doctype/data_import/importer.py", line 194, in process_doc
+    return self.insert_record(doc)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/core/doctype/data_import/importer.py", line 213, in insert_record
+    new_doc.insert()
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 259, in insert
+    self.run_method("after_insert")
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 860, in run_method
+    out = Document.hook(fn)(self, *args, **kwargs)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 1158, in composer
+    return composed(self, method, *args, **kwargs)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 1141, in runner
+    add_to_return_value(self, fn(self, *args, **kwargs))
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 854, in 
+    fn = lambda self, *args, **kwargs: getattr(self, method)(*args, **kwargs)
+  File "/home/frappe/frappe-bench/apps/erpnext/erpnext/accounts/doctype/subscription/subscription.py", line 311, in after_insert
+    self.set_subscription_status()
+  File "/home/frappe/frappe-bench/apps/erpnext/erpnext/accounts/doctype/subscription/subscription.py", line 208, in set_subscription_status
+    self.save()
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 285, in save
+    return self._save(*args, **kwargs)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 323, in _save
+    self._validate()
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 519, in _validate
+    self.validate_set_only_once()
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/model/document.py", line 565, in validate_set_only_once
+    frappe.CannotChangeConstantError)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/__init__.py", line 439, in throw
+    msgprint(msg, raise_exception=exc, title=title, indicator='red', is_minimizable=is_minimizable, wide=wide, as_list=as_list)
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/__init__.py", line 418, in msgprint
+    _raise_exception()
+  File "/home/frappe/frappe-bench/apps/frappe/frappe/__init__.py", line 372, in _raise_exception
+    raise raise_exception(msg)
+frappe.exceptions.CannotChangeConstantError: Value cannot be changed for Subscription Start Date
+```
+
+## Workaround
+
+Create a **Property Setter** to disable `set_only_once` for the `start_date` field. Remove after successful import.
+  </issue>
+  
+  <patch>
+  diff --git a/frappe/model/base_document.py b/frappe/model/base_document.py
+index 8a81aa561015..fe4626511c28 100644
+--- a/frappe/model/base_document.py
++++ b/frappe/model/base_document.py
+@@ -4,13 +4,30 @@
+ 
+ import frappe
+ from frappe import _
+-from frappe.model import child_table_fields, default_fields, display_fieldtypes, table_fields
++from frappe.model import (
++	child_table_fields,
++	default_fields,
++	display_fieldtypes,
++	table_fields,
++)
++from frappe.model.docstatus import DocStatus
+ from frappe.model.naming import set_new_name
+ from frappe.model.utils.link_count import notify_link_count
+ from frappe.modules import load_doctype_module
+-from frappe.utils import cast_fieldtype, cint, cstr, flt, now, sanitize_html, strip_html
++from frappe.utils import (
++	cast_fieldtype,
++	cint,
++	cstr,
++	flt,
++	get_date_str,
++	get_datetime,
++	get_time_str,
++	now,
++	sanitize_html,
++	strip_html,
++	to_timedelta,
++)
+ from frappe.utils.html_utils import unescape_html
+-from frappe.model.docstatus import DocStatus
+ 
+ max_positive_value = {
+ 	'smallint': 2 ** 15,
+@@ -895,7 +912,7 @@ def _sanitize_content(self):
+ 
+ 	def _save_passwords(self):
+ 		"""Save password field values in __Auth table"""
+-		from frappe.utils.password import set_encrypted_password, remove_encrypted_password
++		from frappe.utils.password import remove_encrypted_password, set_encrypted_password
+ 
+ 		if self.flags.ignore_save_passwords is True:
+ 			return
+@@ -1058,6 +1075,57 @@ def _extract_images_from_text_editor(self):
+ 			for df in self.meta.get("fields", {"fieldtype": ('=', "Text Editor")}):
+ 				extract_images_from_doc(self, df.fieldname)
+ 
++	def _cast_date_and_time_fields(self) -> None:
++		"""
++		Converts datetime/string value to date and time respectively for Date and Time fields only.
++		This is necessary since the values with which the Document class is initialized can differ.
++
++		For eg: The user initializes document with datetime values for Date and Time field, the framework
++		should parse them into correct format.
++		If the values are in datetime format, preserve it in datetime format
++		If the values are in string format, preserve it in string format
++		"""
++		self._cast_date_fields()
++		self._cast_time_fields()
++
++	def _cast_date_fields(self) -> None:
++		for field in self.meta.get_date_fields():
++			if not self.get(field.fieldname):
++				continue
++
++			_value = self.get(field.fieldname)
++			if get_datetime(_value) is None:
++				continue
++
++			value = get_datetime(_value).date()
++			value = (
++				get_date_str(value)
++				if not isinstance(_value, (datetime.datetime, datetime.date))
++				else value
++			)
++
++			self.set(field.fieldname, value)
++
++	def _cast_time_fields(self) -> None:
++		for field in self.meta.get_time_fields():
++			if not self.get(field.fieldname):
++				continue
++
++			_value = self.get(field.fieldname)
++			if get_datetime(_value) is None:
++				continue
++
++			value = get_datetime(_value).time()
++			value = to_timedelta(value)
++			value = (
++				get_time_str(value)
++				if not isinstance(_value, (datetime.datetime, datetime.timedelta))
++				else value
++			)
++
++			self.set(field.fieldname, value)
++
++
+ def _filter(data, filters, limit=None):
+ 	"""pass filters as:
+ 		{"key": "val", "key": ["!=", "val"],
+diff --git a/frappe/model/document.py b/frappe/model/document.py
+index 3c38ff34426c..e7456496c71e 100644
+--- a/frappe/model/document.py
++++ b/frappe/model/document.py
+@@ -3,23 +3,24 @@
+ import hashlib
+ import json
+ import time
++
+ from werkzeug.exceptions import NotFound
+ 
+ import frappe
+-from frappe import _, msgprint, is_whitelisted
+-from frappe.utils import flt, cstr, now, get_datetime_str, file_lock, date_diff
++from frappe import _, is_whitelisted, msgprint
++from frappe.core.doctype.server_script.server_script_utils import (
++	run_server_script_for_doc_event,
++)
++from frappe.desk.form.document_follow import follow_document
++from frappe.integrations.doctype.webhook import run_webhooks
++from frappe.model import optional_fields, table_fields
+ from frappe.model.base_document import BaseDocument, get_controller
+-from frappe.model.naming import set_new_name, validate_name
+ from frappe.model.docstatus import DocStatus
+-from frappe.model import optional_fields, table_fields
+-from frappe.model.workflow import validate_workflow
+-from frappe.model.workflow import set_workflow_state_on_action
+-from frappe.utils.global_search import update_global_search
+-from frappe.integrations.doctype.webhook import run_webhooks
+-from frappe.desk.form.document_follow import follow_document
+-from frappe.core.doctype.server_script.server_script_utils import run_server_script_for_doc_event
++from frappe.model.naming import set_new_name, validate_name
++from frappe.model.workflow import set_workflow_state_on_action, validate_workflow
++from frappe.utils import cstr, date_diff, file_lock, flt, get_datetime_str, now
+ from frappe.utils.data import get_absolute_url
+-
++from frappe.utils.global_search import update_global_search
+ 
+ # once_only validation
+ # methods
+@@ -503,6 +504,7 @@ def _validate(self):
+ 		self._sanitize_content()
+ 		self._save_passwords()
+ 		self.validate_workflow()
++		self._cast_date_and_time_fields()
+ 
+ 		children = self.get_all_children()
+ 		for d in children:
+@@ -514,6 +516,7 @@ def _validate(self):
+ 			d._extract_images_from_text_editor()
+ 			d._sanitize_content()
+ 			d._save_passwords()
++			d._cast_date_and_time_fields()
+ 		if self.is_new():
+ 			# don't set fields like _assign, _comments for new doc
+ 			for fieldname in optional_fields:
+@@ -1101,7 +1104,10 @@ def db_get(self, fieldname):
+ 
+ 	def check_no_back_links_exist(self):
+ 		"""Check if document links to any active document before Cancel."""
+-		from frappe.model.delete_doc import check_if_doc_is_linked, check_if_doc_is_dynamically_linked
++		from frappe.model.delete_doc import (
++			check_if_doc_is_dynamically_linked,
++			check_if_doc_is_linked,
++		)
+ 		if not self.flags.ignore_links:
+ 			check_if_doc_is_linked(self, method="Cancel")
+ 			check_if_doc_is_dynamically_linked(self, method="Cancel")
+diff --git a/frappe/model/meta.py b/frappe/model/meta.py
+index a3d167fb9b60..6bb5b0c618c1 100644
+--- a/frappe/model/meta.py
++++ b/frappe/model/meta.py
+@@ -609,6 +609,18 @@ def get_web_template(self, suffix=''):
+ 	def is_nested_set(self):
+ 		return self.has_field('lft') and self.has_field('rgt')
+ 
++	def get_date_fields(self):
++		if not hasattr(self, "_date_fields"):
++			self._date_fields = self.get('fields', {"fieldtype": "Date"})
++
++		return self._date_fields
++
++	def get_time_fields(self):
++		if not hasattr(self, "_time_fields"):
++			self._time_fields = self.get('fields', {"fieldtype": "Time"})
++
++		return self._time_fields
++
+ DOCTYPE_TABLE_FIELDS = [
+ 	frappe._dict({"fieldname": "fields", "options": "DocField"}),
+ 	frappe._dict({"fieldname": "permissions", "options": "DocPerm"}),
+diff --git a/frappe/tests/test_document.py b/frappe/tests/test_document.py
+index 55dbf001f93d..8e979b928048 100644
+--- a/frappe/tests/test_document.py
++++ b/frappe/tests/test_document.py
+@@ -7,8 +7,19 @@
+ 
+ import frappe
+ from frappe.desk.doctype.note.note import Note
+-from frappe.model.naming import make_autoname, parse_naming_series, revert_series_if_last
+-from frappe.utils import cint, now_datetime
++from frappe.model.naming import (
++	make_autoname,
++	parse_naming_series,
++	revert_series_if_last,
++)
++from frappe.utils import (
++	cint,
++	get_date_str,
++	get_datetime,
++	get_time_str,
++	now_datetime,
++	to_timedelta,
++)
+ 
+ 
+ class CustomTestNote(Note):
+@@ -16,7 +27,6 @@ class CustomTestNote(Note):
+ 	def age(self):
+ 		return now_datetime() - self.creation
+ 
+-
+ class TestDocument(unittest.TestCase):
+ 	def test_get_return_empty_list_for_table_field_if_none(self):
+ 		d = frappe.get_doc({"doctype":"User"})
+@@ -337,3 +347,49 @@ def my_as_dict(*args, **kwargs):
+ 
+ 		# run_method should get overridden
+ 		self.assertEqual(doc.run_method("as_dict"), "success")
++
++	def test_date_casting(self):
++		create_time_custom_field()
++
++		_datetime_str = "2022-02-13 12:02:33.713418"
++		_datetime = get_datetime(_datetime_str)
++
++		# Check if the system parses the string for date and time
++		todo = frappe.get_doc({
++			"doctype": "ToDo",
++			"description": "test_date_and_time_casting",
++			"date": _datetime_str,
++			"time": _datetime_str
++		}).insert()
++
++		self.assertEquals(todo.date, get_date_str(_datetime_str))
++		self.assertEquals(todo.time, get_time_str(_datetime_str))
++
++		# Check if the system parses the datetime object for date and time
++		todo.date = _datetime
++		todo.time = _datetime
++		todo.save()
++
++		self.assertEquals(todo.date, _datetime.date())
++		self.assertEquals(todo.time, to_timedelta(_datetime.time()))
++
++		# Check if the system parses the datetime object for date and time
++		todo.date = None
++		todo.time = None
++		todo.save()
++
++		self.assertEquals(todo.date, None)
++		self.assertEquals(todo.time, None)
++
++
++def create_time_custom_field():
++	if not frappe.db.exists({"doctype": "Custom Field", "dt": "ToDo", "fieldname": "time"}):
++		frappe.get_doc({
++			"doctype": "Custom Field",
++			"label": "Time",
++			"dt": "ToDo",
++			"fieldname": "time",
++			"fieldtype": "Time",
++			"insert_after": "date"
++		}).insert()
++
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,3874 @@
+  Task-ID: scipy__scipy-20393@c92a476
+  Please checkout to this commit first: 86c3a5bf8d7bc965a7873b744127ee076a8c3fa1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Combining extensions in `stats._boost` into one
+After gh-15770 I noticed another wheel size increase. With the current codegen it's easy to add new functions, but it looks like a separate new Python extension per function isn't all that sustainable:
+```
+$ ls -l build/scipy/stats/_boost/
+...
+-rwxr-xr-x  1 rgommers  staff  403276 Jul 12 07:13 beta_ufunc.cpython-39-darwin.so
+-rwxr-xr-x  1 rgommers  staff  358557 Jul 12 07:13 binom_ufunc.cpython-39-darwin.so
+-rwxr-xr-x  1 rgommers  staff  267553 Jul 12 07:13 hypergeom_ufunc.cpython-39-darwin.so
+-rwxr-xr-x  1 rgommers  staff  366350 Jul 12 07:13 nbinom_ufunc.cpython-39-darwin.so
+-rwxr-xr-x  1 rgommers  staff  337707 Jul 12 07:13 ncf_ufunc.cpython-39-darwin.so
+-rwxr-xr-x  1 rgommers  staff  375308 Jul 12 07:13 ncx2_ufunc.cpython-39-darwin.so
+# Note; removed directories from output
+```
+
+That's ~350kb per function. A lot of which will be Cython overhead I expect. @mckib2 what do you think about putting them all in a single `_ufuncs` extension?
+
+BUG: Test failures due to `invalid value encountered in _beta_ppf` on M2 mac
+### Describe your issue.
+
+The following tests fail with the warning `invalid value encountered in _beta_ppf`
+
+
+
+### Reproducing Code Example
+
+```python
+`python dev.py test`
+```
+
+
+### Error message
+
+```shell
+FAILED scipy/stats/tests/test_distributions.py::TestBeta::test_issue_12635 - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_distributions.py::TestBeta::test_issue_12794 - RuntimeWarning: invalid value encountered in _beta_isf
+FAILED scipy/stats/tests/test_distributions.py::TestBeta::test_issue_12796 - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fast_gen_inversion.py::test_rvs_and_ppf[betaprime-args6] - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_distributions.py::TestBetaPrime::test_ppf[0.375-0.25-7.0-0.002036820346115211] - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fast_gen_inversion.py::test_non_rvs_methods_with_domain - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fit.py::TestGoodnessOfFit::test_against_filliben_norm - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fit.py::TestGoodnessOfFit::test_filliben_property - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fit.py::TestGoodnessOfFit::test_against_filliben_norm_table[case0] - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fit.py::TestGoodnessOfFit::test_against_filliben_norm_table[case1] - RuntimeWarning: invalid value encountered in _beta_ppf
+FAILED scipy/stats/tests/test_fit.py::TestGoodnessOfFit::test_against_filliben_norm_table[case2] - RuntimeWarning: invalid value encountered in _beta_ppf
+```
+
+
+### SciPy/NumPy/Python version and system information
+
+<details>
+
+```shell
+1.13.0.dev0+0.9979b1d 1.26.4 sys.version_info(major=3, minor=11, micro=8, releaselevel='final', serial=0)
+Build Dependencies:
+  blas:
+    detection method: pkgconfig
+    found: true
+    include directory: /Users/kai/miniconda3/envs/scipy-dev/include
+    lib directory: /Users/kai/miniconda3/envs/scipy-dev/lib
+    name: openblas
+    openblas configuration: USE_64BITINT=0 DYNAMIC_ARCH=0 DYNAMIC_OLDER= NO_CBLAS=
+      NO_LAPACK=0 NO_LAPACKE= NO_AFFINITY=1 USE_OPENMP=1 VORTEX MAX_THREADS=128
+    pc file directory: /Users/kai/miniconda3/envs/scipy-dev/lib/pkgconfig
+    version: 0.3.26
+  lapack:
+    detection method: pkgconfig
+    found: true
+    include directory: /Users/kai/miniconda3/envs/scipy-dev/include
+    lib directory: /Users/kai/miniconda3/envs/scipy-dev/lib
+    name: openblas
+    openblas configuration: USE_64BITINT=0 DYNAMIC_ARCH=0 DYNAMIC_OLDER= NO_CBLAS=
+      NO_LAPACK=0 NO_LAPACKE= NO_AFFINITY=1 USE_OPENMP=1 VORTEX MAX_THREADS=128
+    pc file directory: /Users/kai/miniconda3/envs/scipy-dev/lib/pkgconfig
+    version: 0.3.26
+  pybind11:
+    detection method: pkgconfig
+    include directory: /Users/kai/miniconda3/envs/scipy-dev/include
+    name: pybind11
+    version: 2.11.1
+Compilers:
+  c:
+    args: -ftree-vectorize, -fPIC, -fstack-protector-strong, -O2, -pipe, -isystem,
+      /Users/kai/miniconda3/envs/scipy-dev/include, -D_FORTIFY_SOURCE=2, -isystem,
+      /Users/kai/miniconda3/envs/scipy-dev/include
+    commands: arm64-apple-darwin20.0.0-clang
+    linker: ld64
+    linker args: -Wl,-headerpad_max_install_names, -Wl,-dead_strip_dylibs, -Wl,-rpath,/Users/kai/miniconda3/envs/scipy-dev/lib,
+      -L/Users/kai/miniconda3/envs/scipy-dev/lib, -ftree-vectorize, -fPIC, -fstack-protector-strong,
+      -O2, -pipe, -isystem, /Users/kai/miniconda3/envs/scipy-dev/include, -D_FORTIFY_SOURCE=2,
+      -isystem, /Users/kai/miniconda3/envs/scipy-dev/include
+    name: clang
+    version: 16.0.6
+  c++:
+    args: -ftree-vectorize, -fPIC, -fstack-protector-strong, -O2, -pipe, -stdlib=libc++,
+      -fvisibility-inlines-hidden, -fmessage-length=0, -isystem, /Users/kai/miniconda3/envs/scipy-dev/include,
+      -D_FORTIFY_SOURCE=2, -isystem, /Users/kai/miniconda3/envs/scipy-dev/include
+    commands: arm64-apple-darwin20.0.0-clang++
+    linker: ld64
+    linker args: -Wl,-headerpad_max_install_names, -Wl,-dead_strip_dylibs, -Wl,-rpath,/Users/kai/miniconda3/envs/scipy-dev/lib,
+      -L/Users/kai/miniconda3/envs/scipy-dev/lib, -ftree-vectorize, -fPIC, -fstack-protector-strong,
+      -O2, -pipe, -stdlib=libc++, -fvisibility-inlines-hidden, -fmessage-length=0,
+      -isystem, /Users/kai/miniconda3/envs/scipy-dev/include, -D_FORTIFY_SOURCE=2,
+      -isystem, /Users/kai/miniconda3/envs/scipy-dev/include
+    name: clang
+    version: 16.0.6
+  cython:
+    commands: cython
+    linker: cython
+    name: cython
+    version: 3.0.9
+  fortran:
+    args: -march=armv8.3-a, -ftree-vectorize, -fPIC, -fno-stack-protector, -O2, -pipe,
+      -isystem, /Users/kai/miniconda3/envs/scipy-dev/include
+    commands: /Users/kai/miniconda3/envs/scipy-dev/bin/arm64-apple-darwin20.0.0-gfortran
+    linker: ld64
+    linker args: -Wl,-headerpad_max_install_names, -Wl,-dead_strip_dylibs, -Wl,-rpath,/Users/kai/miniconda3/envs/scipy-dev/lib,
+      -L/Users/kai/miniconda3/envs/scipy-dev/lib, -march=armv8.3-a, -ftree-vectorize,
+      -fPIC, -fno-stack-protector, -O2, -pipe, -isystem, /Users/kai/miniconda3/envs/scipy-dev/include
+    name: gcc
+    version: 12.3.0
+  pythran:
+    include directory: ../../../miniconda3/envs/scipy-dev/lib/python3.11/site-packages/pythran
+    version: 0.15.0
+Machine Information:
+  build:
+    cpu: aarch64
+    endian: little
+    family: aarch64
+    system: darwin
+  cross-compiled: false
+  host:
+    cpu: aarch64
+    endian: little
+    family: aarch64
+    system: darwin
+Python Information:
+  path: /Users/kai/miniconda3/envs/scipy-dev/bin/python3.11
+  version: '3.11'
+```
+```
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/mypy.ini b/mypy.ini
+index aa840b19701e..4910a0f3776c 100644
+--- a/mypy.ini
++++ b/mypy.ini
+@@ -200,9 +200,6 @@ ignore_missing_imports = True
+ [mypy-scipy.interpolate._rbfinterp_pythran]
+ ignore_missing_imports = True
+ 
+-[mypy-scipy.stats._boost.*]
+-ignore_missing_imports = True
+-
+ [mypy-scipy.stats._statlib]
+ ignore_missing_imports = True
+ 
+diff --git a/scipy/_lib/boost_math b/scipy/_lib/boost_math
+index 1a7be5d895d2..15c40fae1610 160000
+--- a/scipy/_lib/boost_math
++++ b/scipy/_lib/boost_math
+@@ -1 +1 @@
+-Subproject commit 1a7be5d895d266a870af7a6ed258e5bcf9838277
++Subproject commit 15c40fae1610fd83728d75e96d7377fe55f976f7
+diff --git a/scipy/special/_add_newdocs.py b/scipy/special/_add_newdocs.py
+index c39eefc5a96b..64acb1cef113 100644
+--- a/scipy/special/_add_newdocs.py
++++ b/scipy/special/_add_newdocs.py
+@@ -12659,3 +12659,1011 @@ def add_newdoc(name, doc):
+     r"""
+     Internal function, do not use.
+     """)
++
++add_newdoc(
++    "_beta_pdf",
++    """
++    _beta_pdf(x, a, b)
++
++    Probability density function of beta distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued such that :math:`0 \leq x \leq 1`,
++        the upper limit of integration
++    a, b : array_like
++           Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_beta_ppf",
++    """
++    _beta_ppf(x, a, b)
++
++    Percent point function of beta distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued such that :math:`0 \leq x \leq 1`,
++        the upper limit of integration
++    a, b : array_like
++           Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_invgauss_ppf",
++    """
++    _invgauss_ppf(x, mu)
++
++    Percent point function of inverse gaussian distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    mu : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_invgauss_isf",
++    """
++    _invgauss_isf(x, mu, s)
++
++    Inverse survival function of inverse gaussian distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    mu : array_like
++        Positive, real-valued parameters
++    s : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncx2_pdf",
++    """
++    _ncx2_pdf(x, k, l)
++
++    Probability density function of Non-central chi-squared distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    k, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncx2_cdf",
++    """
++    _ncx2_cdf(x, k, l)
++
++    Cumulative density function of Non-central chi-squared distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    k, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncx2_ppf",
++    """
++    _ncx2_ppf(x, k, l)
++
++    Percent point function of Non-central chi-squared distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    k, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncx2_sf",
++    """
++    _ncx2_sf(x, k, l)
++
++    Survival function of Non-central chi-squared distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    k, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncx2_isf",
++    """
++    _ncx2_isf(x, k, l)
++
++    Inverse survival function of Non-central chi-squared distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    k, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_pdf",
++    """
++    _ncf_pdf(x, v1, v2, l)
++
++    Probability density function of noncentral F-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_cdf",
++    """
++    _ncf_cdf(x, v1, v2, l)
++
++    Cumulative density function of noncentral F-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_ppf",
++    """
++    _ncf_ppf(x, v1, v2, l)
++
++    Percent point function of noncentral F-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_sf",
++    """
++    _ncf_sf(x, v1, v2, l)
++
++    Survival function of noncentral F-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_isf",
++    """
++    _ncf_isf(x, v1, v2, l)
++
++    Inverse surivial function of noncentral F-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Positive real-valued
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_mean",
++    """
++    _ncf_mean(v1, v2, l)
++
++    Mean of noncentral F-distribution.
++
++    Parameters
++    ----------
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_variance",
++    """
++    _ncf_variance(v1, v2, l)
++
++    Variance of noncentral F-distribution.
++
++    Parameters
++    ----------
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_skewness",
++    """
++    _ncf_skewness(v1, v2, l)
++
++    Skewness of noncentral F-distribution.
++
++    Parameters
++    ----------
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_ncf_kurtosis_excess",
++    """
++    _ncf_kurtosis_excess(v1, v2, l)
++
++    Kurtosis excess of noncentral F-distribution.
++
++    Parameters
++    ----------
++    v1, v2, l : array_like
++        Positive, real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_cdf",
++    """
++    _nct_cdf(x, v, l)
++
++    Cumulative density function of noncentral t-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_ppf",
++    """
++    _nct_ppf(x, v, l)
++
++    Percent point function of noncentral t-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_sf",
++    """
++    _nct_sf(x, v, l)
++
++    Survival function of noncentral t-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_isf",
++    """
++    _nct_isf(x, v, l)
++
++    Inverse surivial function of noncentral t-distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_mean",
++    """
++    _nct_mean(v, l)
++
++    Mean of noncentral t-distribution.
++
++    Parameters
++    ----------
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_variance",
++    """
++    _nct_variance(v, l)
++
++    Variance of noncentral t-distribution.
++
++    Parameters
++    ----------
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_skewness",
++    """
++    _nct_skewness(v, l)
++
++    Skewness of noncentral t-distribution.
++
++    Parameters
++    ----------
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nct_kurtosis_excess",
++    """
++    _nct_kurtosis_excess(v, l)
++
++    Kurtosis excess of noncentral t-distribution.
++
++    Parameters
++    ----------
++    v : array_like
++        Positive, real-valued parameters
++    l : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_skewnorm_cdf",
++    """
++    _skewnorm_cdf(x, l, sc, sh)
++
++    Cumulative density function of skewnorm distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    l : array_like
++        Real-valued parameters
++    sc : array_like
++        Positive, Real-valued parameters
++    sh : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_skewnorm_ppf",
++    """
++    _skewnorm_ppf(x, l, sc, sh)
++
++    Percent point function of skewnorm distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    l : array_like
++        Real-valued parameters
++    sc : array_like
++        Positive, Real-valued parameters
++    sh : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_skewnorm_isf",
++    """
++    _skewnorm_isf(x, l, sc, sh)
++
++    Inverse surivial function of skewnorm distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    l : array_like
++        Real-valued parameters
++    sc : array_like
++        Positive, Real-valued parameters
++    sh : array_like
++        Real-valued parameters
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_binom_pmf",
++    """
++    _binom_pmf(x, n, p)
++
++    Probability mass function of binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    n : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_binom_cdf",
++    """
++    _binom_cdf(x, n, p)
++
++    Cumulative density function of binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    n : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_binom_ppf",
++    """
++    _binom_ppf(x, n, p)
++
++    Percent point function of binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    n : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_binom_sf",
++    """
++    _binom_sf(x, n, p)
++
++    Survival function of binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    n : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_binom_isf",
++    """
++    _binom_isf(x, n, p)
++
++    Inverse survival function of binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    n : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_pmf",
++    """
++    _nbinom_pmf(x, r, p)
++
++    Probability mass function of negative binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_cdf",
++    """
++    _nbinom_cdf(x, r, p)
++
++    Cumulative density function of negative binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_ppf",
++    """
++    _nbinom_ppf(x, r, p)
++
++    Percent point function of negative binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_sf",
++    """
++    _nbinom_sf(x, r, p)
++
++    Survival function of negative binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_isf",
++    """
++    _nbinom_isf(x, r, p)
++
++    Inverse survival function of negative binomial distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_mean",
++    """
++    _nbinom_mean(r, p)
++
++    Mean of negative binomial distribution.
++
++    Parameters
++    ----------
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_variance",
++    """
++    _nbinom_variance(r, p)
++
++    Variance of negative binomial distribution.
++
++    Parameters
++    ----------
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_skewness",
++    """
++    _nbinom_skewness(r, p)
++
++    Skewness of negative binomial distribution.
++
++    Parameters
++    ----------
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_nbinom_kurtosis_excess",
++    """
++    _nbinom_kurtosis_excess(r, p)
++
++    Kurtosis excess of negative binomial distribution.
++
++    Parameters
++    ----------
++    r : array_like
++        Positive, integer-valued parameter
++    p : array_like
++        Positive, real-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_hypergeom_pmf",
++    """
++    _hypergeom_pmf(x, r, N, M)
++
++    Probability mass function of hypergeometric distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_hypergeom_cdf",
++    """
++    _hypergeom_cdf(x, r, N, M)
++
++    Cumulative density function of hypergeometric distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++    """)
++
++add_newdoc(
++    "_hypergeom_sf",
++    """
++    _hypergeom_sf(x, r, N, M)
++
++    Survival function of hypergeometric distribution.
++
++    Parameters
++    ----------
++    x : array_like
++        Real-valued
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++    """)
++
++add_newdoc(
++    "_hypergeom_mean",
++    """
++    _hypergeom_mean(r, N, M)
++
++    Mean of hypergeometric distribution.
++
++    Parameters
++    ----------
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_hypergeom_variance",
++    """
++    _hypergeom_variance(r, N, M)
++
++    Mean of hypergeometric distribution.
++
++    Parameters
++    ----------
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
++
++add_newdoc(
++    "_hypergeom_skewness",
++    """
++    _hypergeom_skewness(r, N, M)
++
++    Skewness of hypergeometric distribution.
++
++    Parameters
++    ----------
++    r, N, M : array_like
++        Positive, integer-valued parameter
++
++    Returns
++    -------
++    scalar or ndarray
++
++    """)
+diff --git a/scipy/special/boost_special_functions.h b/scipy/special/boost_special_functions.h
+index a202ea2c9b18..668aa7a9c3c4 100644
+--- a/scipy/special/boost_special_functions.h
++++ b/scipy/special/boost_special_functions.h
+@@ -10,8 +10,6 @@
+ // These are required to ensure that the Boost function ibeta_inv
+ // handles extremely small p values with precision comparable to the
+ // Cephes incbi function.
+-#define BOOST_MATH_MAX_ROOT_ITERATION_POLICY  400
+-#define BOOST_MATH_PROMOTE_DOUBLE_POLICY      false
+ 
+ #include "boost/math/special_functions/beta.hpp"
+ #include "boost/math/special_functions/erf.hpp"
+@@ -19,6 +17,60 @@
+ #include "boost/math/special_functions/hypergeometric_1F1.hpp"
+ #include "boost/math/special_functions/hypergeometric_pFq.hpp"
+ 
++#include "boost/math/distributions.hpp"
++#include <boost/math/distributions/inverse_gaussian.hpp>
++
++typedef boost::math::policies::policy<
++    boost::math::policies::promote_float<false >,
++    boost::math::policies::promote_double<false >,
++    boost::math::policies::max_root_iterations<400 > > SpecialPolicy;
++
++// Round up to achieve correct ppf(cdf) round-trips for discrete distributions
++typedef boost::math::policies::policy<
++    boost::math::policies::domain_error<boost::math::policies::ignore_error >,
++    boost::math::policies::overflow_error<boost::math::policies::user_error >,
++    boost::math::policies::evaluation_error<boost::math::policies::user_error >,
++    boost::math::policies::promote_float<false >,
++    boost::math::policies::promote_double<false >,
++    boost::math::policies::discrete_quantile<
++        boost::math::policies::integer_round_up > > StatsPolicy;
++
++// Raise a RuntimeWarning making users aware that something went wrong during
++// evaluation of the function, but return the best guess
++template <class RealType>
++RealType
++boost::math::policies::user_evaluation_error(const char* function, const char* message, const RealType& val) {
++    std::string msg("Error in function ");
++    std::string haystack {function};
++    const std::string needle {"%1%"};
++    msg += haystack.replace(haystack.find(needle), needle.length(), typeid(RealType).name()) + ": ";
++    // "message" may have %1%, but arguments don't always contain all
++    // required information, so don't call boost::format for now
++    msg += message;
++    PyGILState_STATE save = PyGILState_Ensure();
++    PyErr_WarnEx(PyExc_RuntimeWarning, msg.c_str(), 1);
++    PyGILState_Release(save);
++    return val;
++}
++
++
++template <class RealType>
++RealType
++boost::math::policies::user_overflow_error(const char* function, const char* message, const RealType& val) {
++    std::string msg("Error in function ");
++    std::string haystack {function};
++    const std::string needle {"%1%"};
++    msg += haystack.replace(haystack.find(needle), needle.length(), typeid(RealType).name()) + ": ";
++    // From Boost docs: "overflow and underflow messages do not contain this %1% specifier
++    //                   (since the value of value is immaterial in these cases)."
++    if (message) {
++        msg += message;
++    }
++    PyGILState_STATE save = PyGILState_Ensure();
++    PyErr_SetString(PyExc_OverflowError, msg.c_str());
++    PyGILState_Release(save);
++    return 0;
++}
+ 
+ template<typename Real>
+ static inline
+@@ -34,7 +86,7 @@ Real ibeta_wrap(Real a, Real b, Real x)
+         return NAN;
+     }
+     try {
+-        y = boost::math::ibeta(a, b, x);
++        y = boost::math::ibeta(a, b, x, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         sf_error("betainc", SF_ERROR_DOMAIN, NULL);
+         y = NAN;
+@@ -108,9 +160,9 @@ ibetac_double(double a, double b, double x)
+ }
+ 
+ 
+-template<typename Real>
++template<typename Real, typename Policy>
+ static inline
+-Real ibeta_inv_wrap(Real a, Real b, Real p)
++Real ibeta_inv_wrap(Real a, Real b, Real p, const Policy& policy_)
+ {
+     Real y;
+ 
+@@ -122,7 +174,7 @@ Real ibeta_inv_wrap(Real a, Real b, Real p)
+         return NAN;
+     }
+     try {
+-        y = boost::math::ibeta_inv(a, b, p);
++        y = boost::math::ibeta_inv(a, b, p, policy_);
+     } catch (const std::domain_error& e) {
+         sf_error("betaincinv", SF_ERROR_DOMAIN, NULL);
+         y = NAN;
+@@ -142,13 +194,13 @@ Real ibeta_inv_wrap(Real a, Real b, Real p)
+ float
+ ibeta_inv_float(float a, float b, float p)
+ {
+-    return ibeta_inv_wrap(a, b, p);
++    return ibeta_inv_wrap(a, b, p, SpecialPolicy());
+ }
+ 
+ double
+ ibeta_inv_double(double a, double b, double p)
+ {
+-    return ibeta_inv_wrap(a, b, p);
++    return ibeta_inv_wrap(a, b, p, SpecialPolicy());
+ }
+ 
+ 
+@@ -166,7 +218,7 @@ Real ibetac_inv_wrap(Real a, Real b, Real p)
+         return NAN;
+     }
+     try {
+-        y = boost::math::ibetac_inv(a, b, p);
++        y = boost::math::ibetac_inv(a, b, p, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         sf_error("betainccinv", SF_ERROR_DOMAIN, NULL);
+         y = NAN;
+@@ -195,7 +247,6 @@ ibetac_inv_double(double a, double b, double p)
+     return ibetac_inv_wrap(a, b, p);
+ }
+ 
+-
+ template<typename Real>
+ static inline
+ Real erfinv_wrap(Real x)
+@@ -210,7 +261,7 @@ Real erfinv_wrap(Real x)
+     }
+ 
+     try {
+-        y = boost::math::erf_inv(x);
++        y = boost::math::erf_inv(x, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         sf_error("erfinv", SF_ERROR_DOMAIN, NULL);
+         y = NAN;
+@@ -270,13 +321,13 @@ Real powm1_wrap(Real x, Real y)
+     }
+ 
+     try {
+-        z = boost::math::powm1(x, y);
++        z = boost::math::powm1(x, y, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         sf_error("powm1", SF_ERROR_DOMAIN, NULL);
+         z = NAN;
+     } catch (const std::overflow_error& e) {
+         sf_error("powm1", SF_ERROR_OVERFLOW, NULL);
+-        
++
+         // See: https://en.cppreference.com/w/cpp/numeric/math/pow
+         if (x > 0) {
+             if (y < 0) {
+@@ -350,7 +401,8 @@ Real call_hypergeometric_pFq(Real a, Real b, Real x)
+     Real y;
+ 
+     try {
+-        y = boost::math::hypergeometric_pFq({a}, {b}, x);
++        Real p_abs_error = 0;
++        y = boost::math::hypergeometric_pFq({a}, {b}, x, &p_abs_error, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         // The string "hyp1f1" is correct--don't change it to something like
+         // "hypqfq".  The string refers to the SciPy special function, not the
+@@ -411,7 +463,8 @@ Real hyp1f1_wrap(Real a, Real b, Real x)
+     // Catch all exceptions and handle them using the `special` error
+     // handling function.
+     try {
+-        y = boost::math::hypergeometric_1F1(a, b, x);
++        // Real p_abs_error = 0;
++        y = boost::math::hypergeometric_1F1(a, b, x, SpecialPolicy());
+     } catch (const std::domain_error& e) {
+         sf_error("hyp1f1", SF_ERROR_DOMAIN, NULL);
+         y = INFINITY;
+@@ -445,4 +498,942 @@ hyp1f1_double(double a, double b, double x)
+ // comments in _generate_pyx.py).
+ //
+ 
++// patch for boost::math::beta_distribution throwing exception for
++// x = 1, beta < 1 as well as x = 0, alpha < 1
++template<typename Real>
++Real beta_pdf_wrap(const Real x, const Real a, const Real b)
++{
++    if (std::isfinite(x)) {
++        if ((x >= 1) && (b < 1)) {
++            // x>1 should really be 0, but rv_continuous will do that for us
++            return INFINITY;
++        }
++        else if ((x <= 0) && (a < 1)) {
++            return INFINITY;
++        }
++        return boost::math::pdf(
++            boost::math::beta_distribution<Real, StatsPolicy>(a, b), x);
++    }
++    return NAN;
++}
++
++float
++beta_pdf_float(float x, float a, float b)
++{
++    return beta_pdf_wrap(x, a, b);
++}
++
++double
++beta_pdf_double(double x, double a, double b)
++{
++    return beta_pdf_wrap(x, a, b);
++}
++
++template<typename Real>
++Real beta_ppf_wrap(const Real x, const Real a, const Real b)
++{
++    typedef boost::math::policies::policy<
++        boost::math::policies::domain_error<boost::math::policies::ignore_error >,
++        boost::math::policies::overflow_error<boost::math::policies::user_error >,
++        boost::math::policies::evaluation_error<boost::math::policies::user_error >,
++        boost::math::policies::promote_float<false > > BetaPolicyForStats;
++
++    return ibeta_inv_wrap(a, b, x, BetaPolicyForStats());
++}
++
++float
++beta_ppf_float(float x, float a, float b)
++{
++    return beta_ppf_wrap(x, a, b);
++}
++
++double
++beta_ppf_double(double x, double a, double b)
++{
++    return beta_ppf_wrap(x, a, b);
++}
++
++template<typename Real>
++Real
++invgauss_ppf_wrap(const Real x, const Real mu, const Real s)
++{
++    return boost::math::quantile(
++        boost::math::inverse_gaussian_distribution<Real, StatsPolicy>(mu, s), x);
++}
++
++float
++invgauss_ppf_float(float x, float mu, float s)
++{
++    return invgauss_ppf_wrap(x, mu, s);
++}
++
++double
++invgauss_ppf_double(double x, double mu, double s)
++{
++    return invgauss_ppf_wrap(x, mu, s);
++}
++
++template<typename Real>
++Real
++invgauss_isf_wrap(const Real x, const Real mu, const Real s)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::inverse_gaussian_distribution<Real, StatsPolicy>(mu, s), x));
++}
++
++float
++invgauss_isf_float(float x, float mu, float s)
++{
++    return invgauss_isf_wrap(x, mu, s);
++}
++
++double
++invgauss_isf_double(double x, double mu, double s)
++{
++    return invgauss_isf_wrap(x, mu, s);
++}
++
++template<typename Real>
++Real
++ncx2_pdf_wrap(const Real x, const Real k, const Real l)
++{
++    if (std::isfinite(x)) {
++        return boost::math::pdf(
++            boost::math::non_central_chi_squared_distribution<Real, StatsPolicy>(k, l), x);
++    }
++    return NAN; // inf or -inf returns NAN
++}
++
++float
++ncx2_pdf_float(float x, float k, float l)
++{
++    return ncx2_pdf_wrap(x, k, l);
++}
++
++double
++ncx2_pdf_double(double x, double k, double l)
++{
++    return ncx2_pdf_wrap(x, k, l);
++}
++
++template<typename Real>
++Real
++ncx2_cdf_wrap(const Real x, const Real k, const Real l)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::non_central_chi_squared_distribution<Real, StatsPolicy>(k, l), x);
++    }
++    // -inf => 0, inf => 1
++    return 1 - std::signbit(x);
++}
++
++float
++ncx2_cdf_float(float x, float k, float l)
++{
++    return ncx2_cdf_wrap(x, k, l);
++}
++
++double
++ncx2_cdf_double(double x, double k, double l)
++{
++    return ncx2_cdf_wrap(x, k, l);
++}
++
++template<typename Real>
++Real
++ncx2_ppf_wrap(const Real x, const Real k, const Real l)
++{
++    return boost::math::quantile(
++        boost::math::non_central_chi_squared_distribution<Real, StatsPolicy>(k, l), x);
++}
++
++float
++ncx2_ppf_float(float x, float k, float l)
++{
++    return ncx2_ppf_wrap(x, k, l);
++}
++
++double
++ncx2_ppf_double(double x, double k, double l)
++{
++    return ncx2_ppf_wrap(x, k, l);
++}
++
++template<typename Real>
++Real
++ncx2_sf_wrap(const Real x, const Real k, const Real l)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::non_central_chi_squared_distribution<Real, StatsPolicy>(k, l), x));
++}
++
++float
++ncx2_sf_float(float x, float k, float l)
++{
++    return ncx2_sf_wrap(x, k, l);
++}
++
++double
++ncx2_sf_double(double x, double k, double l)
++{
++    return ncx2_sf_wrap(x, k, l);
++}
++
++template<typename Real>
++Real
++ncx2_isf_wrap(const Real x, const Real k, const Real l)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::non_central_chi_squared_distribution<Real, StatsPolicy>(k, l), x));
++}
++
++float
++ncx2_isf_float(float x, float k, float l)
++{
++    return ncx2_isf_wrap(x, k, l);
++}
++
++double
++ncx2_isf_double(double x, double k, double l)
++{
++    return ncx2_isf_wrap(x, k, l);
++}
++
++template<typename Real>
++Real
++ncf_pdf_wrap(const Real x, const Real v1, const Real v2, const Real l)
++{
++    if (std::isfinite(x)) {
++        return boost::math::pdf(
++            boost::math::non_central_f_distribution<Real, StatsPolicy>(v1, v2, l), x);
++    }
++    return NAN; // inf or -inf returns NAN
++}
++
++float
++ncf_pdf_float(float x, float v1, float v2, float l)
++{
++    return ncf_pdf_wrap(x, v1, v2, l);
++}
++
++double
++ncf_pdf_double(double x, double v1, double v2, double l)
++{
++    return ncf_pdf_wrap(x, v1, v2, l);
++}
++
++template<typename Real>
++Real
++ncf_cdf_wrap(const Real x, const Real v1, const Real v2, const Real l)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::non_central_f_distribution<Real, StatsPolicy>(v1, v2, l), x);
++    }
++    // -inf => 0, inf => 1
++    return 1.0 - std::signbit(x);
++}
++
++float
++ncf_cdf_float(float x, float v1, float v2, float l)
++{
++    return ncf_cdf_wrap(x, v1, v2, l);
++}
++
++double
++ncf_cdf_double(double x, double v1, double v2, double l)
++{
++    return ncf_cdf_wrap(x, v1, v2, l);
++}
++
++template<typename Real>
++Real
++ncf_ppf_wrap(const Real x, const Real v1, const Real v2, const Real l)
++{
++    return boost::math::quantile<Real, StatsPolicy>(
++        boost::math::non_central_f_distribution<Real, StatsPolicy>(v1, v2, l), x);
++}
++
++float
++ncf_ppf_float(float x, float v1, float v2, float l)
++{
++    return ncf_ppf_wrap(x, v1, v2, l);
++}
++
++double
++ncf_ppf_double(double x, double v1, double v2, double l)
++{
++    return ncf_ppf_wrap(x, v1, v2, l);
++}
++
++template<typename Real>
++Real
++ncf_sf_wrap(const Real x, const Real v1, const Real v2, const Real l)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::non_central_f_distribution<Real, StatsPolicy>(v1, v2, l), x));
++}
++
++float
++ncf_sf_float(float x, float v1, float v2, float l)
++{
++    return ncf_sf_wrap(x, v1, v2, l);
++}
++
++double
++ncf_sf_double(double x, double v1, double v2, double l)
++{
++    return ncf_sf_wrap(x, v1, v2, l);
++}
++
++template<typename Real>
++Real
++ncf_isf_wrap(const Real x, const Real v1, const Real v2, const Real l)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::non_central_f_distribution<Real, StatsPolicy>(v1, v2, l), x));
++}
++
++float
++ncf_isf_float(float x, float v1, float v2, float l)
++{
++    return ncf_isf_wrap(x, v1, v2, l);
++}
++
++double
++ncf_isf_double(double x, double v1, double v2, double l)
++{
++    return ncf_isf_wrap(x, v1, v2, l);
++}
++
++#define RETURN_NAN(v, c) if( v <= c ) { \
++        return NAN; \
++    } \
++
++float
++ncf_mean_float(float v1, float v2, float l)
++{
++    RETURN_NAN(v2, 2.0);
++    return boost::math::mean(boost::math::non_central_f_distribution<float, StatsPolicy>(v1, v2, l));
++}
++
++double
++ncf_mean_double(double v1, double v2, double l)
++{
++    RETURN_NAN(v2, 2.0);
++    return boost::math::mean(boost::math::non_central_f_distribution<double, StatsPolicy>(v1, v2, l));
++}
++
++float
++ncf_variance_float(float v1, float v2, float l)
++{
++    RETURN_NAN(v2, 4.0);
++    return boost::math::variance(boost::math::non_central_f_distribution<float, StatsPolicy>(v1, v2, l));
++}
++
++double
++ncf_variance_double(double v1, double v2, double l)
++{
++    RETURN_NAN(v2, 4.0);
++    return boost::math::variance(boost::math::non_central_f_distribution<double, StatsPolicy>(v1, v2, l));
++}
++
++float
++ncf_skewness_float(float v1, float v2, float l)
++{
++    RETURN_NAN(v2, 6.0);
++    return boost::math::skewness(boost::math::non_central_f_distribution<float, StatsPolicy>(v1, v2, l));
++}
++
++double
++ncf_skewness_double(double v1, double v2, double l)
++{
++    RETURN_NAN(v2, 6.0);
++    return boost::math::skewness(boost::math::non_central_f_distribution<double, StatsPolicy>(v1, v2, l));
++}
++
++float
++ncf_kurtosis_excess_float(float v1, float v2, float l)
++{
++    RETURN_NAN(v2, 8.0);
++    return boost::math::kurtosis_excess(boost::math::non_central_f_distribution<float, StatsPolicy>(v1, v2, l));
++}
++
++double
++ncf_kurtosis_excess_double(double v1, double v2, double l)
++{
++    RETURN_NAN(v2, 8.0);
++    return boost::math::kurtosis_excess(boost::math::non_central_f_distribution<double, StatsPolicy>(v1, v2, l));
++}
++
++template<typename Real>
++Real
++nct_cdf_wrap(const Real x, const Real v, const Real l)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::non_central_t_distribution<Real, StatsPolicy>(v, l), x);
++    }
++    // -inf => 0, inf => 1
++    return 1.0 - std::signbit(x);
++}
++
++float
++nct_cdf_float(float x, float v, float l)
++{
++    return nct_cdf_wrap(x, v, l);
++}
++
++double
++nct_cdf_double(double x, double v, double l)
++{
++    return nct_cdf_wrap(x, v, l);
++}
++
++template<typename Real>
++Real
++nct_ppf_wrap(const Real x, const Real v, const Real l)
++{
++    return boost::math::quantile(
++        boost::math::non_central_t_distribution<Real, StatsPolicy>(v, l), x);
++}
++
++float
++nct_ppf_float(float x, float v, float l)
++{
++    return nct_ppf_wrap(x, v, l);
++}
++
++double
++nct_ppf_double(double x, double v, double l)
++{
++    return nct_ppf_wrap(x, v, l);
++}
++
++template<typename Real>
++Real
++nct_sf_wrap(const Real x, const Real v, const Real l)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::non_central_t_distribution<Real, StatsPolicy>(v, l), x));
++}
++
++float
++nct_sf_float(float x, float v, float l)
++{
++    return nct_sf_wrap(x, v, l);
++}
++
++double
++nct_sf_double(double x, double v, double l)
++{
++    return nct_sf_wrap(x, v, l);
++}
++
++template<typename Real>
++Real
++nct_isf_wrap(const Real x, const Real v, const Real l)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::non_central_t_distribution<Real, StatsPolicy>(v, l), x));
++}
++
++float
++nct_isf_float(float x, float v, float l)
++{
++    return nct_isf_wrap(x, v, l);
++}
++
++double
++nct_isf_double(double x, double v, double l)
++{
++    return nct_isf_wrap(x, v, l);
++}
++
++float
++nct_mean_float(float v, float l)
++{
++    RETURN_NAN(v, 1.0);
++    return boost::math::mean(boost::math::non_central_t_distribution<float, StatsPolicy>(v, l));
++}
++
++double
++nct_mean_double(double v, double l)
++{
++    RETURN_NAN(v, 1.0);
++    return boost::math::mean(boost::math::non_central_t_distribution<double, StatsPolicy>(v, l));
++}
++
++float
++nct_variance_float(float v, float l)
++{
++    RETURN_NAN(v, 2.0);
++    return boost::math::variance(boost::math::non_central_t_distribution<float, StatsPolicy>(v, l));
++}
++
++double
++nct_variance_double(double v, double l)
++{
++    RETURN_NAN(v, 2.0);
++    return boost::math::variance(boost::math::non_central_t_distribution<double, StatsPolicy>(v, l));
++}
++
++float
++nct_skewness_float(float v, float l)
++{
++    RETURN_NAN(v, 3.0);
++    return boost::math::skewness(boost::math::non_central_t_distribution<float, StatsPolicy>(v, l));
++}
++
++double
++nct_skewness_double(double v, double l)
++{
++    RETURN_NAN(v, 3.0);
++    return boost::math::skewness(boost::math::non_central_t_distribution<double, StatsPolicy>(v, l));
++}
++
++float
++nct_kurtosis_excess_float(float v, float l)
++{
++    RETURN_NAN(v, 4.0);
++    return boost::math::kurtosis_excess(boost::math::non_central_t_distribution<float, StatsPolicy>(v, l));
++}
++
++double
++nct_kurtosis_excess_double(double v, double l)
++{
++    RETURN_NAN(v, 4.0);
++    return boost::math::kurtosis_excess(boost::math::non_central_t_distribution<double, StatsPolicy>(v, l));
++}
++
++template<typename Real>
++Real
++skewnorm_cdf_wrap(const Real x, const Real l, const Real sc, const Real sh)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::skew_normal_distribution<Real, StatsPolicy>(l, sc, sh), x);
++    }
++    // -inf => 0, inf => 1
++    return 1 - std::signbit(x);
++}
++
++float
++skewnorm_cdf_float(float x, float l, float sc, float sh)
++{
++    return skewnorm_cdf_wrap(x, l, sc, sh);
++}
++
++double
++skewnorm_cdf_double(double x, double l, double sc, double sh)
++{
++    return skewnorm_cdf_wrap(x, l, sc, sh);
++}
++
++template<typename Real>
++Real
++skewnorm_ppf_wrap(const Real x, const Real l, const Real sc, const Real sh)
++{
++    return boost::math::quantile(
++        boost::math::skew_normal_distribution<Real, StatsPolicy>(l, sc, sh), x);
++}
++
++float
++skewnorm_ppf_float(float x, float l, float sc, float sh)
++{
++    return skewnorm_ppf_wrap(x, l, sc, sh);
++}
++
++double
++skewnorm_ppf_double(double x, double l, double sc, double sh)
++{
++    return skewnorm_ppf_wrap(x, l, sc, sh);
++}
++
++template<typename Real>
++Real
++skewnorm_isf_wrap(const Real x, const Real l, const Real sc, const Real sh)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::skew_normal_distribution<Real, StatsPolicy>(l, sc, sh), x));
++}
++
++float
++skewnorm_isf_float(float x, float l, float sc, float sh)
++{
++    return skewnorm_isf_wrap(x, l, sc, sh);
++}
++
++double
++skewnorm_isf_double(double x, double l, double sc, double sh)
++{
++    return skewnorm_isf_wrap(x, l, sc, sh);
++}
++
++template<typename Real>
++Real
++binom_pmf_wrap(const Real x, const Real n, const Real p)
++{
++    if (std::isfinite(x)) {
++        return boost::math::pdf(
++            boost::math::binomial_distribution<Real, StatsPolicy>(n, p), x);
++    }
++    return NAN; // inf or -inf returns NAN
++}
++
++float
++binom_pmf_float(float x, float n, float p)
++{
++    return binom_pmf_wrap(x, n, p);
++}
++
++double
++binom_pmf_double(double x, double n, double p)
++{
++    return binom_pmf_wrap(x, n, p);
++}
++
++template<typename Real>
++Real
++binom_cdf_wrap(const Real x, const Real n, const Real p)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::binomial_distribution<Real, StatsPolicy>(n, p), x);
++    }
++    // -inf => 0, inf => 1
++    return 1 - std::signbit(x);
++}
++
++float
++binom_cdf_float(float x, float n, float p)
++{
++    return binom_cdf_wrap(x, n, p);
++}
++
++double
++binom_cdf_double(double x, double n, double p)
++{
++    return binom_cdf_wrap(x, n, p);
++}
++
++template<typename Real>
++Real
++binom_ppf_wrap(const Real x, const Real n, const Real p)
++{
++    return boost::math::quantile(
++        boost::math::binomial_distribution<Real, StatsPolicy>(n, p), x);
++}
++
++float
++binom_ppf_float(float x, float n, float p)
++{
++    return binom_ppf_wrap(x, n, p);
++}
++
++double
++binom_ppf_double(double x, double n, double p)
++{
++    return binom_ppf_wrap(x, n, p);
++}
++
++template<typename Real>
++Real
++binom_sf_wrap(const Real x, const Real n, const Real p)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::binomial_distribution<Real, StatsPolicy>(n, p), x));
++}
++
++float
++binom_sf_float(float x, float n, float p)
++{
++    return binom_sf_wrap(x, n, p);
++}
++
++double
++binom_sf_double(double x, double n, double p)
++{
++    return binom_sf_wrap(x, n, p);
++}
++
++template<typename Real>
++Real
++binom_isf_wrap(const Real x, const Real n, const Real p)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::binomial_distribution<Real, StatsPolicy>(n, p), x));
++}
++
++float
++binom_isf_float(float x, float n, float p)
++{
++    return binom_isf_wrap(x, n, p);
++}
++
++double
++binom_isf_double(double x, double n, double p)
++{
++    return binom_isf_wrap(x, n, p);
++}
++
++template<typename Real>
++Real
++nbinom_pmf_wrap(const Real x, const Real r, const Real p)
++{
++    if (std::isfinite(x)) {
++        return boost::math::pdf(
++            boost::math::negative_binomial_distribution<Real, StatsPolicy>(r, p), x);
++    }
++    return NAN; // inf or -inf returns NAN
++}
++
++float
++nbinom_pmf_float(float x, float r, float p)
++{
++    return nbinom_pmf_wrap(x, r, p);
++}
++
++double
++nbinom_pmf_double(double x, double r, double p)
++{
++    return nbinom_pmf_wrap(x, r, p);
++}
++
++template<typename Real>
++Real
++nbinom_cdf_wrap(const Real x, const Real r, const Real p)
++{
++    if (std::isfinite(x)) {
++        return boost::math::cdf(
++            boost::math::negative_binomial_distribution<Real, StatsPolicy>(r, p), x);
++    }
++    // -inf => 0, inf => 1
++    return 1 - std::signbit(x);
++}
++
++float
++nbinom_cdf_float(float x, float r, float p)
++{
++    return nbinom_cdf_wrap(x, r, p);
++}
++
++double
++nbinom_cdf_double(double x, double r, double p)
++{
++    return nbinom_cdf_wrap(x, r, p);
++}
++
++template<typename Real>
++Real
++nbinom_ppf_wrap(const Real x, const Real r, const Real p)
++{
++    return boost::math::quantile(
++        boost::math::negative_binomial_distribution<Real, StatsPolicy>(r, p), x);
++}
++
++float
++nbinom_ppf_float(float x, float r, float p)
++{
++    return nbinom_ppf_wrap(x, r, p);
++}
++
++double
++nbinom_ppf_double(double x, double r, double p)
++{
++    return nbinom_ppf_wrap(x, r, p);
++}
++
++template<typename Real>
++Real
++nbinom_sf_wrap(const Real x, const Real r, const Real p)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::negative_binomial_distribution<Real, StatsPolicy>(r, p), x));
++}
++
++float
++nbinom_sf_float(float x, float r, float p)
++{
++    return nbinom_sf_wrap(x, r, p);
++}
++
++double
++nbinom_sf_double(double x, double r, double p)
++{
++    return nbinom_sf_wrap(x, r, p);
++}
++
++template<typename Real>
++Real
++nbinom_isf_wrap(const Real x, const Real r, const Real p)
++{
++    return boost::math::quantile(boost::math::complement(
++        boost::math::negative_binomial_distribution<Real, StatsPolicy>(r, p), x));
++}
++
++float
++nbinom_isf_float(float x, float r, float p)
++{
++    return nbinom_isf_wrap(x, r, p);
++}
++
++double
++nbinom_isf_double(double x, double r, double p)
++{
++    return nbinom_isf_wrap(x, r, p);
++}
++
++float
++nbinom_mean_float(float r, float p)
++{
++    return boost::math::mean(boost::math::negative_binomial_distribution<float, StatsPolicy>(r, p));
++}
++
++double
++nbinom_mean_double(double r, double p)
++{
++    return boost::math::mean(boost::math::negative_binomial_distribution<double, StatsPolicy>(r, p));
++}
++
++float
++nbinom_variance_float(float r, float p)
++{
++    return boost::math::variance(boost::math::negative_binomial_distribution<float, StatsPolicy>(r, p));
++}
++
++double
++nbinom_variance_double(double r, double p)
++{
++    return boost::math::variance(boost::math::negative_binomial_distribution<double, StatsPolicy>(r, p));
++}
++
++float
++nbinom_skewness_float(float r, float p)
++{
++    return boost::math::skewness(boost::math::negative_binomial_distribution<float, StatsPolicy>(r, p));
++}
++
++double
++nbinom_skewness_double(double r, double p)
++{
++    return boost::math::skewness(boost::math::negative_binomial_distribution<double, StatsPolicy>(r, p));
++}
++
++float
++nbinom_kurtosis_excess_float(float r, float p)
++{
++    return boost::math::kurtosis_excess(boost::math::negative_binomial_distribution<float, StatsPolicy>(r, p));
++}
++
++double
++nbinom_kurtosis_excess_double(double r, double p)
++{
++    return boost::math::kurtosis_excess(boost::math::negative_binomial_distribution<double, StatsPolicy>(r, p));
++}
++
++template<typename Real>
++Real
++hypergeom_pmf_wrap(const Real k, const Real n, const Real N, const Real M)
++{
++    if (std::isfinite(k)) {
++        return boost::math::pdf(
++            boost::math::hypergeometric_distribution<Real, StatsPolicy>(n, N, M), k);
++    }
++    return NAN; // inf or -inf returns NAN
++}
++
++float
++hypergeom_pmf_float(float k, float n, float N, float M)
++{
++    return hypergeom_pmf_wrap(k, n, N, M);
++}
++
++double
++hypergeom_pmf_double(double k, double n, double N, double M)
++{
++    return hypergeom_pmf_wrap(k, n, N, M);
++}
++
++template<typename Real>
++Real
++hypergeom_cdf_wrap(const Real k, const Real n, const Real N, const Real M)
++{
++    if (std::isfinite(k)) {
++        return boost::math::cdf(
++            boost::math::hypergeometric_distribution<Real, StatsPolicy>(n, N, M), k);
++    }
++    // -inf => 0, inf => 1
++    return 1 - std::signbit(k);
++}
++
++float
++hypergeom_cdf_float(float k, float n, float N, float M)
++{
++    return hypergeom_cdf_wrap(k, n, N, M);
++}
++
++double
++hypergeom_cdf_double(double k, double n, double N, double M)
++{
++    return hypergeom_cdf_wrap(k, n, N, M);
++}
++
++template<typename Real>
++Real
++hypergeom_sf_wrap(const Real k, const Real n, const Real N, const Real M)
++{
++    return boost::math::cdf(boost::math::complement(
++        boost::math::hypergeometric_distribution<Real, StatsPolicy>(n, N, M), k));
++}
++
++float
++hypergeom_sf_float(float k, float n, float N, float M)
++{
++    return hypergeom_sf_wrap(k, n, N, M);
++}
++
++double
++hypergeom_sf_double(double k, double n, double N, double M)
++{
++    return hypergeom_sf_wrap(k, n, N, M);
++}
++
++float
++hypergeom_mean_float(float n, float N, float M)
++{
++    return boost::math::mean(boost::math::hypergeometric_distribution<float, StatsPolicy>(n, N, M));
++}
++
++double
++hypergeom_mean_double(double n, double N, double M)
++{
++    return boost::math::mean(boost::math::hypergeometric_distribution<double, StatsPolicy>(n, N, M));
++}
++
++float
++hypergeom_variance_float(float n, float N, float M)
++{
++    return boost::math::variance(boost::math::hypergeometric_distribution<float, StatsPolicy>(n, N, M));
++}
++
++double
++hypergeom_variance_double(double n, double N, double M)
++{
++    return boost::math::variance(boost::math::hypergeometric_distribution<double, StatsPolicy>(n, N, M));
++}
++
++float
++hypergeom_skewness_float(float n, float N, float M)
++{
++    return boost::math::skewness(boost::math::hypergeometric_distribution<float, StatsPolicy>(n, N, M));
++}
++
++double
++hypergeom_skewness_double(double n, double N, double M)
++{
++    return boost::math::skewness(boost::math::hypergeometric_distribution<double, StatsPolicy>(n, N, M));
++}
++
+ #endif
+diff --git a/scipy/special/functions.json b/scipy/special/functions.json
+index 485d74d8d158..5f61804b9506 100644
+--- a/scipy/special/functions.json
++++ b/scipy/special/functions.json
+@@ -1473,8 +1473,302 @@
+         }
+     },
+     "ndtri_exp": {
+-	"_ndtri_exp.pxd": {
+-	    "ndtri_exp": "d->d"
+-	}
++        "_ndtri_exp.pxd": {
++            "ndtri_exp": "d->d"
++        }
++    },
++    "_beta_pdf": {
++        "boost_special_functions.h++": {
++            "beta_pdf_float": "fff->f",
++            "beta_pdf_double": "ddd->d"
++        }
++    },
++    "_beta_ppf": {
++        "boost_special_functions.h++": {
++            "beta_ppf_float": "fff->f",
++            "beta_ppf_double": "ddd->d"
++        }
++    },
++    "_invgauss_ppf": {
++        "boost_special_functions.h++": {
++            "invgauss_ppf_float": "fff->f",
++            "invgauss_ppf_double": "ddd->d"
++        }
++    },
++    "_invgauss_isf": {
++        "boost_special_functions.h++": {
++            "invgauss_isf_float": "fff->f",
++            "invgauss_isf_double": "ddd->d"
++        }
++    },
++    "_ncx2_pdf": {
++        "boost_special_functions.h++": {
++            "ncx2_pdf_float": "fff->f",
++            "ncx2_pdf_double": "ddd->d"
++        }
++    },
++    "_ncx2_cdf": {
++        "boost_special_functions.h++": {
++            "ncx2_cdf_float": "fff->f",
++            "ncx2_cdf_double": "ddd->d"
++        }
++    },
++    "_ncx2_ppf": {
++        "boost_special_functions.h++": {
++            "ncx2_ppf_float": "fff->f",
++            "ncx2_ppf_double": "ddd->d"
++        }
++    },
++    "_ncx2_sf": {
++        "boost_special_functions.h++": {
++            "ncx2_sf_float": "fff->f",
++            "ncx2_sf_double": "ddd->d"
++        }
++    },
++    "_ncx2_isf": {
++        "boost_special_functions.h++": {
++            "ncx2_isf_float": "fff->f",
++            "ncx2_isf_double": "ddd->d"
++        }
++    },
++    "_ncf_pdf": {
++        "boost_special_functions.h++": {
++            "ncf_pdf_float": "ffff->f",
++            "ncf_pdf_double": "dddd->d"
++        }
++    },
++    "_ncf_cdf": {
++        "boost_special_functions.h++": {
++            "ncf_cdf_float": "ffff->f",
++            "ncf_cdf_double": "dddd->d"
++        }
++    },
++    "_ncf_ppf": {
++        "boost_special_functions.h++": {
++            "ncf_ppf_float": "ffff->f",
++            "ncf_ppf_double": "dddd->d"
++        }
++    },
++    "_ncf_sf": {
++        "boost_special_functions.h++": {
++            "ncf_sf_float": "ffff->f",
++            "ncf_sf_double": "dddd->d"
++        }
++    },
++    "_ncf_isf": {
++        "boost_special_functions.h++": {
++            "ncf_isf_float": "ffff->f",
++            "ncf_isf_double": "dddd->d"
++        }
++    },
++    "_ncf_mean": {
++        "boost_special_functions.h++": {
++            "ncf_mean_float": "fff->f",
++            "ncf_mean_double": "ddd->d"
++        }
++    },
++    "_ncf_variance": {
++        "boost_special_functions.h++": {
++            "ncf_variance_float": "fff->f",
++            "ncf_variance_double": "ddd->d"
++        }
++    },
++    "_ncf_skewness": {
++        "boost_special_functions.h++": {
++            "ncf_skewness_float": "fff->f",
++            "ncf_skewness_double": "ddd->d"
++        }
++    },
++    "_ncf_kurtosis_excess": {
++        "boost_special_functions.h++": {
++            "ncf_kurtosis_excess_float": "fff->f",
++            "ncf_kurtosis_excess_double": "ddd->d"
++        }
++    },
++    "_nct_cdf": {
++        "boost_special_functions.h++": {
++            "nct_cdf_float": "fff->f",
++            "nct_cdf_double": "ddd->d"
++        }
++    },
++    "_nct_ppf": {
++        "boost_special_functions.h++": {
++            "nct_ppf_float": "fff->f",
++            "nct_ppf_double": "ddd->d"
++        }
++    },
++    "_nct_sf": {
++        "boost_special_functions.h++": {
++            "nct_sf_float": "fff->f",
++            "nct_sf_double": "ddd->d"
++        }
++    },
++    "_nct_isf": {
++        "boost_special_functions.h++": {
++            "nct_isf_float": "fff->f",
++            "nct_isf_double": "ddd->d"
++        }
++    },
++    "_nct_mean": {
++        "boost_special_functions.h++": {
++            "nct_mean_float": "ff->f",
++            "nct_mean_double": "dd->d"
++        }
++    },
++    "_nct_variance": {
++        "boost_special_functions.h++": {
++            "nct_variance_float": "ff->f",
++            "nct_variance_double": "dd->d"
++        }
++    },
++    "_nct_skewness": {
++        "boost_special_functions.h++": {
++            "nct_skewness_float": "ff->f",
++            "nct_skewness_double": "dd->d"
++        }
++    },
++    "_nct_kurtosis_excess": {
++        "boost_special_functions.h++": {
++            "nct_kurtosis_excess_float": "ff->f",
++            "nct_kurtosis_excess_double": "dd->d"
++        }
++    },
++    "_skewnorm_cdf": {
++        "boost_special_functions.h++": {
++            "skewnorm_cdf_float": "ffff->f",
++            "skewnorm_cdf_double": "dddd->d"
++        }
++    },
++    "_skewnorm_ppf": {
++        "boost_special_functions.h++": {
++            "skewnorm_ppf_float": "ffff->f",
++            "skewnorm_ppf_double": "dddd->d"
++        }
++    },
++    "_skewnorm_isf": {
++        "boost_special_functions.h++": {
++            "skewnorm_isf_float": "ffff->f",
++            "skewnorm_isf_double": "dddd->d"
++        }
++    },
++    "_binom_pmf": {
++        "boost_special_functions.h++": {
++            "binom_pmf_float": "fff->f",
++            "binom_pmf_double": "ddd->d"
++        }
++    },
++    "_binom_cdf": {
++        "boost_special_functions.h++": {
++            "binom_cdf_float": "fff->f",
++            "binom_cdf_double": "ddd->d"
++        }
++    },
++    "_binom_ppf": {
++        "boost_special_functions.h++": {
++            "binom_ppf_float": "fff->f",
++            "binom_ppf_double": "ddd->d"
++        }
++    },
++    "_binom_sf": {
++        "boost_special_functions.h++": {
++            "binom_sf_float": "fff->f",
++            "binom_sf_double": "ddd->d"
++        }
++    },
++    "_binom_isf": {
++        "boost_special_functions.h++": {
++            "binom_isf_float": "fff->f",
++            "binom_isf_double": "ddd->d"
++        }
++    },
++    "_nbinom_pmf": {
++        "boost_special_functions.h++": {
++            "nbinom_pmf_float": "fff->f",
++            "nbinom_pmf_double": "ddd->d"
++        }
++    },
++    "_nbinom_cdf": {
++        "boost_special_functions.h++": {
++            "nbinom_cdf_float": "fff->f",
++            "nbinom_cdf_double": "ddd->d"
++        }
++    },
++    "_nbinom_ppf": {
++        "boost_special_functions.h++": {
++            "nbinom_ppf_float": "fff->f",
++            "nbinom_ppf_double": "ddd->d"
++        }
++    },
++    "_nbinom_sf": {
++        "boost_special_functions.h++": {
++            "nbinom_sf_float": "fff->f",
++            "nbinom_sf_double": "ddd->d"
++        }
++    },
++    "_nbinom_isf": {
++        "boost_special_functions.h++": {
++            "nbinom_isf_float": "fff->f",
++            "nbinom_isf_double": "ddd->d"
++        }
++    },
++    "_nbinom_mean": {
++        "boost_special_functions.h++": {
++            "nbinom_mean_float": "ff->f",
++            "nbinom_mean_double": "dd->d"
++        }
++    },
++    "_nbinom_variance": {
++        "boost_special_functions.h++": {
++            "nbinom_variance_float": "ff->f",
++            "nbinom_variance_double": "dd->d"
++        }
++    },
++    "_nbinom_skewness": {
++        "boost_special_functions.h++": {
++            "nbinom_skewness_float": "ff->f",
++            "nbinom_skewness_double": "dd->d"
++        }
++    },
++    "_nbinom_kurtosis_excess": {
++        "boost_special_functions.h++": {
++            "nbinom_kurtosis_excess_float": "ff->f",
++            "nbinom_kurtosis_excess_double": "dd->d"
++        }
++    },
++    "_hypergeom_pmf": {
++        "boost_special_functions.h++": {
++            "hypergeom_pmf_float": "ffff->f",
++            "hypergeom_pmf_double": "dddd->d"
++        }
++    },
++    "_hypergeom_cdf": {
++        "boost_special_functions.h++": {
++            "hypergeom_cdf_float": "ffff->f",
++            "hypergeom_cdf_double": "dddd->d"
++        }
++    },
++    "_hypergeom_sf": {
++        "boost_special_functions.h++": {
++            "hypergeom_sf_float": "ffff->f",
++            "hypergeom_sf_double": "dddd->d"
++        }
++    },
++    "_hypergeom_mean": {
++        "boost_special_functions.h++": {
++            "hypergeom_mean_float": "fff->f",
++            "hypergeom_mean_double": "ddd->d"
++        }
++    },
++    "_hypergeom_variance": {
++        "boost_special_functions.h++": {
++            "hypergeom_variance_float": "fff->f",
++            "hypergeom_variance_double": "ddd->d"
++        }
++    },
++    "_hypergeom_skewness": {
++        "boost_special_functions.h++": {
++            "hypergeom_skewness_float": "fff->f",
++            "hypergeom_skewness_double": "ddd->d"
++        }
+     }
+ }
+diff --git a/scipy/stats/_boost/.gitignore b/scipy/stats/_boost/.gitignore
+deleted file mode 100644
+index 91d21187c688..000000000000
+--- a/scipy/stats/_boost/.gitignore
++++ /dev/null
+@@ -1,2 +0,0 @@
+-# generated files
+-src/
+diff --git a/scipy/stats/_boost/__init__.py b/scipy/stats/_boost/__init__.py
+deleted file mode 100644
+index 681694192be6..000000000000
+--- a/scipy/stats/_boost/__init__.py
++++ /dev/null
+@@ -1,53 +0,0 @@
+-from scipy.stats._boost.beta_ufunc import (
+-    _beta_pdf, _beta_cdf, _beta_sf, _beta_ppf,
+-    _beta_isf, _beta_mean, _beta_variance,
+-    _beta_skewness, _beta_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.binom_ufunc import (
+-    _binom_pdf, _binom_cdf, _binom_sf, _binom_ppf,
+-    _binom_isf, _binom_mean, _binom_variance,
+-    _binom_skewness, _binom_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.nbinom_ufunc import (
+-    _nbinom_pdf, _nbinom_cdf, _nbinom_sf, _nbinom_ppf,
+-    _nbinom_isf, _nbinom_mean, _nbinom_variance,
+-    _nbinom_skewness, _nbinom_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.hypergeom_ufunc import (
+-    _hypergeom_pdf, _hypergeom_cdf, _hypergeom_sf, _hypergeom_ppf,
+-    _hypergeom_isf, _hypergeom_mean, _hypergeom_variance,
+-    _hypergeom_skewness, _hypergeom_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.ncf_ufunc import (
+-    _ncf_pdf, _ncf_cdf, _ncf_sf, _ncf_ppf,
+-    _ncf_isf, _ncf_mean, _ncf_variance,
+-    _ncf_skewness, _ncf_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.ncx2_ufunc import (
+-    _ncx2_pdf, _ncx2_cdf, _ncx2_sf, _ncx2_ppf,
+-    _ncx2_isf, _ncx2_mean, _ncx2_variance,
+-    _ncx2_skewness, _ncx2_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.nct_ufunc import (
+-    _nct_pdf, _nct_cdf, _nct_sf, _nct_ppf,
+-    _nct_isf, _nct_mean, _nct_variance,
+-    _nct_skewness, _nct_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.skewnorm_ufunc import (
+-    _skewnorm_pdf, _skewnorm_cdf, _skewnorm_sf, _skewnorm_ppf,
+-    _skewnorm_isf, _skewnorm_mean, _skewnorm_variance,
+-    _skewnorm_skewness, _skewnorm_kurtosis_excess,
+-)
+-
+-from scipy.stats._boost.invgauss_ufunc import (
+-    _invgauss_pdf, _invgauss_cdf, _invgauss_sf, _invgauss_ppf,
+-    _invgauss_isf, _invgauss_mean, _invgauss_variance,
+-    _invgauss_skewness, _invgauss_kurtosis_excess,
+-)
+diff --git a/scipy/stats/_boost/include/Templated_PyUFunc.hpp b/scipy/stats/_boost/include/Templated_PyUFunc.hpp
+deleted file mode 100644
+index 6e979e6d2af1..000000000000
+--- a/scipy/stats/_boost/include/Templated_PyUFunc.hpp
++++ /dev/null
+@@ -1,57 +0,0 @@
+-#ifndef TEMPLATED_PYUFUNC_HPP
+-#define TEMPLATED_PYUFUNC_HPP
+-
+-#include <cstddef>
+-#include <stdexcept>
+-#define UFUNC_CALLFUNC(RealType, NINPUTS, func, inputs) \
+-    *output = callfunc<RealType, NINPUTS>(func, inputs);
+-
+-// Explicitly handle NINPUTS cases for C++11 compatibility
+-template<class RealType, std::size_t NINPUTS>
+-RealType
+-callfunc(void* func, RealType **inputs)
+-{
+-    switch (NINPUTS) {
+-    case 1:
+-        return (reinterpret_cast<RealType(*)(RealType)>(func))(*inputs[0]);
+-    case 2:
+-        return (reinterpret_cast<RealType(*)(RealType, RealType)>(func))(*inputs[0], *inputs[1]);
+-    case 3:
+-        return (reinterpret_cast<RealType(*)(RealType, RealType, RealType)>(func))(*inputs[0], *inputs[1], *inputs[2]);
+-    case 4:
+-        return (reinterpret_cast<RealType(*)(RealType, RealType, RealType, RealType)>(func))(*inputs[0], *inputs[1], *inputs[2], *inputs[3]);
+-    // case n:
+-    //     add more cases if/when you need them
+-    default:
+-        throw std::runtime_error("callfunc() in C++11 compatibility mode "
+-				 "handles too few args!");
+-    }
+-}
+-
+-
+-/** \brief UFUNC loop function that handles any type and number of inputs.
+- *         Always returns a single output. */
+-template<class RealType = double, std::size_t NINPUTS>
+-static void
+-PyUFunc_T(char **args, npy_intp const *dimensions, npy_intp const *steps,
+-	  void *func)
+-{
+-    static_assert(NINPUTS > 0, "numpy.ufunc demands NINPUT > 0!");
+-    RealType *inputs[NINPUTS];
+-    for (std::size_t ii = 0; ii < NINPUTS; ++ii) {
+-        inputs[ii] = (RealType*)args[ii];
+-    }
+-
+-    RealType *output = (RealType*)args[NINPUTS];
+-    const std::size_t sz = sizeof(RealType);
+-    for (npy_intp ii = 0; ii < dimensions[0]; ++ii) {
+-        UFUNC_CALLFUNC(RealType, NINPUTS, func, inputs);
+-        for (std::size_t jj = 0; jj < NINPUTS; ++jj) {
+-            inputs[jj] += steps[jj]/sz;
+-        }
+-        output += steps[NINPUTS]/sz;
+-    }
+-}
+-
+-
+-#endif // TEMPLATED_PYUFUNC_HPP
+diff --git a/scipy/stats/_boost/include/_info.py b/scipy/stats/_boost/include/_info.py
+deleted file mode 100644
+index bade79470a7c..000000000000
+--- a/scipy/stats/_boost/include/_info.py
++++ /dev/null
+@@ -1,27 +0,0 @@
+-from typing import NamedTuple
+-
+-
+-class _KlassMap(NamedTuple):
+-    scipy_name: str
+-    ctor_args: tuple
+-
+-
+-# map boost stats classes to scipy class names and
+-# constructor arguments; b -> (s, ('ctor', 'args', ...))
+-_klass_mapper = {
+-    'beta': _KlassMap('beta', ('a', 'b')),
+-    'binomial': _KlassMap('binom', ('n', 'p')),
+-    'negative_binomial': _KlassMap('nbinom', ('n', 'p')),
+-    'hypergeometric': _KlassMap('hypergeom', ('r', 'n', 'N')),
+-    'non_central_f': _KlassMap('ncf', ('dfn', 'dfd', 'nc')),
+-    'non_central_chi_squared': _KlassMap('ncx2', ('df', 'nc')),
+-    'non_central_t': _KlassMap('nct', ('df', 'nc')),
+-    'skew_normal': _KlassMap('skewnorm', ('loc', 'scale', 'a',)),
+-    'inverse_gaussian': _KlassMap('invgauss', ('mu', 'mean')),
+-}
+-
+-# functions that take ctor params and parameter "x"
+-_x_funcs = ('pdf', 'cdf', 'sf', 'ppf', 'isf')
+-
+-# functions that take only ctor params
+-_no_x_funcs = ('mean', 'variance', 'skewness', 'kurtosis_excess')
+diff --git a/scipy/stats/_boost/include/code_gen.py b/scipy/stats/_boost/include/code_gen.py
+deleted file mode 100644
+index cca647671d5e..000000000000
+--- a/scipy/stats/_boost/include/code_gen.py
++++ /dev/null
+@@ -1,176 +0,0 @@
+-'''Generate Cython PYX wrappers for Boost stats distributions.'''
+-
+-from typing import NamedTuple
+-from warnings import warn
+-from textwrap import dedent
+-import pathlib
+-import argparse
+-
+-from gen_func_defs_pxd import (  # type: ignore
+-    _gen_func_defs_pxd)
+-from _info import (  # type: ignore
+-    _x_funcs, _no_x_funcs, _klass_mapper)
+-
+-
+-class _MethodDef(NamedTuple):
+-    ufunc_name: str
+-    num_inputs: int
+-    boost_func_name: str
+-
+-
+-def _ufunc_gen(scipy_dist: str, types: list, ctor_args: tuple,
+-               filename: str, boost_dist: str, x_funcs: list,
+-               no_x_funcs: list):
+-    '''
+-    We need methods defined for each rv_continuous/_discrete internal method:
+-        i.e.: _pdf, _cdf, etc.
+-    Some of these methods take constructor arguments and 1 extra argument,
+-        e.g.: _pdf(x, *ctor_args), _ppf(q, *ctor_args)
+-    while some of the methods take only constructor arguments:
+-        e.g.: _stats(*ctor_args)
+-    '''
+-    num_ctor_args = len(ctor_args)
+-    methods = [_MethodDef(
+-        ufunc_name=f'_{scipy_dist}_{x_func}',
+-        num_inputs=num_ctor_args+1,  # +1 for the x argument
+-        # PDF for the beta distribution has a custom wrapper:
+-        boost_func_name=x_func if boost_dist != 'beta_distribution'
+-        else 'pdf_beta' if x_func == 'pdf' else x_func,
+-    ) for x_func in x_funcs]
+-    methods += [_MethodDef(
+-        ufunc_name=f'_{scipy_dist}_{func}',
+-        num_inputs=num_ctor_args,
+-        boost_func_name=func,
+-    ) for func in no_x_funcs]
+-
+-    # Identify potential ufunc issues:
+-    no_input_methods = [m for m in methods if m.num_inputs == 0]
+-    if no_input_methods:
+-        raise ValueError("ufuncs must have >0 arguments! "
+-                         f"Cannot construct these ufuncs: {no_input_methods}")
+-
+-    boost_hdr_name = boost_dist.split('_distribution')[0]
+-    unique_num_inputs = set({m.num_inputs for m in methods})
+-    has_NPY_FLOAT16 = 'NPY_FLOAT16' in types
+-    line_joiner = ',\n    ' + ' '*12
+-    num_types = len(types)
+-    loop_fun = 'PyUFunc_T'
+-    func_defs_cimports = line_joiner.join(
+-        f"boost_{m.boost_func_name}{num_ctor_args}" for m in methods)
+-    nontype_params = line_joiner[1:].join(
+-        f'ctypedef int NINPUTS{n} "{n}"' for n in unique_num_inputs)
+-
+-    with open(filename, 'w') as fp:
+-        boost_hdr = f'boost/math/distributions/{boost_hdr_name}.hpp'
+-        relimport = '.'
+-
+-        fp.write(dedent(f'''\
+-            # cython: language_level=3
+-
+-            # This file was generated by stats/_boost/include/code_gen.py
+-            # All modifications to this file will be overwritten.
+-
+-            from numpy cimport (
+-                import_array,
+-                import_ufunc,
+-                PyUFunc_FromFuncAndData,
+-                PyUFuncGenericFunction,
+-                PyUFunc_None,
+-                {line_joiner.join(types)}
+-            )
+-            from {relimport}templated_pyufunc cimport PyUFunc_T
+-            from {relimport}func_defs cimport (
+-                {func_defs_cimports},
+-            )
+-            cdef extern from "{boost_hdr}" namespace "boost::math" nogil:
+-                cdef cppclass {boost_dist} nogil:
+-                    pass
+-
+-            # Workaround for Cython's lack of non-type template parameter
+-            # support
+-            cdef extern from * nogil:
+-                {nontype_params}
+-
+-            _DUMMY = ""
+-            import_array()
+-            import_ufunc()
+-            '''))
+-
+-        if has_NPY_FLOAT16:
+-            warn('Boost stats NPY_FLOAT16 ufunc generation not '
+-                 'currently not supported!',
+-                 stacklevel=3)
+-
+-        # Generate ufuncs for each method
+-        for ii, m in enumerate(methods):
+-            fp.write(dedent(f'''
+-                cdef PyUFuncGenericFunction loop_func{ii}[{num_types}]
+-                cdef void* func{ii}[1*{num_types}]
+-                cdef char types{ii}[{m.num_inputs+1}*{num_types}]
+-                '''))  # m.num_inputs+1 for output arg
+-
+-            for jj, T in enumerate(types):
+-                ctype = {
+-                    'NPY_DOUBLE': 'double',
+-                    'NPY_FLOAT': 'float',
+-                    'NPY_FLOAT16': 'npy_half',
+-                }[T]
+-                boost_fun = f'boost_{m.boost_func_name}{num_ctor_args}'
+-                type_str = ", ".join([ctype]*(1+num_ctor_args))
+-                boost_tmpl = f'{boost_dist}, {type_str}'
+-                N = m.num_inputs
+-                fp.write(f'''\
+-loop_func{ii}[{jj}] = <PyUFuncGenericFunction>{loop_fun}[{ctype}, NINPUTS{N}]
+-func{ii}[{jj}] = <void*>{boost_fun}[{boost_tmpl}]
+-''')
+-                for tidx in range(m.num_inputs+1):
+-                    fp.write(
+-                        f'types{ii}[{tidx}+{jj}*{m.num_inputs+1}] = {T}\n')
+-            arg_list_str = ', '.join(ctor_args)
+-            if m.boost_func_name in x_funcs:
+-                arg_list_str = 'x, ' + arg_list_str
+-            fp.write(dedent(f'''
+-                {m.ufunc_name} = PyUFunc_FromFuncAndData(
+-                    loop_func{ii},
+-                    func{ii},
+-                    types{ii},
+-                    {num_types},  # number of supported input types
+-                    {m.num_inputs},  # number of input args
+-                    1,  # number of output args
+-                    PyUFunc_None,  # `identity` element, never mind this
+-                    "{m.ufunc_name}",  # function name
+-                    ("{m.ufunc_name}({arg_list_str}) -> computes "
+-                     "{m.boost_func_name} of {scipy_dist} distribution"),
+-                    0  # unused
+-                )
+-                '''))
+-
+-
+-if __name__ == '__main__':
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("-o", "--outdir", type=str,
+-                        help="Path to the output directory")
+-    args = parser.parse_args()
+-
+-    _boost_dir = pathlib.Path(__file__).resolve().parent.parent
+-    if not args.outdir:
+-        raise ValueError("A path to the output directory is required")
+-    else:
+-        src_dir = pathlib.Path(args.outdir)
+-
+-    # generate the PXD and PYX wrappers
+-    _gen_func_defs_pxd(
+-        f'{src_dir}/func_defs.pxd',
+-        x_funcs=_x_funcs,
+-        no_x_funcs=_no_x_funcs)
+-    float_types = ['NPY_FLOAT', 'NPY_DOUBLE']
+-    for b, s in _klass_mapper.items():
+-        _ufunc_gen(
+-            scipy_dist=s.scipy_name,
+-            types=float_types,
+-            ctor_args=s.ctor_args,
+-            filename=f'{src_dir}/{s.scipy_name}_ufunc.pyx',
+-            boost_dist=f'{b}_distribution',
+-            x_funcs=_x_funcs,
+-            no_x_funcs=_no_x_funcs,
+-        )
+diff --git a/scipy/stats/_boost/include/func_defs.hpp b/scipy/stats/_boost/include/func_defs.hpp
+deleted file mode 100644
+index ff373d39ed3a..000000000000
+--- a/scipy/stats/_boost/include/func_defs.hpp
++++ /dev/null
+@@ -1,142 +0,0 @@
+-#ifndef CLASS_DEF_HPP
+-#define CLASS_DEF_HPP
+-
+-#include <utility>
+-#include <cmath>
+-
+-#include "boost/math/distributions.hpp"
+-
+-// Round up to achieve correct ppf(cdf) round-trips for discrete distributions
+-typedef boost::math::policies::policy<
+-    boost::math::policies::discrete_quantile<
+-        boost::math::policies::integer_round_up > > Policy;
+-
+-
+-// Raise a RuntimeWarning making users aware that something went wrong during
+-// evaluation of the function, but return the best guess
+-template <class RealType>
+-RealType
+-boost::math::policies::user_evaluation_error(const char* function, const char* message, const RealType& val) {
+-    std::string msg("Error in function ");
+-    std::string haystack {function};
+-    const std::string needle {"%1%"};
+-    msg += haystack.replace(haystack.find(needle), needle.length(), typeid(RealType).name()) + ": ";
+-    // "message" may have %1%, but arguments don't always contain all
+-    // required information, so don't call boost::format for now
+-    msg += message;
+-    PyGILState_STATE save = PyGILState_Ensure();
+-    PyErr_WarnEx(PyExc_RuntimeWarning, msg.c_str(), 1);
+-    PyGILState_Release(save);
+-    return val;
+-}
+-
+-
+-template <class RealType>
+-RealType
+-boost::math::policies::user_overflow_error(const char* function, const char* message, const RealType& val) {
+-    std::string msg("Error in function ");
+-    std::string haystack {function};
+-    const std::string needle {"%1%"};
+-    msg += haystack.replace(haystack.find(needle), needle.length(), typeid(RealType).name()) + ": ";
+-    // From Boost docs: "overflow and underflow messages do not contain this %1% specifier
+-    //                   (since the value of value is immaterial in these cases)."
+-    if (message) {
+-        msg += message;
+-    }
+-    PyGILState_STATE save = PyGILState_Ensure();
+-    PyErr_SetString(PyExc_OverflowError, msg.c_str());
+-    PyGILState_Release(save);
+-    return 0;
+-}
+-
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_pdf(const RealType x, const Args ... args)
+-{
+-    if (std::isfinite(x)) {
+-        return boost::math::pdf(Dst<RealType, Policy>(args...), x);
+-    }
+-    return NAN; // inf or -inf returns NAN
+-}
+-
+-// patch for boost::math::beta_distribution throwing exception for
+-// x = 1, beta < 1 as well as x = 0, alpha < 1
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_pdf_beta(const RealType x, const RealType a, const RealType b)
+-{
+-    if (std::isfinite(x)) {
+-        if ((x >= 1) && (b < 1)) {
+-            // x>1 should really be 0, but rv_continuous will do that for us
+-            return INFINITY;
+-        }
+-        else if ((x <= 0) && (a < 1)) {
+-            return INFINITY;
+-        }
+-        return boost::math::pdf(
+-	    boost::math::beta_distribution<RealType, Policy>(a, b), x);
+-    }
+-    return NAN;
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_cdf(const RealType x, const Args ... args)
+-{
+-    if (std::isfinite(x)) {
+-        return boost::math::cdf(Dst<RealType, Policy>(args...), x);
+-    }
+-    // -inf => 0, inf => 1
+-    return 1 - std::signbit(x);
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_sf(const RealType x, const Args ... args)
+-{
+-    return boost::math::cdf(
+-        boost::math::complement(Dst<RealType, Policy>(args...), x));
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_ppf(const RealType q, const Args ... args)
+-{
+-    return boost::math::quantile(Dst<RealType, Policy>(args...), q);
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_isf(const RealType q, const Args ... args)
+-{
+-    return boost::math::quantile(
+-        boost::math::complement(Dst<RealType, Policy>(args...), q));
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_mean(const Args ... args)
+-{
+-    return boost::math::mean(Dst<RealType, Policy>(args...));
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_variance(const Args ... args) {
+-    return boost::math::variance(Dst<RealType, Policy>(args...));
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_skewness(const Args ... args) {
+-    return boost::math::skewness(Dst<RealType, Policy>(args...));
+-}
+-
+-template<template <typename, typename> class Dst, class RealType, class...Args>
+-RealType
+-boost_kurtosis_excess(const Args ... args) {
+-    return boost::math::kurtosis_excess(Dst<RealType, Policy>(args...));
+-}
+-
+-#endif // CLASS_DEF_HPP
+diff --git a/scipy/stats/_boost/include/gen_func_defs_pxd.py b/scipy/stats/_boost/include/gen_func_defs_pxd.py
+deleted file mode 100644
+index 9407cd50cf33..000000000000
+--- a/scipy/stats/_boost/include/gen_func_defs_pxd.py
++++ /dev/null
+@@ -1,44 +0,0 @@
+-'''Generate func_defs.pxd'''
+-
+-import pathlib
+-
+-
+-def _gen_func_defs_pxd(outfile, x_funcs, no_x_funcs, max_num_inputs=4):
+-    '''
+-    Cython does not support template parameter packs, so to keep it
+-    from freaking out, we'll manually produce all the different template
+-    expansions we need to call in the cython wrappers.
+-    '''
+-
+-    contents = ('# This file was generated by stats/_boost/include/'
+-                '_gen_func_defs_pxd.py\n')
+-    contents += '# All modifications to this file will be overwritten.\n'
+-    hdr = str((pathlib.Path(__file__).parent / "func_defs.hpp").as_posix())
+-    contents += f'cdef extern from "{hdr}" namespace "" nogil:\n'
+-
+-    for ii in range(1, max_num_inputs+1):
+-        template_args = ', '.join(f'T{jj} arg{jj}' for jj in range(1, ii+1))
+-        template_types = ', '.join(f'T{jj}' for jj in range(1, ii+1))
+-
+-        # for all the different "overloads", we need to produce a
+-        # distinct Cython reference;
+-        # assumes that all number template types are the same,
+-        # i.e. RealType == T1 == T2 == etc
+-        for func in x_funcs:
+-            fname = f'boost_{func}'
+-            tmpl = f'Dist, RealType, {template_types}'
+-            contents += (f'    RealType {fname}{ii} "{fname}" '
+-                         f'[{tmpl}](RealType x, {template_args})\n')
+-        for func in no_x_funcs:
+-            fname = f'boost_{func}'
+-            tmpl = f'Dist, RealType, {template_types}'
+-            contents += (f'    RealType {fname}{ii} "{fname}" '
+-                         f'[{tmpl}]({template_args})\n')
+-
+-    # patch for boost::math::beta_distibution to handle x = 0 when a < 1
+-    # and x = 1 when beta < 1
+-    contents += ('    RealType boost_pdf_beta2 "boost_pdf_beta" '
+-                 '[Dist, RealType, T1, T2](RealType x, T1 a, T2 b)')
+-
+-    with open(outfile, 'w') as fp:
+-        fp.write(contents)
+diff --git a/scipy/stats/_boost/include/templated_pyufunc.pxd b/scipy/stats/_boost/include/templated_pyufunc.pxd
+deleted file mode 100644
+index 7c0d27de40e8..000000000000
+--- a/scipy/stats/_boost/include/templated_pyufunc.pxd
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# cython: language_level=3
+-
+-from numpy cimport npy_intp
+-
+-cdef extern from "Templated_PyUFunc.hpp" namespace "" nogil:
+-    void PyUFunc_T[T, N](char** args, npy_intp *dimensions, npy_intp *steps, void *data) except +
+diff --git a/scipy/stats/_boost/meson.build b/scipy/stats/_boost/meson.build
+deleted file mode 100644
+index f6f034520229..000000000000
+--- a/scipy/stats/_boost/meson.build
++++ /dev/null
+@@ -1,37 +0,0 @@
+-cpp_args = [
+-  '-DBOOST_MATH_STANDALONE=1',
+-  '-DBOOST_MATH_DOMAIN_ERROR_POLICY=ignore_error',
+-  '-DBOOST_MATH_EVALUATION_ERROR_POLICY=user_error',
+-  '-DBOOST_MATH_OVERFLOW_ERROR_POLICY=user_error',
+-  '-DBOOST_MATH_PROMOTE_DOUBLE_POLICY=false'
+-]
+-
+-pyx_files = [
+-  ['binom_ufunc', binom_ufunc_pyx],
+-  ['beta_ufunc', beta_ufunc_pyx],
+-  ['hypergeom_ufunc', hypergeom_ufunc_pyx],
+-  ['nbinom_ufunc', nbinom_ufunc_pyx],
+-  ['ncf_ufunc', ncf_ufunc_pyx],
+-  ['ncx2_ufunc', ncx2_ufunc_pyx],
+-  ['nct_ufunc', nct_ufunc_pyx],
+-  ['skewnorm_ufunc', skewnorm_ufunc_pyx],
+-  ['invgauss_ufunc', invgauss_ufunc_pyx],
+-]
+-
+-foreach pyx_file: pyx_files
+-  py3.extension_module(pyx_file[0],
+-    pyx_file[1],
+-    include_directories: ['include', '../../_lib/boost_math/include'],
+-    dependencies: np_dep,
+-    link_args: version_link_args,
+-    cpp_args: [cpp_args, cython_cpp_args],
+-    install: true,
+-    subdir: 'scipy/stats/_boost'
+-  )
+-endforeach
+-
+-py3.install_sources([
+-    '__init__.py'
+-  ],
+-  subdir: 'scipy/stats/_boost'
+-)
+diff --git a/scipy/stats/_continuous_distns.py b/scipy/stats/_continuous_distns.py
+index 13af050097f4..1ffbdf5e050a 100644
+--- a/scipy/stats/_continuous_distns.py
++++ b/scipy/stats/_continuous_distns.py
+@@ -30,7 +30,6 @@
+ from ._constants import (_XMIN, _LOGXMIN, _EULER, _ZETA3, _SQRT_PI,
+                          _SQRT_2_OVER_PI, _LOG_SQRT_2_OVER_PI)
+ from ._censored_data import CensoredData
+-import scipy.stats._boost as _boost
+ from scipy.optimize import root_scalar
+ from scipy.stats._warnings_errors import FitError
+ import scipy.stats as stats
+@@ -678,7 +677,7 @@ def _pdf(self, x, a, b):
+         # beta.pdf(x, a, b) = ------------------------------------
+         #                              gamma(a)*gamma(b)
+         with np.errstate(over='ignore'):
+-            return _boost._beta_pdf(x, a, b)
++            return scu._beta_pdf(x, a, b)
+ 
+     def _logpdf(self, x, a, b):
+         lPx = sc.xlog1py(b - 1.0, -x) + sc.xlogy(a - 1.0, x)
+@@ -686,25 +685,54 @@ def _logpdf(self, x, a, b):
+         return lPx
+ 
+     def _cdf(self, x, a, b):
+-        return _boost._beta_cdf(x, a, b)
++        return sc.betainc(a, b, x)
+ 
+     def _sf(self, x, a, b):
+-        return _boost._beta_sf(x, a, b)
++        return sc.betaincc(a, b, x)
+ 
+     def _isf(self, x, a, b):
+-        with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._beta_isf(x, a, b)
++        return sc.betainccinv(a, b, x)
+ 
+     def _ppf(self, q, a, b):
+-        with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._beta_ppf(q, a, b)
++        return scu._beta_ppf(q, a, b)
+ 
+     def _stats(self, a, b):
++        a_plus_b = np.add(a, b)
++        _beta_mean = np.divide(a, a_plus_b)
++        _beta_variance = np.divide(
++            np.multiply(a, b),
++            np.multiply(
++                np.square(a_plus_b),
++                np.add(a_plus_b, 1)
++            )
++        )
++        _beta_skewness = np.divide(
++            np.multiply(
++                np.multiply(2, np.subtract(b, a)),
++                np.sqrt(np.add(a_plus_b, 1))
++            ),
++            np.multiply(
++                np.add(a_plus_b, 2),
++                np.sqrt(np.multiply(a, b))
++            )
++        )
++        _beta_kurtosis_excess = np.divide(
++            np.multiply(6, np.subtract(
++                np.multiply(np.square(np.subtract(a, b)),
++                            np.add(a_plus_b, 1)),
++                np.multiply(np.multiply(a, b),
++                            np.add(a_plus_b, 2))
++            )),
++            np.multiply(
++                np.multiply(np.multiply(a, b),
++                            np.add(a_plus_b, 2)),
++                np.add(a_plus_b, 3))
++        )
+         return (
+-            _boost._beta_mean(a, b),
+-            _boost._beta_variance(a, b),
+-            _boost._beta_skewness(a, b),
+-            _boost._beta_kurtosis_excess(a, b))
++            _beta_mean,
++            _beta_variance,
++            _beta_skewness,
++            _beta_kurtosis_excess)
+ 
+     def _fitstart(self, data):
+         if isinstance(data, CensoredData):
+@@ -2289,7 +2317,7 @@ class f_gen(rv_continuous):
+     the distribution of the ratio of two independent chi-squared distributions with
+     :math:`df_1` and :math:`df_2` degrees of freedom, after rescaling by
+     :math:`df_2 / df_1`.
+-    
++
+     The probability density function for `f` is:
+ 
+     .. math::
+@@ -4789,9 +4817,9 @@ def _cdf(self, x, mu):
+     def _ppf(self, x, mu):
+         with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+             x, mu = np.broadcast_arrays(x, mu)
+-            ppf = _boost._invgauss_ppf(x, mu, 1)
++            ppf = scu._invgauss_ppf(x, mu, 1)
+             i_wt = x > 0.5  # "wrong tail" - sometimes too inaccurate
+-            ppf[i_wt] = _boost._invgauss_isf(1-x[i_wt], mu[i_wt], 1)
++            ppf[i_wt] = scu._invgauss_isf(1-x[i_wt], mu[i_wt], 1)
+             i_nan = np.isnan(ppf)
+             ppf[i_nan] = super()._ppf(x[i_nan], mu[i_nan])
+         return ppf
+@@ -4799,9 +4827,9 @@ def _ppf(self, x, mu):
+     def _isf(self, x, mu):
+         with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+             x, mu = np.broadcast_arrays(x, mu)
+-            isf = _boost._invgauss_isf(x, mu, 1)
++            isf = scu._invgauss_isf(x, mu, 1)
+             i_wt = x > 0.5  # "wrong tail" - sometimes too inaccurate
+-            isf[i_wt] = _boost._invgauss_ppf(1-x[i_wt], mu[i_wt], 1)
++            isf[i_wt] = scu._invgauss_ppf(1-x[i_wt], mu[i_wt], 1)
+             i_nan = np.isnan(isf)
+             isf[i_nan] = super()._isf(x[i_nan], mu[i_nan])
+         return isf
+@@ -7439,39 +7467,54 @@ def _logpdf(self, x, df, nc):
+     def _pdf(self, x, df, nc):
+         cond = np.ones_like(x, dtype=bool) & (nc != 0)
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _lazywhere(cond, (x, df, nc), f=_boost._ncx2_pdf,
++            return _lazywhere(cond, (x, df, nc), f=scu._ncx2_pdf,
+                               f2=lambda x, df, _: chi2._pdf(x, df))
+ 
+     def _cdf(self, x, df, nc):
+         cond = np.ones_like(x, dtype=bool) & (nc != 0)
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _lazywhere(cond, (x, df, nc), f=_boost._ncx2_cdf,
++            return _lazywhere(cond, (x, df, nc), f=scu._ncx2_cdf,
+                               f2=lambda x, df, _: chi2._cdf(x, df))
+ 
+     def _ppf(self, q, df, nc):
+         cond = np.ones_like(q, dtype=bool) & (nc != 0)
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _lazywhere(cond, (q, df, nc), f=_boost._ncx2_ppf,
++            return _lazywhere(cond, (q, df, nc), f=scu._ncx2_ppf,
+                               f2=lambda x, df, _: chi2._ppf(x, df))
+ 
+     def _sf(self, x, df, nc):
+         cond = np.ones_like(x, dtype=bool) & (nc != 0)
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _lazywhere(cond, (x, df, nc), f=_boost._ncx2_sf,
++            return _lazywhere(cond, (x, df, nc), f=scu._ncx2_sf,
+                               f2=lambda x, df, _: chi2._sf(x, df))
+ 
+     def _isf(self, x, df, nc):
+         cond = np.ones_like(x, dtype=bool) & (nc != 0)
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _lazywhere(cond, (x, df, nc), f=_boost._ncx2_isf,
++            return _lazywhere(cond, (x, df, nc), f=scu._ncx2_isf,
+                               f2=lambda x, df, _: chi2._isf(x, df))
+ 
+     def _stats(self, df, nc):
++        _ncx2_mean = np.add(df, nc)
++        def k_plus_cl(k, l, c):
++            return np.add(k, np.multiply(c, l))
++        _ncx2_variance = np.multiply(2.0, k_plus_cl(df, nc, 2.0))
++        _ncx2_skewness = np.divide(
++            np.multiply(
++                np.sqrt(np.power(2.0, 3)),
++                k_plus_cl(df, nc, 3)
++            ),
++            np.sqrt(np.power(k_plus_cl(df, nc, 2.0), 3))
++        )
++        _ncx2_kurtosis_excess = np.divide(
++            np.multiply(12.0, k_plus_cl(df, nc, 4.0)),
++            np.square(k_plus_cl(df, nc, 2.0))
++        )
+         return (
+-            _boost._ncx2_mean(df, nc),
+-            _boost._ncx2_variance(df, nc),
+-            _boost._ncx2_skewness(df, nc),
+-            _boost._ncx2_kurtosis_excess(df, nc),
++            _ncx2_mean,
++            _ncx2_variance,
++            _ncx2_skewness,
++            _ncx2_kurtosis_excess,
+         )
+ 
+ 
+@@ -7538,21 +7581,21 @@ def _pdf(self, x, dfn, dfd, nc):
+         #             gamma(df1/2)*gamma(1+df2/2) *
+         #             L^{v1/2-1}^{v2/2}(-nc*v1*x/(2*(v1*x+v2))) /
+         #             (B(v1/2, v2/2) * gamma((v1+v2)/2))
+-        return _boost._ncf_pdf(x, dfn, dfd, nc)
++        return scu._ncf_pdf(x, dfn, dfd, nc)
+ 
+     def _cdf(self, x, dfn, dfd, nc):
+-        return _boost._ncf_cdf(x, dfn, dfd, nc)
++        return scu._ncf_cdf(x, dfn, dfd, nc)
+ 
+     def _ppf(self, q, dfn, dfd, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._ncf_ppf(q, dfn, dfd, nc)
++            return scu._ncf_ppf(q, dfn, dfd, nc)
+ 
+     def _sf(self, x, dfn, dfd, nc):
+-        return _boost._ncf_sf(x, dfn, dfd, nc)
++        return scu._ncf_sf(x, dfn, dfd, nc)
+ 
+     def _isf(self, x, dfn, dfd, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._ncf_isf(x, dfn, dfd, nc)
++            return scu._ncf_isf(x, dfn, dfd, nc)
+ 
+     def _munp(self, n, dfn, dfd, nc):
+         val = (dfn * 1.0/dfd)**n
+@@ -7562,10 +7605,10 @@ def _munp(self, n, dfn, dfd, nc):
+         return val
+ 
+     def _stats(self, dfn, dfd, nc, moments='mv'):
+-        mu = _boost._ncf_mean(dfn, dfd, nc)
+-        mu2 = _boost._ncf_variance(dfn, dfd, nc)
+-        g1 = _boost._ncf_skewness(dfn, dfd, nc) if 's' in moments else None
+-        g2 = _boost._ncf_kurtosis_excess(
++        mu = scu._ncf_mean(dfn, dfd, nc)
++        mu2 = scu._ncf_variance(dfn, dfd, nc)
++        g1 = scu._ncf_skewness(dfn, dfd, nc) if 's' in moments else None
++        g2 = scu._ncf_kurtosis_excess(
+             dfn, dfd, nc) if 'k' in moments else None
+         return mu, mu2, g1, g2
+ 
+@@ -7753,25 +7796,25 @@ def _pdf(self, x, df, nc):
+ 
+     def _cdf(self, x, df, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return np.clip(_boost._nct_cdf(x, df, nc), 0, 1)
++            return np.clip(scu._nct_cdf(x, df, nc), 0, 1)
+ 
+     def _ppf(self, q, df, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._nct_ppf(q, df, nc)
++            return scu._nct_ppf(q, df, nc)
+ 
+     def _sf(self, x, df, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return np.clip(_boost._nct_sf(x, df, nc), 0, 1)
++            return np.clip(scu._nct_sf(x, df, nc), 0, 1)
+ 
+     def _isf(self, x, df, nc):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._nct_isf(x, df, nc)
++            return scu._nct_isf(x, df, nc)
+ 
+     def _stats(self, df, nc, moments='mv'):
+-        mu = _boost._nct_mean(df, nc)
+-        mu2 = _boost._nct_variance(df, nc)
+-        g1 = _boost._nct_skewness(df, nc) if 's' in moments else None
+-        g2 = _boost._nct_kurtosis_excess(df, nc) if 'k' in moments else None
++        mu = scu._nct_mean(df, nc)
++        mu2 = scu._nct_variance(df, nc)
++        g1 = scu._nct_skewness(df, nc) if 's' in moments else None
++        g2 = scu._nct_kurtosis_excess(df, nc) if 'k' in moments else None
+         return mu, mu2, g1, g2
+ 
+ 
+@@ -9195,7 +9238,7 @@ def _logpdf(self, x, a):
+ 
+     def _cdf(self, x, a):
+         a = np.atleast_1d(a)
+-        cdf = _boost._skewnorm_cdf(x, 0, 1, a)
++        cdf = scu._skewnorm_cdf(x, 0.0, 1.0, a)
+         # for some reason, a isn't broadcasted if some of x are invalid
+         a = np.broadcast_to(a, cdf.shape)
+         # Boost is not accurate in left tail when a > 0
+@@ -9204,7 +9247,7 @@ def _cdf(self, x, a):
+         return np.clip(cdf, 0, 1)
+ 
+     def _ppf(self, x, a):
+-        return _boost._skewnorm_ppf(x, 0, 1, a)
++        return scu._skewnorm_ppf(x, 0.0, 1.0, a)
+ 
+     def _sf(self, x, a):
+         # Boost's SF is implemented this way. Use whatever customizations
+@@ -9212,7 +9255,7 @@ def _sf(self, x, a):
+         return self._cdf(-x, -a)
+ 
+     def _isf(self, x, a):
+-        return _boost._skewnorm_isf(x, 0, 1, a)
++        return scu._skewnorm_isf(x, 0.0, 1.0, a)
+ 
+     def _rvs(self, a, size=None, random_state=None):
+         u0 = random_state.normal(size=size)
+diff --git a/scipy/stats/_discrete_distns.py b/scipy/stats/_discrete_distns.py
+index 169222855fdd..522b35d24893 100644
+--- a/scipy/stats/_discrete_distns.py
++++ b/scipy/stats/_discrete_distns.py
+@@ -15,10 +15,10 @@
+ 
+ from ._distn_infrastructure import (rv_discrete, get_distribution_names,
+                                     _check_shape, _ShapeInfo)
+-import scipy.stats._boost as _boost
+ from ._biasedurn import (_PyFishersNCHypergeometric,
+                          _PyWalleniusNCHypergeometric,
+                          _PyStochasticLib3)
++import scipy.special._ufuncs as scu
+ 
+ 
+ def _isintegral(x):
+@@ -73,30 +73,38 @@ def _logpmf(self, x, n, p):
+ 
+     def _pmf(self, x, n, p):
+         # binom.pmf(k) = choose(n, k) * p**k * (1-p)**(n-k)
+-        return _boost._binom_pdf(x, n, p)
++        return scu._binom_pmf(x, n, p)
+ 
+     def _cdf(self, x, n, p):
+         k = floor(x)
+-        return _boost._binom_cdf(k, n, p)
++        return scu._binom_cdf(k, n, p)
+ 
+     def _sf(self, x, n, p):
+         k = floor(x)
+-        return _boost._binom_sf(k, n, p)
++        return scu._binom_sf(k, n, p)
+ 
+     def _isf(self, x, n, p):
+-        return _boost._binom_isf(x, n, p)
++        return scu._binom_isf(x, n, p)
+ 
+     def _ppf(self, q, n, p):
+-        return _boost._binom_ppf(q, n, p)
++        return scu._binom_ppf(q, n, p)
+ 
+     def _stats(self, n, p, moments='mv'):
+-        mu = _boost._binom_mean(n, p)
+-        var = _boost._binom_variance(n, p)
++        mu = np.multiply(n, p)
++        var = np.subtract(mu, np.multiply(n, np.square(p)))
+         g1, g2 = None, None
+         if 's' in moments:
+-            g1 = _boost._binom_skewness(n, p)
++            pq = np.subtract(p, np.square(p))
++            npq_sqrt = np.sqrt(np.multiply(n, pq))
++            t1 = np.reciprocal(npq_sqrt)
++            t2 = np.divide(np.multiply(2.0, p), npq_sqrt)
++            g1 = np.subtract(t1, t2)
+         if 'k' in moments:
+-            g2 = _boost._binom_kurtosis_excess(n, p)
++            pq = np.subtract(p, np.square(p))
++            npq = np.multiply(n, pq)
++            t1 = np.reciprocal(npq)
++            t2 = np.divide(6.0, n)
++            g2 = np.subtract(t1, t2)
+         return mu, var, g1, g2
+ 
+     def _entropy(self, n, p):
+@@ -324,7 +332,7 @@ def _argcheck(self, n, p):
+ 
+     def _pmf(self, x, n, p):
+         # nbinom.pmf(k) = choose(k+n-1, n-1) * p**n * (1-p)**k
+-        return _boost._nbinom_pdf(x, n, p)
++        return scu._nbinom_pmf(x, n, p)
+ 
+     def _logpmf(self, x, n, p):
+         coeff = gamln(n+x) - gamln(x+1) - gamln(n)
+@@ -332,7 +340,7 @@ def _logpmf(self, x, n, p):
+ 
+     def _cdf(self, x, n, p):
+         k = floor(x)
+-        return _boost._nbinom_cdf(k, n, p)
++        return scu._nbinom_cdf(k, n, p)
+ 
+     def _logcdf(self, x, n, p):
+         k = floor(x)
+@@ -351,22 +359,22 @@ def f1(k, n, p):
+ 
+     def _sf(self, x, n, p):
+         k = floor(x)
+-        return _boost._nbinom_sf(k, n, p)
++        return scu._nbinom_sf(k, n, p)
+ 
+     def _isf(self, x, n, p):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._nbinom_isf(x, n, p)
++            return scu._nbinom_isf(x, n, p)
+ 
+     def _ppf(self, q, n, p):
+         with np.errstate(over='ignore'):  # see gh-17432
+-            return _boost._nbinom_ppf(q, n, p)
++            return scu._nbinom_ppf(q, n, p)
+ 
+     def _stats(self, n, p):
+         return (
+-            _boost._nbinom_mean(n, p),
+-            _boost._nbinom_variance(n, p),
+-            _boost._nbinom_skewness(n, p),
+-            _boost._nbinom_kurtosis_excess(n, p),
++            scu._nbinom_mean(n, p),
++            scu._nbinom_variance(n, p),
++            scu._nbinom_skewness(n, p),
++            scu._nbinom_kurtosis_excess(n, p),
+         )
+ 
+ 
+@@ -637,10 +645,10 @@ def _logpmf(self, k, M, n, N):
+         return result
+ 
+     def _pmf(self, k, M, n, N):
+-        return _boost._hypergeom_pdf(k, n, N, M)
++        return scu._hypergeom_pmf(k, n, N, M)
+ 
+     def _cdf(self, k, M, n, N):
+-        return _boost._hypergeom_cdf(k, n, N, M)
++        return scu._hypergeom_cdf(k, n, N, M)
+ 
+     def _stats(self, M, n, N):
+         M, n, N = 1. * M, 1. * n, 1. * N
+@@ -653,9 +661,9 @@ def _stats(self, M, n, N):
+         g2 += 6. * n * N * (M - N) * m * (5. * M - 6)
+         g2 /= n * N * (M - N) * m * (M - 2.) * (M - 3.)
+         return (
+-            _boost._hypergeom_mean(n, N, M),
+-            _boost._hypergeom_variance(n, N, M),
+-            _boost._hypergeom_skewness(n, N, M),
++            scu._hypergeom_mean(n, N, M),
++            scu._hypergeom_variance(n, N, M),
++            scu._hypergeom_skewness(n, N, M),
+             g2,
+         )
+ 
+@@ -665,7 +673,7 @@ def _entropy(self, M, n, N):
+         return np.sum(entr(vals), axis=0)
+ 
+     def _sf(self, k, M, n, N):
+-        return _boost._hypergeom_sf(k, n, N, M)
++        return scu._hypergeom_sf(k, n, N, M)
+ 
+     def _logsf(self, k, M, n, N):
+         res = []
+@@ -1164,8 +1172,8 @@ class randint_gen(rv_discrete):
+     >>> x = np.arange(low - 5, high + 5)
+     >>> ax.plot(x, randint.pmf(x, low, high), 'bo', ms=8, label='randint pmf')
+     >>> ax.vlines(x, 0, randint.pmf(x, low, high), colors='b', lw=5, alpha=0.5)
+-    
+-    Alternatively, the distribution object can be called (as a function) to 
++
++    Alternatively, the distribution object can be called (as a function) to
+     fix the shape and location. This returns a "frozen" RV object holding the
+     given parameters fixed.
+ 
+@@ -1176,7 +1184,7 @@ class randint_gen(rv_discrete):
+     ...           lw=1, label='frozen pmf')
+     >>> ax.legend(loc='lower center')
+     >>> plt.show()
+-    
++
+     Check the relationship between the cumulative distribution function
+     (``cdf``) and its inverse, the percent point function (``ppf``):
+ 
+@@ -1562,8 +1570,8 @@ def _rvs(self, mu1, mu2, size=None, random_state=None):
+     def _pmf(self, x, mu1, mu2):
+         with np.errstate(over='ignore'):  # see gh-17432
+             px = np.where(x < 0,
+-                          _boost._ncx2_pdf(2*mu2, 2*(1-x), 2*mu1)*2,
+-                          _boost._ncx2_pdf(2*mu1, 2*(1+x), 2*mu2)*2)
++                          scu._ncx2_pdf(2*mu2, 2*(1-x), 2*mu1)*2,
++                          scu._ncx2_pdf(2*mu1, 2*(1+x), 2*mu2)*2)
+             # ncx2.pdf() returns nan's for extremely low probabilities
+         return px
+ 
+@@ -1571,8 +1579,8 @@ def _cdf(self, x, mu1, mu2):
+         x = floor(x)
+         with np.errstate(over='ignore'):  # see gh-17432
+             px = np.where(x < 0,
+-                          _boost._ncx2_cdf(2*mu2, -2*x, 2*mu1),
+-                          1 - _boost._ncx2_cdf(2*mu1, 2*(x+1), 2*mu2))
++                          scu._ncx2_cdf(2*mu2, -2*x, 2*mu1),
++                          1 - scu._ncx2_cdf(2*mu1, 2*(x+1), 2*mu2))
+         return px
+ 
+     def _stats(self, mu1, mu2):
+diff --git a/scipy/stats/_distn_infrastructure.py b/scipy/stats/_distn_infrastructure.py
+index 3eb1e85be30c..c8dbfcb6ec21 100644
+--- a/scipy/stats/_distn_infrastructure.py
++++ b/scipy/stats/_distn_infrastructure.py
+@@ -2502,7 +2502,7 @@ def fit(self, data, *args, **kwds):
+             - optimizer : The optimizer to use.  The optimizer must take
+               ``func`` and starting position as the first two arguments,
+               plus ``args`` (for extra arguments to pass to the
+-              function to be optimized) and ``disp``. 
++              function to be optimized) and ``disp``.
+               The ``fit`` method calls the optimizer with ``disp=0`` to suppress output.
+               The optimizer must return the estimated parameters.
+ 
+@@ -2563,7 +2563,7 @@ def fit(self, data, *args, **kwds):
+                                     \log(f(k_u; \pmb{\theta}))
+                                 + \sum
+                                     \log(F(k_l; \pmb{\theta})) \\
+-                                & + \sum 
++                                & + \sum
+                                     \log(1 - F(k_r; \pmb{\theta})) \\
+                                 & + \sum
+                                     \log(F(k_{\text{high}, i}; \pmb{\theta})
+diff --git a/scipy/stats/meson.build b/scipy/stats/meson.build
+index 33b12574a88a..168d9e9ed2c7 100644
+--- a/scipy/stats/meson.build
++++ b/scipy/stats/meson.build
+@@ -2,7 +2,6 @@ _stats_pxd = [
+   fs.copyfile('__init__.py'),
+   fs.copyfile('_stats.pxd'),
+   fs.copyfile('_biasedurn.pxd'),
+-  fs.copyfile('_boost/include/templated_pyufunc.pxd'),
+ ]
+ 
+ stats_special_cython_gen = generator(cython,
+@@ -74,55 +73,6 @@ py3.extension_module('_qmc_cy',
+   subdir: 'scipy/stats'
+ )
+ 
+-_stats_gen_pyx = custom_target('_stats_gen_pyx',
+-  output: [
+-    'beta_ufunc.pyx',  # 0 (used in stats/_boost - S_B)
+-    'binom_ufunc.pyx',  # 1 (S_B)
+-    'func_defs.pxd',  # 2 (S_B)
+-    'hypergeom_ufunc.pyx',  # 3 (S_B)
+-    'nbinom_ufunc.pyx',  # 4 (S_B)
+-    'ncf_ufunc.pyx',  # 5 (S_B)
+-    'ncx2_ufunc.pyx',  # 6 (S_B)
+-    'nct_ufunc.pyx',  # 7 (S_B)
+-    'skewnorm_ufunc.pyx',  # 8 (S_B)
+-    'invgauss_ufunc.pyx',  # 9 (S_B)
+-  ],
+-  input: '_generate_pyx.py',
+-  command: [py3, '@INPUT@', '-o', '@OUTDIR@'],
+-  depends: _stats_pxd,
+-  depend_files: [
+-    '_boost/include/code_gen.py',
+-    '_boost/include/gen_func_defs_pxd.py',
+-    '_boost/include/_info.py',
+-  ]
+-)
+-
+-# Only needed to establish a dependency; see comments in linalg/meson.build
+-# for cython_blas_pxd
+-_stats_gen_pyx_dummy = custom_target('_dummy_stats_gen_pyx',
+-  output: '_dummy_stats_gen.pxd',
+-  input: _stats_gen_pyx[2],
+-  command: [py3, '-c', '"@INPUT@"'],
+-)
+-
+-cython_stats_gen_cpp = generator(cython,
+-  arguments : cython_cplus_args,
+-  output : '@BASENAME@.cpp',
+-  depends : [_cython_tree, _stats_gen_pyx_dummy])
+-
+-# Build recipes defined here to get correct output path when used from
+-# other subdirs.
+-beta_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[0])
+-binom_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[1])
+-hypergeom_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[3])
+-nbinom_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[4])
+-ncf_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[5])
+-ncx2_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[6])
+-nct_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[7])
+-skewnorm_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[8])
+-invgauss_ufunc_pyx = cython_stats_gen_cpp.process(_stats_gen_pyx[9])
+-
+-
+ py3.extension_module('_biasedurn',
+   [
+     cython_gen_cpp.process('_biasedurn.pyx'),
+@@ -175,7 +125,6 @@ py3.install_sources([
+     '_distr_params.py',
+     '_entropy.py',
+     '_fit.py',
+-    '_generate_pyx.py',
+     '_hypotests.py',
+     '_kde.py',
+     '_ksstats.py',
+@@ -232,7 +181,6 @@ py3.install_sources([
+   subdir: 'scipy/stats'
+ )
+ 
+-subdir('_boost')
+ subdir('_levy_stable')
+ subdir('_unuran')
+ subdir('_rcont')
+diff --git a/scipy/stats/tests/test_boost_ufuncs.py b/scipy/stats/tests/test_boost_ufuncs.py
+index 89b7558899f3..590ecbbb5707 100644
+--- a/scipy/stats/tests/test_boost_ufuncs.py
++++ b/scipy/stats/tests/test_boost_ufuncs.py
+@@ -1,7 +1,7 @@
+ import pytest
+ import numpy as np
+ from numpy.testing import assert_allclose
+-from scipy.stats import _boost
++import scipy.special._ufuncs as scu
+ 
+ 
+ type_char_to_type_tol = {'f': (np.float32, 32*np.finfo(np.float32).eps),
+@@ -16,18 +16,14 @@
+ # It is a spot check of several functions, primarily for
+ # checking that the different data types are handled correctly.
+ test_data = [
+-    (_boost._beta_cdf, (0.5, 2, 3), 0.6875),
+-    (_boost._beta_ppf, (0.6875, 2, 3), 0.5),
+-    (_boost._beta_pdf, (0.5, 2, 3), 1.5),
+-    (_boost._beta_pdf, (0, 1, 5), 5.0),
+-    (_boost._beta_pdf, (1, 5, 1), 5.0),
+-    (_boost._beta_sf, (0.5, 2, 1), 0.75),
+-    (_boost._beta_isf, (0.75, 2, 1), 0.5),
+-    (_boost._binom_cdf, (1, 3, 0.5), 0.5),
+-    (_boost._binom_pdf, (1, 4, 0.5), 0.25),
+-    (_boost._hypergeom_cdf, (2, 3, 5, 6), 0.5),
+-    (_boost._nbinom_cdf, (1, 4, 0.25), 0.015625),
+-    (_boost._ncf_mean, (10, 12, 2.5), 1.5),
++    (scu._beta_pdf, (0.5, 2, 3), 1.5),
++    (scu._beta_pdf, (0, 1, 5), 5.0),
++    (scu._beta_pdf, (1, 5, 1), 5.0),
++    (scu._binom_cdf, (1, 3, 0.5), 0.5),
++    (scu._binom_pmf, (1, 4, 0.5), 0.25),
++    (scu._hypergeom_cdf, (2, 3, 5, 6), 0.5),
++    (scu._nbinom_cdf, (1, 4, 0.25), 0.015625),
++    (scu._ncf_mean, (10, 12, 2.5), 1.5),
+ ]
+ 
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,164 @@
+  Task-ID: numba__numba-9144@74a4cd4
+  Please checkout to this commit first: f6d1a7cb589c15e171aff4f75e6f851beffaa167
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `isinstance` check produces wrong output
+Mutating a variable inside an `isinstance` produces the wrong output
+
+```python
+from numba import njit
+
+@njit
+def foo(a):
+    x = 0
+    if isinstance(a, int):
+        # renaming variable fixes the issue: "b = (a, a)"
+        a = (a, a)
+
+    for i in range(len(a)):
+        x += i
+    return x
+
+a = 3
+print(foo(a))  # 0
+print(foo.py_func(a))  # 1
+```
+
+------------
+
+*  Using a while loop fixes the issue
+```python
+@njit
+def foo(a):
+    x = 0
+    if isinstance(a, int):
+        a = (a, a)
+    i = 0
+    while i < len(a):
+        x += i
+        i += 1
+    return x
+
+a = 3
+print(foo(a))  # 1
+print(foo.py_func(a))  # 1
+```
+
+------------
+
+* Renaming `b = (a, a)` fixes it as well
+
+```python
+@njit
+def foo(a):
+    x = 0
+    if isinstance(a, int):
+        b = (a, a)
+    for i in range(len(b)):
+        x += i
+    return x
+
+a = 3
+print(foo(a))  # 1
+print(foo.py_func(a))  # 1
+```
+  </issue>
+  
+  <patch>
+  diff --git a/docs/upcoming_changes/9126.bug_fix.rst b/docs/upcoming_changes/9126.bug_fix.rst
+new file mode 100644
+index 00000000000..19d01f76219
+--- /dev/null
++++ b/docs/upcoming_changes/9126.bug_fix.rst
+@@ -0,0 +1,5 @@
++Fix propagation of literal values in PHI nodes.
++"""""""""""""""""""""""""""""""""""""""""""""""
++
++Fixed a bug in the literal propagation pass where a PHI node could be wrongly
++replaced by a constant.
+diff --git a/numba/core/untyped_passes.py b/numba/core/untyped_passes.py
+index b68e6274adf..737727cea77 100644
+--- a/numba/core/untyped_passes.py
++++ b/numba/core/untyped_passes.py
+@@ -1574,6 +1574,13 @@ def run_pass(self, state):
+                                    'due to a branch.')
+                             raise errors.NumbaTypeError(msg, loc=assign.loc)
+ 
++                # Only propagate a PHI node if all arguments are the same
++                # constant
++                if isinstance(value, ir.Expr) and value.op == 'phi':
++                    v = [typemap.get(inc.name) for inc in value.incoming_values]
++                    if any([v[0] != vi for vi in v]):
++                        continue
++
+                 lit = typemap.get(target.name, None)
+                 if lit and isinstance(lit, types.Literal):
+                     # replace assign instruction by ir.Const(lit) iff
+diff --git a/numba/tests/test_builtins.py b/numba/tests/test_builtins.py
+index 5679ea7c482..2ad70ec9a67 100644
+--- a/numba/tests/test_builtins.py
++++ b/numba/tests/test_builtins.py
+@@ -309,6 +309,17 @@ def invalid_isinstance_usecase_phi_nopropagate(x):
+         return False
+ 
+ 
++def invalid_isinstance_usecase_phi_nopropagate2(a):
++    # Numba issue #9125
++    x = 0
++    if isinstance(a, int):
++        a = (a, a)
++
++    for i in range(len(a)):
++        x += i
++    return x
++
++
+ def invalid_isinstance_optional_usecase(x):
+     if x > 4:
+         z = 10
+@@ -1246,6 +1257,11 @@ def test_isinstance_dict(self):
+         cfunc = jit(nopython=True)(pyfunc)
+         self.assertEqual(pyfunc(), cfunc())
+ 
++    def test_isinstance_issue9125(self):
++        pyfunc = invalid_isinstance_usecase_phi_nopropagate2
++        cfunc = jit(nopython=True)(pyfunc)
++        self.assertEqual(pyfunc(3), cfunc(3))
++
+     def test_isinstance_numba_types(self):
+         # This makes use of type aliasing between python scalars and NumPy
+         # scalars, see also test_numba_types()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

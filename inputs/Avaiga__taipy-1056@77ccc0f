@@ -1,0 +1,362 @@
+  Task-ID: Avaiga__taipy-1056@77ccc0f
+  Please checkout to this commit first: 54d7d9931439c131697a49b83cb988526da691e8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Clean DN inheritance
+The inheritance mechanism for all data nodes would benefit from some cleaning.
+
+Suggestions:
+
+- The `_AbstractTabularDataNode` is not a data node but a mixin. The name is misleading. It is more like a mixin.
+- Same for `_AbstractFileDataNode`.
+- However, the `_abstract_sql` is a data node sub-class. Why this inconsistency?
+- The `FilterDataNode` is not a data node sub-class nor a mixin. It is just a delegated class. I guess it should be renamed to `DataNodeFilter`.
+- The exposed type code is duplicated in many data node implementations. I believe we can factorize the code in the `_AbstractTabularDataNode` class since the exposed type is for tabular data.
+  </issue>
+  
+  <patch>
+  diff --git a/taipy/core/data/_abstract_file.py b/taipy/core/data/_abstract_file.py
+index 41be0e6020..82dda99a8c 100644
+--- a/taipy/core/data/_abstract_file.py
++++ b/taipy/core/data/_abstract_file.py
+@@ -13,7 +13,7 @@
+ import shutil
+ 
+ 
+-class _AbstractFileDataNode(object):
++class _AbstractFileDataNodeMixin(object):
+     """Abstract base class for data node implementations (CSVDataNode, ParquetDataNode, ExcelDataNode,
+     PickleDataNode and JSONDataNode) that are file based."""
+ 
+diff --git a/taipy/core/data/_abstract_sql.py b/taipy/core/data/_abstract_sql.py
+index 9b73c2fee0..7173a1571b 100644
+--- a/taipy/core/data/_abstract_sql.py
++++ b/taipy/core/data/_abstract_sql.py
+@@ -25,12 +25,12 @@
+ from .._version._version_manager_factory import _VersionManagerFactory
+ from ..data.operator import JoinOperator, Operator
+ from ..exceptions.exceptions import MissingRequiredProperty, UnknownDatabaseEngine
+-from ._abstract_tabular import _AbstractTabularDataNode
++from ._abstract_tabular import _AbstractTabularDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class _AbstractSQLDataNode(DataNode, _AbstractTabularDataNode):
++class _AbstractSQLDataNode(DataNode, _AbstractTabularDataNodeMixin):
+     """Abstract base class for data node implementations (SQLDataNode and SQLTableDataNode) that use SQL."""
+ 
+     __STORAGE_TYPE = "NOT_IMPLEMENTED"
+@@ -95,14 +95,11 @@ def __init__(
+             properties = {}
+         self._check_required_properties(properties)
+ 
+-        if self._EXPOSED_TYPE_PROPERTY not in properties.keys():
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
+-        elif properties[self._EXPOSED_TYPE_PROPERTY] == self._EXPOSED_TYPE_MODIN:
+-            # Deprecated in favor of pandas since 3.1.0
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
++        properties[self._EXPOSED_TYPE_PROPERTY] = _AbstractTabularDataNodeMixin._get_valid_exposed_type(properties)
+         self._check_exposed_type(properties[self._EXPOSED_TYPE_PROPERTY])
+ 
+-        super().__init__(
++        DataNode.__init__(
++            self,
+             config_id,
+             scope,
+             id,
+@@ -117,7 +114,7 @@ def __init__(
+             editor_expiration_date,
+             **properties,
+         )
+-        _AbstractTabularDataNode.__init__(self, **properties)
++        _AbstractTabularDataNodeMixin.__init__(self, **properties)
+         self._engine = None
+         if not self._last_edit_date:  # type: ignore
+             self._last_edit_date = datetime.now()
+diff --git a/taipy/core/data/_abstract_tabular.py b/taipy/core/data/_abstract_tabular.py
+index 7d3a58148c..8cb70dd546 100644
+--- a/taipy/core/data/_abstract_tabular.py
++++ b/taipy/core/data/_abstract_tabular.py
+@@ -17,7 +17,7 @@
+ from ..exceptions.exceptions import InvalidExposedType
+ 
+ 
+-class _AbstractTabularDataNode(object):
++class _AbstractTabularDataNodeMixin(object):
+     """Abstract base class for tabular data node implementations (CSVDataNode, ParquetDataNode, ExcelDataNode,
+     SQLTableDataNode and SQLDataNode) that are tabular representable."""
+ 
+@@ -53,9 +53,20 @@ def _convert_data_to_dataframe(self, exposed_type: Any, data: Any) -> Union[pd.D
+             return pd.DataFrame.from_records([self._encoder(row) for row in data])
+         return pd.DataFrame(data)
+ 
+-    @staticmethod
+-    def _check_exposed_type(exposed_type):
+-        valid_string_exposed_types = _AbstractTabularDataNode.__VALID_STRING_EXPOSED_TYPES
++    @classmethod
++    def _get_valid_exposed_type(cls, properties: Dict):
++        if (
++            cls._EXPOSED_TYPE_PROPERTY not in properties.keys()
++            or properties[cls._EXPOSED_TYPE_PROPERTY] == cls._EXPOSED_TYPE_MODIN
++        ):
++            # Default exposed type is pandas
++            # Deprecated modin exposed type in favor of pandas since 3.1.0
++            return cls._EXPOSED_TYPE_PANDAS
++        return properties[cls._EXPOSED_TYPE_PROPERTY]
++
++    @classmethod
++    def _check_exposed_type(cls, exposed_type):
++        valid_string_exposed_types = cls.__VALID_STRING_EXPOSED_TYPES
+         if isinstance(exposed_type, str) and exposed_type not in valid_string_exposed_types:
+             raise InvalidExposedType(
+                 f"Invalid string exposed type {exposed_type}. Supported values are "
+diff --git a/taipy/core/data/csv.py b/taipy/core/data/csv.py
+index b279869f2e..6b3c094bc8 100644
+--- a/taipy/core/data/csv.py
++++ b/taipy/core/data/csv.py
+@@ -23,13 +23,13 @@
+ from .._entity._reload import _self_reload
+ from .._version._version_manager_factory import _VersionManagerFactory
+ from ..job.job_id import JobId
+-from ._abstract_file import _AbstractFileDataNode
+-from ._abstract_tabular import _AbstractTabularDataNode
++from ._abstract_file import _AbstractFileDataNodeMixin
++from ._abstract_tabular import _AbstractTabularDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class CSVDataNode(DataNode, _AbstractFileDataNode, _AbstractTabularDataNode):
++class CSVDataNode(DataNode, _AbstractFileDataNodeMixin, _AbstractTabularDataNodeMixin):
+     """Data Node stored as a CSV file.
+ 
+     Attributes:
+@@ -97,11 +97,7 @@ def __init__(
+         if self._HAS_HEADER_PROPERTY not in properties.keys():
+             properties[self._HAS_HEADER_PROPERTY] = True
+ 
+-        if self._EXPOSED_TYPE_PROPERTY not in properties.keys():
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
+-        elif properties[self._EXPOSED_TYPE_PROPERTY] == self._EXPOSED_TYPE_MODIN:
+-            # Deprecated in favor of pandas since 3.1.0
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
++        properties[self._EXPOSED_TYPE_PROPERTY] = _AbstractTabularDataNodeMixin._get_valid_exposed_type(properties)
+         self._check_exposed_type(properties[self._EXPOSED_TYPE_PROPERTY])
+ 
+         DataNode.__init__(
+@@ -120,7 +116,7 @@ def __init__(
+             editor_expiration_date,
+             **properties,
+         )
+-        _AbstractTabularDataNode.__init__(self, **properties)
++        _AbstractTabularDataNodeMixin.__init__(self, **properties)
+ 
+         self._path = properties.get(self.__PATH_KEY, properties.get(self.__DEFAULT_PATH_KEY))
+         if self._path and ".data" in self._path:
+diff --git a/taipy/core/data/excel.py b/taipy/core/data/excel.py
+index 1200dff7e8..5ca64635a8 100644
+--- a/taipy/core/data/excel.py
++++ b/taipy/core/data/excel.py
+@@ -24,13 +24,13 @@
+ from .._version._version_manager_factory import _VersionManagerFactory
+ from ..exceptions.exceptions import ExposedTypeLengthMismatch, NonExistingExcelSheet, SheetNameLengthMismatch
+ from ..job.job_id import JobId
+-from ._abstract_file import _AbstractFileDataNode
+-from ._abstract_tabular import _AbstractTabularDataNode
++from ._abstract_file import _AbstractFileDataNodeMixin
++from ._abstract_tabular import _AbstractTabularDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class ExcelDataNode(DataNode, _AbstractFileDataNode, _AbstractTabularDataNode):
++class ExcelDataNode(DataNode, _AbstractFileDataNodeMixin, _AbstractTabularDataNodeMixin):
+     """Data Node stored as an Excel file.
+ 
+     The Excel file format is _xlsx_.
+@@ -101,11 +101,7 @@ def __init__(
+             properties[self.__SHEET_NAME_PROPERTY] = None
+         if self._HAS_HEADER_PROPERTY not in properties.keys():
+             properties[self._HAS_HEADER_PROPERTY] = True
+-        if self._EXPOSED_TYPE_PROPERTY not in properties.keys():
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
+-        elif properties[self._EXPOSED_TYPE_PROPERTY] == self._EXPOSED_TYPE_MODIN:
+-            # Deprecated in favor of pandas since 3.1.0
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
++        properties[self._EXPOSED_TYPE_PROPERTY] = _AbstractTabularDataNodeMixin._get_valid_exposed_type(properties)
+         self._check_exposed_type(properties[self._EXPOSED_TYPE_PROPERTY])
+ 
+         DataNode.__init__(
+@@ -124,7 +120,7 @@ def __init__(
+             editor_expiration_date,
+             **properties,
+         )
+-        _AbstractTabularDataNode.__init__(self, **properties)
++        _AbstractTabularDataNodeMixin.__init__(self, **properties)
+         if self._path and ".data" in self._path:
+             self._path = self._migrate_path(self.storage_type(), self._path)
+ 
+@@ -176,13 +172,13 @@ def storage_type(cls) -> str:
+     @staticmethod
+     def _check_exposed_type(exposed_type):
+         if isinstance(exposed_type, str):
+-            _AbstractTabularDataNode._check_exposed_type(exposed_type)
++            _AbstractTabularDataNodeMixin._check_exposed_type(exposed_type)
+         elif isinstance(exposed_type, list):
+             for t in exposed_type:
+-                _AbstractTabularDataNode._check_exposed_type(t)
++                _AbstractTabularDataNodeMixin._check_exposed_type(t)
+         elif isinstance(exposed_type, dict):
+             for t in exposed_type.values():
+-                _AbstractTabularDataNode._check_exposed_type(t)
++                _AbstractTabularDataNodeMixin._check_exposed_type(t)
+ 
+     def _read(self):
+         if self.properties[self._EXPOSED_TYPE_PROPERTY] == self._EXPOSED_TYPE_PANDAS:
+diff --git a/taipy/core/data/json.py b/taipy/core/data/json.py
+index 984412c3db..2cc7a83b0c 100644
+--- a/taipy/core/data/json.py
++++ b/taipy/core/data/json.py
+@@ -22,12 +22,12 @@
+ 
+ from .._entity._reload import _self_reload
+ from .._version._version_manager_factory import _VersionManagerFactory
+-from ._abstract_file import _AbstractFileDataNode
++from ._abstract_file import _AbstractFileDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class JSONDataNode(DataNode, _AbstractFileDataNode):
++class JSONDataNode(DataNode, _AbstractFileDataNodeMixin):
+     """Data Node stored as a JSON file.
+ 
+     Attributes:
+diff --git a/taipy/core/data/parquet.py b/taipy/core/data/parquet.py
+index 44e5d76462..116a1ed409 100644
+--- a/taipy/core/data/parquet.py
++++ b/taipy/core/data/parquet.py
+@@ -23,13 +23,13 @@
+ from .._version._version_manager_factory import _VersionManagerFactory
+ from ..exceptions.exceptions import UnknownCompressionAlgorithm, UnknownParquetEngine
+ from ..job.job_id import JobId
+-from ._abstract_file import _AbstractFileDataNode
+-from ._abstract_tabular import _AbstractTabularDataNode
++from ._abstract_file import _AbstractFileDataNodeMixin
++from ._abstract_tabular import _AbstractTabularDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class ParquetDataNode(DataNode, _AbstractFileDataNode, _AbstractTabularDataNode):
++class ParquetDataNode(DataNode, _AbstractFileDataNodeMixin, _AbstractTabularDataNodeMixin):
+     """Data Node stored as a Parquet file.
+ 
+     Attributes:
+@@ -134,11 +134,7 @@ def __init__(
+         if self.__WRITE_KWARGS_PROPERTY not in properties.keys():
+             properties[self.__WRITE_KWARGS_PROPERTY] = {}
+ 
+-        if self._EXPOSED_TYPE_PROPERTY not in properties.keys():
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
+-        elif properties[self._EXPOSED_TYPE_PROPERTY] == self._EXPOSED_TYPE_MODIN:
+-            # Deprecated in favor of pandas since 3.1.0
+-            properties[self._EXPOSED_TYPE_PROPERTY] = self._EXPOSED_TYPE_PANDAS
++        properties[self._EXPOSED_TYPE_PROPERTY] = _AbstractTabularDataNodeMixin._get_valid_exposed_type(properties)
+         self._check_exposed_type(properties[self._EXPOSED_TYPE_PROPERTY])
+ 
+         DataNode.__init__(
+@@ -157,7 +153,7 @@ def __init__(
+             editor_expiration_date,
+             **properties,
+         )
+-        _AbstractTabularDataNode.__init__(self, **properties)
++        _AbstractTabularDataNodeMixin.__init__(self, **properties)
+ 
+         self._path = properties.get(self.__PATH_KEY, properties.get(self.__DEFAULT_PATH_KEY))
+ 
+diff --git a/taipy/core/data/pickle.py b/taipy/core/data/pickle.py
+index f0eeccab8f..f847f08b4f 100644
+--- a/taipy/core/data/pickle.py
++++ b/taipy/core/data/pickle.py
+@@ -18,12 +18,12 @@
+ 
+ from .._entity._reload import _self_reload
+ from .._version._version_manager_factory import _VersionManagerFactory
+-from ._abstract_file import _AbstractFileDataNode
++from ._abstract_file import _AbstractFileDataNodeMixin
+ from .data_node import DataNode
+ from .data_node_id import DataNodeId, Edit
+ 
+ 
+-class PickleDataNode(DataNode, _AbstractFileDataNode):
++class PickleDataNode(DataNode, _AbstractFileDataNodeMixin):
+     """Data Node stored as a pickle file.
+ 
+     Attributes:
+diff --git a/taipy/gui_core/_context.py b/taipy/gui_core/_context.py
+index dac0a469c0..288c3ae2eb 100644
+--- a/taipy/gui_core/_context.py
++++ b/taipy/gui_core/_context.py
+@@ -52,7 +52,7 @@
+ from taipy.core import delete as core_delete
+ from taipy.core import get as core_get
+ from taipy.core import submit as core_submit
+-from taipy.core.data._abstract_tabular import _AbstractTabularDataNode
++from taipy.core.data._abstract_tabular import _AbstractTabularDataNodeMixin
+ from taipy.core.notification import CoreEventConsumerBase, EventEntityType
+ from taipy.core.notification.event import Event, EventOperation
+ from taipy.core.notification.notifier import Notifier
+@@ -724,7 +724,7 @@ def get_data_node_history(self, datanode: DataNode, id: str):
+ 
+     @staticmethod
+     def __is_tabular_data(datanode: DataNode, value: t.Any):
+-        if isinstance(datanode, _AbstractTabularDataNode):
++        if isinstance(datanode, _AbstractTabularDataNodeMixin):
+             return True
+         if datanode.is_ready_for_reading:
+             return isinstance(value, (pd.DataFrame, pd.Series, list, tuple, dict))
+@@ -739,7 +739,7 @@ def get_data_node_data(self, datanode: DataNode, id: str):
+             and isinstance(dn, DataNode)
+         ):
+             if dn._last_edit_date:
+-                if isinstance(dn, _AbstractTabularDataNode):
++                if isinstance(dn, _AbstractTabularDataNodeMixin):
+                     return (None, None, True, None)
+                 try:
+                     value = dn.read()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

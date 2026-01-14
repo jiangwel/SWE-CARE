@@ -1,0 +1,322 @@
+  Task-ID: dbt-labs__dbt-core-7186@c6b5b12
+  Please checkout to this commit first: 7872f6a67087b08e377cb580248a70355c6c3c76
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Introduce "delimiter" parameter for seeds? Allow non-csv file types
+### Describe the feature
+Use alternative delimiters for seeds besides "," (comma)
+
+### Describe alternatives you've considered
+Currently, the only option is to load a non-csv seed into database as a temp table and then reference that as a "source".
+
+### Additional context
+No, not database specific. 
+
+### Who will this benefit?
+Anyone who uses seeds.
+  </issue>
+  
+  <patch>
+  diff --git a/.changes/unreleased/Features-20230317-144957.yaml b/.changes/unreleased/Features-20230317-144957.yaml
+new file mode 100644
+index 00000000000..f00c52795c9
+--- /dev/null
++++ b/.changes/unreleased/Features-20230317-144957.yaml
+@@ -0,0 +1,6 @@
++kind: Features
++body: Added support to configure a delimiter for a seed file, defaults to comma
++time: 2023-03-17T14:49:57.564210866+01:00
++custom:
++  Author: ramonvermeulen
++  Issue: "3990"
+diff --git a/core/dbt/clients/agate_helper.py b/core/dbt/clients/agate_helper.py
+index 1d69a2bd17f..e1a66d6375a 100644
+--- a/core/dbt/clients/agate_helper.py
++++ b/core/dbt/clients/agate_helper.py
+@@ -135,12 +135,12 @@ def as_matrix(table):
+     return [r.values() for r in table.rows.values()]
+ 
+ 
+-def from_csv(abspath, text_columns):
++def from_csv(abspath, text_columns, delimiter = ","):
+     type_tester = build_type_tester(text_columns=text_columns)
+     with open(abspath, encoding="utf-8") as fp:
+         if fp.read(1) != BOM:
+             fp.seek(0)
+-        return agate.Table.from_csv(fp, column_types=type_tester)
++        return agate.Table.from_csv(fp, column_types=type_tester, delimiter=delimiter)
+ 
+ 
+ class _NullMarker:
+diff --git a/core/dbt/context/providers.py b/core/dbt/context/providers.py
+index fec5111e36c..cc462e4280b 100644
+--- a/core/dbt/context/providers.py
++++ b/core/dbt/context/providers.py
+@@ -791,8 +791,9 @@ def load_agate_table(self) -> agate.Table:
+         assert self.model.root_path
+         path = os.path.join(self.model.root_path, self.model.original_file_path)
+         column_types = self.model.config.column_types
++        delimiter = self.model.config.delimiter
+         try:
+-            table = agate_helper.from_csv(path, text_columns=column_types)
++            table = agate_helper.from_csv(path, text_columns=column_types, delimiter=delimiter)
+         except ValueError as e:
+             raise LoadAgateTableValueError(e, node=self.model)
+         table.original_abspath = os.path.abspath(path)
+diff --git a/core/dbt/contracts/graph/model_config.py b/core/dbt/contracts/graph/model_config.py
+index 60cfb114ad0..3946107d9ef 100644
+--- a/core/dbt/contracts/graph/model_config.py
++++ b/core/dbt/contracts/graph/model_config.py
+@@ -435,6 +435,7 @@ class NodeConfig(NodeAndTestConfig):
+         default_factory=dict,
+         metadata=MergeBehavior.Update.meta(),
+     )
++    delimiter: str = ","
+     full_refresh: Optional[bool] = None
+     # 'unique_key' doesn't use 'Optional' because typing.get_type_hints was
+     # sometimes getting the Union order wrong, causing serialization failures.
+diff --git a/test/unit/test_contracts_graph_compiled.py b/test/unit/test_contracts_graph_compiled.py
+index 931dc9ddbaa..8fdbfeeb37f 100644
+--- a/test/unit/test_contracts_graph_compiled.py
++++ b/test/unit/test_contracts_graph_compiled.py
+@@ -133,6 +133,7 @@ def basic_uncompiled_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'view',
+             'persist_docs': {},
+@@ -182,6 +183,7 @@ def basic_compiled_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'view',
+             'persist_docs': {},
+diff --git a/test/unit/test_contracts_graph_parsed.py b/test/unit/test_contracts_graph_parsed.py
+index 3ff0e2d75ee..5cff87ae675 100644
+--- a/test/unit/test_contracts_graph_parsed.py
++++ b/test/unit/test_contracts_graph_parsed.py
+@@ -65,6 +65,7 @@ def populated_node_config_object():
+ def populated_node_config_dict():
+     return {
+         'column_types': {'a': 'text'},
++        'delimiter': ',',
+         'enabled': True,
+         'materialized': 'table',
+         'persist_docs': {},
+@@ -91,6 +92,7 @@ def test_config_populated(populated_node_config_object, populated_node_config_di
+ def unrendered_node_config_dict():
+     return {
+         'column_types': {'a': 'text'},
++        'delimiter': ',',
+         'materialized': 'table',
+         'post_hook': 'insert into blah(a, b) select "1", 1',
+     }
+@@ -150,6 +152,7 @@ def base_parsed_model_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'view',
+             'persist_docs': {},
+@@ -251,6 +254,7 @@ def complex_parsed_model_dict():
+         'meta': {},
+         'config': {
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'ephemeral',
+             'persist_docs': {},
+@@ -278,6 +282,7 @@ def complex_parsed_model_dict():
+         'checksum': {'name': 'sha256', 'checksum': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'},
+         'unrendered_config': {
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'materialized': 'ephemeral',
+             'post_hook': ['insert into blah(a, b) select "1", 1'],
+         },
+@@ -311,6 +316,7 @@ def complex_parsed_model_object():
+         meta={},
+         config=NodeConfig(
+             column_types={'a': 'text'},
++            delimiter=',',
+             materialized='ephemeral',
+             post_hook=[Hook(sql='insert into blah(a, b) select "1", 1')],
+         ),
+@@ -318,15 +324,16 @@ def complex_parsed_model_object():
+         checksum=FileHash.from_contents(''),
+         unrendered_config={
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'materialized': 'ephemeral',
+             'post_hook': ['insert into blah(a, b) select "1", 1'],
+         },
+     )
+ 
+ 
+-{'enabled': True, 'tags': [], 'meta': {}, 'materialized': 'ephemeral', 'persist_docs': {}, 'quoting': {}, 'column_types': {'a': 'text'}, 'on_schema_change': 'ignore', 'grants': {}, 'packages': [], 'docs': {'show': True}, 'contract': False, 'post-hook': [{'sql': 'insert into blah(a, b) select "1", 1', 'transaction': True}], 'pre-hook': []}
++{'enabled': True, 'tags': [], 'meta': {}, 'materialized': 'ephemeral', 'persist_docs': {}, 'quoting': {}, 'column_types': {'a': 'text'}, 'delimiter': ',', 'on_schema_change': 'ignore', 'grants': {}, 'packages': [], 'docs': {'show': True}, 'contract': False, 'post-hook': [{'sql': 'insert into blah(a, b) select "1", 1', 'transaction': True}], 'pre-hook': []}
+ 
+-{'column_types': {'a': 'text'}, 'enabled': True, 'materialized': 'ephemeral', 'persist_docs': {}, 'post-hook': [{'sql': 'insert into blah(a, b) select "1", 1', 'transaction': True}], 'pre-hook': [], 'quoting': {}, 'tags': [], 'on_schema_change': 'ignore', 'meta': {}, 'grants': {}, 'docs': {'show': True}, 'packages': []}
++{'column_types': {'a': 'text'}, 'delimiter': ',', 'enabled': True, 'materialized': 'ephemeral', 'persist_docs': {}, 'post-hook': [{'sql': 'insert into blah(a, b) select "1", 1', 'transaction': True}], 'pre-hook': [], 'quoting': {}, 'tags': [], 'on_schema_change': 'ignore', 'meta': {}, 'grants': {}, 'docs': {'show': True}, 'packages': []}
+ 
+ def test_model_basic(basic_parsed_model_object, base_parsed_model_dict, minimal_parsed_model_dict):
+     node = basic_parsed_model_object
+@@ -452,6 +459,7 @@ def basic_parsed_seed_dict():
+         'alias': 'foo',
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'seed',
+             'persist_docs': {},
+@@ -542,6 +550,7 @@ def complex_parsed_seed_dict():
+         'alias': 'foo',
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'seed',
+             'persist_docs': {'relation': True, 'columns': True},
+@@ -803,6 +812,7 @@ def base_parsed_hook_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'view',
+             'persist_docs': {},
+@@ -882,6 +892,7 @@ def complex_parsed_hook_dict():
+         'meta': {},
+         'config': {
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'table',
+             'persist_docs': {},
+@@ -910,6 +921,7 @@ def complex_parsed_hook_dict():
+         'checksum': {'name': 'sha256', 'checksum': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'},
+         'unrendered_config': {
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'materialized': 'table',
+         },
+         'config_call_dict': {},
+@@ -941,6 +953,7 @@ def complex_parsed_hook_object():
+         meta={},
+         config=NodeConfig(
+             column_types={'a': 'text'},
++            delimiter=',',
+             materialized='table',
+             post_hook=[]
+         ),
+@@ -949,6 +962,7 @@ def complex_parsed_hook_object():
+         checksum=FileHash.from_contents(''),
+         unrendered_config={
+             'column_types': {'a': 'text'},
++            'delimiter': ',',
+             'materialized': 'table',
+         },
+     )
+@@ -1226,6 +1240,7 @@ def test_invalid_severity(complex_parsed_schema_test_dict):
+ def basic_timestamp_snapshot_config_dict():
+     return {
+         'column_types': {},
++        'delimiter': ',',
+         'enabled': True,
+         'materialized': 'snapshot',
+         'persist_docs': {},
+@@ -1262,6 +1277,7 @@ def basic_timestamp_snapshot_config_object():
+ def complex_timestamp_snapshot_config_dict():
+     return {
+         'column_types': {'a': 'text'},
++        'delimiter': ',',
+         'enabled': True,
+         'materialized': 'snapshot',
+         'persist_docs': {},
+@@ -1288,6 +1304,7 @@ def complex_timestamp_snapshot_config_dict():
+ def complex_timestamp_snapshot_config_object():
+     cfg = SnapshotConfig(
+         column_types={'a': 'text'},
++        delimiter=',',
+         materialized='snapshot',
+         post_hook=[Hook(sql='insert into blah(a, b) select "1", 1')],
+         strategy='timestamp',
+@@ -1324,6 +1341,7 @@ def test_invalid_missing_updated_at(basic_timestamp_snapshot_config_dict):
+ def basic_check_snapshot_config_dict():
+     return {
+         'column_types': {},
++        'delimiter': ',',
+         'enabled': True,
+         'materialized': 'snapshot',
+         'persist_docs': {},
+@@ -1360,6 +1378,7 @@ def basic_check_snapshot_config_object():
+ def complex_set_snapshot_config_dict():
+     return {
+         'column_types': {'a': 'text'},
++        'delimiter': ',',
+         'enabled': True,
+         'materialized': 'snapshot',
+         'persist_docs': {},
+@@ -1386,6 +1405,7 @@ def complex_set_snapshot_config_dict():
+ def complex_set_snapshot_config_object():
+     cfg = SnapshotConfig(
+         column_types={'a': 'text'},
++        delimiter=',',
+         materialized='snapshot',
+         post_hook=[Hook(sql='insert into blah(a, b) select "1", 1')],
+         strategy='check',
+@@ -1472,6 +1492,7 @@ def basic_timestamp_snapshot_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'snapshot',
+             'persist_docs': {},
+@@ -1614,6 +1635,7 @@ def basic_check_snapshot_dict():
+         'tags': [],
+         'config': {
+             'column_types': {},
++            'delimiter': ',',
+             'enabled': True,
+             'materialized': 'snapshot',
+             'persist_docs': {},
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

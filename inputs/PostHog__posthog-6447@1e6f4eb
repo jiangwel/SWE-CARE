@@ -1,0 +1,224 @@
+  Task-ID: PostHog__posthog-6447@1e6f4eb
+  Please checkout to this commit first: 0f72528a418c99d612307e17f4aff9642f640750
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Dashboard Items: Path dashboard items can't be deleted
+## Bug description
+
+*Please describe.*  
+If you add a path viz to a dashboard and try deleting, it won't delete
+
+## Expected behavior
+Item should be deletable
+
+
+## How to reproduce
+
+1. Add a path viz to dashboards
+2. Try deleting
+
+## Environment
+
+- [ ] PostHog Cloud
+- [ ] self-hosted PostHog (ClickHouse-based), version/commit: _please provide_
+- [ ] self-hosted PostHog (Postgres-based, legacy), version/commit: _please provide_
+
+## Additional context
+
+
+
+#### *Thank you* for your bug report – we love squashing them!
+  </issue>
+  
+  <patch>
+  diff --git a/frontend/src/scenes/dashboard/DashboardItem.tsx b/frontend/src/scenes/dashboard/DashboardItem.tsx
+index e87081ab16fa1..ac8ff4cfafad3 100644
+--- a/frontend/src/scenes/dashboard/DashboardItem.tsx
++++ b/frontend/src/scenes/dashboard/DashboardItem.tsx
+@@ -565,7 +565,9 @@ export function DashboardItem({
+                                                     data-attr={'dashboard-item-' + index + '-dropdown-delete'}
+                                                     onClick={() =>
+                                                         deleteWithUndo({
+-                                                            object: item,
++                                                            object: {
++                                                                id: item.id,
++                                                            },
+                                                             endpoint: 'insight',
+                                                             callback: loadDashboardItems,
+                                                         })
+diff --git a/frontend/src/scenes/funnels/funnelLogic.test.ts b/frontend/src/scenes/funnels/funnelLogic.test.ts
+index bae66f38005f6..2e1d63d477a3a 100644
+--- a/frontend/src/scenes/funnels/funnelLogic.test.ts
++++ b/frontend/src/scenes/funnels/funnelLogic.test.ts
+@@ -227,4 +227,18 @@ describe('funnelLogic', () => {
+                 })
+         })
+     })
++
++    describe('dashboard item interface', () => {
++        initKeaTestLogic({
++            logic: funnelLogic,
++            props: { dashboardItemId: undefined },
++            onLogic: (l) => (logic = l),
++        })
++
++        it('can load directly', async () => {
++            await expectLogic(logic, () => {
++                logic.actions.loadResults()
++            }).toDispatchActions(['loadResults'])
++        })
++    })
+ })
+diff --git a/frontend/src/scenes/paths/pathsLogic.test.ts b/frontend/src/scenes/paths/pathsLogic.test.ts
+index 1cca3622ca4da..3339594de129d 100644
+--- a/frontend/src/scenes/paths/pathsLogic.test.ts
++++ b/frontend/src/scenes/paths/pathsLogic.test.ts
+@@ -11,7 +11,9 @@ describe('pathsLogic', () => {
+ 
+     mockAPI(async (url) => {
+         const { pathname } = url
+-        if (['api/insight/paths/'].includes(pathname)) {
++        if (pathname === 'api/insight') {
++            return { results: [] }
++        } else if (['api/insight/paths/'].includes(pathname)) {
+             return { result: ['result from api'] }
+         }
+         return defaultAPIMocks(url)
+@@ -66,4 +68,18 @@ describe('pathsLogic', () => {
+                 })
+         })
+     })
++
++    describe('dashboard item interface', () => {
++        initKeaTestLogic({
++            logic: pathsLogic,
++            props: { dashboardItemId: undefined },
++            onLogic: (l) => (logic = l),
++        })
++
++        it('can load directly', async () => {
++            await expectLogic(logic, () => {
++                logic.actions.loadResults()
++            }).toDispatchActions(['loadResults'])
++        })
++    })
+ })
+diff --git a/frontend/src/scenes/paths/pathsLogic.ts b/frontend/src/scenes/paths/pathsLogic.ts
+index 1f9e9fd58a49c..468ed92801511 100644
+--- a/frontend/src/scenes/paths/pathsLogic.ts
++++ b/frontend/src/scenes/paths/pathsLogic.ts
+@@ -40,7 +40,7 @@ export const pathsLogic = kea<pathsLogicType<PathNode>>({
+ 
+     connect: (props: InsightLogicProps) => ({
+         values: [insightLogic(props), ['filters as filter', 'insight', 'insightLoading']],
+-        actions: [insightLogic(props), ['loadResultsSuccess']],
++        actions: [insightLogic(props), ['loadResultsSuccess', 'loadResults']],
+     }),
+ 
+     actions: {
+diff --git a/frontend/src/scenes/retention/retentionTableLogic.test.ts b/frontend/src/scenes/retention/retentionTableLogic.test.ts
+index dfa9635b9fb12..2996b7a8b6fee 100644
+--- a/frontend/src/scenes/retention/retentionTableLogic.test.ts
++++ b/frontend/src/scenes/retention/retentionTableLogic.test.ts
+@@ -64,4 +64,18 @@ describe('retentionTableLogic', () => {
+                 })
+         })
+     })
++
++    describe('dashboard item interface', () => {
++        initKeaTestLogic({
++            logic: retentionTableLogic,
++            props: { dashboardItemId: undefined },
++            onLogic: (l) => (logic = l),
++        })
++
++        it('can load directly', async () => {
++            await expectLogic(logic, () => {
++                logic.actions.loadResults()
++            }).toDispatchActions(['loadResults'])
++        })
++    })
+ })
+diff --git a/frontend/src/scenes/retention/retentionTableLogic.ts b/frontend/src/scenes/retention/retentionTableLogic.ts
+index a37352ee39745..e1a49463ca8e4 100644
+--- a/frontend/src/scenes/retention/retentionTableLogic.ts
++++ b/frontend/src/scenes/retention/retentionTableLogic.ts
+@@ -35,7 +35,7 @@ export const retentionTableLogic = kea<retentionTableLogicType>({
+     key: keyForInsightLogicProps(DEFAULT_RETENTION_LOGIC_KEY),
+     connect: (props: InsightLogicProps) => ({
+         values: [insightLogic(props), ['filters', 'insight', 'insightLoading'], actionsModel, ['actions']],
+-        actions: [insightLogic(props), ['loadResultsSuccess']],
++        actions: [insightLogic(props), ['loadResultsSuccess', 'loadResults']],
+     }),
+     actions: () => ({
+         setFilters: (filters: Partial<FilterType>) => ({ filters }),
+diff --git a/frontend/src/scenes/trends/trendsLogic.test.ts b/frontend/src/scenes/trends/trendsLogic.test.ts
+index 6a28b223ba9bd..e1a2878e036d0 100644
+--- a/frontend/src/scenes/trends/trendsLogic.test.ts
++++ b/frontend/src/scenes/trends/trendsLogic.test.ts
+@@ -110,4 +110,18 @@ describe('trendsLogic', () => {
+                 })
+         })
+     })
++
++    describe('dashboard item interface', () => {
++        initKeaTestLogic({
++            logic: trendsLogic,
++            props: { dashboardItemId: undefined },
++            onLogic: (l) => (logic = l),
++        })
++
++        it('can load directly', async () => {
++            await expectLogic(logic, () => {
++                logic.actions.loadResults()
++            }).toDispatchActions(['loadResults'])
++        })
++    })
+ })
+diff --git a/frontend/src/scenes/trends/trendsLogic.ts b/frontend/src/scenes/trends/trendsLogic.ts
+index b166534d4ec8a..953fb6d7b332e 100644
+--- a/frontend/src/scenes/trends/trendsLogic.ts
++++ b/frontend/src/scenes/trends/trendsLogic.ts
+@@ -13,7 +13,7 @@ export const trendsLogic = kea<trendsLogicType>({
+ 
+     connect: (props: InsightLogicProps) => ({
+         values: [insightLogic(props), ['filters', 'insight', 'insightLoading']],
+-        actions: [insightLogic(props), ['loadResultsSuccess']],
++        actions: [insightLogic(props), ['loadResultsSuccess', 'loadResults']],
+     }),
+ 
+     actions: () => ({
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

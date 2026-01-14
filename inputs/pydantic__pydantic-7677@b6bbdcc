@@ -1,0 +1,177 @@
+  Task-ID: pydantic__pydantic-7677@b6bbdcc
+  Please checkout to this commit first: 3205738358cfdf843991b5e2576597c23a449e47
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Mypy reports "Too many positional arguments" for RootModel subclass
+### Initial Checks
+
+- [X] I confirm that I'm using Pydantic V2
+
+### Description
+
+
+1. Subclassing the `RootModel` to use list as a root
+2. Instantiating this new model without keyword `root=`
+   e.g. `ListRootModel(['qwe', 'asd'])` instead of `ListRootModel(root=['qwe', 'asd'])`
+3. All is working fine in runtime
+4. Mypy is reporting "Too many positional arguments for ListRootModel"
+
+I understand, that that's a minor issue, but still it would be nice to have a bit cleaner code without compromising mypy analysis
+
+### Example Code
+
+```Python
+from pydantic import RootModel
+
+class ListRootModel(RootModel):
+    root: list[str]
+
+ListRootModel(['qwe', 'asd'])  # mypy: Too many positional arguments for "ListRootModel"  [misc]
+```
+
+
+### Python, Pydantic & OS Version
+
+```Text
+pydantic version: 2.3.0
+        pydantic-core version: 2.6.3
+          pydantic-core build: profile=release pgo=true
+                 install path: /home/nik/.cache/pypoetry/virtualenvs/zia-api-python-PZ2SEBy0-py3.11/lib/python3.11/site-packages/pydantic
+               python version: 3.11.3 (main, May 15 2023, 09:03:45) [GCC 11.3.0]
+                     platform: Linux-5.15.0-79-generic-x86_64-with-glibc2.35
+     optional deps. installed: ['typing-extensions']
+```
+  </issue>
+  
+  <patch>
+  diff --git a/pydantic/mypy.py b/pydantic/mypy.py
+index c2eb919472d..359e1314f19 100644
+--- a/pydantic/mypy.py
++++ b/pydantic/mypy.py
+@@ -440,7 +440,8 @@ def transform(self) -> bool:
+                 return False
+ 
+         is_settings = any(base.fullname == BASESETTINGS_FULLNAME for base in info.mro[:-1])
+-        self.add_initializer(fields, config, is_settings)
++        is_root_model = any('pydantic.root_model.RootModel' in base.fullname for base in info.mro[:-1])
++        self.add_initializer(fields, config, is_settings, is_root_model)
+         self.add_model_construct_method(fields, config, is_settings)
+         self.set_frozen(fields, frozen=config.frozen is True)
+ 
+@@ -780,7 +781,9 @@ def _infer_dataclass_attr_init_type(self, sym: SymbolTableNode, name: str, conte
+ 
+         return default
+ 
+-    def add_initializer(self, fields: list[PydanticModelField], config: ModelConfigData, is_settings: bool) -> None:
++    def add_initializer(
++        self, fields: list[PydanticModelField], config: ModelConfigData, is_settings: bool, is_root_model: bool
++    ) -> None:
+         """Adds a fields-aware `__init__` method to the class.
+ 
+         The added `__init__` will be annotated with types vs. all `Any` depending on the plugin settings.
+@@ -799,6 +802,14 @@ def add_initializer(self, fields: list[PydanticModelField], config: ModelConfigD
+                 use_alias=use_alias,
+                 is_settings=is_settings,
+             )
++            if is_root_model:
++                if len(fields) > 1:
++                    pass
++                    # error_extra_fields_on_root_model(self._api)
++
++                # convert root argument to positional argument
++                args[0].kind = ARG_POS
++
+             if is_settings:
+                 base_settings_node = self._api.lookup_fully_qualified(BASESETTINGS_FULLNAME).node
+                 if '__init__' in base_settings_node.names:
+@@ -1048,6 +1059,7 @@ def setdefault(self, key: str, value: Any) -> None:
+ ERROR_UNEXPECTED = ErrorCode('pydantic-unexpected', 'Unexpected behavior', 'Pydantic')
+ ERROR_UNTYPED = ErrorCode('pydantic-field', 'Untyped field disallowed', 'Pydantic')
+ ERROR_FIELD_DEFAULTS = ErrorCode('pydantic-field', 'Invalid Field defaults', 'Pydantic')
++ERROR_EXTRA_FIELD_ROOT_MODEL = ErrorCode('pydantic-field', 'Extra field on RootModel subclass', 'Pydantic')
+ 
+ 
+ def error_from_attributes(model_name: str, api: CheckerPluginInterface, context: Context) -> None:
+@@ -1084,6 +1096,11 @@ def error_untyped_fields(api: SemanticAnalyzerPluginInterface, context: Context)
+     api.fail('Untyped fields disallowed', context, code=ERROR_UNTYPED)
+ 
+ 
++def error_extra_fields_on_root_model(api: CheckerPluginInterface, context: Context) -> None:
++    """Emits an error when there is more than just a root field defined for a subclass of RootModel."""
++    api.fail('Only `root` is allowed as a field of a `RootModel`', context, code=ERROR_EXTRA_FIELD_ROOT_MODEL)
++
++
+ def error_default_and_default_factory_specified(api: CheckerPluginInterface, context: Context) -> None:
+     """Emits an error when `Field` has both `default` and `default_factory` together."""
+     api.fail('Field default and default_factory cannot be specified together', context, code=ERROR_FIELD_DEFAULTS)
+diff --git a/tests/mypy/modules/root_models.py b/tests/mypy/modules/root_models.py
+new file mode 100644
+index 00000000000..404c202bfb7
+--- /dev/null
++++ b/tests/mypy/modules/root_models.py
+@@ -0,0 +1,19 @@
++from typing import List
++
++from pydantic import RootModel
++
++
++class Pets1(RootModel[List[str]]):
++    pass
++
++
++Pets2 = RootModel[List[str]]
++
++
++class Pets3(RootModel):
++    root: List[str]
++
++
++pets1 = Pets1(['dog', 'cat'])
++pets2 = Pets2(['dog', 'cat'])
++pets3 = Pets3(['dog', 'cat'])
+diff --git a/tests/mypy/test_mypy.py b/tests/mypy/test_mypy.py
+index 782caaed1b8..435b6c846a6 100644
+--- a/tests/mypy/test_mypy.py
++++ b/tests/mypy/test_mypy.py
+@@ -98,6 +98,7 @@ def build(self) -> List[Union[Tuple[str, str], Any]]:
+     + [
+         ('mypy-plugin.ini', 'custom_constructor.py'),
+         ('mypy-plugin.ini', 'generics.py'),
++        ('mypy-plugin.ini', 'root_models.py'),
+         ('mypy-plugin-strict.ini', 'plugin_default_factory.py'),
+         ('mypy-plugin-strict-no-any.ini', 'dataclass_no_any.py'),
+         ('mypy-plugin-very-strict.ini', 'metaclass_args.py'),
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

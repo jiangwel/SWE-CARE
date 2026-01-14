@@ -1,0 +1,606 @@
+  Task-ID: sqlfluff__sqlfluff-541@c5a16c3
+  Please checkout to this commit first: a5665e0d82dc3d8177fbf4a589623976cb1288be
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  References to linting errors are in the position in the templated file, not in the reference to the raw file.
+For example if we have a file such as:
+
+```
+select
+    {% for elem in ('a', 'b', 'c' , 'd') %}
+    {{elem}} as col_{{elem}},
+    {% endfor %}
+    some_other_col
+from my_table AS foo
+```
+
+And lint for something that will happen late in the file:
+
+```
+$ sqlfluff lint test.sql --rules L010
+== [test.sql] FAIL
+L:  12 | P:  15 | L010 | Inconsistent capitalisation of keywords.
+```
+
+The linting error shows as being on line 12, which is true in the templated file, but *not* in the raw file, where the issue is with the `AS` keyword on line 6. This makes it much harder to track down exactly where the error is in the original file.
+
+My suggestion is that while the current behavior should still be an option, that the default behavior should be to report the position in the *raw* file, i,e. that the error shown above should be reported at `L:  5 | P: 15`.
+  </issue>
+  
+  <patch>
+  diff --git a/setup.py b/setup.py
+index 33b5b6625e3..dee6140cde5 100644
+--- a/setup.py
++++ b/setup.py
+@@ -63,6 +63,7 @@ def read(*names, **kwargs):
+         "sqlfluff.core.parser.segments",
+         "sqlfluff.core.parser.grammar",
+         "sqlfluff.core.rules",
++        "sqlfluff.core.templaters",
+     ],
+     package_dir={"": "src"},
+     include_package_data=True,
+diff --git a/src/sqlfluff/core/parser/lexer.py b/src/sqlfluff/core/parser/lexer.py
+index e3a28563903..3967e51aac4 100644
+--- a/src/sqlfluff/core/parser/lexer.py
++++ b/src/sqlfluff/core/parser/lexer.py
+@@ -298,6 +298,9 @@ def lex(self, raw):
+         segment_buff = ()
+         violations = []
+ 
++        # Handle potential TemplatedFile for now
++        raw = str(raw)
++
+         while True:
+             res = self.matcher.match(raw, start_pos)
+             segment_buff += res.segments
+diff --git a/src/sqlfluff/core/templaters/__init__.py b/src/sqlfluff/core/templaters/__init__.py
+new file mode 100644
+index 00000000000..637e5cc937f
+--- /dev/null
++++ b/src/sqlfluff/core/templaters/__init__.py
+@@ -0,0 +1,11 @@
++"""Templater Code."""
++
++# flake8: noqa: F401
++
++from .base import templater_selector
++
++# Although these shouldn't usually be instantiated from here
++# we import them to make sure they get registered.
++from .base import RawTemplateInterface
++from .jinja import JinjaTemplateInterface
++from .python import PythonTemplateInterface
+diff --git a/src/sqlfluff/core/templaters/base.py b/src/sqlfluff/core/templaters/base.py
+new file mode 100644
+index 00000000000..c360a25b5c9
+--- /dev/null
++++ b/src/sqlfluff/core/templaters/base.py
+@@ -0,0 +1,107 @@
++"""Defines the templaters."""
++
++from typing import Dict
++
++_templater_lookup: Dict[str, "RawTemplateInterface"] = {}
++
++
++def templater_selector(s=None, **kwargs):
++    """Instantitate a new templater by name."""
++    s = s or "jinja"  # default to jinja
++    try:
++        cls = _templater_lookup[s]
++        # Instantiate here, optionally with kwargs
++        return cls(**kwargs)
++    except KeyError:
++        raise ValueError(
++            "Requested templater {0!r} which is not currently available. Try one of {1}".format(
++                s, ", ".join(_templater_lookup.keys())
++            )
++        )
++
++
++def register_templater(cls):
++    """Register a new templater by name.
++
++    This is designed as a decorator for templaters.
++
++    e.g.
++    @register_templater()
++    class RawTemplateInterface(BaseSegment):
++        blah blah blah
++
++    """
++    n = cls.name
++    _templater_lookup[n] = cls
++    return cls
++
++
++class TemplatedFile:
++    """A templated SQL file.
++
++    This is the response of a templaters .process() method
++    and contains both references to the orginal file and also
++    the capability to split up that file when lexing.
++    """
++
++    def __init__(self, source_str, templated_str=None, fname=None):
++        """Initialise the TemplatedFile.
++
++        If no full_templated is provided then we assume that
++        the file is NOT templated and that the templated view
++        is the same as the source view.
++        """
++        self.source_str = source_str
++        self.templated_str = templated_str or source_str
++        # If no fname, we assume this is from a string or stdin.
++        self.fname = fname
++
++    def __bool__(self):
++        """Return true if there's a templated file."""
++        return bool(self.templated_str)
++
++    def __str__(self):
++        """Return the templated file if coerced to string."""
++        return self.templated_str
++
++
++@register_templater
++class RawTemplateInterface:
++    """A templater which does nothing.
++
++    This also acts as the base templating class.
++    """
++
++    name = "raw"
++    templater_selector = "templater"
++
++    def __init__(self, **kwargs):
++        """Placeholder init function.
++
++        Here we should load any initial config found in the root directory. The init
++        function shouldn't take any arguments at this stage as we assume that it will load
++        it's own config. Maybe at this stage we might allow override parameters to be passed
++        to the linter at runtime from the cli - that would be the only time we would pass
++        arguments in here.
++        """
++
++    @staticmethod
++    def process(in_str, fname=None, config=None):
++        """Process a string and return a TemplatedFile.
++
++        Args:
++            in_str (:obj:`str`): The input string.
++            fname (:obj:`str`, optional): The filename of this string. This is
++                mostly for loading config files at runtime.
++            config (:obj:`FluffConfig`): A specific config to use for this
++                templating operation. Only necessary for some templaters.
++
++        """
++        return TemplatedFile(in_str, fname=fname), []
++
++    def __eq__(self, other):
++        """Return true if `other` is of the same class as this one.
++
++        NB: This is useful in comparing configs.
++        """
++        return isinstance(other, self.__class__)
+diff --git a/src/sqlfluff/core/templaters.py b/src/sqlfluff/core/templaters/jinja.py
+similarity index 61%
+rename from src/sqlfluff/core/templaters.py
+rename to src/sqlfluff/core/templaters/jinja.py
+index 7bba4d269fe..1c3f379e8e6 100644
+--- a/src/sqlfluff/core/templaters.py
++++ b/src/sqlfluff/core/templaters/jinja.py
+@@ -1,164 +1,16 @@
+ """Defines the templaters."""
+ 
+ import os.path
+-import ast
+-from typing import Dict
+ 
+ from jinja2.sandbox import SandboxedEnvironment
+ from jinja2 import meta
+ import jinja2.nodes
+ 
+-from .errors import SQLTemplaterError
+-from .parser import FilePositionMarker
++from ..errors import SQLTemplaterError
++from ..parser import FilePositionMarker
+ 
+-_templater_lookup: Dict[str, "RawTemplateInterface"] = {}
+-
+-
+-def templater_selector(s=None, **kwargs):
+-    """Instantitate a new templater by name."""
+-    s = s or "jinja"  # default to jinja
+-    try:
+-        cls = _templater_lookup[s]
+-        # Instantiate here, optionally with kwargs
+-        return cls(**kwargs)
+-    except KeyError:
+-        raise ValueError(
+-            "Requested templater {0!r} which is not currently available. Try one of {1}".format(
+-                s, ", ".join(_templater_lookup.keys())
+-            )
+-        )
+-
+-
+-def register_templater(cls):
+-    """Register a new templater by name.
+-
+-    This is designed as a decorator for templaters.
+-
+-    e.g.
+-    @register_templater()
+-    class RawTemplateInterface(BaseSegment):
+-        blah blah blah
+-
+-    """
+-    n = cls.name
+-    _templater_lookup[n] = cls
+-    return cls
+-
+-
+-@register_templater
+-class RawTemplateInterface:
+-    """A templater which does nothing.
+-
+-    This also acts as the base templating class.
+-    """
+-
+-    name = "raw"
+-    templater_selector = "templater"
+-
+-    def __init__(self, **kwargs):
+-        """Placeholder init function.
+-
+-        Here we should load any initial config found in the root directory. The init
+-        function shouldn't take any arguments at this stage as we assume that it will load
+-        it's own config. Maybe at this stage we might allow override parameters to be passed
+-        to the linter at runtime from the cli - that would be the only time we would pass
+-        arguments in here.
+-        """
+-
+-    @staticmethod
+-    def process(in_str, fname=None, config=None):
+-        """Process a string and return the new string.
+-
+-        Args:
+-            in_str (:obj:`str`): The input string.
+-            fname (:obj:`str`, optional): The filename of this string. This is
+-                mostly for loading config files at runtime.
+-            config (:obj:`FluffConfig`): A specific config to use for this
+-                templating operation. Only necessary for some templaters.
+-
+-        """
+-        return in_str, []
+-
+-    def __eq__(self, other):
+-        """Return true if `other` is of the same class as this one.
+-
+-        NB: This is useful in comparing configs.
+-        """
+-        return isinstance(other, self.__class__)
+-
+-
+-@register_templater
+-class PythonTemplateInterface(RawTemplateInterface):
+-    """A templater using python format strings.
+-
+-    See: https://docs.python.org/3/library/string.html#format-string-syntax
+-
+-    For the python templater we don't allow functions or macros because there isn't
+-    a good way of doing it securely. Use the jinja templater for this.
+-    """
+-
+-    name = "python"
+-
+-    def __init__(self, override_context=None, **kwargs):
+-        self.default_context = dict(test_value="__test__")
+-        self.override_context = override_context or {}
+-
+-    @staticmethod
+-    def infer_type(s):
+-        """Infer a python type from a string ans convert.
+-
+-        Given a string value, convert it to a more specific built-in Python type
+-        (e.g. int, float, list, dictionary) if possible.
+-
+-        """
+-        try:
+-            return ast.literal_eval(s)
+-        except (SyntaxError, ValueError):
+-            return s
+-
+-    def get_context(self, fname=None, config=None):
+-        """Get the templating context from the config."""
+-        # TODO: The config loading should be done outside the templater code. Here
+-        # is a silly place.
+-        if config:
+-            # This is now a nested section
+-            loaded_context = (
+-                config.get_section((self.templater_selector, self.name, "context"))
+-                or {}
+-            )
+-        else:
+-            loaded_context = {}
+-        live_context = {}
+-        live_context.update(self.default_context)
+-        live_context.update(loaded_context)
+-        live_context.update(self.override_context)
+-
+-        # Infer types
+-        for k in loaded_context:
+-            live_context[k] = self.infer_type(live_context[k])
+-        return live_context
+-
+-    def process(self, in_str, fname=None, config=None):
+-        """Process a string and return the new string.
+-
+-        Args:
+-            in_str (:obj:`str`): The input string.
+-            fname (:obj:`str`, optional): The filename of this string. This is
+-                mostly for loading config files at runtime.
+-            config (:obj:`FluffConfig`): A specific config to use for this
+-                templating operation. Only necessary for some templaters.
+-
+-        """
+-        live_context = self.get_context(fname=fname, config=config)
+-        try:
+-            return in_str.format(**live_context), []
+-        except KeyError as err:
+-            # TODO: Add a url here so people can get more help.
+-            raise SQLTemplaterError(
+-                "Failure in Python templating: {0}. Have you configured your variables?".format(
+-                    err
+-                )
+-            )
++from .base import register_templater, TemplatedFile
++from .python import PythonTemplateInterface
+ 
+ 
+ @register_templater
+@@ -345,8 +197,8 @@ def process(self, in_str, fname=None, config=None):
+ 
+         # Attempt to identify any undeclared variables
+         try:
+-            ast = env.parse(in_str)
+-            undefined_variables = meta.find_undeclared_variables(ast)
++            syntax_tree = env.parse(in_str)
++            undefined_variables = meta.find_undeclared_variables(syntax_tree)
+         except Exception as err:
+             # TODO: Add a url here so people can get more help.
+             raise SQLTemplaterError(
+@@ -360,13 +212,16 @@ def process(self, in_str, fname=None, config=None):
+ 
+         if undefined_variables:
+             # Lets go through and find out where they are:
+-            for val in self._crawl_tree(ast, undefined_variables, in_str):
++            for val in self._crawl_tree(syntax_tree, undefined_variables, in_str):
+                 violations.append(val)
+ 
+         try:
+             # NB: Passing no context. Everything is loaded when the template is loaded.
+             out_str = template.render()
+-            return out_str, violations
++            return (
++                TemplatedFile(source_str=in_str, templated_str=out_str, fname=fname),
++                violations,
++            )
+         except Exception as err:
+             # TODO: Add a url here so people can get more help.
+             violations.append(
+diff --git a/src/sqlfluff/core/templaters/python.py b/src/sqlfluff/core/templaters/python.py
+new file mode 100644
+index 00000000000..9e0c4996071
+--- /dev/null
++++ b/src/sqlfluff/core/templaters/python.py
+@@ -0,0 +1,82 @@
++"""Defines the templaters."""
++
++import ast
++
++from ..errors import SQLTemplaterError
++
++from .base import RawTemplateInterface, register_templater, TemplatedFile
++
++
++@register_templater
++class PythonTemplateInterface(RawTemplateInterface):
++    """A templater using python format strings.
++
++    See: https://docs.python.org/3/library/string.html#format-string-syntax
++
++    For the python templater we don't allow functions or macros because there isn't
++    a good way of doing it securely. Use the jinja templater for this.
++    """
++
++    name = "python"
++
++    def __init__(self, override_context=None, **kwargs):
++        self.default_context = dict(test_value="__test__")
++        self.override_context = override_context or {}
++
++    @staticmethod
++    def infer_type(s):
++        """Infer a python type from a string ans convert.
++
++        Given a string value, convert it to a more specific built-in Python type
++        (e.g. int, float, list, dictionary) if possible.
++
++        """
++        try:
++            return ast.literal_eval(s)
++        except (SyntaxError, ValueError):
++            return s
++
++    def get_context(self, fname=None, config=None):
++        """Get the templating context from the config."""
++        # TODO: The config loading should be done outside the templater code. Here
++        # is a silly place.
++        if config:
++            # This is now a nested section
++            loaded_context = (
++                config.get_section((self.templater_selector, self.name, "context"))
++                or {}
++            )
++        else:
++            loaded_context = {}
++        live_context = {}
++        live_context.update(self.default_context)
++        live_context.update(loaded_context)
++        live_context.update(self.override_context)
++
++        # Infer types
++        for k in loaded_context:
++            live_context[k] = self.infer_type(live_context[k])
++        return live_context
++
++    def process(self, in_str, fname=None, config=None):
++        """Process a string and return a TemplatedFile.
++
++        Args:
++            in_str (:obj:`str`): The input string.
++            fname (:obj:`str`, optional): The filename of this string. This is
++                mostly for loading config files at runtime.
++            config (:obj:`FluffConfig`): A specific config to use for this
++                templating operation. Only necessary for some templaters.
++
++        """
++        live_context = self.get_context(fname=fname, config=config)
++        try:
++            new_str = in_str.format(**live_context)
++        except KeyError as err:
++            # TODO: Add a url here so people can get more help.
++            raise SQLTemplaterError(
++                "Failure in Python templating: {0}. Have you configured your variables?".format(
++                    err
++                )
++            )
++        return TemplatedFile(source_str=in_str, templated_str=new_str, fname=fname), []
+diff --git a/test/core/templaters_test.py b/test/core/templaters_test.py
+index d528f9d3888..03eaed22fdd 100644
+--- a/test/core/templaters_test.py
++++ b/test/core/templaters_test.py
+@@ -26,7 +26,7 @@ def test__templater_raw():
+     t = RawTemplateInterface()
+     instr = "SELECT * FROM {{blah}}"
+     outstr, _ = t.process(instr)
+-    assert instr == outstr
++    assert instr == str(outstr)
+ 
+ 
+ PYTHON_STRING = "SELECT * FROM {blah}"
+@@ -37,7 +37,7 @@ def test__templater_python():
+     t = PythonTemplateInterface(override_context=dict(blah="foo"))
+     instr = PYTHON_STRING
+     outstr, _ = t.process(instr)
+-    assert outstr == "SELECT * FROM foo"
++    assert str(outstr) == "SELECT * FROM foo"
+ 
+ 
+ def test__templater_python_error():
+@@ -56,7 +56,7 @@ def test__templater_jinja():
+     t = JinjaTemplateInterface(override_context=dict(blah="foo", condition="a < 10"))
+     instr = JINJA_STRING
+     outstr, _ = t.process(instr, config=FluffConfig())
+-    assert outstr == "SELECT * FROM f, o, o WHERE a < 10\n\n"
++    assert str(outstr) == "SELECT * FROM f, o, o WHERE a < 10\n\n"
+ 
+ 
+ def test__templater_jinja_error():
+@@ -64,7 +64,7 @@ def test__templater_jinja_error():
+     t = JinjaTemplateInterface(override_context=dict(blah="foo"))
+     instr = JINJA_STRING
+     outstr, vs = t.process(instr, config=FluffConfig())
+-    assert outstr == "SELECT * FROM f, o, o WHERE \n\n"
++    assert str(outstr) == "SELECT * FROM f, o, o WHERE \n\n"
+     # Check we have violations.
+     assert len(vs) > 0
+ 
+diff --git a/test_fileparse.py b/test_fileparse.py
+new file mode 100644
+index 00000000000..0c87e8d475b
+--- /dev/null
++++ b/test_fileparse.py
+@@ -0,0 +1,46 @@
++"""Performance testing on parsing and lexing."""
++
++import timeit
++
++from sqlfluff.core import Lexer, Parser
++
++with open("test2.sql") as f:
++    sql = f.read()
++
++# #### Lexing
++lexer = Lexer()
++
++
++def lex_string():
++    """Lex to tokens."""
++    tokens, _ = lexer.lex(sql)
++    return tokens
++
++
++print("Time to lex: ", timeit.timeit(lex_string, number=100) / 100)
++# As at 2020-11-02: 0.038s
++
++# Actually lex
++tokens = lex_string()
++
++# #### Parsing
++parser = Parser()
++
++
++def parse_tokens():
++    """Level 1 parse."""
++    # (NB: this won't parse the StatementSegments, only FileSegment)
++    return parser.parse(tokens, recurse=0)
++
++
++print("Time to parse (level 1): ", timeit.timeit(parse_tokens, number=100) / 100)
++# As at 2020-11-02: 0.119s
++
++
++def parse_tokens_full():
++    """Full parse."""
++    return parser.parse(tokens)
++
++
++print("Time to parse (Full): ", timeit.timeit(parse_tokens_full, number=20) / 20)
++# As at 2020-11-02: 1.221s
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

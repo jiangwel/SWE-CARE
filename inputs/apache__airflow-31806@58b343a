@@ -1,0 +1,974 @@
+  Task-ID: apache__airflow-31806@58b343a
+  Please checkout to this commit first: 15d42b4320d535cf54743929f134e36f59c615bb
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Create a new gantt chart in React
+The Gantt chart could become far more useful to see how a dag is performing. We should make it a first class citizen by integrating it with the tree view.
+
+The gantt rows can be lined up with the tree view to keep context.
+It would be easy to explore different runs by selecting separate columns in the tree view.
+
+Without a dag run selected we can have a summary across many dag runs. Even including a box and whisker plot to show the median run times and min/max.
+
+If you have selected an active run, the gantt view should also auto-refresh.
+  </issue>
+  
+  <patch>
+  diff --git a/airflow/www/package.json b/airflow/www/package.json
+index cad6a6320a154..9767558c9afe8 100644
+--- a/airflow/www/package.json
++++ b/airflow/www/package.json
+@@ -129,7 +129,7 @@
+     "nvd3": "^1.8.6",
+     "react": "^18.0.0",
+     "react-dom": "^18.0.0",
+-    "react-icons": "^4.3.1",
++    "react-icons": "^4.9.0",
+     "react-json-view": "^1.21.3",
+     "react-markdown": "^8.0.4",
+     "react-query": "^3.39.1",
+diff --git a/airflow/www/static/js/dag/Main.tsx b/airflow/www/static/js/dag/Main.tsx
+index 9a484046ce658..99620a731be68 100644
+--- a/airflow/www/static/js/dag/Main.tsx
++++ b/airflow/www/static/js/dag/Main.tsx
+@@ -68,6 +68,8 @@ const Main = () => {
+   const [isGridCollapsed, setIsGridCollapsed] = useState(false);
+   const resizeRef = useRef<HTMLDivElement>(null);
+   const gridRef = useRef<HTMLDivElement>(null);
++  const gridScrollRef = useRef<HTMLDivElement>(null);
++  const ganttScrollRef = useRef<HTMLDivElement>(null);
+   const isPanelOpen = localStorage.getItem(detailsPanelKey) !== "true";
+   const { isOpen, onToggle } = useDisclosure({ defaultIsOpen: isPanelOpen });
+   const [hoveredTaskState, setHoveredTaskState] = useState<
+@@ -207,6 +209,8 @@ const Main = () => {
+                 onToggleGroups={onToggleGroups}
+                 isGridCollapsed={isGridCollapsed}
+                 setIsGridCollapsed={onToggleGridCollapse}
++                gridScrollRef={gridScrollRef}
++                ganttScrollRef={ganttScrollRef}
+               />
+             </Box>
+             {isOpen && (
+@@ -229,6 +233,8 @@ const Main = () => {
+                     openGroupIds={openGroupIds}
+                     onToggleGroups={onToggleGroups}
+                     hoveredTaskState={hoveredTaskState}
++                    gridScrollRef={gridScrollRef}
++                    ganttScrollRef={ganttScrollRef}
+                   />
+                 </Box>
+               </>
+diff --git a/airflow/www/static/js/dag/details/gantt/Chart.tsx b/airflow/www/static/js/dag/details/gantt/Chart.tsx
+new file mode 100644
+index 0000000000000..385f934274911
+--- /dev/null
++++ b/airflow/www/static/js/dag/details/gantt/Chart.tsx
+@@ -0,0 +1,190 @@
++/*!
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import React from "react";
++import { Box, Text, Tooltip, Flex } from "@chakra-ui/react";
++import useSelection from "src/dag/useSelection";
++import { getDuration, formatDuration } from "src/datetime_utils";
++import { SimpleStatus } from "src/dag/StatusBox";
++import { useContainerRef } from "src/context/containerRef";
++import { hoverDelay } from "src/utils";
++import Time from "src/components/Time";
++import type { DagRun, Task } from "src/types";
++
++interface Props {
++  ganttWidth?: number;
++  openGroupIds: string[];
++  dagRun: DagRun;
++  tasks: Task[];
++  checkScrollPosition: () => void;
++}
++
++const Chart = ({
++  ganttWidth = 500,
++  openGroupIds,
++  tasks,
++  dagRun,
++  checkScrollPosition,
++}: Props) => {
++  const {
++    selected: { runId, taskId },
++    onSelect,
++  } = useSelection();
++  const containerRef = useContainerRef();
++
++  const runDuration = getDuration(dagRun?.startDate, dagRun?.endDate);
++
++  return (
++    <div>
++      {tasks?.map((task) => {
++        const instance = task.instances.find((ti) => ti.runId === runId);
++        const isSelected = taskId === instance?.taskId;
++        const hasQueuedDttm = !!instance?.queuedDttm;
++        const isOpen = openGroupIds.includes(task.label || "");
++        const isGroup = !!task.children;
++
++        // Calculate durations in ms
++        const taskDuration = getDuration(
++          instance?.startDate,
++          instance?.endDate
++        );
++        const queuedDuration = hasQueuedDttm
++          ? getDuration(instance?.queuedDttm, instance?.startDate)
++          : 0;
++        const taskStartOffset = getDuration(
++          dagRun.startDate,
++          instance?.queuedDttm || instance?.startDate
++        );
++
++        // Percent of each duration vs the overall dag run
++        const taskDurationPercent = taskDuration / runDuration;
++        const taskStartOffsetPercent = taskStartOffset / runDuration;
++        const queuedDurationPercent = queuedDuration / runDuration;
++
++        // Calculate the pixel width of the queued and task bars and the position in the graph
++        // Min width should be 5px
++        let width = ganttWidth * taskDurationPercent;
++        if (width < 5) width = 5;
++        let queuedWidth = hasQueuedDttm
++          ? ganttWidth * queuedDurationPercent
++          : 0;
++        if (hasQueuedDttm && queuedWidth < 5) queuedWidth = 5;
++        const offsetMargin = taskStartOffsetPercent * ganttWidth;
++
++        return (
++          <div key={`gantt-${task.id}`}>
++            <Box
++              py="4px"
++              borderBottomWidth={1}
++              borderBottomColor={isGroup && isOpen ? "gray.400" : "gray.200"}
++              bg={isSelected ? "blue.100" : "inherit"}
++            >
++              {instance ? (
++                <Tooltip
++                  label={
++                    <Box>
++                      <Text>
++                        Task{isGroup ? " Group" : ""}: {task.label}
++                      </Text>
++                      <br />
++                      {hasQueuedDttm && (
++                        <Text>
++                          Queued Duration: {formatDuration(queuedDuration)}
++                        </Text>
++                      )}
++                      <Text>Run Duration: {formatDuration(taskDuration)}</Text>
++                      <br />
++                      {hasQueuedDttm && (
++                        <Text>
++                          Queued At: <Time dateTime={instance?.queuedDttm} />
++                        </Text>
++                      )}
++                      <Text>
++                        Start: <Time dateTime={instance?.startDate} />
++                      </Text>
++                      <Text>
++                        {instance?.endDate ? (
++                          <>
++                            End: <Time dateTime={instance?.endDate} />
++                          </>
++                        ) : (
++                          "Ongoing"
++                        )}
++                      </Text>
++                    </Box>
++                  }
++                  hasArrow
++                  portalProps={{ containerRef }}
++                  placement="top"
++                  openDelay={hoverDelay}
++                >
++                  <Flex
++                    width={`${width + queuedWidth}px`}
++                    cursor="pointer"
++                    pointerEvents="auto"
++                    marginLeft={`${offsetMargin}px`}
++                    onClick={() => {
++                      onSelect({
++                        runId: instance.runId,
++                        taskId: instance.taskId,
++                      });
++                      checkScrollPosition();
++                    }}
++                  >
++                    {instance.state !== "queued" && hasQueuedDttm && (
++                      <SimpleStatus
++                        state="queued"
++                        width={`${queuedWidth}px`}
++                        borderRightRadius={0}
++                        // The normal queued color is too dark when next to the actual task's state
++                        opacity={0.6}
++                      />
++                    )}
++                    <SimpleStatus
++                      state={instance.state}
++                      width={`${width}px`}
++                      borderLeftRadius={
++                        instance.state !== "queued" && hasQueuedDttm
++                          ? 0
++                          : undefined
++                      }
++                    />
++                  </Flex>
++                </Tooltip>
++              ) : (
++                <Box height="10px" />
++              )}
++            </Box>
++            {isOpen && !!task.children && (
++              <Chart
++                ganttWidth={ganttWidth}
++                openGroupIds={openGroupIds}
++                dagRun={dagRun}
++                tasks={task.children}
++                checkScrollPosition={checkScrollPosition}
++              />
++            )}
++          </div>
++        );
++      })}
++    </div>
++  );
++};
++
++export default Chart;
+diff --git a/airflow/www/static/js/dag/details/gantt/index.tsx b/airflow/www/static/js/dag/details/gantt/index.tsx
+new file mode 100644
+index 0000000000000..7eeade47bf7c4
+--- /dev/null
++++ b/airflow/www/static/js/dag/details/gantt/index.tsx
+@@ -0,0 +1,173 @@
++/*!
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import React, { useCallback, useEffect, useRef, useState } from "react";
++import { Box, Divider, Text } from "@chakra-ui/react";
++
++import useSelection from "src/dag/useSelection";
++import { useGridData } from "src/api";
++import Time from "src/components/Time";
++import { getDuration } from "src/datetime_utils";
++
++import Chart from "./Chart";
++
++interface Props {
++  openGroupIds: string[];
++  gridScrollRef: React.RefObject<HTMLDivElement>;
++  ganttScrollRef: React.RefObject<HTMLDivElement>;
++}
++
++const Gantt = ({ openGroupIds, gridScrollRef, ganttScrollRef }: Props) => {
++  const ganttRef = useRef<HTMLDivElement>(null);
++  const [top, setTop] = useState(0);
++  const [width, setWidth] = useState(500);
++  const [height, setHeight] = useState("100%");
++  const {
++    selected: { runId, taskId },
++  } = useSelection();
++  const {
++    data: { dagRuns, groups },
++  } = useGridData();
++
++  const calculateGanttDimensions = useCallback(() => {
++    if (ganttRef?.current) {
++      const tbody = gridScrollRef.current?.getElementsByTagName("tbody")[0];
++      const tableTop =
++        (tbody?.getBoundingClientRect().top || 0) +
++        (gridScrollRef?.current?.scrollTop || 0);
++      const ganttRect = ganttRef?.current?.getBoundingClientRect();
++      const offsetTop = ganttRect?.top;
++      setTop(tableTop && offsetTop ? tableTop - offsetTop : 0);
++      if (ganttRect?.width) setWidth(ganttRect.width);
++      const gridHeight = gridScrollRef.current?.getBoundingClientRect().height;
++      if (gridHeight) setHeight(`${gridHeight - 155}px`);
++    }
++  }, [ganttRef, gridScrollRef]);
++
++  // Calculate top, height and width when changing selections
++  useEffect(() => {
++    calculateGanttDimensions();
++  }, [runId, taskId, openGroupIds, calculateGanttDimensions]);
++
++  const onGridScroll = (e: Event) => {
++    const { scrollTop } = e.currentTarget as HTMLDivElement;
++    if (scrollTop && ganttScrollRef?.current) {
++      ganttScrollRef.current.scrollTo(0, scrollTop);
++    }
++  };
++
++  // Sync grid and gantt scroll
++  useEffect(() => {
++    const grid = gridScrollRef.current;
++    grid?.addEventListener("scroll", onGridScroll);
++    return () => {
++      grid?.removeEventListener("scroll", onGridScroll);
++    };
++  });
++
++  // Calculate top, height and width on resize
++  useEffect(() => {
++    const ganttChart = ganttRef.current;
++    const ganttObserver = new ResizeObserver(calculateGanttDimensions);
++
++    if (ganttChart) {
++      ganttObserver.observe(ganttChart);
++      return () => {
++        ganttObserver.unobserve(ganttChart);
++      };
++    }
++    return () => {};
++  }, [ganttRef, calculateGanttDimensions]);
++
++  const checkScrollPosition = () => {
++    const gridScrollTop = gridScrollRef.current?.scrollTop;
++    const ganttScrollTop = ganttScrollRef.current?.scrollTop;
++    if (ganttScrollTop !== gridScrollTop && gridScrollRef.current) {
++      gridScrollRef.current.scrollTo(0, ganttScrollTop || 0);
++    }
++  };
++
++  const dagRun = dagRuns.find((dr) => dr.runId === runId);
++
++  const startDate = dagRun?.startDate;
++
++  const numBars = Math.round(width / 100);
++  const runDuration = getDuration(dagRun?.startDate, dagRun?.endDate);
++  const intervals = runDuration / numBars;
++
++  return (
++    <Box
++      ref={ganttRef}
++      position="relative"
++      height="100%"
++      pointerEvents="none"
++      overflow="hidden"
++    >
++      <Box borderBottomWidth={1} pt={`${top}px`}>
++        {Array.from(Array(numBars)).map((_, i) => (
++          <Box
++            position="absolute"
++            left={`${(width / numBars) * i}px`}
++            // eslint-disable-next-line react/no-array-index-key
++            key={i}
++          >
++            <Text
++              color="gray.400"
++              fontSize="sm"
++              transform="rotate(-30deg) translateX(28px)"
++              mt={-6}
++              mb={1}
++              ml={-9}
++            >
++              <Time
++                dateTime={moment(startDate)
++                  .add(i * intervals, "milliseconds")
++                  .format()}
++                format="HH:mm:ss z"
++              />
++            </Text>
++            <Divider orientation="vertical" height={height} />
++          </Box>
++        ))}
++        <Box position="absolute" left={width - 2} key="end">
++          <Divider orientation="vertical" height={height} />
++        </Box>
++      </Box>
++      <Box
++        maxHeight={height}
++        height="100%"
++        overflow="auto"
++        ref={ganttScrollRef}
++        overscrollBehavior="contain"
++      >
++        {!!runId && !!dagRun && !!groups.children && (
++          <Chart
++            ganttWidth={width}
++            openGroupIds={openGroupIds}
++            dagRun={dagRun}
++            tasks={groups.children}
++            checkScrollPosition={checkScrollPosition}
++          />
++        )}
++      </Box>
++    </Box>
++  );
++};
++
++export default Gantt;
+diff --git a/airflow/www/static/js/dag/details/index.tsx b/airflow/www/static/js/dag/details/index.tsx
+index a4caa7236a0a1..ebc5490ab2439 100644
+--- a/airflow/www/static/js/dag/details/index.tsx
++++ b/airflow/www/static/js/dag/details/index.tsx
+@@ -17,7 +17,7 @@
+  * under the License.
+  */
+ 
+-import React, { useCallback } from "react";
++import React, { useCallback, useEffect } from "react";
+ import {
+   Flex,
+   Divider,
+@@ -33,7 +33,13 @@ import { useSearchParams } from "react-router-dom";
+ import useSelection from "src/dag/useSelection";
+ import { getTask, getMetaValue } from "src/utils";
+ import { useGridData, useTaskInstance } from "src/api";
+-import { MdDetails, MdAccountTree, MdReorder, MdCode } from "react-icons/md";
++import {
++  MdDetails,
++  MdAccountTree,
++  MdReorder,
++  MdCode,
++  MdOutlineViewTimeline,
++} from "react-icons/md";
+ import { BiBracket } from "react-icons/bi";
+ import URLSearchParamsWrapper from "src/utils/URLSearchParamWrapper";
+ 
+@@ -42,6 +48,7 @@ import TaskInstanceContent from "./taskInstance";
+ import DagRunContent from "./dagRun";
+ import DagContent from "./Dag";
+ import Graph from "./graph";
++import Gantt from "./gantt";
+ import DagCode from "./dagCode";
+ import MappedInstances from "./taskInstance/MappedInstances";
+ import Logs from "./taskInstance/Logs";
+@@ -58,16 +65,20 @@ interface Props {
+   openGroupIds: string[];
+   onToggleGroups: (groupIds: string[]) => void;
+   hoveredTaskState?: string | null;
++  gridScrollRef: React.RefObject<HTMLDivElement>;
++  ganttScrollRef: React.RefObject<HTMLDivElement>;
+ }
+ 
+ const tabToIndex = (tab?: string) => {
+   switch (tab) {
+     case "graph":
+       return 1;
++    case "gantt":
++      return 2;
+     case "code":
+     case "logs":
+     case "mapped_tasks":
+-      return 2;
++      return 3;
+     case "details":
+     default:
+       return 0;
+@@ -84,6 +95,8 @@ const indexToTab = (
+     case 1:
+       return "graph";
+     case 2:
++      return "gantt";
++    case 3:
+       if (!taskId) return "code";
+       if (showMappedTasks) return "mapped_tasks";
+       if (showLogs) return "logs";
+@@ -96,7 +109,13 @@ const indexToTab = (
+ 
+ const TAB_PARAM = "tab";
+ 
+-const Details = ({ openGroupIds, onToggleGroups, hoveredTaskState }: Props) => {
++const Details = ({
++  openGroupIds,
++  onToggleGroups,
++  hoveredTaskState,
++  gridScrollRef,
++  ganttScrollRef,
++}: Props) => {
+   const {
+     selected: { runId, taskId, mapIndex },
+     onSelect,
+@@ -134,6 +153,12 @@ const Details = ({ openGroupIds, onToggleGroups, hoveredTaskState }: Props) => {
+     [setSearchParams, searchParams, showLogs, showMappedTasks, taskId]
+   );
+ 
++  useEffect(() => {
++    if ((!taskId || isGroup) && tabIndex > 3) {
++      onChangeTab(1);
++    }
++  }, [runId, taskId, tabIndex, isGroup, onChangeTab]);
++
+   const run = dagRuns.find((r) => r.runId === runId);
+   const { data: mappedTaskInstance } = useTaskInstance({
+     dagId,
+@@ -212,6 +237,14 @@ const Details = ({ openGroupIds, onToggleGroups, hoveredTaskState }: Props) => {
+               Graph
+             </Text>
+           </Tab>
++          {run && (
++            <Tab>
++              <MdOutlineViewTimeline size={16} />
++              <Text as="strong" ml={1}>
++                Gantt
++              </Text>
++            </Tab>
++          )}
+           {showDagCode && (
+             <Tab>
+               <MdCode size={16} />
+@@ -262,6 +295,16 @@ const Details = ({ openGroupIds, onToggleGroups, hoveredTaskState }: Props) => {
+               hoveredTaskState={hoveredTaskState}
+             />
+           </TabPanel>
++          {run && (
++            <TabPanel p={0} height="100%">
++              <Gantt
++                openGroupIds={openGroupIds}
++                // hoveredTaskState={hoveredTaskState}
++                gridScrollRef={gridScrollRef}
++                ganttScrollRef={ganttScrollRef}
++              />
++            </TabPanel>
++          )}
+           {showDagCode && (
+             <TabPanel height="100%">
+               <DagCode />
+diff --git a/airflow/www/static/js/dag/grid/index.tsx b/airflow/www/static/js/dag/grid/index.tsx
+index b598a7fb5895d..77d675816fe10 100644
+--- a/airflow/www/static/js/dag/grid/index.tsx
++++ b/airflow/www/static/js/dag/grid/index.tsx
+@@ -39,6 +39,8 @@ interface Props {
+   onToggleGroups: (groupIds: string[]) => void;
+   isGridCollapsed?: boolean;
+   setIsGridCollapsed?: (collapsed: boolean) => void;
++  gridScrollRef?: React.RefObject<HTMLDivElement>;
++  ganttScrollRef?: React.RefObject<HTMLDivElement>;
+ }
+ 
+ const Grid = ({
+@@ -49,8 +51,9 @@ const Grid = ({
+   onToggleGroups,
+   isGridCollapsed,
+   setIsGridCollapsed,
++  gridScrollRef,
++  ganttScrollRef,
+ }: Props) => {
+-  const scrollRef = useRef<HTMLDivElement>(null);
+   const tableRef = useRef<HTMLTableSectionElement>(null);
+   const offsetTop = useOffsetTop(tableRef);
+   const { selected } = useSelection();
+@@ -68,9 +71,33 @@ const Grid = ({
+       return true;
+     });
+ 
++  const onGanttScroll = (e: Event) => {
++    const { scrollTop } = e.currentTarget as HTMLDivElement;
++    if (scrollTop && gridScrollRef?.current) {
++      gridScrollRef.current.scrollTo(0, scrollTop);
++    }
++  };
++
++  const checkScrollPosition = () => {
++    const gridScrollTop = gridScrollRef?.current?.scrollTop;
++    const ganttScrollTop = ganttScrollRef?.current?.scrollTop;
++    if (ganttScrollTop !== gridScrollTop && ganttScrollRef?.current) {
++      ganttScrollRef.current.scrollTo(0, gridScrollTop || 0);
++    }
++  };
++
++  // Sync grid and gantt scroll
++  useEffect(() => {
++    const gantt = ganttScrollRef?.current;
++    gantt?.addEventListener("scroll", onGanttScroll);
++    return () => {
++      gantt?.removeEventListener("scroll", onGanttScroll);
++    };
++  });
++
+   useEffect(() => {
+     const scrollOnResize = new ResizeObserver(() => {
+-      const runsContainer = scrollRef.current;
++      const runsContainer = gridScrollRef?.current;
+       // Set scroll to top right if it is scrollable
+       if (
+         tableRef?.current &&
+@@ -90,7 +117,7 @@ const Grid = ({
+       };
+     }
+     return () => {};
+-  }, [tableRef, isGridCollapsed]);
++  }, [tableRef, isGridCollapsed, gridScrollRef]);
+ 
+   return (
+     <Box height="100%" position="relative">
+@@ -134,11 +161,12 @@ const Grid = ({
+       )}
+       <Box
+         maxHeight={`calc(100% - ${offsetTop}px)`}
+-        ref={scrollRef}
++        ref={gridScrollRef}
+         overflow="auto"
+         position="relative"
+         pr={4}
+         mt={8}
++        overscrollBehavior="contain"
+       >
+         <Table pr="10px">
+           <Thead>
+@@ -157,6 +185,7 @@ const Grid = ({
+               onToggleGroups,
+               hoveredTaskState,
+               isGridCollapsed,
++              checkScrollPosition,
+             })}
+           </Tbody>
+         </Table>
+diff --git a/airflow/www/static/js/dag/grid/renderTaskRows.tsx b/airflow/www/static/js/dag/grid/renderTaskRows.tsx
+index c661eba6775ce..8b62b66f006f4 100644
+--- a/airflow/www/static/js/dag/grid/renderTaskRows.tsx
++++ b/airflow/www/static/js/dag/grid/renderTaskRows.tsx
+@@ -40,6 +40,7 @@ interface RowProps {
+   hoveredTaskState?: string | null;
+   isParentMapped?: boolean;
+   isGridCollapsed?: boolean;
++  checkScrollPosition?: () => void;
+ }
+ 
+ const renderTaskRows = ({ task, level = 0, ...rest }: RowProps) => (
+@@ -58,6 +59,7 @@ interface TaskInstancesProps {
+   onSelect: (selection: SelectionProps) => void;
+   hoveredTaskState?: string | null;
+   isGridCollapsed?: boolean;
++  checkScrollPosition?: () => void;
+ }
+ 
+ const TaskInstances = ({
+@@ -65,6 +67,7 @@ const TaskInstances = ({
+   dagRunIds,
+   selectedRunId,
+   onSelect,
++  checkScrollPosition,
+   hoveredTaskState,
+   isGridCollapsed,
+ }: TaskInstancesProps) => (
+@@ -87,7 +90,10 @@ const TaskInstances = ({
+             <StatusBox
+               instance={instance}
+               group={task}
+-              onSelect={onSelect}
++              onSelect={(selection) => {
++                onSelect(selection);
++                if (checkScrollPosition) checkScrollPosition();
++              }}
+               isActive={
+                 hoveredTaskState === undefined ||
+                 hoveredTaskState === instance.state
+@@ -114,6 +120,7 @@ const Row = (props: RowProps) => {
+     hoveredTaskState,
+     isParentMapped,
+     isGridCollapsed,
++    checkScrollPosition,
+   } = props;
+   const { colors } = useTheme();
+   const { selected, onSelect } = useSelection();
+@@ -186,6 +193,7 @@ const Row = (props: RowProps) => {
+             onSelect={onSelect}
+             hoveredTaskState={hoveredTaskState}
+             isGridCollapsed={isGridCollapsed}
++            checkScrollPosition={checkScrollPosition}
+           />
+         </Td>
+       </Tr>
+diff --git a/airflow/www/static/js/types/index.ts b/airflow/www/static/js/types/index.ts
+index 09a7ca4f9bf71..4fbb1b0ccc4e9 100644
+--- a/airflow/www/static/js/types/index.ts
++++ b/airflow/www/static/js/types/index.ts
+@@ -71,6 +71,7 @@ interface TaskInstance {
+   mappedStates?: {
+     [key: string]: number;
+   };
++  queuedDttm?: string | null;
+   mapIndex?: number;
+   tryNumber?: number;
+   triggererJob?: Job;
+diff --git a/airflow/www/utils.py b/airflow/www/utils.py
+index bcf368ea20481..635bd83b67eda 100644
+--- a/airflow/www/utils.py
++++ b/airflow/www/utils.py
+@@ -122,6 +122,10 @@ def get_mapped_summary(parent_instance, task_instances):
+             group_state = state
+             break
+ 
++    group_queued_dttm = datetime_to_string(
++        min((ti.queued_dttm for ti in task_instances if ti.queued_dttm), default=None)
++    )
++
+     group_start_date = datetime_to_string(
+         min((ti.start_date for ti in task_instances if ti.start_date), default=None)
+     )
+@@ -133,6 +137,7 @@ def get_mapped_summary(parent_instance, task_instances):
+         "task_id": parent_instance.task_id,
+         "run_id": parent_instance.run_id,
+         "state": group_state,
++        "queued_dttm": group_queued_dttm,
+         "start_date": group_start_date,
+         "end_date": group_end_date,
+         "mapped_states": mapped_states,
+diff --git a/airflow/www/views.py b/airflow/www/views.py
+index 85375a518b3fe..c5e39a0cbe714 100644
+--- a/airflow/www/views.py
++++ b/airflow/www/views.py
+@@ -302,6 +302,7 @@ def dag_to_grid(dag: DagModel, dag_runs: Sequence[DagRun], session: Session):
+             TaskInstance._try_number,
+             func.min(TaskInstanceNote.content).label("note"),
+             func.count(func.coalesce(TaskInstance.state, sqla.literal("no_status"))).label("state_count"),
++            func.min(TaskInstance.queued_dttm).label("queued_dttm"),
+             func.min(TaskInstance.start_date).label("start_date"),
+             func.max(TaskInstance.end_date).label("end_date"),
+         )
+@@ -332,6 +333,7 @@ def _get_summary(task_instance):
+                     "task_id": task_instance.task_id,
+                     "run_id": task_instance.run_id,
+                     "state": task_instance.state,
++                    "queued_dttm": task_instance.queued_dttm,
+                     "start_date": task_instance.start_date,
+                     "end_date": task_instance.end_date,
+                     "try_number": wwwutils.get_try_count(task_instance._try_number, task_instance.state),
+@@ -361,15 +363,26 @@ def set_overall_state(record):
+                         record = {
+                             "task_id": ti_summary.task_id,
+                             "run_id": run_id,
++                            "queued_dttm": ti_summary.queued_dttm,
+                             "start_date": ti_summary.start_date,
+                             "end_date": ti_summary.end_date,
+                             "mapped_states": {ti_summary.state: ti_summary.state_count},
+                             "state": None,  # We change this before yielding
+                         }
+                         continue
++                    record["queued_dttm"] = min(
++                        filter(None, [record["queued_dttm"], ti_summary.queued_dttm]), default=None
++                    )
+                     record["start_date"] = min(
+                         filter(None, [record["start_date"], ti_summary.start_date]), default=None
+                     )
++                    # Sometimes the start date of a group might be before the queued date of the group
++                    if (
++                        record["queued_dttm"]
++                        and record["start_date"]
++                        and record["queued_dttm"] > record["start_date"]
++                    ):
++                        record["queued_dttm"] = None
+                     record["end_date"] = max(
+                         filter(None, [record["end_date"], ti_summary.end_date]), default=None
+                     )
+@@ -419,18 +432,24 @@ def get_summary(dag_run: DagRun):
+                 if item
+             ]
+ 
++            children_queued_dttms = (item["queued_dttm"] for item in child_instances)
+             children_start_dates = (item["start_date"] for item in child_instances)
+             children_end_dates = (item["end_date"] for item in child_instances)
+             children_states = {item["state"] for item in child_instances}
+ 
+             group_state = next((state for state in wwwutils.priority if state in children_states), None)
++            group_queued_dttm = min(filter(None, children_queued_dttms), default=None)
+             group_start_date = min(filter(None, children_start_dates), default=None)
+             group_end_date = max(filter(None, children_end_dates), default=None)
++            # Sometimes the start date of a group might be before the queued date of the group
++            if group_queued_dttm and group_start_date and group_queued_dttm > group_start_date:
++                group_queued_dttm = None
+ 
+             return {
+                 "task_id": task_group.group_id,
+                 "run_id": dag_run.run_id,
+                 "state": group_state,
++                "queued_dttm": group_queued_dttm,
+                 "start_date": group_start_date,
+                 "end_date": group_end_date,
+             }
+@@ -460,6 +479,7 @@ def get_mapped_group_summary(run_id: str, mapped_instances: Mapping[int, list[Ta
+                     if item and item["run_id"] == run_id
+                 ]
+ 
++                children_queued_dttms = (item["queued_dttm"] for item in child_instances)
+                 children_start_dates = (item["start_date"] for item in child_instances)
+                 children_end_dates = (item["end_date"] for item in child_instances)
+                 children_states = {item["state"] for item in child_instances}
+@@ -475,6 +495,7 @@ def get_mapped_group_summary(run_id: str, mapped_instances: Mapping[int, list[Ta
+                     mapped_states[value] += 1
+ 
+                 group_state = next((state for state in wwwutils.priority if state in children_states), None)
++                group_queued_dttm = min(filter(None, children_queued_dttms), default=None)
+                 group_start_date = min(filter(None, children_start_dates), default=None)
+                 group_end_date = max(filter(None, children_end_dates), default=None)
+ 
+@@ -482,6 +503,7 @@ def get_mapped_group_summary(run_id: str, mapped_instances: Mapping[int, list[Ta
+                     "task_id": task_group.group_id,
+                     "run_id": run_id,
+                     "state": group_state,
++                    "queued_dttm": group_queued_dttm,
+                     "start_date": group_start_date,
+                     "end_date": group_end_date,
+                     "mapped_states": mapped_states,
+diff --git a/airflow/www/yarn.lock b/airflow/www/yarn.lock
+index a3e6e864b7bda..4a2914ae94a92 100644
+--- a/airflow/www/yarn.lock
++++ b/airflow/www/yarn.lock
+@@ -9804,10 +9804,10 @@ react-focus-lock@^2.9.1:
+     use-callback-ref "^1.3.0"
+     use-sidecar "^1.1.2"
+ 
+-react-icons@^4.3.1:
+-  version "4.3.1"
+-  resolved "https://registry.yarnpkg.com/react-icons/-/react-icons-4.3.1.tgz#2fa92aebbbc71f43d2db2ed1aed07361124e91ca"
+-  integrity sha512-cB10MXLTs3gVuXimblAdI71jrJx8njrJZmNMEMC+sQu5B/BIOmlsAjskdqpn81y8UBVEGuHODd7/ci5DvoSzTQ==
++react-icons@^4.9.0:
++  version "4.9.0"
++  resolved "https://registry.yarnpkg.com/react-icons/-/react-icons-4.9.0.tgz#ba44f436a053393adb1bdcafbc5c158b7b70d2a3"
++  integrity sha512-ijUnFr//ycebOqujtqtV9PFS7JjhWg0QU6ykURVHuL4cbofvRCf3f6GMn9+fBktEFQOIVZnuAYLZdiyadRQRFg==
+ 
+ react-is@^16.13.1, react-is@^16.7.0, react-is@^16.8.1:
+   version "16.13.1"
+diff --git a/tests/www/views/test_views_grid.py b/tests/www/views/test_views_grid.py
+index 171b48211f547..57e7e5686558d 100644
+--- a/tests/www/views/test_views_grid.py
++++ b/tests/www/views/test_views_grid.py
+@@ -238,6 +238,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                     "instances": [
+                         {
+                             "run_id": "run_1",
++                            "queued_dttm": None,
+                             "start_date": None,
+                             "end_date": None,
+                             "note": None,
+@@ -247,6 +248,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                         },
+                         {
+                             "run_id": "run_2",
++                            "queued_dttm": None,
+                             "start_date": None,
+                             "end_date": None,
+                             "note": None,
+@@ -270,6 +272,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                                 {
+                                     "run_id": "run_1",
+                                     "mapped_states": {"success": 3},
++                                    "queued_dttm": None,
+                                     "start_date": None,
+                                     "end_date": None,
+                                     "state": "success",
+@@ -278,6 +281,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                                 {
+                                     "run_id": "run_2",
+                                     "mapped_states": {"no_status": 3},
++                                    "queued_dttm": None,
+                                     "start_date": None,
+                                     "end_date": None,
+                                     "state": None,
+@@ -297,12 +301,14 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                             "end_date": None,
+                             "run_id": "run_1",
+                             "mapped_states": {"success": 3},
++                            "queued_dttm": None,
+                             "start_date": None,
+                             "state": "success",
+                             "task_id": "mapped_task_group",
+                         },
+                         {
+                             "run_id": "run_2",
++                            "queued_dttm": None,
+                             "start_date": None,
+                             "end_date": None,
+                             "state": None,
+@@ -323,6 +329,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                                 {
+                                     "run_id": "run_1",
+                                     "mapped_states": {"success": 4},
++                                    "queued_dttm": None,
+                                     "start_date": None,
+                                     "end_date": None,
+                                     "state": "success",
+@@ -331,6 +338,7 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                                 {
+                                     "run_id": "run_2",
+                                     "mapped_states": {"no_status": 2, "running": 1, "success": 1},
++                                    "queued_dttm": None,
+                                     "start_date": "2021-07-01T01:00:00+00:00",
+                                     "end_date": "2021-07-01T01:02:03+00:00",
+                                     "state": "running",
+@@ -348,12 +356,14 @@ def test_one_run(admin_client, dag_with_runs: list[DagRun], session):
+                         {
+                             "end_date": None,
+                             "run_id": "run_1",
++                            "queued_dttm": None,
+                             "start_date": None,
+                             "state": "success",
+                             "task_id": "group",
+                         },
+                         {
+                             "run_id": "run_2",
++                            "queued_dttm": None,
+                             "start_date": "2021-07-01T01:00:00+00:00",
+                             "end_date": "2021-07-01T01:02:03+00:00",
+                             "state": "running",
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,349 @@
+  Task-ID: saltstack__salt-62278@f77f94a
+  Please checkout to this commit first: 7823bcfdc3a4a95b018a142fc0b651e57b59ba21
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [TECH DEBT] Add memory leak test to the test suite.
+Add memory leak test to the test suite.
+
+a. check memory consumption 
+b. start master, minion 
+c. check memory consumption 
+d. run a state file multiple times 
+e. check memory consumption and make sure it goes back down to the level on step c
+  </issue>
+  
+  <patch>
+  diff --git a/tests/integration/daemons/test_masterapi.py b/tests/integration/daemons/test_masterapi.py
+deleted file mode 100644
+index be511d191bbb..000000000000
+--- a/tests/integration/daemons/test_masterapi.py
++++ /dev/null
+@@ -1,82 +0,0 @@
+-import os
+-import shutil
+-import stat
+-
+-import pytest
+-import salt.utils.files
+-import salt.utils.stringutils
+-from tests.support.case import ShellCase
+-from tests.support.runtests import RUNTIME_VARS
+-
+-
+-class AutosignGrainsTest(ShellCase):
+-    """
+-    Test autosigning minions based on grain values.
+-    """
+-
+-    def setUp(self):
+-        # all read, only owner write
+-        self.autosign_file_permissions = (
+-            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH | stat.S_IWUSR
+-        )
+-        self.autosign_file_path = os.path.join(RUNTIME_VARS.TMP, "autosign_file")
+-        shutil.copyfile(
+-            os.path.join(RUNTIME_VARS.FILES, "autosign_grains", "autosign_file"),
+-            self.autosign_file_path,
+-        )
+-        os.chmod(self.autosign_file_path, self.autosign_file_permissions)
+-
+-        self.run_key("-d minion -y")
+-        self.run_call(
+-            "test.ping -l quiet"
+-        )  # get minion to try to authenticate itself again
+-
+-        if "minion" in self.run_key("-l acc"):
+-            self.tearDown()
+-            self.skipTest("Could not deauthorize minion")
+-        if "minion" not in self.run_key("-l un"):
+-            self.tearDown()
+-            self.skipTest("minion did not try to reauthenticate itself")
+-
+-        self.autosign_grains_dir = os.path.join(self.master_opts["autosign_grains_dir"])
+-        if not os.path.isdir(self.autosign_grains_dir):
+-            os.makedirs(self.autosign_grains_dir)
+-
+-    def tearDown(self):
+-        shutil.copyfile(
+-            os.path.join(RUNTIME_VARS.FILES, "autosign_file"), self.autosign_file_path
+-        )
+-        os.chmod(self.autosign_file_path, self.autosign_file_permissions)
+-
+-        self.run_call("test.ping -l quiet")  # get minion to authenticate itself again
+-
+-        try:
+-            if os.path.isdir(self.autosign_grains_dir):
+-                shutil.rmtree(self.autosign_grains_dir)
+-        except AttributeError:
+-            pass
+-
+-    @pytest.mark.slow_test
+-    def test_autosign_grains_accept(self):
+-        grain_file_path = os.path.join(self.autosign_grains_dir, "test_grain")
+-        with salt.utils.files.fopen(grain_file_path, "w") as f:
+-            f.write(salt.utils.stringutils.to_str("#invalid_value\ncheese"))
+-        os.chmod(grain_file_path, self.autosign_file_permissions)
+-
+-        self.run_call(
+-            "test.ping -l quiet"
+-        )  # get minion to try to authenticate itself again
+-        self.assertIn("minion", self.run_key("-l acc"))
+-
+-    @pytest.mark.slow_test
+-    def test_autosign_grains_fail(self):
+-        grain_file_path = os.path.join(self.autosign_grains_dir, "test_grain")
+-        with salt.utils.files.fopen(grain_file_path, "w") as f:
+-            f.write(salt.utils.stringutils.to_str("#cheese\ninvalid_value"))
+-        os.chmod(grain_file_path, self.autosign_file_permissions)
+-
+-        self.run_call(
+-            "test.ping -l quiet"
+-        )  # get minion to try to authenticate itself again
+-        self.assertNotIn("minion", self.run_key("-l acc"))
+-        self.assertIn("minion", self.run_key("-l un"))
+diff --git a/tests/integration/daemons/__init__.py b/tests/pytests/integration/daemons/__init__.py
+similarity index 100%
+rename from tests/integration/daemons/__init__.py
+rename to tests/pytests/integration/daemons/__init__.py
+diff --git a/tests/pytests/integration/daemons/test_masterapi.py b/tests/pytests/integration/daemons/test_masterapi.py
+new file mode 100644
+index 000000000000..fede1fa43998
+--- /dev/null
++++ b/tests/pytests/integration/daemons/test_masterapi.py
+@@ -0,0 +1,119 @@
++"""
++Test autosigning minions based on grain values.
++"""
++
++import os
++import shutil
++import stat
++
++import pytest
++import salt.utils.files
++import salt.utils.stringutils
++from tests.support.runtests import RUNTIME_VARS
++
++pytestmark = [pytest.mark.slow_test]
++
++
++@pytest.fixture
++def autosign_file_permissions():
++    return stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH | stat.S_IWUSR
++
++
++@pytest.fixture
++def autosign_file_path():
++    return os.path.join(RUNTIME_VARS.TMP, "autosign_file")
++
++
++@pytest.fixture
++def autosign_grains_dir(salt_master):
++    return salt_master.config["autosign_grains_dir"]
++
++
++@pytest.fixture(autouse=True)
++def setup_autosign_files(
++    autosign_file_permissions,
++    autosign_file_path,
++    autosign_grains_dir,
++    salt_key_cli,
++    salt_call_cli,
++    salt_minion,
++):
++    shutil.copyfile(
++        os.path.join(RUNTIME_VARS.FILES, "autosign_grains", "autosign_file"),
++        autosign_file_path,
++    )
++    os.chmod(autosign_file_path, autosign_file_permissions)
++
++    salt_key_cli.run("-d", salt_minion.id, "-y")
++    salt_call_cli.run(
++        "test.ping", "-l", "quiet"
++    )  # get minion to try to authenticate itself again
++
++    skip_msg = ""
++    if salt_minion.id in salt_key_cli.run("-l", "acc").data:
++        skip_msg = "Could not deauthorize minion"
++    if salt_minion.id not in salt_key_cli.run("-l", "un").data:
++        skip_msg = "minion did not try to reauthenticate itself"
++
++    if not os.path.isdir(autosign_grains_dir):
++        os.makedirs(autosign_grains_dir)
++
++    if not skip_msg:
++        yield
++
++    shutil.copyfile(
++        os.path.join(RUNTIME_VARS.FILES, "autosign_file"), autosign_file_path
++    )
++    os.chmod(autosign_file_path, autosign_file_permissions)
++
++    salt_call_cli.run(
++        "test.ping", "-l", "quiet"
++    )  # get minion to authenticate itself again
++
++    try:
++        if os.path.isdir(autosign_grains_dir):
++            shutil.rmtree(autosign_grains_dir)
++    except AttributeError:
++        pass
++
++    if skip_msg:
++        pytest.skip(skip_msg)
++
++
++@pytest.mark.slow_test
++def test_autosign_grains_accept(
++    autosign_grains_dir,
++    autosign_file_permissions,
++    salt_minion,
++    salt_call_cli,
++    salt_key_cli,
++):
++    grain_file_path = os.path.join(autosign_grains_dir, "test_grain")
++    with salt.utils.files.fopen(grain_file_path, "w") as f:
++        f.write(salt.utils.stringutils.to_str("#invalid_value\ncheese"))
++    os.chmod(grain_file_path, autosign_file_permissions)
++
++    salt_call_cli.run(
++        "test.ping", "-l", "quiet"
++    )  # get minion to try to authenticate itself again
++    assert salt_minion.id in salt_key_cli.run("-l", "acc")
++
++
++@pytest.mark.slow_test
++def test_autosign_grains_fail(
++    autosign_grains_dir,
++    autosign_file_permissions,
++    salt_minion,
++    salt_call_cli,
++    salt_key_cli,
++):
++    grain_file_path = os.path.join(autosign_grains_dir, "test_grain")
++    with salt.utils.files.fopen(grain_file_path, "w") as f:
++        f.write(salt.utils.stringutils.to_str("#cheese\ninvalid_value"))
++    os.chmod(grain_file_path, autosign_file_permissions)
++
++    salt_call_cli.run(
++        "test.ping", "-l", "quiet"
++    )  # get minion to try to authenticate itself again
++    assert salt_minion.id not in salt_key_cli.run("-l", "acc")
++    assert salt_minion.id in salt_key_cli.run("-l", "un")
+diff --git a/tests/pytests/integration/daemons/test_memory_leak.py b/tests/pytests/integration/daemons/test_memory_leak.py
+new file mode 100644
+index 000000000000..3f9c17474344
+--- /dev/null
++++ b/tests/pytests/integration/daemons/test_memory_leak.py
+@@ -0,0 +1,77 @@
++import time
++
++import pytest
++
++try:
++    import psutil
++
++    HAS_PSUTIL = True
++except ImportError:
++    HAS_PSUTIL = False
++
++pytestmark = [
++    pytest.mark.skipif(not HAS_PSUTIL, reason="Need psutil to test memory leak"),
++    pytest.mark.slow_test,
++]
++
++
++@pytest.fixture
++def testfile_path(tmp_path):
++    return tmp_path / "testfile"
++
++
++@pytest.fixture
++def file_add_sls(testfile_path, base_env_state_tree_root_dir):
++    sls_name = "file_add"
++    sls_contents = """
++    {}:
++      file.managed:
++        - source: salt://testfile
++        - makedirs: true
++    """.format(
++        testfile_path
++    )
++    with pytest.helpers.temp_file(
++        "{}.sls".format(sls_name), sls_contents, base_env_state_tree_root_dir
++    ):
++        yield sls_name
++
++
++@pytest.fixture
++def file_delete_sls(testfile_path, base_env_state_tree_root_dir):
++    sls_name = "file_delete"
++    sls_contents = """
++    delete_file:
++      file.absent:
++        - name: {}
++    """.format(
++        testfile_path
++    )
++    with pytest.helpers.temp_file(
++        "{}.sls".format(sls_name), sls_contents, base_env_state_tree_root_dir
++    ):
++        yield sls_name
++
++
++@pytest.mark.flaky(max_runs=4)
++def test_memory_leak(salt_cli, salt_minion, file_add_sls, file_delete_sls):
++    usage_ts_data = []
++    max_ts_points = 100
++
++    # Try to drive up memory usage
++    for i in range(4):
++        salt_cli.run("state.sls", file_add_sls, minion_tgt=salt_minion.id)
++        salt_cli.run("state.sls", file_delete_sls, minion_tgt=salt_minion.id)
++
++    while len(usage_ts_data) < max_ts_points:
++        usg = psutil.virtual_memory()
++        usage_ts_data.append((time.time(), usg.total - usg.available))
++        time.sleep(0.05)
++
++    # find the slope of the simple SSE linear regression
++    y_bar = sum(y for y, y in usage_ts_data) / len(usage_ts_data)
++    x_bar = sum(x for x, y in usage_ts_data) / len(usage_ts_data)
++    numerator = sum(x * y - y_bar * x for x, y in usage_ts_data)
++    denominator = sum(x * x - x_bar * x for x, y in usage_ts_data)
++    slope = numerator / denominator
++    assert slope <= 0
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

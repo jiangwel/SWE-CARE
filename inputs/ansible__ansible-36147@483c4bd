@@ -1,0 +1,575 @@
+  Task-ID: ansible__ansible-36147@483c4bd
+  Please checkout to this commit first: dc902a50223e334cc87a1014534f1fb13eb58fc1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  nxos_bgp_af issues
+<!---
+Verify first that your issue/request is not already reported on GitHub.
+Also test if the latest release, and devel branch are affected too.
+-->
+
+##### ISSUE TYPE
+<!--- Pick one below and delete the rest -->
+ - Bug Report
+
+##### COMPONENT NAME
+<!---
+Name of the module, plugin, task or feature
+Do not include extra details here, e.g. "vyos_command" not "the network module vyos_command" or the full path
+-->
+nxos_bgp_af
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes below -->
+```
+ansible 2.5.0 (devel 788010d0f0) last updated 2018/01/08 11:49:21 (GMT -400)
+  config file = /etc/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /root/agents-ci/ansible/lib/ansible
+  executable location = /root/agents-ci/ansible/bin/ansible
+  python version = 2.7.6 (default, Oct 26 2016, 20:30:19) [GCC 4.8.4]
+```
+
+##### OS / ENVIRONMENT
+<!---
+Mention the OS you are running Ansible from, and the OS you are
+managing, or say "N/A" for anything that is not platform-specific.
+Also mention the specific version of what you are trying to control,
+e.g. if this is a network bug the version of firmware on the network device.
+-->
+Ansible Server : Ubuntu 14.04
+Device: N9K running 7.0(3)I5(2)
+
+##### SUMMARY
+There are few issues with nxos_bgp_af module.
+
+1. Most of the parameters like dampening_state, inject_map, redistribute, networks etc. are not idempotent.
+2. Setting parameters to 'default' does not work for most parameters.
+3. The integration tests do not cover all the parameters or multiple vrfs.
+
+Note: I will open a PR shortly to address these above issues
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/network/nxos/nxos_bgp_af.py b/lib/ansible/modules/network/nxos/nxos_bgp_af.py
+index 1327fe5f4d5ee7..a19c1d1a7444c7 100644
+--- a/lib/ansible/modules/network/nxos/nxos_bgp_af.py
++++ b/lib/ansible/modules/network/nxos/nxos_bgp_af.py
+@@ -337,42 +337,15 @@ def get_value(arg, config, module):
+     command_val_re = re.compile(r'(?:{0}\s)(?P<value>.*)$'.format(command), re.M)
+     has_command_val = command_val_re.search(config)
+ 
+-    if arg == 'inject_map':
+-        inject_re = r'.*inject-map\s(?P<inject_map>\S+)\sexist-map\s(?P<exist_map>\S+)-*'
+-
+-        value = []
+-        match_inject = re.match(inject_re, config, re.DOTALL)
+-        if match_inject:
+-            inject_group = match_inject.groupdict()
+-            inject_map = inject_group['inject_map']
+-            exist_map = inject_group['exist_map']
+-            value.append(inject_map)
+-            value.append(exist_map)
+-
+-            inject_map_command = ('inject-map {0} exist-map {1} '
+-                                  'copy-attributes'.format(
+-                                      inject_group['inject_map'],
+-                                      inject_group['exist_map']))
+-
+-            inject_re = re.compile(r'\s+{0}\s*$'.format(inject_map_command), re.M)
+-            if inject_re.search(config):
+-                value.append('copy_attributes')
+-
+-    elif arg == 'networks':
++    if arg in ['networks', 'redistribute', 'inject_map']:
+         value = []
+-        for network in command_val_re.findall(config):
+-            value.append(network.split())
+-
+-    elif arg == 'redistribute':
+-        value = []
+-        if has_command_val:
+-            value = has_command_val.group('value').split()
+-
+-            if value:
+-                if len(value) == 3:
+-                    value.pop(1)
+-                elif len(value) == 4:
+-                    value = ['{0} {1}'.format(value[0], value[1]), value[3]]
++        for ele in command_val_re.findall(config):
++            tl = ele.split()
++            if 'exist-map' in tl:
++                tl.remove('exist-map')
++            elif 'route-map' in tl:
++                tl.remove('route-map')
++            value.append(tl)
+ 
+     elif command == 'distance':
+         distance_re = r'.*distance\s(?P<d_ebgp>\w+)\s(?P<d_ibgp>\w+)\s(?P<d_local>\w+)'
+@@ -408,7 +381,9 @@ def get_value(arg, config, module):
+                     value = dampening_group['suppress']
+                 elif arg == 'dampening_max_suppress_time':
+                     value = dampening_group['max_suppress']
+-
++            else:
++                if arg == 'dampening_state':
++                    value = True if 'dampening' in config else False
+     elif arg == 'table_map_filter':
+         tmf_regex = re.compile(r'\s+table-map.*filter$', re.M)
+         value = False
+@@ -464,7 +439,14 @@ def get_existing(module, args, warnings):
+         if config:
+             for arg in args:
+                 if arg not in ['asn', 'afi', 'safi', 'vrf']:
+-                    existing[arg] = get_value(arg, config, module)
++                    gv = get_value(arg, config, module)
++                    if gv:
++                        existing[arg] = gv
++                    else:
++                        if arg != 'client_to_client' and arg in PARAM_TO_DEFAULT_KEYMAP.keys():
++                            existing[arg] = PARAM_TO_DEFAULT_KEYMAP.get(arg)
++                        else:
++                            existing[arg] = gv
+ 
+             existing['asn'] = existing_asn
+             existing['afi'] = module.params['afi']
+@@ -540,6 +522,11 @@ def default_existing(existing_value, key, value):
+             elif len(maps) == 3:
+                 commands.append('no inject-map {0} exist-map {1} '
+                                 'copy-attributes'.format(maps[0], maps[1]))
++
++    elif key == 'redistribute':
++        for maps in existing_value:
++            commands.append('no redistribute {0} route-map {1}'.format(maps[0], maps[1]))
++
+     else:
+         commands.append('no {0} {1}'.format(key, existing_value))
+     return commands
+@@ -557,6 +544,13 @@ def get_network_command(existing, key, value):
+             elif len(inet) == 2:
+                 command = '{0} {1} route-map {2}'.format(key, inet[0], inet[1])
+             commands.append(command)
++    for enet in existing_networks:
++        if enet not in value:
++            if len(enet) == 1:
++                command = 'no {0} {1}'.format(key, enet[0])
++            elif len(enet) == 2:
++                command = 'no {0} {1} route-map {2}'.format(key, enet[0], enet[1])
++            commands.append(command)
+     return commands
+ 
+ 
+@@ -575,21 +569,33 @@ def get_inject_map_command(existing, key, value):
+                            'copy-attributes'.format(maps[0],
+                                                     maps[1]))
+             commands.append(command)
++    for emaps in existing_maps:
++        if emaps not in value:
++            if len(emaps) == 2:
++                command = ('no inject-map {0} exist-map {1}'.format(
++                    emaps[0], emaps[1]))
++            elif len(emaps) == 3:
++                command = ('no inject-map {0} exist-map {1} '
++                           'copy-attributes'.format(emaps[0],
++                                                    emaps[1]))
++            commands.append(command)
+     return commands
+ 
+ 
+ def get_redistribute_command(existing, key, value):
+     commands = []
++    existing_rules = existing.get('redistribute', [])
+     for rule in value:
+-        if rule[1] == 'default':
+-            existing_rule = existing.get('redistribute', [])
+-            for each_rule in existing_rule:
+-                if rule[0] in each_rule:
+-                    command = 'no {0} {1} route-map {2}'.format(
+-                        key, each_rule[0], each_rule[1])
+-                    commands.append(command)
+-        else:
+-            command = '{0} {1} route-map {2}'.format(key, rule[0], rule[1])
++        if not isinstance(rule, list):
++            rule = [rule]
++        if rule not in existing_rules:
++            command = ('redistribute {0} route-map {1}'.format(
++                rule[0], rule[1]))
++            commands.append(command)
++    for erule in existing_rules:
++        if erule not in value:
++            command = ('no redistribute {0} route-map {1}'.format(
++                erule[0], erule[1]))
+             commands.append(command)
+     return commands
+ 
+@@ -758,6 +764,15 @@ def main():
+                 module.fail_json(msg='dampening_routemap cannot be used with'
+                                      ' the {0} param'.format(param))
+ 
++    if module.params['dampening_state']:
++        if module.params['dampening_routemap']:
++            module.fail_json(msg='dampening_state cannot be used with'
++                                 ' the dampening_routemap param')
++        for param in DAMPENING_PARAMS:
++            if module.params[param]:
++                module.fail_json(msg='dampening_state cannot be used with'
++                                     ' the {0} param'.format(param))
++
+     if module.params['advertise_l2vpn_evpn']:
+         if module.params['vrf'] == 'default':
+             module.fail_json(msg='It is not possible to advertise L2VPN '
+@@ -780,7 +795,7 @@ def main():
+     proposed_args = dict((k, v) for k, v in module.params.items()
+                          if v is not None and k in args)
+ 
+-    for arg in ['networks', 'inject_map']:
++    for arg in ['networks', 'inject_map', 'redistribute']:
+         if proposed_args.get(arg):
+             if proposed_args[arg][0] == 'default':
+                 proposed_args[arg] = 'default'
+diff --git a/test/integration/targets/nxos_bgp_af/defaults/main.yaml b/test/integration/targets/nxos_bgp_af/defaults/main.yaml
+index 5f709c5aac15f1..525b7aab903bad 100644
+--- a/test/integration/targets/nxos_bgp_af/defaults/main.yaml
++++ b/test/integration/targets/nxos_bgp_af/defaults/main.yaml
+@@ -1,2 +1,5 @@
+ ---
+ testcase: "*"
++vrfs:
++  - default
++  - myvrf
+diff --git a/test/integration/targets/nxos_bgp_af/tests/common/sanity.yaml b/test/integration/targets/nxos_bgp_af/tests/common/sanity.yaml
+index c0ac6b4d1650fd..c9fc502c3007b9 100644
+--- a/test/integration/targets/nxos_bgp_af/tests/common/sanity.yaml
++++ b/test/integration/targets/nxos_bgp_af/tests/common/sanity.yaml
+@@ -35,10 +35,10 @@
+       provider: "{{ connection }}"
+     when: platform is search('N9K')
+ 
+-  - name: "Configure BGP_AF defaults"
+-    nxos_bgp_af: &configure_default
++  - name: "Configure BGP_AF 1"
++    nxos_bgp_af: &configure1
+       asn: 65535
+-      vrf: TESTING
++      vrf: testing
+       afi: ipv4
+       safi: unicast
+       advertise_l2vpn_evpn: "{{advertise_l2vpn_evpn|default(omit)}}"
+@@ -51,7 +51,7 @@
+         - "result.changed == true"
+ 
+   - name: "Check Idempotence"
+-    nxos_bgp_af: *configure_default
++    nxos_bgp_af: *configure1
+     register: result
+ 
+   - assert: &false
+@@ -59,35 +59,91 @@
+         - "result.changed == false"
+ 
+   - name: "Remove BGP"
+-    nxos_bgp: *remove
++    nxos_bgp_af: &remove_af
++      asn: 65535
++      vrf: testing
++      afi: ipv4
++      safi: unicast
++      state: absent
++      provider: "{{ connection }}"
+     register: result
+ 
+   - assert: *true
+ 
+-  - name: "Check Idempotence"
+-    nxos_bgp: *remove
+-    register: result
+-
+-  - assert: *false
+-
+-  - name: "Configure BGP_AF non defaults"
+-    nxos_bgp_af: &configure_non_default
++  - name: "Configure BGP_AF 2"
++    nxos_bgp_af: &configure2
+       asn: 65535
+-      vrf: TESTING
++      vrf: "{{ item }}"
+       afi: ipv4
+       safi: unicast
++      dampening_state: True
+       additional_paths_install: true
+       additional_paths_receive: true
+       additional_paths_selection: RouteMap
+       additional_paths_send: true
+-      advertise_l2vpn_evpn: "{{advertise_l2vpn_evpn|default(omit)}}"
+-      client_to_client: false
+-      dampen_igp_metric: 200
+-      dampening_half_time: 1
+-      dampening_max_suppress_time: 4
+-      dampening_reuse_time: 2
+-      dampening_suppress_time: 3
++      client_to_client: False
+       default_information_originate: true
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *configure2
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Configure BGP_AF def2"
++    nxos_bgp_af: &configuredef2
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampening_state: False
++      additional_paths_install: False
++      additional_paths_receive: False
++      additional_paths_selection: default
++      additional_paths_send: False
++      client_to_client: True
++      default_information_originate: False
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *configuredef2
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Remove BGP"
++    nxos_bgp_af: &remove_af_vrf
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      state: absent
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Configure BGP_AF 3"
++    nxos_bgp_af: &configure3
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampening_routemap: 'abcd'
+       default_metric: 50
+       distance_ebgp: 30
+       distance_ibgp: 60
+@@ -100,24 +156,150 @@
+       table_map_filter: true
+       state: present
+       provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
+     register: result
+ 
+   - assert: *true
+ 
+   - name: "Check Idempotence"
+-    nxos_bgp_af: *configure_non_default
++    nxos_bgp_af: *configure3
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Configure BGP_AF def3"
++    nxos_bgp_af: &configuredef3
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampening_routemap: default
++      default_metric: default
++      distance_ebgp: default
++      distance_ibgp: default
++      distance_local: default
++      maximum_paths: default
++      maximum_paths_ibgp: default
++      next_hop_route_map: default
++      suppress_inactive: False
++      table_map: default
++      table_map_filter: False
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *configuredef3
++    with_items: "{{ vrfs }}"
+     register: result
+ 
+   - assert: *false
+ 
+   - name: "Remove BGP"
+-    nxos_bgp: *remove
++    nxos_bgp_af: *remove_af_vrf
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Configure BGP_AF 4"
++    nxos_bgp_af: &configure4
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampen_igp_metric: 200
++      dampening_half_time: 1
++      dampening_max_suppress_time: 4
++      dampening_reuse_time: 2
++      dampening_suppress_time: 3
++      inject_map: [['lax_inject_map', 'lax_exist_map'], ['nyc_inject_map', 'nyc_exist_map', 'copy-attributes'], ['fsd_inject_map', 'fsd_exist_map']]
++      networks: [['10.0.0.0/16', 'routemap_LA'], ['192.168.1.1/32', 'Chicago'], ['192.168.2.0/24'], ['192.168.3.0/24', 'routemap_NYC']]
++      redistribute: [['direct', 'rm_direct'], ['lisp', 'rm_lisp']]
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
+     register: result
+ 
+   - assert: *true
+ 
+   - name: "Check Idempotence"
+-    nxos_bgp: *remove
++    nxos_bgp_af: *configure4
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Configure BGP_AF 5"
++    nxos_bgp_af: &configure5
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampen_igp_metric: 300
++      dampening_half_time: 10
++      dampening_max_suppress_time: 40
++      dampening_reuse_time: 20
++      dampening_suppress_time: 30
++      inject_map: [['fsd_inject_map', 'fsd_exist_map']]
++      networks: [['192.168.2.0/24']]
++      redistribute: [['lisp', 'rm_lisp']]
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *configure5
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Configure BGP_AF def5"
++    nxos_bgp_af: &configuredef5
++      asn: 65535
++      vrf: "{{ item }}"
++      afi: ipv4
++      safi: unicast
++      dampen_igp_metric: default
++      dampening_half_time: default
++      dampening_max_suppress_time: default
++      dampening_reuse_time: default
++      dampening_suppress_time: default
++      inject_map: default
++      networks: default
++      redistribute: default
++      state: present
++      provider: "{{ connection }}"
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *configuredef5
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *false
++
++  - name: "Remove BGP"
++    nxos_bgp_af: *remove_af_vrf
++    with_items: "{{ vrfs }}"
++    register: result
++
++  - assert: *true
++
++  - name: "Check Idempotence"
++    nxos_bgp_af: *remove_af_vrf
++    with_items: "{{ vrfs }}"
+     register: result
+ 
+   - assert: *false
+@@ -141,6 +323,12 @@
+       provider: "{{ connection }}"
+     ignore_errors: yes
+ 
++  # Some platforms will timeout if the
++  # 'no nv overlay evpn' command is sent
++  # too quickly followin bgp disablement.
++  - pause:
++      seconds: 5
++
+   - name: "Remove nv overlay evpn"
+     nxos_config:
+       lines:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

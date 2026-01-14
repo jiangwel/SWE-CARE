@@ -1,0 +1,346 @@
+  Task-ID: dbt-labs__dbt-core-1453@70206b1
+  Please checkout to this commit first: cc8ef4774798059b4a0ee4364b6944a487b2fa6b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Warn for packages that are not pinned to a specific version
+## Feature
+
+### Feature description
+When we make breaking changes to repos like `dbt-utils`, we invariably break _someone's_ project. This happens when people 1) don't specify a version/revision for their package or 2) specify something overly broad, like `master`.
+
+While this is pretty well documented (we could do a better job of documenting this in the actual packages), dbt should also WARN if a package is specified without a version/revision, or with the revision `master`. We should additionally add a config (project-level? profile-level? in the `packages.yml` file?) which opts out of this warning.
+
+### Who will this benefit?
+Folks that are using packages and don't want external code changes to brick their projects.
+  </issue>
+  
+  <patch>
+  diff --git a/core/dbt/contracts/project.py b/core/dbt/contracts/project.py
+index 9e79101f52a..3bda33e2500 100644
+--- a/core/dbt/contracts/project.py
++++ b/core/dbt/contracts/project.py
+@@ -188,6 +188,9 @@ class Project(APIObject):
+             'items': {'type': 'string'},
+             'description': 'The git revision to use, if it is not tip',
+         },
++        'warn-unpinned': {
++            'type': 'boolean',
++        }
+     },
+     'required': ['git'],
+ }
+diff --git a/core/dbt/task/deps.py b/core/dbt/task/deps.py
+index aaf37979ef6..50bc0cff25c 100644
+--- a/core/dbt/task/deps.py
++++ b/core/dbt/task/deps.py
+@@ -25,6 +25,7 @@
+ 
+ DOWNLOADS_PATH = None
+ REMOVE_DOWNLOADS = False
++PIN_PACKAGE_URL = 'https://docs.getdbt.com/docs/package-management#section-specifying-package-versions' # noqa
+ 
+ 
+ def _initialize_downloads():
+@@ -215,6 +216,8 @@ class GitPackage(Package):
+     SCHEMA = GIT_PACKAGE_CONTRACT
+ 
+     def __init__(self, *args, **kwargs):
++        if 'warn_unpinned' in kwargs:
++            kwargs['warn-unpinned'] = kwargs.pop('warn_unpinned')
+         super(GitPackage, self).__init__(*args, **kwargs)
+         self._checkout_name = hashlib.md5(six.b(self.git)).hexdigest()
+         self.version = self._contents.get('revision')
+@@ -252,8 +255,12 @@ def nice_version_name(self):
+         return "revision {}".format(self.version_name())
+ 
+     def incorporate(self, other):
++        # if one is True, make both be True.
++        warn_unpinned = self.warn_unpinned and other.warn_unpinned
++
+         return GitPackage(git=self.git,
+-                          revision=(self.version + other.version))
++                          revision=(self.version + other.version),
++                          warn_unpinned=warn_unpinned)
+ 
+     def _resolve_version(self):
+         requested = set(self.version)
+@@ -263,6 +270,10 @@ def _resolve_version(self):
+                 '{} contains: {}'.format(self.git, requested))
+         self.version = requested.pop()
+ 
++    @property
++    def warn_unpinned(self):
++        return self.get('warn-unpinned', True)
++
+     def _checkout(self, project):
+         """Performs a shallow clone of the repository into the downloads
+         directory. This function can be called repeatedly. If the project has
+@@ -287,6 +298,13 @@ def _checkout(self, project):
+ 
+     def _fetch_metadata(self, project):
+         path = self._checkout(project)
++        if self.version[0] == 'master' and self.warn_unpinned:
++            dbt.exceptions.warn_or_error(
++                'Version for {} not pinned - "master" may introduce breaking '
++                'changes without warning! See {}'
++                .format(self.git, PIN_PACKAGE_URL),
++                log_fmt='WARNING: {}'
++            )
+         loaded = project.from_project_root(path, {})
+         return ProjectPackageMetadata(loaded)
+ 
+diff --git a/test/integration/006_simple_dependency_test/test_simple_dependency.py b/test/integration/006_simple_dependency_test/test_simple_dependency.py
+index cd0ac9847fa..75222dd9f91 100644
+--- a/test/integration/006_simple_dependency_test/test_simple_dependency.py
++++ b/test/integration/006_simple_dependency_test/test_simple_dependency.py
+@@ -1,5 +1,6 @@
+ import os
+ from test.integration.base import DBTIntegrationTest, use_profile
++from dbt.exceptions import CompilationException
+ 
+ 
+ class TestSimpleDependency(DBTIntegrationTest):
+@@ -21,13 +22,14 @@ def packages_config(self):
+         return {
+             "packages": [
+                 {
+-                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project'
++                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
++                    'warn-unpinned': False,
+                 }
+             ]
+         }
+ 
+     @use_profile('postgres')
+-    def test_simple_dependency(self):
++    def test_postgres_simple_dependency(self):
+         self.run_dbt(["deps"])
+         results = self.run_dbt(["run"])
+         self.assertEqual(len(results),  4)
+@@ -49,7 +51,7 @@ def test_simple_dependency(self):
+         self.assertTablesEqual("seed","incremental")
+ 
+     @use_profile('postgres')
+-    def test_simple_dependency_with_models(self):
++    def test_postgres_simple_dependency_with_models(self):
+         self.run_dbt(["deps"])
+         results = self.run_dbt(["run", '--models', 'view_model+'])
+         self.assertEqual(len(results),  2)
+@@ -66,6 +68,37 @@ def test_simple_dependency_with_models(self):
+         self.assertEqual(created_models['view_summary'], 'view')
+ 
+ 
++class TestSimpleDependencyUnpinned(DBTIntegrationTest):
++    def setUp(self):
++        DBTIntegrationTest.setUp(self)
++        self.run_sql_file("test/integration/006_simple_dependency_test/seed.sql")
++
++    @property
++    def schema(self):
++        return "simple_dependency_006"
++
++    @property
++    def models(self):
++        return "test/integration/006_simple_dependency_test/models"
++
++    @property
++    def packages_config(self):
++        return {
++            "packages": [
++                {
++                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
++                    'warn-unpinned': True,
++                }
++            ]
++        }
++
++    @use_profile('postgres')
++    def test_postgres_simple_dependency(self):
++        self.run_dbt(['deps'], strict=False)
++        with self.assertRaises(CompilationException):
++            self.run_dbt(["deps"])
++
++
+ class TestSimpleDependencyWithDuplicates(DBTIntegrationTest):
+     @property
+     def schema(self):
+@@ -81,10 +114,12 @@ def packages_config(self):
+         return {
+             "packages": [
+                 {
+-                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project'
++                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
++                    'warn-unpinned': False,
+                 },
+                 {
+-                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project.git'
++                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project.git',
++                    'warn-unpinned': False,
+                 }
+             ]
+         }
+@@ -147,6 +182,7 @@ def packages_config(self):
+                 {
+                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
+                     'revision': 'master',
++                    'warn-unpinned': False,
+                 },
+             ]
+         }
+@@ -168,7 +204,7 @@ def deps_run_assert_equality(self):
+         self.assertEqual(created_models['incremental'], 'table')
+ 
+     @use_profile('postgres')
+-    def test_simple_dependency(self):
++    def test_postgres_simple_dependency(self):
+         self.deps_run_assert_equality()
+ 
+         self.assertTablesEqual("seed_summary","view_summary")
+@@ -178,7 +214,7 @@ def test_simple_dependency(self):
+         self.deps_run_assert_equality()
+ 
+     @use_profile('postgres')
+-    def test_empty_models_not_compiled_in_dependencies(self):
++    def test_postgres_empty_models_not_compiled_in_dependencies(self):
+         self.deps_run_assert_equality()
+ 
+         models = self.get_models_in_schema()
+diff --git a/test/integration/007_graph_selection_tests/test_schema_test_graph_selection.py b/test/integration/007_graph_selection_tests/test_schema_test_graph_selection.py
+index bc5971bd6de..df4fcd90de1 100644
+--- a/test/integration/007_graph_selection_tests/test_schema_test_graph_selection.py
++++ b/test/integration/007_graph_selection_tests/test_schema_test_graph_selection.py
+@@ -17,7 +17,7 @@ def models(self):
+     def packages_config(self):
+         return {
+             "packages": [
+-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project'}
++                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+             ]
+         }
+ 
+diff --git a/test/integration/008_schema_tests_test/test_schema_v2_tests.py b/test/integration/008_schema_tests_test/test_schema_v2_tests.py
+index 69836e42c44..88dca5845f3 100644
+--- a/test/integration/008_schema_tests_test/test_schema_v2_tests.py
++++ b/test/integration/008_schema_tests_test/test_schema_v2_tests.py
+@@ -145,6 +145,7 @@ def packages_config(self):
+                 },
+                 {
+                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
++                    'warn-unpinned': False,
+                 },
+             ]
+         }
+diff --git a/test/integration/016_macro_tests/test_macros.py b/test/integration/016_macro_tests/test_macros.py
+index e0cf958c1f9..e6d355f9221 100644
+--- a/test/integration/016_macro_tests/test_macros.py
++++ b/test/integration/016_macro_tests/test_macros.py
+@@ -19,7 +19,7 @@ def models(self):
+     def packages_config(self):
+         return {
+             'packages': [
+-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project'},
++                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+             ]
+         }
+ 
+@@ -92,7 +92,7 @@ def models(self):
+     def packages_config(self):
+         return {
+             'packages': [
+-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project'}
++                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+             ]
+         }
+ 
+diff --git a/test/integration/023_exit_codes_test/test_exit_codes.py b/test/integration/023_exit_codes_test/test_exit_codes.py
+index bc54e01aa57..88e16e48e06 100644
+--- a/test/integration/023_exit_codes_test/test_exit_codes.py
++++ b/test/integration/023_exit_codes_test/test_exit_codes.py
+@@ -132,7 +132,7 @@ def models(self):
+     def packages_config(self):
+         return {
+             "packages": [
+-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project'}
++                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+             ]
+         }
+ 
+diff --git a/test/integration/025_duplicate_model_test/test_duplicate_model.py b/test/integration/025_duplicate_model_test/test_duplicate_model.py
+index 5d438640ac1..0b368f3cfc1 100644
+--- a/test/integration/025_duplicate_model_test/test_duplicate_model.py
++++ b/test/integration/025_duplicate_model_test/test_duplicate_model.py
+@@ -103,6 +103,7 @@ def packages_config(self):
+                 {
+                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
+                     'revision': 'master',
++                    'warn-unpinned': False,
+                 },
+             ],
+         }
+@@ -139,6 +140,7 @@ def packages_config(self):
+                 {
+                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
+                     'revision': 'master',
++                    'warn-unpinned': False,
+                 },
+             ],
+         }
+diff --git a/test/integration/029_docs_generate_tests/test_docs_generate.py b/test/integration/029_docs_generate_tests/test_docs_generate.py
+index 312ef1c8299..966f2070c4c 100644
+--- a/test/integration/029_docs_generate_tests/test_docs_generate.py
++++ b/test/integration/029_docs_generate_tests/test_docs_generate.py
+@@ -81,6 +81,7 @@ def packages_config(self):
+             'packages': [
+                 {
+                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
++                    'warn-unpinned': False,
+                 },
+             ],
+         }
+diff --git a/test/integration/033_event_tracking_test/test_events.py b/test/integration/033_event_tracking_test/test_events.py
+index 91121872623..03f9ad3a9d2 100644
+--- a/test/integration/033_event_tracking_test/test_events.py
++++ b/test/integration/033_event_tracking_test/test_events.py
+@@ -177,7 +177,7 @@ class TestEventTrackingSuccess(TestEventTracking):
+     def packages_config(self):
+         return {
+             'packages': [
+-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project'},
++                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False},
+             ],
+         }
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

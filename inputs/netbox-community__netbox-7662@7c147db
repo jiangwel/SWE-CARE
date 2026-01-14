@@ -1,0 +1,1886 @@
+  Task-ID: netbox-community__netbox-7662@7c147db
+  Please checkout to this commit first: 04d145d6d8957956369bdd224a852d7cd172fecf
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Multiple ASNs per Site
+### NetBox version
+
+v2.11.9
+
+### Feature type
+
+Change to existing functionality
+
+### Proposed functionality
+
+- We need the field ASN under Site as list that supports multiple ASNs
+- We want to pin multiple ASNs to locations
+
+### Use case
+
+We use the sites (geographic sites) to document our ASNs that we use. If we have multiple ASNs per site we get a problem.
+
+We want assign multiple ASNs per site
+e.g. site --> subsidiary-vienna (ASNs: 55555, 66666) small site without DC, no locations.
+
+We want to pin multiple ASNs to locations
+e. g. site--> datacenter-Munich, location --> mu1 (ASNs: 11111, 22222), location --> mu2 (ASNs: 33333, 44444)
+
+### Database changes
+
+_No response_
+
+### External dependencies
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/netbox/dcim/api/serializers.py b/netbox/dcim/api/serializers.py
+index a1e8156dcb8..6fd67bf69c0 100644
+--- a/netbox/dcim/api/serializers.py
++++ b/netbox/dcim/api/serializers.py
+@@ -7,7 +7,7 @@
+ from dcim.choices import *
+ from dcim.constants import *
+ from dcim.models import *
+-from ipam.api.nested_serializers import NestedIPAddressSerializer, NestedVLANSerializer
++from ipam.api.nested_serializers import NestedIPAddressSerializer, NestedVLANSerializer, NestedASNSerializer
+ from ipam.models import VLAN
+ from netbox.api import ChoiceField, ContentTypeField, SerializedPKRelatedField
+ from netbox.api.serializers import (
+@@ -113,21 +113,24 @@ class SiteSerializer(PrimaryModelSerializer):
+     region = NestedRegionSerializer(required=False, allow_null=True)
+     group = NestedSiteGroupSerializer(required=False, allow_null=True)
+     tenant = NestedTenantSerializer(required=False, allow_null=True)
++    asns = NestedASNSerializer(many=True, required=False, allow_null=True)
+     time_zone = TimeZoneSerializerField(required=False)
+     circuit_count = serializers.IntegerField(read_only=True)
+     device_count = serializers.IntegerField(read_only=True)
+     prefix_count = serializers.IntegerField(read_only=True)
+     rack_count = serializers.IntegerField(read_only=True)
++    asn_count = serializers.IntegerField(read_only=True)
+     virtualmachine_count = serializers.IntegerField(read_only=True)
+     vlan_count = serializers.IntegerField(read_only=True)
+ 
+     class Meta:
+         model = Site
+         fields = [
+-            'id', 'url', 'display', 'name', 'slug', 'status', 'region', 'group', 'tenant', 'facility', 'asn',
++            'id', 'url', 'display', 'name', 'slug', 'status', 'region', 'group', 'tenant', 'facility', 'asn', 'asns',
+             'time_zone', 'description', 'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name',
+             'contact_phone', 'contact_email', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
+-            'circuit_count', 'device_count', 'prefix_count', 'rack_count', 'virtualmachine_count', 'vlan_count',
++            'asn_count', 'circuit_count', 'device_count', 'prefix_count', 'rack_count', 'virtualmachine_count',
++            'vlan_count',
+         ]
+ 
+ 
+diff --git a/netbox/dcim/api/views.py b/netbox/dcim/api/views.py
+index 3248891f233..e05ccaed257 100644
+--- a/netbox/dcim/api/views.py
++++ b/netbox/dcim/api/views.py
+@@ -15,7 +15,7 @@
+ from dcim import filtersets
+ from dcim.models import *
+ from extras.api.views import ConfigContextQuerySetMixin, CustomFieldModelViewSet
+-from ipam.models import Prefix, VLAN
++from ipam.models import Prefix, VLAN, ASN
+ from netbox.api.authentication import IsAuthenticatedOrLoginNotRequired
+ from netbox.api.exceptions import ServiceUnavailable
+ from netbox.api.metadata import ContentTypeMetadata
+@@ -139,6 +139,7 @@ class SiteViewSet(CustomFieldModelViewSet):
+     queryset = Site.objects.prefetch_related(
+         'region', 'tenant', 'tags'
+     ).annotate(
++        asn_count=count_related(ASN, 'sites'),
+         device_count=count_related(Device, 'site'),
+         rack_count=count_related(Rack, 'site'),
+         prefix_count=count_related(Prefix, 'site'),
+diff --git a/netbox/dcim/filtersets.py b/netbox/dcim/filtersets.py
+index bced6d882a7..c58e9d17e28 100644
+--- a/netbox/dcim/filtersets.py
++++ b/netbox/dcim/filtersets.py
+@@ -3,6 +3,7 @@
+ 
+ from extras.filters import TagFilter
+ from extras.filtersets import LocalConfigContextFilterSet
++from ipam.models import ASN
+ from netbox.filtersets import (
+     BaseFilterSet, ChangeLoggedModelFilterSet, OrganizationalModelFilterSet, PrimaryModelFilterSet,
+ )
+@@ -130,12 +131,23 @@ class SiteFilterSet(PrimaryModelFilterSet, TenancyFilterSet):
+         to_field_name='slug',
+         label='Group (slug)',
+     )
++    asn_id = django_filters.ModelMultipleChoiceFilter(
++        field_name='asns',
++        queryset=ASN.objects.all(),
++        label='AS (ID)',
++    )
++    asn = django_filters.ModelMultipleChoiceFilter(
++        field_name='asns__asn',
++        queryset=ASN.objects.all(),
++        to_field_name='asn',
++        label='AS (Number)',
++    )
+     tag = TagFilter()
+ 
+     class Meta:
+         model = Site
+         fields = [
+-            'id', 'name', 'slug', 'facility', 'asn', 'latitude', 'longitude', 'contact_name', 'contact_phone',
++            'id', 'name', 'slug', 'facility', 'latitude', 'longitude', 'contact_name', 'contact_phone',
+             'contact_email',
+         ]
+ 
+@@ -155,6 +167,7 @@ def search(self, queryset, name, value):
+         )
+         try:
+             qs_filter |= Q(asn=int(value.strip()))
++            qs_filter |= Q(asns=int(value.strip()))
+         except ValueError:
+             pass
+         return queryset.filter(qs_filter)
+diff --git a/netbox/dcim/forms/bulk_edit.py b/netbox/dcim/forms/bulk_edit.py
+index eac2ed314ff..045dbf73726 100644
+--- a/netbox/dcim/forms/bulk_edit.py
++++ b/netbox/dcim/forms/bulk_edit.py
+@@ -1,4 +1,5 @@
+ from django import forms
++from django.utils.translation import gettext as _
+ from django.contrib.auth.models import User
+ from timezone_field import TimeZoneFormField
+ 
+@@ -6,8 +7,7 @@
+ from dcim.constants import *
+ from dcim.models import *
+ from extras.forms import AddRemoveTagsForm, CustomFieldModelBulkEditForm
+-from ipam.constants import BGP_ASN_MAX, BGP_ASN_MIN
+-from ipam.models import VLAN
++from ipam.models import VLAN, ASN
+ from tenancy.models import Tenant
+ from utilities.forms import (
+     add_blank_choice, BootstrapMixin, BulkEditForm, BulkEditNullBooleanSelect, ColorField, CommentField,
+@@ -110,11 +110,10 @@ class SiteBulkEditForm(BootstrapMixin, AddRemoveTagsForm, CustomFieldModelBulkEd
+         queryset=Tenant.objects.all(),
+         required=False
+     )
+-    asn = forms.IntegerField(
+-        min_value=BGP_ASN_MIN,
+-        max_value=BGP_ASN_MAX,
+-        required=False,
+-        label='ASN'
++    asns = DynamicModelChoiceField(
++        queryset=ASN.objects.all(),
++        label=_('ASNs'),
++        required=False
+     )
+     description = forms.CharField(
+         max_length=100,
+@@ -128,7 +127,7 @@ class SiteBulkEditForm(BootstrapMixin, AddRemoveTagsForm, CustomFieldModelBulkEd
+ 
+     class Meta:
+         nullable_fields = [
+-            'region', 'group', 'tenant', 'asn', 'description', 'time_zone',
++            'region', 'group', 'tenant', 'asns', 'description', 'time_zone',
+         ]
+ 
+ 
+diff --git a/netbox/dcim/forms/bulk_import.py b/netbox/dcim/forms/bulk_import.py
+index 94c56b22ae3..df8c4ec01bb 100644
+--- a/netbox/dcim/forms/bulk_import.py
++++ b/netbox/dcim/forms/bulk_import.py
+@@ -95,7 +95,7 @@ class SiteCSVForm(CustomFieldModelCSVForm):
+     class Meta:
+         model = Site
+         fields = (
+-            'name', 'slug', 'status', 'region', 'group', 'tenant', 'facility', 'asn', 'time_zone', 'description',
++            'name', 'slug', 'status', 'region', 'group', 'tenant', 'facility', 'time_zone', 'description',
+             'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name', 'contact_phone',
+             'contact_email', 'comments',
+         )
+diff --git a/netbox/dcim/forms/filtersets.py b/netbox/dcim/forms/filtersets.py
+index b5728212085..11fc69745ea 100644
+--- a/netbox/dcim/forms/filtersets.py
++++ b/netbox/dcim/forms/filtersets.py
+@@ -6,6 +6,7 @@
+ from dcim.constants import *
+ from dcim.models import *
+ from extras.forms import CustomFieldModelFilterForm, LocalConfigContextFilterForm
++from ipam.models import ASN
+ from tenancy.forms import TenancyFilterForm
+ from utilities.forms import (
+     APISelectMultiple, add_blank_choice, BootstrapMixin, ColorField, DynamicModelMultipleChoiceField, StaticSelect,
+@@ -138,11 +139,12 @@ class SiteGroupFilterForm(BootstrapMixin, CustomFieldModelFilterForm):
+ 
+ class SiteFilterForm(BootstrapMixin, TenancyFilterForm, CustomFieldModelFilterForm):
+     model = Site
+-    field_order = ['q', 'status', 'region_id', 'tenant_group_id', 'tenant_id']
++    field_order = ['q', 'status', 'region_id', 'tenant_group_id', 'tenant_id', 'asn_id']
+     field_groups = [
+         ['q', 'tag'],
+         ['status', 'region_id', 'group_id'],
+         ['tenant_group_id', 'tenant_id'],
++        ['asn_id']
+     ]
+     q = forms.CharField(
+         required=False,
+@@ -166,6 +168,12 @@ class SiteFilterForm(BootstrapMixin, TenancyFilterForm, CustomFieldModelFilterFo
+         label=_('Site group'),
+         fetch_trigger='open'
+     )
++    asn_id = DynamicModelMultipleChoiceField(
++        queryset=ASN.objects.all(),
++        required=False,
++        label=_('ASNs'),
++        fetch_trigger='open'
++    )
+     tag = TagFilterField(model)
+ 
+ 
+diff --git a/netbox/dcim/forms/models.py b/netbox/dcim/forms/models.py
+index 3f87d1bd765..3f88fee0456 100644
+--- a/netbox/dcim/forms/models.py
++++ b/netbox/dcim/forms/models.py
+@@ -1,4 +1,5 @@
+ from django import forms
++from django.utils.translation import gettext as _
+ from django.contrib.auth.models import User
+ from django.contrib.contenttypes.models import ContentType
+ from timezone_field import TimeZoneFormField
+@@ -8,7 +9,7 @@
+ from dcim.models import *
+ from extras.forms import CustomFieldModelForm
+ from extras.models import Tag
+-from ipam.models import IPAddress, VLAN, VLANGroup
++from ipam.models import IPAddress, VLAN, VLANGroup, ASN
+ from tenancy.forms import TenancyForm
+ from utilities.forms import (
+     APISelect, add_blank_choice, BootstrapMixin, ClearableFileInput, CommentField, DynamicModelChoiceField,
+@@ -110,6 +111,11 @@ class SiteForm(BootstrapMixin, TenancyForm, CustomFieldModelForm):
+         queryset=SiteGroup.objects.all(),
+         required=False
+     )
++    asns = DynamicModelMultipleChoiceField(
++        queryset=ASN.objects.all(),
++        label=_('ASNs'),
++        required=False
++    )
+     slug = SlugField()
+     time_zone = TimeZoneFormField(
+         choices=add_blank_choice(TimeZoneFormField().choices),
+@@ -125,13 +131,14 @@ class SiteForm(BootstrapMixin, TenancyForm, CustomFieldModelForm):
+     class Meta:
+         model = Site
+         fields = [
+-            'name', 'slug', 'status', 'region', 'group', 'tenant_group', 'tenant', 'facility', 'asn', 'time_zone',
+-            'description', 'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name',
++            'name', 'slug', 'status', 'region', 'group', 'tenant_group', 'tenant', 'facility', 'asn', 'asns',
++            'time_zone', 'description', 'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name',
+             'contact_phone', 'contact_email', 'comments', 'tags',
+         ]
+         fieldsets = (
+             ('Site', (
+-                'name', 'slug', 'status', 'region', 'group', 'facility', 'asn', 'time_zone', 'description', 'tags',
++                'name', 'slug', 'status', 'region', 'group', 'facility', 'asn', 'asns', 'time_zone', 'description',
++                'tags',
+             )),
+             ('Tenancy', ('tenant_group', 'tenant')),
+             ('Contact Info', (
+@@ -155,8 +162,8 @@ class Meta:
+         }
+         help_texts = {
+             'name': "Full name of the site",
++            'asn': "BGP autonomous system number.  This field is depreciated in favour of the many-to-many field for ASNs",
+             'facility': "Data center provider and facility (e.g. Equinix NY7)",
+-            'asn': "BGP autonomous system number",
+             'time_zone': "Local time zone",
+             'description': "Short description (will appear in sites list)",
+             'physical_address': "Physical location of the building (e.g. for GPS)",
+@@ -165,6 +172,32 @@ class Meta:
+             'longitude': "Longitude in decimal format (xx.yyyyyy)"
+         }
+ 
++    def __init__(self, data=None, instance=None, *args, **kwargs):
++        super().__init__(data=data, instance=instance, *args, **kwargs)
++
++        if self.instance and self.instance.pk is not None:
++            self.fields['asns'].initial = self.instance.asns.all().values_list('id', flat=True)
++
++        # Hide the ASN field if there is nothing there as this is deprecated
++        if instance is None or \
++                (instance and (instance.asn is None or instance.asn == '')) or \
++                (data and (data.get('asn') is None or instance.get('asn')) == ''):
++            if 'asn' in self.Meta.fieldsets[0][1]:
++                site_fieldset = list(self.Meta.fieldsets[0][1])
++                index = site_fieldset.index('asn')
++                site_fieldset.pop(index)
++                self.Meta.fieldsets = (
++                    ('Site', tuple(site_fieldset)),
++                    self.Meta.fieldsets[1],
++                    self.Meta.fieldsets[2],
++                )
++            del self.fields['asn']
++
++    def save(self, *args, **kwargs):
++        instance = super().save(*args, **kwargs)
++        instance.asns.set(self.cleaned_data['asns'])
++        return instance
++
+ 
+ class LocationForm(BootstrapMixin, TenancyForm, CustomFieldModelForm):
+     region = DynamicModelChoiceField(
+@@ -791,7 +824,6 @@ def __init__(self, *args, **kwargs):
+ 
+ 
+ class DeviceVCMembershipForm(forms.ModelForm):
+-
+     class Meta:
+         model = Device
+         fields = [
+@@ -887,7 +919,6 @@ def clean_device(self):
+ 
+ 
+ class ConsolePortTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = ConsolePortTemplate
+         fields = [
+@@ -899,7 +930,6 @@ class Meta:
+ 
+ 
+ class ConsoleServerPortTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = ConsoleServerPortTemplate
+         fields = [
+@@ -911,7 +941,6 @@ class Meta:
+ 
+ 
+ class PowerPortTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = PowerPortTemplate
+         fields = [
+@@ -923,7 +952,6 @@ class Meta:
+ 
+ 
+ class PowerOutletTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = PowerOutletTemplate
+         fields = [
+@@ -934,7 +962,6 @@ class Meta:
+         }
+ 
+     def __init__(self, *args, **kwargs):
+-
+         super().__init__(*args, **kwargs)
+ 
+         # Limit power_port choices to current DeviceType
+@@ -945,7 +972,6 @@ def __init__(self, *args, **kwargs):
+ 
+ 
+ class InterfaceTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = InterfaceTemplate
+         fields = [
+@@ -958,7 +984,6 @@ class Meta:
+ 
+ 
+ class FrontPortTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = FrontPortTemplate
+         fields = [
+@@ -970,7 +995,6 @@ class Meta:
+         }
+ 
+     def __init__(self, *args, **kwargs):
+-
+         super().__init__(*args, **kwargs)
+ 
+         # Limit rear_port choices to current DeviceType
+@@ -981,7 +1005,6 @@ def __init__(self, *args, **kwargs):
+ 
+ 
+ class RearPortTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = RearPortTemplate
+         fields = [
+@@ -994,7 +1017,6 @@ class Meta:
+ 
+ 
+ class DeviceBayTemplateForm(BootstrapMixin, forms.ModelForm):
+-
+     class Meta:
+         model = DeviceBayTemplate
+         fields = [
+@@ -1257,7 +1279,6 @@ class PopulateDeviceBayForm(BootstrapMixin, forms.Form):
+     )
+ 
+     def __init__(self, device_bay, *args, **kwargs):
+-
+         super().__init__(*args, **kwargs)
+ 
+         self.fields['installed_device'].queryset = Device.objects.filter(
+diff --git a/netbox/dcim/graphql/types.py b/netbox/dcim/graphql/types.py
+index 39f08ffdc60..8b9bd76ef5d 100644
+--- a/netbox/dcim/graphql/types.py
++++ b/netbox/dcim/graphql/types.py
+@@ -1,8 +1,11 @@
++import graphene
++
+ from dcim import filtersets, models
+ from extras.graphql.mixins import (
+     ChangelogMixin, ConfigContextMixin, CustomFieldsMixin, ImageAttachmentsMixin, TagsMixin,
+ )
+ from ipam.graphql.mixins import IPAddressesMixin, VLANGroupsMixin
++from ipam.graphql.scalars import ASNField
+ from netbox.graphql.types import BaseObjectType, OrganizationalObjectType, PrimaryObjectType
+ 
+ __all__ = (
+@@ -380,6 +383,7 @@ class Meta:
+ 
+ 
+ class SiteType(VLANGroupsMixin, ImageAttachmentsMixin, PrimaryObjectType):
++    asn = graphene.Field(ASNField)
+ 
+     class Meta:
+         model = models.Site
+diff --git a/netbox/dcim/tables/sites.py b/netbox/dcim/tables/sites.py
+index 65419e9c8ed..43bceff5655 100644
+--- a/netbox/dcim/tables/sites.py
++++ b/netbox/dcim/tables/sites.py
+@@ -81,6 +81,11 @@ class SiteTable(BaseTable):
+     group = tables.Column(
+         linkify=True
+     )
++    asn_count = LinkedCountColumn(
++        viewname='ipam:asn_list',
++        url_params={'site_id': 'pk'},
++        verbose_name='ASNs'
++    )
+     tenant = TenantColumn()
+     comments = MarkdownColumn()
+     tags = TagColumn(
+@@ -90,11 +95,11 @@ class SiteTable(BaseTable):
+     class Meta(BaseTable.Meta):
+         model = Site
+         fields = (
+-            'pk', 'name', 'slug', 'status', 'facility', 'region', 'group', 'tenant', 'asn', 'time_zone', 'description',
+-            'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name', 'contact_phone',
+-            'contact_email', 'comments', 'tags',
++            'pk', 'name', 'slug', 'status', 'facility', 'region', 'group', 'tenant', 'asn_count', 'time_zone',
++            'description', 'physical_address', 'shipping_address', 'latitude', 'longitude', 'contact_name',
++            'contact_phone', 'contact_email', 'comments', 'tags',
+         )
+-        default_columns = ('pk', 'name', 'status', 'facility', 'region', 'group', 'tenant', 'asn', 'description')
++        default_columns = ('pk', 'name', 'status', 'facility', 'region', 'group', 'tenant', 'asn_count', 'description')
+ 
+ 
+ #
+diff --git a/netbox/dcim/tests/test_filtersets.py b/netbox/dcim/tests/test_filtersets.py
+index 37d11be40ff..eb37f061a9c 100644
+--- a/netbox/dcim/tests/test_filtersets.py
++++ b/netbox/dcim/tests/test_filtersets.py
+@@ -4,7 +4,7 @@
+ from dcim.choices import *
+ from dcim.filtersets import *
+ from dcim.models import *
+-from ipam.models import IPAddress
++from ipam.models import IPAddress, RIR, ASN
+ from tenancy.models import Tenant, TenantGroup
+ from utilities.choices import ColorChoices
+ from utilities.testing import ChangeLoggedFilterSetTests
+@@ -149,6 +149,23 @@ def setUpTestData(cls):
+         )
+         Site.objects.bulk_create(sites)
+ 
++        rir = RIR.objects.create(name='RFC 6996', is_private=True)
++
++        asns = (
++            ASN(asn=64512, rir=rir, tenant=tenants[0]),
++            ASN(asn=64513, rir=rir, tenant=tenants[0]),
++            ASN(asn=64514, rir=rir, tenant=tenants[0]),
++            ASN(asn=65001, rir=rir, tenant=tenants[0]),
++            ASN(asn=65002, rir=rir, tenant=tenants[0])
++        )
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.set([sites[0]])
++        asns[1].sites.set([sites[1]])
++        asns[2].sites.set([sites[2]])
++        asns[3].sites.set([sites[2]])
++        asns[4].sites.set([sites[1]])
++
+     def test_name(self):
+         params = {'name': ['Site 1', 'Site 2']}
+         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
+diff --git a/netbox/dcim/tests/test_views.py b/netbox/dcim/tests/test_views.py
+index cd354117e03..9c446fc8bba 100644
+--- a/netbox/dcim/tests/test_views.py
++++ b/netbox/dcim/tests/test_views.py
+@@ -11,7 +11,7 @@
+ from dcim.choices import *
+ from dcim.constants import *
+ from dcim.models import *
+-from ipam.models import VLAN
++from ipam.models import VLAN, ASN, RIR
+ from tenancy.models import Tenant
+ from utilities.testing import ViewTestCases, create_tags, create_test_device
+ 
+@@ -110,7 +110,7 @@ def setUpTestData(cls):
+         for group in groups:
+             group.save()
+ 
+-        Site.objects.bulk_create([
++        sites = Site.objects.bulk_create([
+             Site(name='Site 1', slug='site-1', region=regions[0], group=groups[1]),
+             Site(name='Site 2', slug='site-2', region=regions[0], group=groups[1]),
+             Site(name='Site 3', slug='site-3', region=regions[0], group=groups[1]),
+@@ -118,6 +118,33 @@ def setUpTestData(cls):
+ 
+         tags = create_tags('Alpha', 'Bravo', 'Charlie')
+ 
++        rir = RIR.objects.create(name='RFC 6996', is_private=True)
++
++        asns = [
++            ASN(asn=65000, rir=rir),
++            ASN(asn=65001, rir=rir),
++            ASN(asn=65002, rir=rir),
++            ASN(asn=65003, rir=rir),
++            ASN(asn=65004, rir=rir),
++            ASN(asn=65005, rir=rir),
++            ASN(asn=65006, rir=rir),
++            ASN(asn=65007, rir=rir),
++            ASN(asn=65008, rir=rir),
++            ASN(asn=65009, rir=rir),
++            ASN(asn=65010, rir=rir),
++        ]
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.set([sites[0]])
++        asns[2].sites.set([sites[0]])
++        asns[3].sites.set([sites[1]])
++        asns[4].sites.set([sites[2]])
++        asns[5].sites.set([sites[1]])
++        asns[6].sites.set([sites[2]])
++        asns[7].sites.set([sites[2]])
++        asns[8].sites.set([sites[2]])
++        asns[10].sites.set([sites[0]])
++
+         cls.form_data = {
+             'name': 'Site X',
+             'slug': 'site-x',
+@@ -126,7 +153,6 @@ def setUpTestData(cls):
+             'group': groups[1].pk,
+             'tenant': None,
+             'facility': 'Facility X',
+-            'asn': 65001,
+             'time_zone': pytz.UTC,
+             'description': 'Site description',
+             'physical_address': '742 Evergreen Terrace, Springfield, USA',
+@@ -152,7 +178,6 @@ def setUpTestData(cls):
+             'region': regions[1].pk,
+             'group': groups[1].pk,
+             'tenant': None,
+-            'asn': 65009,
+             'time_zone': pytz.timezone('US/Eastern'),
+             'description': 'New description',
+         }
+diff --git a/netbox/dcim/views.py b/netbox/dcim/views.py
+index 5079e01a5e6..e188ecfe560 100644
+--- a/netbox/dcim/views.py
++++ b/netbox/dcim/views.py
+@@ -14,7 +14,7 @@
+ 
+ from circuits.models import Circuit
+ from extras.views import ObjectChangeLogView, ObjectConfigContextView, ObjectJournalView
+-from ipam.models import IPAddress, Prefix, Service, VLAN
++from ipam.models import IPAddress, Prefix, Service, VLAN, ASN
+ from ipam.tables import InterfaceIPAddressTable, InterfaceVLANTable
+ from netbox.views import generic
+ from utilities.forms import ConfirmationForm
+@@ -310,6 +310,7 @@ class SiteView(generic.ObjectView):
+ 
+     def get_extra_context(self, request, instance):
+         stats = {
++            'asn_count': ASN.objects.restrict(request.user, 'view').filter(sites=instance).count(),
+             'rack_count': Rack.objects.restrict(request.user, 'view').filter(site=instance).count(),
+             'device_count': Device.objects.restrict(request.user, 'view').filter(site=instance).count(),
+             'prefix_count': Prefix.objects.restrict(request.user, 'view').filter(site=instance).count(),
+diff --git a/netbox/ipam/api/nested_serializers.py b/netbox/ipam/api/nested_serializers.py
+index a52a6a03c1a..da679a01afa 100644
+--- a/netbox/ipam/api/nested_serializers.py
++++ b/netbox/ipam/api/nested_serializers.py
+@@ -5,6 +5,7 @@
+ 
+ __all__ = [
+     'NestedAggregateSerializer',
++    'NestedASNSerializer',
+     'NestedIPAddressSerializer',
+     'NestedIPRangeSerializer',
+     'NestedPrefixSerializer',
+@@ -18,6 +19,18 @@
+ ]
+ 
+ 
++#
++# ASNs
++#
++
++class NestedASNSerializer(WritableNestedSerializer):
++    url = serializers.HyperlinkedIdentityField(view_name='ipam-api:asn-detail')
++
++    class Meta:
++        model = models.ASN
++        fields = ['id', 'url', 'display', 'asn']
++
++
+ #
+ # VRFs
+ #
+diff --git a/netbox/ipam/api/serializers.py b/netbox/ipam/api/serializers.py
+index 2b221fdab6d..28ce1575e71 100644
+--- a/netbox/ipam/api/serializers.py
++++ b/netbox/ipam/api/serializers.py
+@@ -16,6 +16,26 @@
+ from .nested_serializers import *
+ 
+ 
++#
++# ASNs
++#
++from ..models import ASN
++
++
++class ASNSerializer(PrimaryModelSerializer):
++    url = serializers.HyperlinkedIdentityField(view_name='ipam-api:asn-detail')
++    tenant = NestedTenantSerializer(required=False, allow_null=True)
++
++    site_count = serializers.IntegerField(read_only=True)
++
++    class Meta:
++        model = ASN
++        fields = [
++            'id', 'url', 'display', 'asn', 'site_count', 'rir', 'tenant', 'description', 'tags', 'custom_fields',
++            'created', 'last_updated',
++        ]
++
++
+ #
+ # VRFs
+ #
+diff --git a/netbox/ipam/api/urls.py b/netbox/ipam/api/urls.py
+index 06c4ab0ea60..b05fcb3033e 100644
+--- a/netbox/ipam/api/urls.py
++++ b/netbox/ipam/api/urls.py
+@@ -5,6 +5,9 @@
+ router = OrderedDefaultRouter()
+ router.APIRootView = views.IPAMRootView
+ 
++# ASNs
++router.register('asns', views.ASNViewSet)
++
+ # VRFs
+ router.register('vrfs', views.VRFViewSet)
+ 
+diff --git a/netbox/ipam/api/views.py b/netbox/ipam/api/views.py
+index a043bd88cc2..e066e0f5714 100644
+--- a/netbox/ipam/api/views.py
++++ b/netbox/ipam/api/views.py
+@@ -1,11 +1,13 @@
+ from rest_framework.routers import APIRootView
+ 
++from dcim.models import Site
+ from extras.api.views import CustomFieldModelViewSet
+ from ipam import filtersets
+ from ipam.models import *
+ from netbox.api.views import ModelViewSet
+ from utilities.utils import count_related
+ from . import mixins, serializers
++from ..models import ASN
+ 
+ 
+ class IPAMRootView(APIRootView):
+@@ -16,6 +18,16 @@ def get_view_name(self):
+         return 'IPAM'
+ 
+ 
++#
++# ASNs
++#
++
++class ASNViewSet(CustomFieldModelViewSet):
++    queryset = ASN.objects.prefetch_related('tenant', 'rir').annotate(site_count=count_related(Site, 'asns'))
++    serializer_class = serializers.ASNSerializer
++    filterset_class = filtersets.ASNFilterSet
++
++
+ #
+ # VRFs
+ #
+diff --git a/netbox/ipam/filtersets.py b/netbox/ipam/filtersets.py
+index 56d23387fc5..81727edd12b 100644
+--- a/netbox/ipam/filtersets.py
++++ b/netbox/ipam/filtersets.py
+@@ -9,6 +9,7 @@
+ from extras.filters import TagFilter
+ from netbox.filtersets import OrganizationalModelFilterSet, PrimaryModelFilterSet
+ from tenancy.filtersets import TenancyFilterSet
++from tenancy.models import Tenant
+ from utilities.filters import (
+     ContentTypeFilter, MultiValueCharFilter, MultiValueNumberFilter, NumericArrayFilter, TreeNodeMultipleChoiceFilter,
+ )
+@@ -19,6 +20,7 @@
+ 
+ __all__ = (
+     'AggregateFilterSet',
++    'ASNFilterSet',
+     'IPAddressFilterSet',
+     'IPRangeFilterSet',
+     'PrefixFilterSet',
+@@ -31,6 +33,8 @@
+     'VRFFilterSet',
+ )
+ 
++from .models import ASN
++
+ 
+ class VRFFilterSet(PrimaryModelFilterSet, TenancyFilterSet):
+     q = django_filters.CharFilter(
+@@ -175,6 +179,41 @@ def filter_prefix(self, queryset, name, value):
+             return queryset.none()
+ 
+ 
++class ASNFilterSet(OrganizationalModelFilterSet, TenancyFilterSet):
++
++    rir_id = django_filters.ModelMultipleChoiceFilter(
++        queryset=RIR.objects.all(),
++        label='RIR (ID)',
++    )
++    rir = django_filters.ModelMultipleChoiceFilter(
++        field_name='rir__slug',
++        queryset=RIR.objects.all(),
++        to_field_name='slug',
++        label='RIR (slug)',
++    )
++    site_id = django_filters.ModelMultipleChoiceFilter(
++        field_name='sites',
++        queryset=Site.objects.all(),
++        label='Site (ID)',
++    )
++    site = django_filters.ModelMultipleChoiceFilter(
++        field_name='sites__slug',
++        queryset=Site.objects.all(),
++        to_field_name='slug',
++        label='Site (slug)',
++    )
++
++    class Meta:
++        model = ASN
++        fields = ['id', 'asn']
++
++    def search(self, queryset, name, value):
++        if not value.strip():
++            return queryset
++        qs_filter = Q(Q(description__icontains=value) | Q(asn__icontains=value))
++        return queryset.filter(qs_filter)
++
++
+ class RoleFilterSet(OrganizationalModelFilterSet):
+     q = django_filters.CharFilter(
+         method='search',
+diff --git a/netbox/ipam/forms/bulk_edit.py b/netbox/ipam/forms/bulk_edit.py
+index 43bf40f88f9..507d180cac8 100644
+--- a/netbox/ipam/forms/bulk_edit.py
++++ b/netbox/ipam/forms/bulk_edit.py
+@@ -5,14 +5,16 @@
+ from ipam.choices import *
+ from ipam.constants import *
+ from ipam.models import *
++from ipam.models import ASN
+ from tenancy.models import Tenant
+ from utilities.forms import (
+     add_blank_choice, BootstrapMixin, BulkEditNullBooleanSelect, DatePicker, DynamicModelChoiceField, NumericArrayField,
+-    StaticSelect,
++    StaticSelect, DynamicModelMultipleChoiceField,
+ )
+ 
+ __all__ = (
+     'AggregateBulkEditForm',
++    'ASNBulkEditForm',
+     'IPAddressBulkEditForm',
+     'IPRangeBulkEditForm',
+     'PrefixBulkEditForm',
+@@ -89,6 +91,38 @@ class Meta:
+         nullable_fields = ['is_private', 'description']
+ 
+ 
++class ASNBulkEditForm(BootstrapMixin, AddRemoveTagsForm, CustomFieldModelBulkEditForm):
++    pk = forms.ModelMultipleChoiceField(
++        queryset=ASN.objects.all(),
++        widget=forms.MultipleHiddenInput()
++    )
++    sites = DynamicModelMultipleChoiceField(
++        queryset=Site.objects.all(),
++        required=False
++    )
++    rir = DynamicModelChoiceField(
++        queryset=RIR.objects.all(),
++        required=False,
++        label='RIR'
++    )
++    tenant = DynamicModelChoiceField(
++        queryset=Tenant.objects.all(),
++        required=False
++    )
++    description = forms.CharField(
++        max_length=100,
++        required=False
++    )
++
++    class Meta:
++        nullable_fields = [
++            'date_added', 'description',
++        ]
++        widgets = {
++            'date_added': DatePicker(),
++        }
++
++
+ class AggregateBulkEditForm(BootstrapMixin, AddRemoveTagsForm, CustomFieldModelBulkEditForm):
+     pk = forms.ModelMultipleChoiceField(
+         queryset=Aggregate.objects.all(),
+diff --git a/netbox/ipam/forms/bulk_import.py b/netbox/ipam/forms/bulk_import.py
+index 49d5014f927..41604f0e412 100644
+--- a/netbox/ipam/forms/bulk_import.py
++++ b/netbox/ipam/forms/bulk_import.py
+@@ -1,17 +1,20 @@
+ from django import forms
+ from django.contrib.contenttypes.models import ContentType
++from django.forms import IntegerField
+ 
+ from dcim.models import Device, Interface, Site
+ from extras.forms import CustomFieldModelCSVForm
+ from ipam.choices import *
+ from ipam.constants import *
+ from ipam.models import *
++from ipam.models import ASN
+ from tenancy.models import Tenant
+ from utilities.forms import CSVChoiceField, CSVContentTypeField, CSVModelChoiceField, SlugField
+ from virtualization.models import VirtualMachine, VMInterface
+ 
+ __all__ = (
+     'AggregateCSVForm',
++    'ASNCSVForm',
+     'IPAddressCSVForm',
+     'IPRangeCSVForm',
+     'PrefixCSVForm',
+@@ -80,6 +83,26 @@ class Meta:
+         fields = ('prefix', 'rir', 'tenant', 'date_added', 'description')
+ 
+ 
++class ASNCSVForm(CustomFieldModelCSVForm):
++    asn = IntegerField()
++    rir = CSVModelChoiceField(
++        queryset=RIR.objects.all(),
++        to_field_name='name',
++        help_text='Assigned RIR'
++    )
++    tenant = CSVModelChoiceField(
++        queryset=Tenant.objects.all(),
++        required=False,
++        to_field_name='name',
++        help_text='Assigned tenant'
++    )
++
++    class Meta:
++        model = ASN
++        fields = ('asn', 'rir', 'tenant', 'description')
++        help_texts = {}
++
++
+ class RoleCSVForm(CustomFieldModelCSVForm):
+     slug = SlugField()
+ 
+diff --git a/netbox/ipam/forms/filtersets.py b/netbox/ipam/forms/filtersets.py
+index 415664f622f..5eeba47c11e 100644
+--- a/netbox/ipam/forms/filtersets.py
++++ b/netbox/ipam/forms/filtersets.py
+@@ -6,7 +6,9 @@
+ from ipam.choices import *
+ from ipam.constants import *
+ from ipam.models import *
++from ipam.models import ASN
+ from tenancy.forms import TenancyFilterForm
++from tenancy.models import Tenant
+ from utilities.forms import (
+     add_blank_choice, BootstrapMixin, DynamicModelChoiceField, DynamicModelMultipleChoiceField, StaticSelect,
+     StaticSelectMultiple, TagFilterField, BOOLEAN_WITH_BLANK_CHOICES,
+@@ -14,6 +16,7 @@
+ 
+ __all__ = (
+     'AggregateFilterForm',
++    'ASNFilterForm',
+     'IPAddressFilterForm',
+     'IPRangeFilterForm',
+     'PrefixFilterForm',
+@@ -133,6 +136,33 @@ class AggregateFilterForm(BootstrapMixin, TenancyFilterForm, CustomFieldModelFil
+     tag = TagFilterField(model)
+ 
+ 
++class ASNFilterForm(BootstrapMixin, TenancyFilterForm, CustomFieldModelFilterForm):
++    model = ASN
++    field_groups = [
++        ['q'],
++        ['rir_id'],
++        ['tenant_group_id', 'tenant_id'],
++        ['site_id'],
++    ]
++    q = forms.CharField(
++        required=False,
++        widget=forms.TextInput(attrs={'placeholder': _('All Fields')}),
++        label=_('Search')
++    )
++    rir_id = DynamicModelMultipleChoiceField(
++        queryset=RIR.objects.all(),
++        required=False,
++        label=_('RIR'),
++        fetch_trigger='open'
++    )
++    site_id = DynamicModelMultipleChoiceField(
++        queryset=Site.objects.all(),
++        required=False,
++        label=_('Site'),
++        fetch_trigger='open'
++    )
++
++
+ class RoleFilterForm(BootstrapMixin, CustomFieldModelFilterForm):
+     model = Role
+     q = forms.CharField(
+diff --git a/netbox/ipam/forms/models.py b/netbox/ipam/forms/models.py
+index a9c8a091073..abf2aa4a10f 100644
+--- a/netbox/ipam/forms/models.py
++++ b/netbox/ipam/forms/models.py
+@@ -6,6 +6,7 @@
+ from extras.models import Tag
+ from ipam.constants import *
+ from ipam.models import *
++from ipam.models import ASN
+ from tenancy.forms import TenancyForm
+ from utilities.forms import (
+     BootstrapMixin, ContentTypeChoiceField, DatePicker, DynamicModelChoiceField, DynamicModelMultipleChoiceField,
+@@ -15,6 +16,7 @@
+ 
+ __all__ = (
+     'AggregateForm',
++    'ASNForm',
+     'IPAddressAssignForm',
+     'IPAddressBulkAddForm',
+     'IPAddressForm',
+@@ -122,6 +124,35 @@ class Meta:
+         }
+ 
+ 
++class ASNForm(BootstrapMixin, TenancyForm, CustomFieldModelForm):
++    rir = DynamicModelChoiceField(
++        queryset=RIR.objects.all(),
++        label='RIR',
++    )
++    sites = DynamicModelMultipleChoiceField(
++        queryset=Site.objects.all(),
++        label='Sites',
++        required=False
++    )
++
++    class Meta:
++        model = ASN
++        fields = [
++            'asn', 'rir', 'sites', 'tenant_group', 'tenant', 'description'
++        ]
++        fieldsets = (
++            ('ASN', ('asn', 'rir', 'sites', 'description')),
++            ('Tenancy', ('tenant_group', 'tenant')),
++        )
++        help_texts = {
++            'asn': "AS number",
++            'rir': "Regional Internet Registry responsible for this prefix",
++        }
++        widgets = {
++            'date_added': DatePicker(),
++        }
++
++
+ class RoleForm(BootstrapMixin, CustomFieldModelForm):
+     slug = SlugField()
+     tags = DynamicModelMultipleChoiceField(
+diff --git a/netbox/ipam/graphql/scalars.py b/netbox/ipam/graphql/scalars.py
+new file mode 100644
+index 00000000000..d59375ba329
+--- /dev/null
++++ b/netbox/ipam/graphql/scalars.py
+@@ -0,0 +1,5 @@
++from netbox.graphql.scalars import BigInt
++
++
++class ASNField(BigInt):
++    pass
+diff --git a/netbox/ipam/graphql/schema.py b/netbox/ipam/graphql/schema.py
+index 58909e57f5c..aa9f89f2b14 100644
+--- a/netbox/ipam/graphql/schema.py
++++ b/netbox/ipam/graphql/schema.py
+@@ -5,6 +5,9 @@
+ 
+ 
+ class IPAMQuery(graphene.ObjectType):
++    asn = ObjectField(ASNType)
++    asn_list = ObjectListField(ASNType)
++
+     aggregate = ObjectField(AggregateType)
+     aggregate_list = ObjectListField(AggregateType)
+ 
+diff --git a/netbox/ipam/graphql/types.py b/netbox/ipam/graphql/types.py
+index c822dab6b39..71c7fd24ef4 100644
+--- a/netbox/ipam/graphql/types.py
++++ b/netbox/ipam/graphql/types.py
+@@ -1,7 +1,11 @@
++import graphene
++
+ from ipam import filtersets, models
++from ipam.graphql.scalars import ASNField
+ from netbox.graphql.types import OrganizationalObjectType, PrimaryObjectType
+ 
+ __all__ = (
++    'ASNType',
+     'AggregateType',
+     'IPAddressType',
+     'IPRangeType',
+@@ -16,6 +20,15 @@
+ )
+ 
+ 
++class ASNType(PrimaryObjectType):
++    asn = graphene.Field(ASNField)
++
++    class Meta:
++        model = models.ASN
++        fields = '__all__'
++        filterset_class = filtersets.ASNFilterSet
++
++
+ class AggregateType(PrimaryObjectType):
+ 
+     class Meta:
+diff --git a/netbox/ipam/migrations/0052_asn_model.py b/netbox/ipam/migrations/0052_asn_model.py
+new file mode 100644
+index 00000000000..4adafd4115f
+--- /dev/null
++++ b/netbox/ipam/migrations/0052_asn_model.py
+@@ -0,0 +1,40 @@
++# Generated by Django 3.2.8 on 2021-10-25 04:34
++
++import dcim.fields
++import django.core.serializers.json
++from django.db import migrations, models
++import django.db.models.deletion
++import taggit.managers
++
++
++class Migration(migrations.Migration):
++
++    dependencies = [
++        ('extras', '0062_clear_secrets_changelog'),
++        ('tenancy', '0003_contacts'),
++        ('dcim', '0137_relax_uniqueness_constraints'),
++        ('ipam', '0051_extend_tag_support'),
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name='ASN',
++            fields=[
++                ('created', models.DateField(auto_now_add=True, null=True)),
++                ('last_updated', models.DateTimeField(auto_now=True, null=True)),
++                ('custom_field_data', models.JSONField(blank=True, default=dict, encoder=django.core.serializers.json.DjangoJSONEncoder)),
++                ('id', models.BigAutoField(primary_key=True, serialize=False)),
++                ('asn', dcim.fields.ASNField(blank=True, null=True, unique=True)),
++                ('description', models.CharField(blank=True, max_length=200)),
++                ('rir', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='asns', to='ipam.rir')),
++                ('sites', models.ManyToManyField(blank=True, related_name='asns', to='dcim.Site')),
++                ('tags', taggit.managers.TaggableManager(through='extras.TaggedItem', to='extras.Tag')),
++                ('tenant', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='asns', to='tenancy.tenant')),
++            ],
++            options={
++                'verbose_name': 'ASN',
++                'verbose_name_plural': 'ASNs',
++                'ordering': ['asn'],
++            },
++        ),
++    ]
+diff --git a/netbox/ipam/models/__init__.py b/netbox/ipam/models/__init__.py
+index cb8b4b93299..0f65e665271 100644
+--- a/netbox/ipam/models/__init__.py
++++ b/netbox/ipam/models/__init__.py
+@@ -4,6 +4,7 @@
+ from .vrfs import *
+ 
+ __all__ = (
++    'ASN',
+     'Aggregate',
+     'IPAddress',
+     'IPRange',
+diff --git a/netbox/ipam/models/ip.py b/netbox/ipam/models/ip.py
+index 6a26f08c37d..03fdbeae5f8 100644
+--- a/netbox/ipam/models/ip.py
++++ b/netbox/ipam/models/ip.py
+@@ -7,6 +7,7 @@
+ from django.urls import reverse
+ from django.utils.functional import cached_property
+ 
++from dcim.fields import ASNField
+ from dcim.models import Device
+ from extras.utils import extras_features
+ from netbox.models import OrganizationalModel, PrimaryModel
+@@ -23,6 +24,7 @@
+ 
+ __all__ = (
+     'Aggregate',
++    'ASN',
+     'IPAddress',
+     'IPRange',
+     'Prefix',
+@@ -69,6 +71,53 @@ def get_absolute_url(self):
+         return reverse('ipam:rir', args=[self.pk])
+ 
+ 
++class ASN(PrimaryModel):
++
++    asn = ASNField(
++        unique=True,
++        blank=True,
++        null=True,
++        verbose_name='ASN',
++        help_text='32-bit autonomous system number'
++    )
++    description = models.CharField(
++        max_length=200,
++        blank=True
++    )
++    rir = models.ForeignKey(
++        to='ipam.RIR',
++        on_delete=models.PROTECT,
++        related_name='asns',
++        blank=False,
++        null=False
++    )
++    tenant = models.ForeignKey(
++        to='tenancy.Tenant',
++        on_delete=models.PROTECT,
++        related_name='asns',
++        blank=True,
++        null=True
++    )
++    sites = models.ManyToManyField(
++        to='dcim.Site',
++        related_name='asns',
++        blank=True
++    )
++
++    objects = RestrictedQuerySet.as_manager()
++
++    class Meta:
++        ordering = ['asn']
++        verbose_name = 'ASN'
++        verbose_name_plural = 'ASNs'
++
++    def __str__(self):
++        return f'AS{self.asn}'
++
++    def get_absolute_url(self):
++        return reverse('ipam:asn', args=[self.pk])
++
++
+ @extras_features('custom_fields', 'custom_links', 'export_templates', 'tags', 'webhooks')
+ class Aggregate(PrimaryModel):
+     """
+diff --git a/netbox/ipam/tables/ip.py b/netbox/ipam/tables/ip.py
+index a2a0c67b1ff..95376aad63a 100644
+--- a/netbox/ipam/tables/ip.py
++++ b/netbox/ipam/tables/ip.py
+@@ -2,6 +2,7 @@
+ from django.utils.safestring import mark_safe
+ from django_tables2.utils import Accessor
+ 
++from ipam.models import ASN
+ from tenancy.tables import TenantColumn
+ from utilities.tables import (
+     BaseTable, BooleanColumn, ButtonsColumn, ChoiceFieldColumn, LinkedCountColumn, TagColumn,
+@@ -11,6 +12,7 @@
+ 
+ __all__ = (
+     'AggregateTable',
++    'ASNTable',
+     'InterfaceIPAddressTable',
+     'IPAddressAssignTable',
+     'IPAddressTable',
+@@ -96,6 +98,29 @@ class Meta(BaseTable.Meta):
+         default_columns = ('pk', 'name', 'is_private', 'aggregate_count', 'description', 'actions')
+ 
+ 
++#
++# RIRs
++#
++
++class ASNTable(BaseTable):
++    pk = ToggleColumn()
++    asn = tables.Column(
++        linkify=True
++    )
++    site_count = LinkedCountColumn(
++        viewname='dcim:site_list',
++        url_params={'asn_id': 'pk'},
++        verbose_name='Sites'
++    )
++
++    actions = ButtonsColumn(ASN)
++
++    class Meta(BaseTable.Meta):
++        model = ASN
++        fields = ('pk', 'asn', 'rir', 'site_count', 'tenant', 'description', 'actions')
++        default_columns = ('pk', 'asn', 'rir', 'site_count', 'sites', 'tenant', 'actions')
++
++
+ #
+ # Aggregates
+ #
+diff --git a/netbox/ipam/tests/test_api.py b/netbox/ipam/tests/test_api.py
+index 5ba45b7fdb3..77473e50486 100644
+--- a/netbox/ipam/tests/test_api.py
++++ b/netbox/ipam/tests/test_api.py
+@@ -7,6 +7,7 @@
+ from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+ from ipam.choices import *
+ from ipam.models import *
++from tenancy.models import Tenant
+ from utilities.testing import APITestCase, APIViewTestCases, disable_warnings
+ 
+ 
+@@ -20,6 +21,58 @@ def test_root(self):
+         self.assertEqual(response.status_code, 200)
+ 
+ 
++class ASNTest(APIViewTestCases.APIViewTestCase):
++    model = ASN
++    brief_fields = ['asn', 'display', 'id', 'url']
++    bulk_update_data = {
++        'description': 'New description',
++    }
++
++    @classmethod
++    def setUpTestData(cls):
++
++        rirs = [
++            RIR.objects.create(name='RFC 6996', slug='rfc-6996', description='Private Use', is_private=True),
++            RIR.objects.create(name='RFC 7300', slug='rfc-7300', description='IANA Use', is_private=True),
++        ]
++        sites = [
++            Site.objects.create(name='Site 1', slug='site-1'),
++            Site.objects.create(name='Site 2', slug='site-2')
++        ]
++        tenants = [
++            Tenant.objects.create(name='Tenant 1', slug='tenant-1'),
++            Tenant.objects.create(name='Tenant 2', slug='tenant-2'),
++        ]
++
++        asns = (
++            ASN(asn=64513, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=65534, rir=rirs[0], tenant=tenants[1]),
++            ASN(asn=4200000000, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=4200002301, rir=rirs[1], tenant=tenants[1]),
++        )
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.set([sites[0]])
++        asns[1].sites.set([sites[1]])
++        asns[2].sites.set([sites[0]])
++        asns[3].sites.set([sites[1]])
++
++        cls.create_data = [
++            {
++                'asn': 64512,
++                'rir': rirs[0].pk,
++            },
++            {
++                'asn': 65543,
++                'rir': rirs[0].pk,
++            },
++            {
++                'asn': 4294967294,
++                'rir': rirs[0].pk,
++            },
++        ]
++
++
+ class VRFTest(APIViewTestCases.APIViewTestCase):
+     model = VRF
+     brief_fields = ['display', 'id', 'name', 'prefix_count', 'rd', 'url']
+diff --git a/netbox/ipam/tests/test_filtersets.py b/netbox/ipam/tests/test_filtersets.py
+index ff9dbfece54..5236807677e 100644
+--- a/netbox/ipam/tests/test_filtersets.py
++++ b/netbox/ipam/tests/test_filtersets.py
+@@ -9,6 +9,83 @@
+ from tenancy.models import Tenant, TenantGroup
+ 
+ 
++class ASNTestCase(TestCase, ChangeLoggedFilterSetTests):
++    queryset = ASN.objects.all()
++    filterset = ASNFilterSet
++
++    @classmethod
++    def setUpTestData(cls):
++
++        rirs = [
++            RIR.objects.create(name='RFC 6996', slug='rfc-6996', description='Private Use', is_private=True),
++            RIR.objects.create(name='RFC 7300', slug='rfc-7300', description='IANA Use', is_private=True),
++        ]
++        sites = [
++            Site.objects.create(name='Site 1', slug='site-1'),
++            Site.objects.create(name='Site 2', slug='site-2'),
++            Site.objects.create(name='Site 3', slug='site-3')
++        ]
++        tenants = [
++            Tenant.objects.create(name='Tenant 1', slug='tenant-1'),
++            Tenant.objects.create(name='Tenant 2', slug='tenant-2'),
++            Tenant.objects.create(name='Tenant 3', slug='tenant-3'),
++            Tenant.objects.create(name='Tenant 4', slug='tenant-4'),
++            Tenant.objects.create(name='Tenant 5', slug='tenant-5'),
++        ]
++
++        asns = (
++            ASN(asn=64512, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=64513, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=64514, rir=rirs[0], tenant=tenants[1]),
++            ASN(asn=64515, rir=rirs[0], tenant=tenants[2]),
++            ASN(asn=64516, rir=rirs[0], tenant=tenants[3]),
++            ASN(asn=65535, rir=rirs[1], tenant=tenants[4]),
++            ASN(asn=4200000000, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=4200000001, rir=rirs[0], tenant=tenants[1]),
++            ASN(asn=4200000002, rir=rirs[0], tenant=tenants[2]),
++            ASN(asn=4200000003, rir=rirs[0], tenant=tenants[3]),
++            ASN(asn=4200002301, rir=rirs[1], tenant=tenants[4]),
++        )
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.set([sites[0]])
++        asns[1].sites.set([sites[0]])
++        asns[2].sites.set([sites[1]])
++        asns[3].sites.set([sites[2]])
++        asns[4].sites.set([sites[0]])
++        asns[5].sites.set([sites[1]])
++        asns[6].sites.set([sites[0]])
++        asns[7].sites.set([sites[1]])
++        asns[8].sites.set([sites[2]])
++        asns[9].sites.set([sites[0]])
++        asns[10].sites.set([sites[1]])
++
++    def test_asn(self):
++        params = {'asn': ['64512', '65535']}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
++
++    def test_tenant(self):
++        tenants = Tenant.objects.all()[:2]
++        params = {'tenant_id': [tenants[0].pk, tenants[1].pk]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 5)
++        params = {'tenant': [tenants[0].slug, tenants[1].slug]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 5)
++
++    def test_rir(self):
++        rirs = RIR.objects.all()[:1]
++        params = {'rir_id': [rirs[0].pk]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 9)
++        params = {'rir': [rirs[0].slug]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 9)
++
++    def test_site(self):
++        sites = Site.objects.all()[:2]
++        params = {'site_id': [sites[0].pk, sites[1].pk]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 9)
++        params = {'site': [sites[0].slug, sites[1].slug]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 9)
++
++
+ class VRFTestCase(TestCase, ChangeLoggedFilterSetTests):
+     queryset = VRF.objects.all()
+     filterset = VRFFilterSet
+diff --git a/netbox/ipam/tests/test_views.py b/netbox/ipam/tests/test_views.py
+index 5440efcb6c7..23a03604bd1 100644
+--- a/netbox/ipam/tests/test_views.py
++++ b/netbox/ipam/tests/test_views.py
+@@ -9,6 +9,61 @@
+ from utilities.testing import ViewTestCases, create_tags
+ 
+ 
++class ASNTestCase(ViewTestCases.PrimaryObjectViewTestCase):
++    model = ASN
++
++    @classmethod
++    def setUpTestData(cls):
++
++        rirs = [
++            RIR.objects.create(name='RFC 6996', slug='rfc-6996', description='Private Use', is_private=True),
++            RIR.objects.create(name='RFC 7300', slug='rfc-7300', description='IANA Use', is_private=True),
++        ]
++        sites = [
++            Site.objects.create(name='Site 1', slug='site-1'),
++            Site.objects.create(name='Site 2', slug='site-2')
++        ]
++        tenants = [
++            Tenant.objects.create(name='Tenant 1', slug='tenant-1'),
++            Tenant.objects.create(name='Tenant 2', slug='tenant-2'),
++        ]
++
++        asns = (
++            ASN(asn=64513, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=65535, rir=rirs[1], tenant=tenants[1]),
++            ASN(asn=4200000000, rir=rirs[0], tenant=tenants[0]),
++            ASN(asn=4200002301, rir=rirs[1], tenant=tenants[1]),
++        )
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.set([sites[0]])
++        asns[1].sites.set([sites[1]])
++        asns[2].sites.set([sites[0]])
++        asns[3].sites.set([sites[1]])
++
++        tags = create_tags('Alpha', 'Bravo', 'Charlie')
++
++        cls.form_data = {
++            'asn': 64512,
++            'rir': rirs[0].pk,
++            'tenant': tenants[0].pk,
++            'site': sites[0].pk,
++            'description': 'A new ASN',
++        }
++
++        cls.csv_data = (
++            "asn,rir",
++            "64533,RFC 6996",
++            "64523,RFC 6996",
++            "4200000002,RFC 6996",
++        )
++
++        cls.bulk_edit_data = {
++            'rir': rirs[1].pk,
++            'description': 'Next description',
++        }
++
++
+ class VRFTestCase(ViewTestCases.PrimaryObjectViewTestCase):
+     model = VRF
+ 
+diff --git a/netbox/ipam/urls.py b/netbox/ipam/urls.py
+index 9d9a846bf0d..88c5d7c9ee9 100644
+--- a/netbox/ipam/urls.py
++++ b/netbox/ipam/urls.py
+@@ -7,6 +7,18 @@
+ app_name = 'ipam'
+ urlpatterns = [
+ 
++    # ASNs
++    path('asns/', views.ASNListView.as_view(), name='asn_list'),
++    path('asns/add/', views.ASNEditView.as_view(), name='asn_add'),
++    path('asns/import/', views.ASNBulkImportView.as_view(), name='asn_import'),
++    path('asns/edit/', views.ASNBulkEditView.as_view(), name='asn_bulk_edit'),
++    path('asns/delete/', views.ASNBulkDeleteView.as_view(), name='asn_bulk_delete'),
++    path('asns/<int:pk>/', views.ASNView.as_view(), name='asn'),
++    path('asns/<int:pk>/edit/', views.ASNEditView.as_view(), name='asn_edit'),
++    path('asns/<int:pk>/delete/', views.ASNDeleteView.as_view(), name='asn_delete'),
++    path('asns/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='asn_changelog', kwargs={'model': ASN}),
++    path('asns/<int:pk>/journal/', ObjectJournalView.as_view(), name='asn_journal', kwargs={'model': ASN}),
++
+     # VRFs
+     path('vrfs/', views.VRFListView.as_view(), name='vrf_list'),
+     path('vrfs/add/', views.VRFEditView.as_view(), name='vrf_add'),
+diff --git a/netbox/ipam/views.py b/netbox/ipam/views.py
+index c24a80124bd..73b228ac45c 100644
+--- a/netbox/ipam/views.py
++++ b/netbox/ipam/views.py
+@@ -2,7 +2,8 @@
+ from django.db.models.expressions import RawSQL
+ from django.shortcuts import get_object_or_404, redirect, render
+ 
+-from dcim.models import Device, Interface
++from dcim.models import Device, Interface, Site
++from dcim.tables import SiteTable
+ from netbox.views import generic
+ from utilities.forms import TableConfigForm
+ from utilities.tables import paginate_table
+@@ -11,6 +12,7 @@
+ from . import filtersets, forms, tables
+ from .constants import *
+ from .models import *
++from .models import ASN
+ from .utils import add_available_ipaddresses, add_available_prefixes, add_available_vlans
+ 
+ 
+@@ -195,6 +197,65 @@ class RIRBulkDeleteView(generic.BulkDeleteView):
+     table = tables.RIRTable
+ 
+ 
++#
++# ASNs
++#
++
++class ASNListView(generic.ObjectListView):
++    queryset = ASN.objects.annotate(
++        site_count=count_related(Site, 'asns'),
++    )
++    filterset = filtersets.ASNFilterSet
++    filterset_form = forms.ASNFilterForm
++    table = tables.ASNTable
++
++
++class ASNView(generic.ObjectView):
++    queryset = ASN.objects.all()
++
++    def get_extra_context(self, request, instance):
++        sites_table = SiteTable(
++            list(instance.sites.all()),
++            orderable=False
++        )
++
++        return {
++            'sites_table': sites_table,
++        }
++
++
++class ASNEditView(generic.ObjectEditView):
++    queryset = ASN.objects.all()
++    model_form = forms.ASNForm
++
++
++class ASNDeleteView(generic.ObjectDeleteView):
++    queryset = ASN.objects.all()
++
++
++class ASNBulkImportView(generic.BulkImportView):
++    queryset = ASN.objects.all()
++    model_form = forms.ASNCSVForm
++    table = tables.ASNTable
++
++
++class ASNBulkEditView(generic.BulkEditView):
++    queryset = ASN.objects.annotate(
++        site_count=count_related(Site, 'asns')
++    )
++    filterset = filtersets.ASNFilterSet
++    table = tables.ASNTable
++    form = forms.ASNBulkEditForm
++
++
++class ASNBulkDeleteView(generic.BulkDeleteView):
++    queryset = ASN.objects.annotate(
++        site_count=count_related(Site, 'asns')
++    )
++    filterset = filtersets.ASNFilterSet
++    table = tables.ASNTable
++
++
+ #
+ # Aggregates
+ #
+diff --git a/netbox/netbox/filtersets.py b/netbox/netbox/filtersets.py
+index 791c21d19e0..2240ce58d24 100644
+--- a/netbox/netbox/filtersets.py
++++ b/netbox/netbox/filtersets.py
+@@ -153,7 +153,6 @@ def get_filters(cls):
+                         # The filter field has been explicity defined on the filterset class so we must manually
+                         # create the new filter with the same type because there is no guarantee the defined type
+                         # is the same as the default type for the field
+-                        resolve_field(field, lookup_expr)  # Will raise FieldLookupError if the lookup is invalid
+                         new_filter = type(existing_filter)(
+                             field_name=field_name,
+                             lookup_expr=lookup_expr,
+diff --git a/netbox/netbox/graphql/scalars.py b/netbox/netbox/graphql/scalars.py
+new file mode 100644
+index 00000000000..7d14189dd95
+--- /dev/null
++++ b/netbox/netbox/graphql/scalars.py
+@@ -0,0 +1,23 @@
++from graphene import Scalar
++from graphql.language import ast
++from graphql.type.scalars import MAX_INT, MIN_INT
++
++
++class BigInt(Scalar):
++    """
++    Handle any BigInts
++    """
++    @staticmethod
++    def to_float(value):
++        num = int(value)
++        if num > MAX_INT or num < MIN_INT:
++            return float(num)
++        return num
++
++    serialize = to_float
++    parse_value = to_float
++
++    @staticmethod
++    def parse_literal(node):
++        if isinstance(node, ast.IntValue):
++            return BigInt.to_float(node.value)
+diff --git a/netbox/netbox/navigation_menu.py b/netbox/netbox/navigation_menu.py
+index 993c5e1715e..35cd8ece84c 100644
+--- a/netbox/netbox/navigation_menu.py
++++ b/netbox/netbox/navigation_menu.py
+@@ -229,6 +229,12 @@ def get_model_buttons(app_label, model_name, actions=('add', 'import')):
+                 get_model_item('ipam', 'role', 'Prefix & VLAN Roles'),
+             ),
+         ),
++        MenuGroup(
++            label='ASNs',
++            items=(
++                get_model_item('ipam', 'asn', 'ASNs'),
++            ),
++        ),
+         MenuGroup(
+             label='Aggregates',
+             items=(
+diff --git a/netbox/templates/dcim/site.html b/netbox/templates/dcim/site.html
+index 7429aa4f5ee..0364dee64d2 100644
+--- a/netbox/templates/dcim/site.html
++++ b/netbox/templates/dcim/site.html
+@@ -215,6 +215,10 @@ <h2><a href="{% url 'circuits:circuit_list' %}?site_id={{ object.pk }}" class="b
+                         <h2><a href="{% url 'virtualization:virtualmachine_list' %}?site_id={{ object.pk }}" class="btn {% if stats.vm_count %}btn-primary{% else %}btn-outline-dark{% endif %} btn-lg">{{ stats.vm_count }}</a></h2>
+                         <p>Virtual Machines</p>
+                     </div>
++                    <div class="col col-md-4 text-center">
++                        <h2><a href="{% url 'ipam:asn_list' %}?site_id={{ object.pk }}" class="btn {% if stats.asn_count %}btn-primary{% else %}btn-outline-dark{% endif %} btn-lg">{{ stats.asn_count }}</a></h2>
++                        <p>ASNs</p>
++                    </div>
+                 </div>
+             </div>
+         </div>
+diff --git a/netbox/templates/ipam/asn.html b/netbox/templates/ipam/asn.html
+new file mode 100644
+index 00000000000..8be09c660e8
+--- /dev/null
++++ b/netbox/templates/ipam/asn.html
+@@ -0,0 +1,64 @@
++{% extends 'generic/object.html' %}
++{% load buttons %}
++{% load helpers %}
++{% load plugins %}
++
++{% block breadcrumbs %}
++  {{ block.super }}
++  <li class="breadcrumb-item"><a href="{% url 'ipam:asn_list' %}?rir_id={{ object.rir.pk }}">{{ object.rir }}</a></li>
++{% endblock %}
++
++{% block content %}
++<div class="row">
++	<div class="col col-md-6">
++        <div class="card">
++            <h5 class="card-header">
++                ASN
++            </h5>
++            <div class="card-body">
++                <table class="table table-hover attr-table">
++                    <tr>
++                        <td>AS Number</td>
++                        <td>{{ object.asn }}</td>
++                    </tr>
++                    <tr>
++                        <td>RIR</td>
++                        <td>
++                            <a href="{% url 'ipam:asn_list' %}?rir={{ object.rir.slug }}">{{ object.rir }}</a>
++                        </td>
++                    </tr>
++                    <tr>
++                        <td>Tenant</td>
++                        <td>
++                            {% if object.tenant %}
++                                {% if prefix.object.group %}
++                                    <a href="{{ object.tenant.group.get_absolute_url }}">{{ object.tenant.group }}</a> /
++                                {% endif %}
++                                <a href="{{ object.tenant.get_absolute_url }}">{{ object.tenant }}</a>
++                            {% else %}
++                                <span class="text-muted">None</span>
++                            {% endif %}
++                        </td>
++                    </tr>
++                    <tr>
++                        <td>Description</td>
++                        <td>{{ object.description|placeholder }}</td>
++                    </tr>
++                </table>
++            </div>
++        </div>
++        {% plugin_left_page object %}
++    </div>
++    <div class="col col-md-6">
++        {% include 'inc/panels/custom_fields.html' %}
++        {% include 'inc/panels/tags.html' with tags=object.tags.all url='ipam:asn_list' %}
++        {% plugin_right_page object %}
++    </div>
++</div>
++<div class="row mb-3">
++    <div class="col col-md-12">
++        {% include 'inc/panel_table.html' with table=sites_table heading='Sites' %}
++        {% plugin_full_width_page object %}
++    </div>
++</div>
++{% endblock %}
+diff --git a/netbox/utilities/tests/test_filters.py b/netbox/utilities/tests/test_filters.py
+index 374167f1ccb..e4609ef9b26 100644
+--- a/netbox/utilities/tests/test_filters.py
++++ b/netbox/utilities/tests/test_filters.py
+@@ -5,6 +5,9 @@
+ from mptt.fields import TreeForeignKey
+ from taggit.managers import TaggableManager
+ 
++from circuits.choices import CircuitStatusChoices
++from circuits.filtersets import CircuitFilterSet
++from circuits.models import Circuit, Provider, CircuitType
+ from dcim.choices import *
+ from dcim.fields import MACAddressField
+ from dcim.filtersets import DeviceFilterSet, SiteFilterSet
+@@ -13,6 +16,7 @@
+ )
+ from extras.filters import TagFilter
+ from extras.models import TaggedItem
++from ipam.models import RIR, ASN
+ from netbox.filtersets import BaseFilterSet
+ from utilities.filters import (
+     MACAddressFilter, MultiValueCharFilter, MultiValueDateFilter, MultiValueDateTimeFilter, MultiValueNumberFilter,
+@@ -337,10 +341,26 @@ class DynamicFilterLookupExpressionTest(TestCase):
+     device_filterset = DeviceFilterSet
+     site_queryset = Site.objects.all()
+     site_filterset = SiteFilterSet
++    circuit_queryset = Circuit.objects.all()
++    circuit_filterset = CircuitFilterSet
+ 
+     @classmethod
+     def setUpTestData(cls):
+ 
++        provider = Provider.objects.create(name='Test Provider', slug='test-provider')
++        circuit_type = CircuitType.objects.create(name='Test Circuit Type', slug='test-circuit-type')
++
++        circuits = (
++            Circuit(cid='CID12123', provider=provider, type=circuit_type,
++                    status=CircuitStatusChoices.STATUS_ACTIVE, commit_rate=1000),
++            Circuit(cid='CID12124', provider=provider, type=circuit_type,
++                    status=CircuitStatusChoices.STATUS_ACTIVE, commit_rate=10000),
++            Circuit(cid='CID12125', provider=provider, type=circuit_type,
++                    status=CircuitStatusChoices.STATUS_ACTIVE, commit_rate=100000)
++
++        )
++        Circuit.objects.bulk_create(circuits)
++
+         manufacturers = (
+             Manufacturer(name='Manufacturer 1', slug='manufacturer-1'),
+             Manufacturer(name='Manufacturer 2', slug='manufacturer-2'),
+@@ -378,12 +398,25 @@ def setUpTestData(cls):
+             region.save()
+ 
+         sites = (
+-            Site(name='Site 1', slug='abc-site-1', region=regions[0], asn=65001),
+-            Site(name='Site 2', slug='def-site-2', region=regions[1], asn=65101),
+-            Site(name='Site 3', slug='ghi-site-3', region=regions[2], asn=65201),
++            Site(name='Site 1', slug='abc-site-1', region=regions[0]),
++            Site(name='Site 2', slug='def-site-2', region=regions[1]),
++            Site(name='Site 3', slug='ghi-site-3', region=regions[2]),
+         )
+         Site.objects.bulk_create(sites)
+ 
++        rir = RIR.objects.create(name='RFC 6996', is_private=True)
++
++        asns = [
++            ASN(asn=65001, rir=rir),
++            ASN(asn=65101, rir=rir),
++            ASN(asn=65201, rir=rir)
++        ]
++        ASN.objects.bulk_create(asns)
++
++        asns[0].sites.add(sites[0])
++        asns[1].sites.add(sites[1])
++        asns[2].sites.add(sites[2])
++
+         racks = (
+             Rack(name='Rack 1', site=sites[0]),
+             Rack(name='Rack 2', site=sites[1]),
+@@ -436,21 +469,21 @@ def test_site_slug_endswith_negation(self):
+         params = {'slug__niew': ['-1']}
+         self.assertEqual(SiteFilterSet(params, self.site_queryset).qs.count(), 2)
+ 
+-    def test_site_asn_lt(self):
+-        params = {'asn__lt': [65101]}
+-        self.assertEqual(SiteFilterSet(params, self.site_queryset).qs.count(), 1)
++    def test_circuit_commit_lt(self):
++        params = {'commit_rate__lt': [10000]}
++        self.assertEqual(CircuitFilterSet(params, self.circuit_queryset).qs.count(), 1)
+ 
+-    def test_site_asn_lte(self):
+-        params = {'asn__lte': [65101]}
+-        self.assertEqual(SiteFilterSet(params, self.site_queryset).qs.count(), 2)
++    def test_circuit_commit_lte(self):
++        params = {'commit_rate__lte': [10000]}
++        self.assertEqual(CircuitFilterSet(params, self.circuit_queryset).qs.count(), 2)
+ 
+-    def test_site_asn_gt(self):
+-        params = {'asn__lt': [65101]}
+-        self.assertEqual(SiteFilterSet(params, self.site_queryset).qs.count(), 1)
++    def test_circuit_commit_gt(self):
++        params = {'commit_rate__gt': [10000]}
++        self.assertEqual(CircuitFilterSet(params, self.circuit_queryset).qs.count(), 1)
+ 
+-    def test_site_asn_gte(self):
+-        params = {'asn__gte': [65101]}
+-        self.assertEqual(SiteFilterSet(params, self.site_queryset).qs.count(), 2)
++    def test_circuit_commit_gte(self):
++        params = {'commit_rate__gte': [10000]}
++        self.assertEqual(CircuitFilterSet(params, self.circuit_queryset).qs.count(), 2)
+ 
+     def test_site_region_negation(self):
+         params = {'region__n': ['region-1']}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

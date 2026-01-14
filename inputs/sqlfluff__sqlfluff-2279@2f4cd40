@@ -1,0 +1,210 @@
+  Task-ID: sqlfluff__sqlfluff-2279@2f4cd40
+  Please checkout to this commit first: df04310cbfcc7b422b56fbf32f7640fe767c0433
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  L052: Auto-fix appended extra `semicolon` in `CREATE TABLE` statement when `multiline_newline` is `True`
+## Expected Behaviour
+
+* Auto-fix of L052 should move `;` at the end of `CREATE TABLE` statement to the next line when `multiline_newline = True`.
+
+## Observed Behaviour
+
+* Auto-fix printed the following when `sqlfluff fix` is executed:
+```
+==== finding fixable violations ====
+WARNING    Loop limit on fixes reached [10].
+== [sample.sql] FAIL
+L:   3 | P:   2 | L052 | Statements must end with a semi-colon.
+==== fixing violations ====
+1 fixable linting violations found
+```
+* Auto-fix for L052 did not move `;` to the next line.
+* Auto-fix for L052 appended multiple `;` after the `CREATE TABLE` statement.
+
+## Steps to Reproduce
+
+1. Create `sample.sql` with the following content:
+```
+CREATE TABLE my_table (
+    id INTEGER
+);
+```
+2. Override L052 to force semi colon of multi-line statement to be on the new line with the following override: (You can create a `.sqlfluff` with the content below.)
+```
+[sqlfluff:rules:L052]
+multiline_newline = True
+```
+3. Run `sqlfluff fix sample.sql -f`
+
+## Dialect
+
+Ansi (Default - Not specific to any dialect.)
+
+## Version
+
+```
+(.venv) ~/code/sqlfluff (main) $ sqlfluff fix sample.sql
+(.venv) ~/code/sqlfluff (main) $ sqlfluff --version
+sqlfluff, version 0.9.1
+(.venv) ~/code/sqlfluff (main) $ python --version
+Python 3.9.9
+```
+
+## Configuration
+* Override L052 to force multiline statement's semicolon to always be in a new line.
+```
+[sqlfluff:rules:L052]
+multiline_newline = True
+```
+
+## Output of `sqlfluff fix`
+
+```
+(.venv) ~/code/sqlfluff (main) $ sqlfluff fix sample.sql
+==== finding fixable violations ====
+WARNING    Loop limit on fixes reached [10].
+== [sample.sql] FAIL
+L:   3 | P:   2 | L052 | Statements must end with a semi-colon.
+==== fixing violations ====
+1 fixable linting violations found
+Are you sure you wish to attempt to fix these? [Y/n] ...
+Attempting fixes...
+Persisting Changes...
+== [sample.sql] PASS
+Done. Please check your files to confirm.
+All Finished 📜 🎉!
+(.venv) ~/code/sqlfluff (main) $
+```
+  </issue>
+  
+  <patch>
+  diff --git a/src/sqlfluff/rules/L052.py b/src/sqlfluff/rules/L052.py
+index 68cda935998..7d4f2d2de37 100644
+--- a/src/sqlfluff/rules/L052.py
++++ b/src/sqlfluff/rules/L052.py
+@@ -193,21 +193,38 @@ def _eval(self, context: RuleContext) -> Optional[LintResult]:
+                     anchor_segment = self._handle_trailing_inline_comments(
+                         context, anchor_segment
+                     )
+-
+-                    fixes = [
+-                        LintFix.replace(
+-                            anchor_segment,
+-                            [
++                    fixes = []
++                    if anchor_segment == context.segment:
++                        fixes.append(
++                            LintFix.replace(
+                                 anchor_segment,
+-                                NewlineSegment(),
+-                                SymbolSegment(raw=";", type="symbol", name="semicolon"),
+-                            ],
+-                        ),
+-                        LintFix.delete(
+-                            context.segment,
+-                        ),
+-                    ]
+-                    fixes.extend(LintFix.delete(d) for d in whitespace_deletions)
++                                [
++                                    NewlineSegment(),
++                                    SymbolSegment(
++                                        raw=";", type="symbol", name="semicolon"
++                                    ),
++                                ],
++                            )
++                        )
++                    else:
++                        fixes.extend(
++                            [
++                                LintFix.replace(
++                                    anchor_segment,
++                                    [
++                                        anchor_segment,
++                                        NewlineSegment(),
++                                        SymbolSegment(
++                                            raw=";", type="symbol", name="semicolon"
++                                        ),
++                                    ],
++                                ),
++                                LintFix.delete(
++                                    context.segment,
++                                ),
++                            ]
++                        )
++                        fixes.extend(LintFix.delete(d) for d in whitespace_deletions)
+                     return LintResult(
+                         anchor=anchor_segment,
+                         fixes=fixes,
+diff --git a/test/fixtures/rules/std_rule_cases/L052.yml b/test/fixtures/rules/std_rule_cases/L052.yml
+index a8ee9830a7e..2ccedf9187f 100644
+--- a/test/fixtures/rules/std_rule_cases/L052.yml
++++ b/test/fixtures/rules/std_rule_cases/L052.yml
+@@ -433,3 +433,34 @@ test_fail_newline_block_comment_semi_colon_after:
+     rules:
+       L052:
+         multiline_newline: true
++
++test_fail_newline_create_table:
++  # https://github.com/sqlfluff/sqlfluff/issues/2268
++  fail_str: |
++    CREATE TABLE my_table (
++      id INTEGER
++    );
++  fix_str: |
++    CREATE TABLE my_table (
++      id INTEGER
++    )
++    ;
++  configs:
++    rules:
++      L052:
++        multiline_newline: true
++
++test_fail_newline_create_table_inline_comment:
++  fail_str: |
++    CREATE TABLE my_table (
++      id INTEGER
++    ); --inline comment
++  fix_str: |
++    CREATE TABLE my_table (
++      id INTEGER
++    ) --inline comment
++    ;
++  configs:
++    rules:
++      L052:
++        multiline_newline: true
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

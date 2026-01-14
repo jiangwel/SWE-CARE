@@ -1,0 +1,187 @@
+  Task-ID: marimo-team__marimo-3122@5536640
+  Please checkout to this commit first: 08e234f028528db329ba19e7671f81c01e5b54d5
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Respect python version declared in inline-scripts (PEP 723) when running with --sandbox
+### Description
+
+Respect python version declared in inline-scripts (PEP 723) when running with --sandbox.
+
+Right now it gets dropped, but it should be forwarded to `uv run`.
+
+### Suggested solution
+
+Parse and forwarded to `uv run`
+
+### Alternative
+
+_No response_
+
+### Additional context
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/marimo/_cli/sandbox.py b/marimo/_cli/sandbox.py
+index 5aced145de5..9333ded3f2e 100644
+--- a/marimo/_cli/sandbox.py
++++ b/marimo/_cli/sandbox.py
+@@ -140,6 +140,22 @@ def _read_pyproject(script: str) -> Dict[str, Any] | None:
+         return None
+ 
+ 
++def _get_python_version_requirement(pyproject: Dict[str, Any]) -> str | None:
++    """Extract Python version requirement from pyproject metadata."""
++    if pyproject is None:
++        return None
++
++    try:
++        version = pyproject.get("requires-python")
++        # Only return string version requirements
++        if not isinstance(version, str):
++            return None
++        return version
++    except Exception as e:
++        LOGGER.warning(f"Failed to parse Python version requirement: {e}")
++        return None
++
++
+ def prompt_run_in_sandbox(name: str | None) -> bool:
+     if GLOBAL_SETTINGS.MANAGE_SCRIPT_METADATA:
+         return False
+@@ -221,6 +237,18 @@ def run_in_sandbox(
+     # Clean up the temporary file after the subprocess has run
+     atexit.register(lambda: os.unlink(temp_file_path))
+ 
++    # Get Python version requirement if available
++    if name is not None:
++        contents, _ = FileContentReader().read_file(name)
++        pyproject = _read_pyproject(contents)
++        python_version = (
++            _get_python_version_requirement(pyproject)
++            if pyproject is not None
++            else None
++        )
++    else:
++        python_version = None
++
+     cmd = [
+         "uv",
+         "run",
+@@ -228,9 +256,19 @@ def run_in_sandbox(
+         # sandboxed notebook shouldn't pick up existing pyproject.toml,
+         # which may conflict with the sandbox requirements
+         "--no-project",
+-        "--with-requirements",
+-        temp_file_path,
+-    ] + cmd
++    ]
++
++    # Add Python version if specified
++    if python_version:
++        cmd.extend(["--python-version", python_version])
++
++    cmd.extend(
++        [
++            "--with-requirements",
++            temp_file_path,
++        ]
++        + cmd
++    )
+ 
+     echo(f"Running in a sandbox: {muted(' '.join(cmd))}")
+ 
+diff --git a/tests/_cli/test_sandbox.py b/tests/_cli/test_sandbox.py
+index 7a3d386d45e..795cdfbec81 100644
+--- a/tests/_cli/test_sandbox.py
++++ b/tests/_cli/test_sandbox.py
+@@ -4,7 +4,9 @@
+ 
+ from marimo._cli.sandbox import (
+     _get_dependencies,
++    _get_python_version_requirement,
+     _pyproject_toml_to_requirements_txt,
++    _read_pyproject,
+ )
+ 
+ 
+@@ -179,3 +181,44 @@ def test_pyproject_toml_to_requirements_txt_with_versioned_dependencies(
+     assert _pyproject_toml_to_requirements_txt(pyproject) == [
+         "marimo @ git+https://github.com/marimo-team/marimo.git@main",
+     ]
++
++
++def test_get_python_version_requirement():
++    pyproject = {"requires-python": ">=3.11"}
++    assert _get_python_version_requirement(pyproject) == ">=3.11"
++
++    pyproject = {"dependencies": ["polars"]}
++    assert _get_python_version_requirement(pyproject) is None
++
++    assert _get_python_version_requirement(None) is None
++
++    pyproject = {"requires-python": {"invalid": "type"}}
++    assert _get_python_version_requirement(pyproject) is None
++
++
++def test_get_dependencies_with_python_version():
++    SCRIPT = """
++# /// script
++# requires-python = ">=3.11"
++# dependencies = ["polars"]
++# ///
++
++import marimo
++"""
++    assert _get_dependencies(SCRIPT) == ["polars"]
++
++    pyproject = _read_pyproject(SCRIPT)
++    assert pyproject is not None
++    assert _get_python_version_requirement(pyproject) == ">=3.11"
++
++    SCRIPT_NO_PYTHON = """
++# /// script
++# dependencies = ["polars"]
++# ///
++
++import marimo
++"""
++    pyproject_no_python = _read_pyproject(SCRIPT_NO_PYTHON)
++    assert pyproject_no_python is not None
++    assert _get_python_version_requirement(pyproject_no_python) is None
++    assert _get_dependencies(SCRIPT_NO_PYTHON) == ["polars"]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

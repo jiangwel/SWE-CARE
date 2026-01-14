@@ -1,0 +1,252 @@
+  Task-ID: skypilot-org__skypilot-1572@1712726
+  Please checkout to this commit first: f84fb0d5b93ee2f9453b47fe97b03edfa549360e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Spot/UX] Need a way to only show the RUNNING spot jobs
+Request from our user:
+> Is there a way to clear jobs that are finished (either "SUCCEEDED" or "FAILED")?
+
+
+[Job] Inconsistent job cancel behavior
+Our user reported that the `sky cancel` does not require confirmation but the `sky spot cancel` requires.
+The user says it is preferred to have confirmation for both of them.
+
+[API] Include hourly price in core.status
+User request: our `sky status -a` includes a `HOURLY_PRICE` column, but it does not appear in `core.status`. It would be nice to have it in the return dict of `core.status`.
+  </issue>
+  
+  <patch>
+  diff --git a/sky/backends/cloud_vm_ray_backend.py b/sky/backends/cloud_vm_ray_backend.py
+index fd22646705f..2281b147938 100644
+--- a/sky/backends/cloud_vm_ray_backend.py
++++ b/sky/backends/cloud_vm_ray_backend.py
+@@ -1870,6 +1870,11 @@ def external_ips(self,
+                 return [ips[1] for ips in self.stable_internal_external_ips]
+             return None
+ 
++        def get_hourly_price(self) -> float:
++            hourly_cost = (self.launched_resources.get_cost(3600) *
++                           self.launched_nodes)
++            return hourly_cost
++
+         @property
+         def cluster_yaml(self):
+             return os.path.expanduser(self._cluster_yaml)
+diff --git a/sky/cli.py b/sky/cli.py
+index 4ce782903f1..e4c9eff8f46 100644
+--- a/sky/cli.py
++++ b/sky/cli.py
+@@ -1602,11 +1602,28 @@ def logs(
+               is_flag=True,
+               required=False,
+               help='Cancel all jobs on the specified cluster.')
++@click.option('--yes',
++              '-y',
++              is_flag=True,
++              default=False,
++              required=False,
++              help='Skip confirmation prompt.')
+ @click.argument('jobs', required=False, type=int, nargs=-1)
+ @usage_lib.entrypoint
+-def cancel(cluster: str, all: bool, jobs: List[int]):  # pylint: disable=redefined-builtin
++def cancel(cluster: str, all: bool, jobs: List[int], yes: bool):  # pylint: disable=redefined-builtin
+     # NOTE(dev): Keep the docstring consistent between the Python API and CLI.
+     """Cancel job(s)."""
++    if not yes:
++        job_ids = ' '.join(map(str, jobs))
++        plural = 's' if len(job_ids) > 1 else ''
++        job_identity_str = f'job{plural} with ID{plural} {job_ids}'
++        if all:
++            job_identity_str = 'all managed spot jobs'
++        job_identity_str += f' on {cluster}'
++        click.confirm(f'Cancelling {job_identity_str}. Proceed?',
++                      default=True,
++                      abort=True,
++                      show_default=True)
+     try:
+         core.cancel(cluster, all, jobs)
+     except ValueError as e:
+@@ -2185,11 +2202,12 @@ def _down_or_stop_clusters(
+                 assert len(reserved_clusters) == 1, reserved_clusters
+                 _hint_for_down_spot_controller(reserved_clusters[0])
+ 
+-                click.confirm('Proceed?',
+-                              default=False,
+-                              abort=True,
+-                              show_default=True)
+-                no_confirm = True
++                if not no_confirm:
++                    click.confirm('Proceed?',
++                                  default=False,
++                                  abort=True,
++                                  show_default=True)
++                    no_confirm = True
+         names += reserved_clusters
+ 
+     if apply_to_all:
+@@ -2939,9 +2957,15 @@ def spot_launch(
+     required=False,
+     help='Query the latest statuses, restarting the spot controller if stopped.'
+ )
++@click.option('--skip-finished',
++              '-s',
++              default=False,
++              is_flag=True,
++              required=False,
++              help='Show only pending/running jobs\' information.')
+ @usage_lib.entrypoint
+ # pylint: disable=redefined-builtin
+-def spot_queue(all: bool, refresh: bool):
++def spot_queue(all: bool, refresh: bool, skip_finished: bool):
+     """Show statuses of managed spot jobs.
+ 
+     \b
+@@ -2972,7 +2996,8 @@ def spot_queue(all: bool, refresh: bool):
+     """
+     click.secho('Fetching managed spot job statuses...', fg='yellow')
+     try:
+-        job_table = core.spot_queue(refresh=refresh)
++        job_table = core.spot_queue(refresh=refresh,
++                                    skip_finished=skip_finished)
+     except exceptions.ClusterNotUpError:
+         cache = spot_lib.load_job_table_cache()
+         if cache is not None:
+diff --git a/sky/core.py b/sky/core.py
+index d725d5d52ba..16654e7dce8 100644
+--- a/sky/core.py
++++ b/sky/core.py
+@@ -635,7 +635,8 @@ def spot_status(refresh: bool) -> List[Dict[str, Any]]:
+ 
+ 
+ @usage_lib.entrypoint
+-def spot_queue(refresh: bool) -> List[Dict[str, Any]]:
++def spot_queue(refresh: bool,
++               skip_finished: bool = False) -> List[Dict[str, Any]]:
+     # NOTE(dev): Keep the docstring consistent between the Python API and CLI.
+     """Get statuses of managed spot jobs.
+ 
+@@ -651,7 +652,7 @@ def spot_queue(refresh: bool) -> List[Dict[str, Any]]:
+                 'end_at': (float) timestamp of end,
+                 'duration': (float) duration in seconds,
+                 'retry_count': int Number of retries,
+-                'status': sky.JobStatus status of the job,
++                'status': spot_state.SpotStatus status of the job,
+                 'cluster_resources': (str) resources of the cluster,
+                 'region': (str) region of the cluster,
+             }
+@@ -698,6 +699,8 @@ def spot_queue(refresh: bool) -> List[Dict[str, Any]]:
+         raise RuntimeError(e.error_msg) from e
+ 
+     jobs = spot.load_spot_job_queue(job_table_payload)
++    if skip_finished:
++        jobs = list(filter(lambda job: not job['status'].is_terminal(), jobs))
+     return jobs
+ 
+ 
+diff --git a/sky/spot/spot_state.py b/sky/spot/spot_state.py
+index 521d43a5b64..42b8ff3b01d 100644
+--- a/sky/spot/spot_state.py
++++ b/sky/spot/spot_state.py
+@@ -7,6 +7,8 @@
+ import time
+ from typing import Any, Dict, List, Optional
+ 
++import colorama
++
+ from sky import sky_logging
+ from sky.backends import backend_utils
+ 
+@@ -68,6 +70,10 @@ def is_terminal(self) -> bool:
+     def is_failed(self) -> bool:
+         return self in self.failure_statuses()
+ 
++    def colored_str(self):
++        color = _SPOT_STATUS_TO_COLOR[self]
++        return f'{color}{self.value}{colorama.Style.RESET_ALL}'
++
+     @classmethod
+     def terminal_statuses(cls) -> List['SpotStatus']:
+         return [
+@@ -80,6 +86,20 @@ def failure_statuses(cls) -> List['SpotStatus']:
+         return [cls.FAILED, cls.FAILED_NO_RESOURCE, cls.FAILED_CONTROLLER]
+ 
+ 
++_SPOT_STATUS_TO_COLOR = {
++    SpotStatus.PENDING: colorama.Fore.BLUE,
++    SpotStatus.SUBMITTED: colorama.Fore.BLUE,
++    SpotStatus.STARTING: colorama.Fore.BLUE,
++    SpotStatus.RUNNING: colorama.Fore.GREEN,
++    SpotStatus.RECOVERING: colorama.Fore.CYAN,
++    SpotStatus.SUCCEEDED: colorama.Fore.GREEN,
++    SpotStatus.FAILED: colorama.Fore.RED,
++    SpotStatus.FAILED_NO_RESOURCE: colorama.Fore.RED,
++    SpotStatus.FAILED_CONTROLLER: colorama.Fore.RED,
++    SpotStatus.CANCELLED: colorama.Fore.YELLOW,
++}
++
++
+ # === Status transition functions ===
+ def set_pending(job_id: int, name: str, resources_str: str):
+     """Set the job to pending state."""
+diff --git a/sky/spot/spot_utils.py b/sky/spot/spot_utils.py
+index 5d6478033b1..3fc0f6dd834 100644
+--- a/sky/spot/spot_utils.py
++++ b/sky/spot/spot_utils.py
+@@ -416,7 +416,7 @@ def format_job_table(jobs: List[Dict[str, Any]], show_all: bool) -> str:
+                                              absolute=True),
+             job_duration,
+             job['recovery_count'],
+-            job['status'].value,
++            job['status'].colored_str(),
+         ]
+         if not job['status'].is_terminal():
+             status_counts[job['status'].value] += 1
+diff --git a/sky/utils/cli_utils/status_utils.py b/sky/utils/cli_utils/status_utils.py
+index 5a64b7abc4e..d117c3bac11 100644
+--- a/sky/utils/cli_utils/status_utils.py
++++ b/sky/utils/cli_utils/status_utils.py
+@@ -262,9 +262,7 @@ def _get_autostop(cluster_status):
+ 
+ 
+ def _get_price(cluster_status):
+-    handle = cluster_status['handle']
+-    hourly_cost = (handle.launched_resources.get_cost(3600) *
+-                   handle.launched_nodes)
++    hourly_cost = cluster_status['handle'].get_hourly_price()
+     price_str = f'$ {hourly_cost:.3f}'
+     return price_str
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

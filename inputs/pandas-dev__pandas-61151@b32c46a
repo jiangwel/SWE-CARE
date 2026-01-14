@@ -1,0 +1,233 @@
+  Task-ID: pandas-dev__pandas-61151@b32c46a
+  Please checkout to this commit first: d739c92dd476196bd750c2ac1680aa2d2235f410
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: Support dict to `pd.set_option` for cleaner code
+### Feature Type
+
+- [x] Adding new functionality to pandas
+
+- [ ] Changing existing functionality in pandas
+
+- [ ] Removing existing functionality in pandas
+
+
+### Problem Description
+
+I wish that I could use dict for `pd.set_option`, just like other packages typically accept dict when there are lots of option. Current pandas style follow what old programming language do, such as MATLAB.
+
+### Feature Description
+
+```python
+import pandas as pd
+
+options = {
+    'display.precision': 2,
+    'display.max_columns': 100,
+    'styler.format.precision': 2,
+}
+
+# like this
+pd.set_option(**options)
+
+# or like this:
+pd.set_option(options)
+```
+
+### Alternative Solutions
+
+Current implementations is:
+
+```python
+pd.set_option('display.precision', 2)
+pd.set_option('display.max_columns', 100)
+pd.set_option('styler.format.precision', 2)
+
+# or
+
+options = {
+    'display.precision': 2,
+    'display.max_columns': 100,
+    'styler.format.precision': 2,
+}
+
+for key, value in options.items():
+    pd.set_option(key, value)
+```
+
+### Additional Context
+
+Because if I write it like this:
+
+```python
+pd.set_option(
+    'display.precision', 2,
+    'display.max_columns', 100,
+    'styler.format.precision', 2,
+)
+```
+
+An auto formatter like `ruff` will make it into:
+
+```python
+pd.set_option(
+    'display.precision',
+    2,
+    'display.max_columns',
+    100,
+    'styler.format.precision',
+    2,
+)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v3.0.0.rst b/doc/source/whatsnew/v3.0.0.rst
+index b4aa6447c0a1b..c312eff4ecc2b 100644
+--- a/doc/source/whatsnew/v3.0.0.rst
++++ b/doc/source/whatsnew/v3.0.0.rst
+@@ -52,6 +52,7 @@ Other enhancements
+ - :class:`Rolling` and :class:`Expanding` now support ``pipe`` method (:issue:`57076`)
+ - :class:`Series` now supports the Arrow PyCapsule Interface for export (:issue:`59518`)
+ - :func:`DataFrame.to_excel` argument ``merge_cells`` now accepts a value of ``"columns"`` to only merge :class:`MultiIndex` column header header cells (:issue:`35384`)
++- :func:`set_option` now accepts a dictionary of options, simplifying configuration of multiple settings at once (:issue:`61093`)
+ - :meth:`DataFrame.corrwith` now accepts ``min_periods`` as optional arguments, as in :meth:`DataFrame.corr` and :meth:`Series.corr` (:issue:`9490`)
+ - :meth:`DataFrame.cummin`, :meth:`DataFrame.cummax`, :meth:`DataFrame.cumprod` and :meth:`DataFrame.cumsum` methods now have a ``numeric_only`` parameter (:issue:`53072`)
+ - :meth:`DataFrame.ewm` now allows ``adjust=False`` when ``times`` is provided (:issue:`54328`)
+diff --git a/pandas/_config/config.py b/pandas/_config/config.py
+index ce53e05608ba7..f8a62ac036d8f 100644
+--- a/pandas/_config/config.py
++++ b/pandas/_config/config.py
+@@ -199,9 +199,9 @@ def set_option(*args) -> None:
+ 
+     Parameters
+     ----------
+-    *args : str | object
++    *args : str | object | dict
+         Arguments provided in pairs, which will be interpreted as (pattern, value)
+-        pairs.
++        pairs, or as a single dictionary containing multiple option-value pairs.
+         pattern: str
+         Regexp which should match a single option
+         value: object
+@@ -248,11 +248,51 @@ def set_option(*args) -> None:
+     [2 rows x 5 columns]
+     >>> pd.reset_option("display.max_columns")
+     """
+-    # must at least 1 arg deal with constraints later
++    # Handle dictionary input
++    if len(args) == 1 and isinstance(args[0], dict):
++        options_dict = args[0]
++        for k, v in options_dict.items():
++            key = _get_single_key(k)
++            opt = _get_registered_option(key)
++            if opt and opt.validator:
++                opt.validator(v)
++            # walk the nested dict
++            root, k_root = _get_root(key)
++            root[k_root] = v
++            if opt.cb:
++                opt.cb(key)
++        return
++
++    # Handle single option-value pair
++    if len(args) == 2:
++        key = _get_single_key(args[0])
++        v = args[1]
++
++        opt = _get_registered_option(key)
++        if opt and opt.validator:
++            opt.validator(v)
++
++        # walk the nested dict
++        root, k_root = _get_root(key)
++        root[k_root] = v
++
++        if opt.cb:
++            opt.cb(key)
++        return
++
++    # Deprecated (# GH 61093): multiple option-value pairs as separate arguments
+     nargs = len(args)
+     if not nargs or nargs % 2 != 0:
+         raise ValueError("Must provide an even number of non-keyword arguments")
+ 
++    warnings.warn(
++        "Setting multiple options using multiple arguments is deprecated and will be "
++        "removed in a future version. Use a dictionary instead.",
++        FutureWarning,
++        stacklevel=2,
++    )
++
++    # Backward compatibility
+     for k, v in zip(args[::2], args[1::2]):
+         key = _get_single_key(k)
+ 
+diff --git a/pandas/tests/config/test_config.py b/pandas/tests/config/test_config.py
+index aaf6178866ecd..2e5293b514746 100644
+--- a/pandas/tests/config/test_config.py
++++ b/pandas/tests/config/test_config.py
+@@ -189,7 +189,28 @@ def test_set_option_multiple(self):
+         assert cf.get_option("b.c") == "hullo"
+         assert cf.get_option("b.b") is None
+ 
+-        cf.set_option("a", "2", "b.c", None, "b.b", 10.0)
++        # Expect the deprecation warning
++        with tm.assert_produces_warning(
++            FutureWarning,
++            match="Setting multiple options using multiple arguments is deprecated",
++        ):
++            cf.set_option("a", "2", "b.c", None, "b.b", 10.0)
++
++        assert cf.get_option("a") == "2"
++        assert cf.get_option("b.c") is None
++        assert cf.get_option("b.b") == 10.0
++
++    def test_set_option_dict(self):
++        cf.register_option("a", 1, "doc")
++        cf.register_option("b.c", "hullo", "doc2")
++        cf.register_option("b.b", None, "doc2")
++
++        assert cf.get_option("a") == 1
++        assert cf.get_option("b.c") == "hullo"
++        assert cf.get_option("b.b") is None
++
++        options_dict = {"a": "2", "b.c": None, "b.b": 10.0}
++        cf.set_option(options_dict)
+ 
+         assert cf.get_option("a") == "2"
+         assert cf.get_option("b.c") is None
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

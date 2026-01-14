@@ -1,0 +1,149 @@
+  Task-ID: numpy__numpy-20310@a4daaf5
+  Please checkout to this commit first: 9c28152850109cdb567eaab7a872aa1429e51f55
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: einsum all zero for float16
+### Describe the issue:
+
+Starting with numpy-1.21.0 (at least some) einsum operations for arrays with dtype=np.float16 yield all zero results.
+
+### Reproduce the code example:
+
+```python
+import numpy as np
+
+a = (np.linspace(0, 301, 300).reshape(10, 10, 3) / 301).astype(np.float16)
+mat = np.array([[0.39, 0.54, 0.0089], [0.07, 0.96, 0.001], [0.02, 0.13, 0.94]], dtype=np.float16)
+assert np.all((a @ mat.T) != 0)
+assert np.all(np.einsum("ij, ...j", mat.astype(np.float32), a.astype(np.float32)) != 0)
+assert np.all(np.einsum("ij, ...j", mat, a) != 0)
+```
+
+
+### Error message:
+
+_No response_
+
+### NumPy/Python version information:
+
+1.21.2 3.8.12 (default, Oct 12 2021, 13:49:34) 
+[GCC 7.5.0]
+  </issue>
+  
+  <patch>
+  diff --git a/numpy/core/src/multiarray/einsum_sumprod.c.src b/numpy/core/src/multiarray/einsum_sumprod.c.src
+index 29ceabd71d58..3114a58960ef 100644
+--- a/numpy/core/src/multiarray/einsum_sumprod.c.src
++++ b/numpy/core/src/multiarray/einsum_sumprod.c.src
+@@ -337,13 +337,13 @@ static NPY_GCC_OPT_3 void
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+          */
+-        const @type@ b@i@ = @from@(data[@i@]);
+-        const @type@ c@i@ = @from@(data_out[@i@]);
++        const @temptype@ b@i@ = @from@(data[@i@]);
++        const @temptype@ c@i@ = @from@(data_out[@i@]);
+         /**end repeat2**/
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+          */
+-        const @type@ abc@i@ = scalar * b@i@ + c@i@;
++        const @temptype@ abc@i@ = scalar * b@i@ + c@i@;
+         /**end repeat2**/
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+@@ -353,8 +353,8 @@ static NPY_GCC_OPT_3 void
+     }
+ #endif // !NPY_DISABLE_OPTIMIZATION
+     for (; count > 0; --count, ++data, ++data_out) {
+-        const @type@ b = @from@(*data);
+-        const @type@ c = @from@(*data_out);
++        const @temptype@ b = @from@(*data);
++        const @temptype@ c = @from@(*data_out);
+         *data_out = @to@(scalar * b + c);
+     }
+ #endif // NPYV check for @type@
+@@ -417,14 +417,14 @@ static void
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+          */
+-        const @type@ a@i@ = @from@(data0[@i@]);
+-        const @type@ b@i@ = @from@(data1[@i@]);
+-        const @type@ c@i@ = @from@(data_out[@i@]);
++        const @temptype@ a@i@ = @from@(data0[@i@]);
++        const @temptype@ b@i@ = @from@(data1[@i@]);
++        const @temptype@ c@i@ = @from@(data_out[@i@]);
+         /**end repeat2**/
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+          */
+-        const @type@ abc@i@ = a@i@ * b@i@ + c@i@;
++        const @temptype@ abc@i@ = a@i@ * b@i@ + c@i@;
+         /**end repeat2**/
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+@@ -434,9 +434,9 @@ static void
+     }
+ #endif // !NPY_DISABLE_OPTIMIZATION
+     for (; count > 0; --count, ++data0, ++data1, ++data_out) {
+-        const @type@ a = @from@(*data0);
+-        const @type@ b = @from@(*data1);
+-        const @type@ c = @from@(*data_out);
++        const @temptype@ a = @from@(*data0);
++        const @temptype@ b = @from@(*data1);
++        const @temptype@ c = @from@(*data_out);
+         *data_out = @to@(a * b + c);
+     }
+ #endif // NPYV check for @type@
+@@ -521,14 +521,14 @@ static NPY_GCC_OPT_3 void
+         /**begin repeat2
+          * #i = 0, 1, 2, 3#
+          */
+-        const @type@ ab@i@ = @from@(data0[@i@]) * @from@(data1[@i@]);
++        const @temptype@ ab@i@ = @from@(data0[@i@]) * @from@(data1[@i@]);
+         /**end repeat2**/
+         accum += ab0 + ab1 + ab2 + ab3;
+     }
+ #endif // !NPY_DISABLE_OPTIMIZATION
+     for (; count > 0; --count, ++data0, ++data1) {
+-        const @type@ a = @from@(*data0);
+-        const @type@ b = @from@(*data1);
++        const @temptype@ a = @from@(*data0);
++        const @temptype@ b = @from@(*data1);
+         accum += a * b;
+     }
+ #endif // NPYV check for @type@
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

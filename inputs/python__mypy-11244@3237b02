@@ -1,0 +1,359 @@
+  Task-ID: python__mypy-11244@3237b02
+  Please checkout to this commit first: e80da8cbf305c7fd2555dcb8443726eea69fa7d7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Unsupported target for indexed assignment for TypedDict union
+```python
+from typing_extensions import TypedDict
+from typing import Union
+
+
+class Foo1(TypedDict):
+    z: str
+    a: int
+
+
+class Foo2(TypedDict):
+    z: str
+    b: int
+
+
+def func(foo: Union[Foo1, Foo2]):
+    foo["z"] = "z"
+```
+
+The error `Unsupported target for indexed assignment ("Union[Foo1, Foo2]")` is reported on line ` foo["z"] = "z"`. I would expect no error.
+
+Tested with `mypy 0.902` and `typing-extensions 3.10.0.0`, no option given to `mypy`.
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 0ccd6cd2b409..4d9fe2867889 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -3236,25 +3236,9 @@ def check_indexed_assignment(self, lvalue: IndexExpr,
+         """
+         self.try_infer_partial_type_from_indexed_assignment(lvalue, rvalue)
+         basetype = get_proper_type(self.expr_checker.accept(lvalue.base))
+-        if (isinstance(basetype, TypedDictType) or (isinstance(basetype, TypeVarType)
+-                and isinstance(get_proper_type(basetype.upper_bound), TypedDictType))):
+-            if isinstance(basetype, TypedDictType):
+-                typed_dict_type = basetype
+-            else:
+-                upper_bound_type = get_proper_type(basetype.upper_bound)
+-                assert isinstance(upper_bound_type, TypedDictType)
+-                typed_dict_type = upper_bound_type
+-            item_type = self.expr_checker.visit_typeddict_index_expr(typed_dict_type, lvalue.index)
+-            method_type: Type = CallableType(
+-                arg_types=[self.named_type('builtins.str'), item_type],
+-                arg_kinds=[ARG_POS, ARG_POS],
+-                arg_names=[None, None],
+-                ret_type=NoneType(),
+-                fallback=self.named_type('builtins.function')
+-            )
+-        else:
+-            method_type = self.expr_checker.analyze_external_member_access(
+-                '__setitem__', basetype, context)
++        method_type = self.expr_checker.analyze_external_member_access(
++            '__setitem__', basetype, lvalue)
++
+         lvalue.method_type = method_type
+         self.expr_checker.check_method_call(
+             '__setitem__', basetype, method_type, [lvalue.index, rvalue],
+diff --git a/mypy/checkmember.py b/mypy/checkmember.py
+index 4fc96de039b0..89c4d135ea67 100644
+--- a/mypy/checkmember.py
++++ b/mypy/checkmember.py
+@@ -12,7 +12,7 @@
+     TypeInfo, FuncBase, Var, FuncDef, SymbolNode, SymbolTable, Context,
+     MypyFile, TypeVarExpr, ARG_POS, ARG_STAR, ARG_STAR2, Decorator,
+     OverloadedFuncDef, TypeAlias, TempNode, is_final_node,
+-    SYMBOL_FUNCBASE_TYPES,
++    SYMBOL_FUNCBASE_TYPES, IndexExpr
+ )
+ from mypy.messages import MessageBuilder
+ from mypy.maptype import map_instance_to_supertype
+@@ -153,9 +153,11 @@ def _analyze_member_access(name: str,
+     elif isinstance(typ, TupleType):
+         # Actually look up from the fallback instance type.
+         return _analyze_member_access(name, tuple_fallback(typ), mx, override_info)
+-    elif isinstance(typ, (TypedDictType, LiteralType, FunctionLike)):
++    elif isinstance(typ, (LiteralType, FunctionLike)):
+         # Actually look up from the fallback instance type.
+         return _analyze_member_access(name, typ.fallback, mx, override_info)
++    elif isinstance(typ, TypedDictType):
++        return analyze_typeddict_access(name, typ, mx, override_info)
+     elif isinstance(typ, NoneType):
+         return analyze_none_member_access(name, typ, mx)
+     elif isinstance(typ, TypeVarType):
+@@ -855,6 +857,33 @@ def analyze_enum_class_attribute_access(itype: Instance,
+     return itype.copy_modified(erased=False, last_known_value=enum_literal)
+ 
+ 
++def analyze_typeddict_access(name: str, typ: TypedDictType,
++                             mx: MemberContext, override_info: Optional[TypeInfo]) -> Type:
++    if name == '__setitem__':
++        # Since we can only get this during `a['key'] = ...`
++        # it is safe to assume that the context is `IndexExpr`.
++        assert isinstance(mx.context, IndexExpr)
++        item_type = mx.chk.expr_checker.visit_typeddict_index_expr(typ, mx.context.index)
++        return CallableType(
++            arg_types=[mx.chk.named_type('builtins.str'), item_type],
++            arg_kinds=[ARG_POS, ARG_POS],
++            arg_names=[None, None],
++            ret_type=NoneType(),
++            fallback=mx.chk.named_type('builtins.function'),
++            name=name,
++        )
++    elif name == '__delitem__':
++        return CallableType(
++            arg_types=[mx.chk.named_type('builtins.str')],
++            arg_kinds=[ARG_POS],
++            arg_names=[None],
++            ret_type=NoneType(),
++            fallback=mx.chk.named_type('builtins.function'),
++            name=name,
++        )
++    return _analyze_member_access(name, typ.fallback, mx, override_info)
++
++
+ def add_class_tvars(t: ProperType, isuper: Optional[Instance],
+                     is_classmethod: bool,
+                     original_type: Type,
+diff --git a/mypy/plugins/default.py b/mypy/plugins/default.py
+index f151d3da669d..55fcaf426141 100644
+--- a/mypy/plugins/default.py
++++ b/mypy/plugins/default.py
+@@ -46,8 +46,6 @@ def get_method_signature_hook(self, fullname: str
+             return typed_dict_pop_signature_callback
+         elif fullname in set(n + '.update' for n in TPDICT_FB_NAMES):
+             return typed_dict_update_signature_callback
+-        elif fullname in set(n + '.__delitem__' for n in TPDICT_FB_NAMES):
+-            return typed_dict_delitem_signature_callback
+         elif fullname == 'ctypes.Array.__setitem__':
+             return ctypes.array_setitem_callback
+         elif fullname == singledispatch.SINGLEDISPATCH_CALLABLE_CALL_METHOD:
+@@ -390,12 +388,6 @@ def typed_dict_setdefault_callback(ctx: MethodContext) -> Type:
+     return ctx.default_return_type
+ 
+ 
+-def typed_dict_delitem_signature_callback(ctx: MethodSigContext) -> CallableType:
+-    # Replace NoReturn as the argument type.
+-    str_type = ctx.api.named_generic_type('builtins.str', [])
+-    return ctx.default_signature.copy_modified(arg_types=[str_type])
+-
+-
+ def typed_dict_delitem_callback(ctx: MethodContext) -> Type:
+     """Type check TypedDict.__delitem__."""
+     if (isinstance(ctx.type, TypedDictType)
+diff --git a/test-data/unit/check-inference.test b/test-data/unit/check-inference.test
+index 80bc40b6ca98..652a26163858 100644
+--- a/test-data/unit/check-inference.test
++++ b/test-data/unit/check-inference.test
+@@ -1975,7 +1975,7 @@ T = TypeVar('T')
+ 
+ class A:
+     def f(self) -> None:
+-        self.g() # E: Too few arguments for "g" of "A"   
++        self.g() # E: Too few arguments for "g" of "A"
+         self.g(1)
+     @dec
+     def g(self, x: str) -> None: pass
+diff --git a/test-data/unit/check-typeddict.test b/test-data/unit/check-typeddict.test
+index 04bbc9b2b4d4..4d9c25e2f4be 100644
+--- a/test-data/unit/check-typeddict.test
++++ b/test-data/unit/check-typeddict.test
+@@ -1681,8 +1681,8 @@ s = ''
+ del a[s] # E: Expected TypedDict key to be string literal
+ del b[s] # E: Expected TypedDict key to be string literal
+ alias = b.__delitem__
+-alias('x') # E: Argument 1 has incompatible type "str"; expected "NoReturn"
+-alias(s) # E: Argument 1 has incompatible type "str"; expected "NoReturn"
++alias('x')
++alias(s)
+ [builtins fixtures/dict.pyi]
+ 
+ [case testPluginUnionsOfTypedDicts]
+@@ -2109,7 +2109,7 @@ class TD(TypedDict):
+ 
+ d: TD = {b'foo': 2} # E: Expected TypedDict key to be string literal
+ d[b'foo'] = 3 # E: TypedDict key must be a string literal; expected one of ("foo") \
+-    # E: Argument 1 has incompatible type "bytes"; expected "str"
++    # E: Argument 1 to "__setitem__" has incompatible type "bytes"; expected "str"
+ d[b'foo'] # E: TypedDict key must be a string literal; expected one of ("foo")
+ d[3] # E: TypedDict key must be a string literal; expected one of ("foo")
+ d[True] # E: TypedDict key must be a string literal; expected one of ("foo")
+@@ -2122,3 +2122,138 @@ from mypy_extensions import TypedDict
+ Foo = TypedDict('Foo', {'camelCaseKey': str})
+ value: Foo = {}  # E: Missing key "camelCaseKey" for TypedDict "Foo"
+ [builtins fixtures/dict.pyi]
++
++
++[case testTypedDictUnionGetItem]
++from typing import TypedDict, Union
++
++class Foo1(TypedDict):
++    z: str
++    a: int
++class Foo2(TypedDict):
++    z: str
++    b: int
++
++def func(foo: Union[Foo1, Foo2]) -> str:
++    reveal_type(foo["z"])  # ok
++
++    reveal_type(foo["a"])
++    reveal_type(foo["b"])
++    reveal_type(foo["missing"])
++    reveal_type(foo[1])
++
++    return foo["z"]
++[out]
++main:11: note: Revealed type is "builtins.str"
++main:13: note: Revealed type is "Union[builtins.int, Any]"
++main:13: error: TypedDict "Foo2" has no key "a"
++main:14: note: Revealed type is "Union[Any, builtins.int]"
++main:14: error: TypedDict "Foo1" has no key "b"
++main:15: note: Revealed type is "Any"
++main:15: error: TypedDict "Foo1" has no key "missing"
++main:15: error: TypedDict "Foo2" has no key "missing"
++main:16: note: Revealed type is "Any"
++main:16: error: TypedDict key must be a string literal; expected one of ("z", "a")
++main:16: error: TypedDict key must be a string literal; expected one of ("z", "b")
++[builtins fixtures/dict.pyi]
++[typing fixtures/typing-typeddict.pyi]
++
++
++[case testTypedDictUnionSetItem]
++from typing import TypedDict, Union
++
++class Foo1(TypedDict):
++    z: str
++    a: int
++class Foo2(TypedDict):
++    z: str
++    b: int
++
++def func(foo: Union[Foo1, Foo2]):
++    foo["z"] = "a"  # ok
++    foo["z"] = 1
++
++    foo["a"] = 1
++    foo["b"] = 2
++
++    foo["missing"] = 1
++    foo[1] = "m"
++[out]
++main:12: error: Value of "z" has incompatible type "int"; expected "str"
++main:14: error: TypedDict "Foo2" has no key "a"
++main:15: error: TypedDict "Foo1" has no key "b"
++main:17: error: TypedDict "Foo1" has no key "missing"
++main:17: error: TypedDict "Foo2" has no key "missing"
++main:18: error: TypedDict key must be a string literal; expected one of ("z", "a")
++main:18: error: TypedDict key must be a string literal; expected one of ("z", "b")
++main:18: error: Argument 1 to "__setitem__" has incompatible type "int"; expected "str"
++[builtins fixtures/dict.pyi]
++[typing fixtures/typing-typeddict.pyi]
++
++
++[case testTypedDictUnionDelItem]
++from typing import TypedDict, Union
++
++class Foo1(TypedDict):
++    z: str
++    a: int
++class Foo2(TypedDict):
++    z: str
++    b: int
++
++def func(foo: Union[Foo1, Foo2]):
++    del foo["z"]
++
++    del foo["a"]
++    del foo["b"]
++
++    del foo["missing"]
++    del foo[1]
++[out]
++main:11: error: Key "z" of TypedDict "Foo1" cannot be deleted
++main:11: error: Key "z" of TypedDict "Foo2" cannot be deleted
++main:13: error: Key "a" of TypedDict "Foo1" cannot be deleted
++main:13: error: TypedDict "Foo2" has no key "a"
++main:14: error: TypedDict "Foo1" has no key "b"
++main:14: error: Key "b" of TypedDict "Foo2" cannot be deleted
++main:16: error: TypedDict "Foo1" has no key "missing"
++main:16: error: TypedDict "Foo2" has no key "missing"
++main:17: error: Expected TypedDict key to be string literal
++main:17: error: Argument 1 to "__delitem__" has incompatible type "int"; expected "str"
++[builtins fixtures/dict.pyi]
++[typing fixtures/typing-typeddict.pyi]
++
++
++[case testTypedDictTypeVarUnionSetItem]
++from typing import TypedDict, Union, TypeVar
++
++F1 = TypeVar('F1', bound='Foo1')
++F2 = TypeVar('F2', bound='Foo2')
++
++class Foo1(TypedDict):
++    z: str
++    a: int
++class Foo2(TypedDict):
++    z: str
++    b: int
++
++def func(foo: Union[F1, F2]):
++    foo["z"] = "a"  # ok
++    foo["z"] = 1
++
++    foo["a"] = 1
++    foo["b"] = 2
++
++    foo["missing"] = 1
++    foo[1] = "m"
++[out]
++main:15: error: Value of "z" has incompatible type "int"; expected "str"
++main:17: error: TypedDict "Foo2" has no key "a"
++main:18: error: TypedDict "Foo1" has no key "b"
++main:20: error: TypedDict "Foo1" has no key "missing"
++main:20: error: TypedDict "Foo2" has no key "missing"
++main:21: error: TypedDict key must be a string literal; expected one of ("z", "a")
++main:21: error: TypedDict key must be a string literal; expected one of ("z", "b")
++main:21: error: Argument 1 to "__setitem__" has incompatible type "int"; expected "str"
++[builtins fixtures/dict.pyi]
++[typing fixtures/typing-typeddict.pyi]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,148 @@
+  Task-ID: skypilot-org__skypilot-614@ac824f0
+  Please checkout to this commit first: b0438c4c2410967fc4516bce572f519650bfa4d7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Inconsistent system version for different cloud
+For different clouds, we are using inconsistent systems. I think it would be fine to be on different small versions of `ubuntu 20`, but GCP's `Debian` would be a bit surprising.
+
+AWS:
+```
+ubuntu@ip-172-31-1-185:~$ lsb_release -d
+Description:    Ubuntu 20.04.4 LTS
+```
+
+GCP:
+```
+ubuntu@ray-gcp-cpunode-head-97a5a5a1-compute:~$ lsb_release -d
+Description:    Debian GNU/Linux 10 (buster)
+```
+
+Azure:
+```
+azureuser@ray-azure-cpunode-head-6f29a63e0:~$ lsb_release -d
+Description:    Ubuntu 20.04.3 LTS
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sky/clouds/gcp.py b/sky/clouds/gcp.py
+index 4e820d5067f..4252b4c620d 100644
+--- a/sky/clouds/gcp.py
++++ b/sky/clouds/gcp.py
+@@ -186,6 +186,7 @@ def make_deploy_resources_variables(self, resources):
+             'tpu': None,
+             'custom_resources': None,
+             'use_spot': r.use_spot,
++            'image_name': 'common-cpu',
+         }
+         accelerators = r.accelerators
+         if accelerators is not None:
+@@ -204,6 +205,8 @@ def make_deploy_resources_variables(self, resources):
+                 # https://cloud.google.com/compute/docs/gpus
+                 resources_vars['gpu'] = 'nvidia-tesla-{}'.format(acc.lower())
+                 resources_vars['gpu_count'] = acc_count
++                # CUDA driver version 470.103.01, CUDA Library 11.3
++                resources_vars['image_name'] = 'common-cu113-ubuntu-2004'
+ 
+         return resources_vars
+ 
+diff --git a/sky/templates/gcp-ray.yml.j2 b/sky/templates/gcp-ray.yml.j2
+index e02119f0e2d..28862bb1011 100644
+--- a/sky/templates/gcp-ray.yml.j2
++++ b/sky/templates/gcp-ray.yml.j2
+@@ -20,7 +20,7 @@ provider:
+   cache_stopped_nodes: True
+ 
+ auth:
+-  ssh_user: ubuntu
++  ssh_user: gcpuser
+ 
+ available_node_types:
+   ray_head_default:
+@@ -35,9 +35,9 @@ available_node_types:
+             diskSizeGb: {{disk_size}}
+             # See https://cloud.google.com/deep-learning-vm/docs/images
+ {%- if gpu is none %}
+-            sourceImage: projects/deeplearning-platform-release/global/images/family/common-cpu
++            sourceImage: projects/deeplearning-platform-release/global/images/family/{{image_name}}
+ {%- else %}
+-            sourceImage: projects/deeplearning-platform-release/global/images/family/common-cu110
++            sourceImage: projects/deeplearning-platform-release/global/images/family/{{image_name}}
+       guestAccelerators:
+         - acceleratorType: projects/intercloud-320520/zones/{{zones}}/acceleratorTypes/{{gpu}}
+           acceleratorCount: {{gpu_count}}
+@@ -45,12 +45,12 @@ available_node_types:
+         items:
+           - key: install-nvidia-driver
+             value: "True"
++{%- endif %}
+       scheduling:
+ {%- if use_spot %}
+         - preemptible: true
+ {%- endif %}
+         - onHostMaintenance: TERMINATE  # Required for GPU-attached VMs.
+-{%- endif %}
+ {% if num_nodes > 1 %}
+   ray_worker_default:
+     min_workers: {{num_nodes - 1}}
+@@ -66,9 +66,9 @@ available_node_types:
+             diskSizeGb: {{disk_size}}
+             # See https://cloud.google.com/deep-learning-vm/docs/images
+ {%- if gpu is none %}
+-            sourceImage: projects/deeplearning-platform-release/global/images/family/common-cpu
++            sourceImage: projects/deeplearning-platform-release/global/images/family/{{image_name}}
+ {%- else %}
+-            sourceImage: projects/deeplearning-platform-release/global/images/family/common-cu110
++            sourceImage: projects/deeplearning-platform-release/global/images/family/{{image_name}}
+       guestAccelerators:
+         - acceleratorType: projects/intercloud-320520/zones/{{zones}}/acceleratorTypes/{{gpu}}
+           acceleratorCount: {{gpu_count}}
+@@ -76,13 +76,13 @@ available_node_types:
+         items:
+           - key: install-nvidia-driver
+             value: "True"
++{%- endif %}
+       scheduling:
+ {%- if use_spot %}
+         - preemptible: true
+ {%- endif %}
+         - onHostMaintenance: TERMINATE  # Required for GPU-attached VMs.
+ {%- endif %}
+-{%- endif %}
+ 
+ head_node_type: ray_head_default
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

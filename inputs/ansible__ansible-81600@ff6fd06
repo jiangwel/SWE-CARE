@@ -1,0 +1,192 @@
+  Task-ID: ansible__ansible-81600@ff6fd06
+  Please checkout to this commit first: 65a96daaf40920c9fa1c8da10203f6a1cbe91ac7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `git` integration test uses excessive network bandwidth
+### Summary
+
+The `git` integration test clones the `ansible-examples` repo (which has grown to > 50MB) numerous times from its Github source, and none of the tests appear to be getting additional benefit from the repeated internet access. This test should be rewritten in one or two steps to:
+
+1) clone the repo *once* from Github to a local tempdir, then all subsequent clone/fetch/checkout/etc tests should reference the local copy in the tempdir
+
+2) be entirely rewritten to use a much more compact integrated repo (thus requiring minimal-to-no internet access at all for the test)
+
+
+### Issue Type
+
+Bug Report
+
+### Component Name
+
+git integration test
+
+### Ansible Version
+
+```console
+$ ansible --version
+
+2.16 devel
+```
+
+
+### Configuration
+
+```console
+# if using a version older than ansible-core 2.12 you should omit the '-t all'
+$ ansible-config dump --only-changed -t all
+```
+
+
+### OS / Environment
+
+NA
+
+### Steps to Reproduce
+
+NA
+
+### Expected Results
+
+Low bandwidth usage, fast tests
+
+### Actual Results
+
+```console
+High bandwidth usage, resulting in slow/flaky tests
+```
+
+
+### Code of Conduct
+
+- [X] I agree to follow the Ansible Code of Conduct
+  </issue>
+  
+  <patch>
+  diff --git a/test/integration/targets/git/tasks/setup-local-repos.yml b/test/integration/targets/git/tasks/setup-local-repos.yml
+index 4626f1028bf74a..3723f4dda4cbf7 100644
+--- a/test/integration/targets/git/tasks/setup-local-repos.yml
++++ b/test/integration/targets/git/tasks/setup-local-repos.yml
+@@ -56,6 +56,16 @@
+   args:
+     chdir: "{{ repo_dir }}/shallow_branches"
+ 
++- name: SETUP-LOCAL-REPOS | get ref head for test_branch
++  shell: git checkout test_branch && git rev-parse HEAD
++  args:
++    chdir: "{{ repo_dir }}/shallow_branches"
++  register: ref_head_id
++
++- name: SETUP-LOCAL-REPOS | store ref head for test_branch
++  set_fact:
++    test_branch_ref_head_id: "{{ ref_head_id.stdout }}"
++
+ # Make this a bare one, we need to be able to push to it from clones
+ # We make the repo here for consistency with the other repos,
+ # but we finish setting it up in forcefully-fetch-tag.yml.
+diff --git a/test/integration/targets/git/tasks/specific-revision.yml b/test/integration/targets/git/tasks/specific-revision.yml
+index f1fe41d56268bf..95d2ccdccb99f1 100644
+--- a/test/integration/targets/git/tasks/specific-revision.yml
++++ b/test/integration/targets/git/tasks/specific-revision.yml
+@@ -70,11 +70,11 @@
+ # Same as the previous test, but this time we specify which ref
+ # contains the SHA1
+ - name: SPECIFIC-REVISION | update to revision by specifying the refspec
+-  git:
+-    repo: https://github.com/ansible/ansible-examples.git
++  git: &git_ref_spec
++    repo: "{{ repo_dir }}/shallow_branches"
+     dest: '{{ checkout_dir }}'
+-    version: 5473e343e33255f2da0b160f53135c56921d875c
+-    refspec: refs/pull/7/merge
++    version: "{{ test_branch_ref_head_id }}"
++    refspec: refs/heads/test_branch
+ 
+ - name: SPECIFIC-REVISION | check HEAD after update with refspec
+   command: git rev-parse HEAD
+@@ -84,7 +84,7 @@
+ 
+ - assert:
+     that:
+-      - 'git_result.stdout == "5473e343e33255f2da0b160f53135c56921d875c"'
++      - 'git_result.stdout == test_branch_ref_head_id'
+ 
+ # try out combination of refspec and depth
+ - name: SPECIFIC-REVISION | clear checkout_dir
+@@ -94,11 +94,8 @@
+ 
+ - name: SPECIFIC-REVISION | update to revision by specifying the refspec with depth=1
+   git:
+-    repo: https://github.com/ansible/ansible-examples.git
+-    dest: '{{ checkout_dir }}'
+-    version: 5473e343e33255f2da0b160f53135c56921d875c
+-    refspec: refs/pull/7/merge
+     depth: 1
++    <<: *git_ref_spec
+ 
+ - name: SPECIFIC-REVISION | check HEAD after update with refspec
+   command: git rev-parse HEAD
+@@ -108,7 +105,7 @@
+ 
+ - assert:
+     that:
+-      - 'git_result.stdout == "5473e343e33255f2da0b160f53135c56921d875c"'
++      - 'git_result.stdout == test_branch_ref_head_id'
+ 
+ - name: SPECIFIC-REVISION | try to access other commit
+   shell: git checkout 0ce1096
+@@ -130,11 +127,7 @@
+     path: "{{ checkout_dir }}"
+ 
+ - name: SPECIFIC-REVISION | clone to revision by specifying the refspec
+-  git:
+-    repo: https://github.com/ansible/ansible-examples.git
+-    dest: "{{ checkout_dir }}"
+-    version: 5473e343e33255f2da0b160f53135c56921d875c
+-    refspec: refs/pull/7/merge
++  git: *git_ref_spec
+ 
+ - name: SPECIFIC-REVISION | check HEAD after update with refspec
+   command: git rev-parse HEAD
+@@ -144,7 +137,7 @@
+ 
+ - assert:
+     that:
+-      - 'git_result.stdout == "5473e343e33255f2da0b160f53135c56921d875c"'
++      - 'git_result.stdout == test_branch_ref_head_id'
+ 
+ # Test that a forced shallow checkout referincing branch only always fetches latest head
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,159 @@
+  Task-ID: deepset-ai__haystack-9338@f9910f7
+  Please checkout to this commit first: e5255d906155476c38577fae37ba99e4fbd1c37e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Potential REDoS Vulnerability in Haystack SentenceSplitter
+We found a REDoS vulnerability in Haystack's `SentenceSplitter`.
+
+- Problematic regex: `QUOTE_SPANS_RE` (`\W(\"+|\'+).*?\1`)
+- Issue: Specially crafted input can cause catastrophic backtracking, leading to a potential DoS.
+
+Reproduction:
+```python
+import time
+from haystack.components.preprocessors.sentence_tokenizer import SentenceSplitter
+
+
+splitter = SentenceSplitter()
+text = ' ' + '"' * 20 + 'A' * 500000000 + 'B'
+start = time.time()
+result = splitter.split_sentences(text)
+end = time.time()
+
+print(f"Execution Time: {end - start:.2f} seconds")
+
+# Execution Time: 33.77 seconds
+```
+
+- Execution time increases dramatically with this input.
+
+Version: v2.13.1 (latest as of April 26, 2025).
+
+Vulnerable function: `SentenceSplitter._apply_split_rules()`
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/components/preprocessors/sentence_tokenizer.py b/haystack/components/preprocessors/sentence_tokenizer.py
+index 2cb77347d3..6d38d14ec7 100644
+--- a/haystack/components/preprocessors/sentence_tokenizer.py
++++ b/haystack/components/preprocessors/sentence_tokenizer.py
+@@ -40,7 +40,7 @@
+     "ml": "malayalam",
+ }
+ 
+-QUOTE_SPANS_RE = re.compile(r"\W(\"+|\'+).*?\1")
++QUOTE_SPANS_RE = re.compile(r'"[^"]*"|\'[^\']*\'')
+ 
+ if nltk_imports.is_successful():
+ 
+diff --git a/releasenotes/notes/SentenceSplitter-ReDoS-fix-ca91b020cab50bf6.yaml b/releasenotes/notes/SentenceSplitter-ReDoS-fix-ca91b020cab50bf6.yaml
+new file mode 100644
+index 0000000000..d66f68c97a
+--- /dev/null
++++ b/releasenotes/notes/SentenceSplitter-ReDoS-fix-ca91b020cab50bf6.yaml
+@@ -0,0 +1,7 @@
++---
++security:
++  - |
++    Made QUOTE_SPANS_RE regex ReDoS-safe. This prevents potential catastrophic backtracking on malicious inputs
++fixes:
++  - |
++    Fixed a potential ReDoS issue in QUOTE_SPANS_RE regex used inside the SentenceSplitter component.
+diff --git a/test/components/preprocessors/test_sentence_tokenizer.py b/test/components/preprocessors/test_sentence_tokenizer.py
+index f8aaf68fa7..5f22d960de 100644
+--- a/test/components/preprocessors/test_sentence_tokenizer.py
++++ b/test/components/preprocessors/test_sentence_tokenizer.py
+@@ -1,8 +1,10 @@
++import time
+ import pytest
+ from unittest.mock import patch
+ from pathlib import Path
+ 
+ from haystack.components.preprocessors.sentence_tokenizer import SentenceSplitter
++from haystack.components.preprocessors.sentence_tokenizer import QUOTE_SPANS_RE
+ 
+ from pytest import LogCaptureFixture
+ 
+@@ -65,3 +67,48 @@ def test_read_abbreviations_missing_file(caplog: LogCaptureFixture):
+         result = SentenceSplitter._read_abbreviations("pt")
+         assert result == []
+         assert "No abbreviations file found for pt. Using default abbreviations." in caplog.text
++
++
++def test_quote_spans_regex():
++    # double quotes
++    text1 = 'He said "Hello world" and left.'
++    matches1 = list(QUOTE_SPANS_RE.finditer(text1))
++    assert len(matches1) == 1
++    assert matches1[0].group() == '"Hello world"'
++
++    # single quotes
++    text2 = "She replied 'Goodbye world' and smiled."
++    matches2 = list(QUOTE_SPANS_RE.finditer(text2))
++    assert len(matches2) == 1
++    assert matches2[0].group() == "'Goodbye world'"
++
++    # multiple quotes
++    text3 = 'First "quote" and second "quote" in same text.'
++    matches3 = list(QUOTE_SPANS_RE.finditer(text3))
++    assert len(matches3) == 2
++    assert matches3[0].group() == '"quote"'
++    assert matches3[1].group() == '"quote"'
++
++    # quotes containing newlines
++    text4 = 'Text with "quote\nspanning\nmultiple\nlines"'
++    matches4 = list(QUOTE_SPANS_RE.finditer(text4))
++    assert len(matches4) == 1
++    assert matches4[0].group() == '"quote\nspanning\nmultiple\nlines"'
++
++    # no quotes
++    text5 = "This text has no quotes."
++    matches5 = list(QUOTE_SPANS_RE.finditer(text5))
++    assert len(matches5) == 0
++
++
++def test_split_sentences_performance() -> None:
++    # make sure our regex is not vulnerable to Regex Denial of Service (ReDoS)
++    # https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS
++    # this is a very long string, roughly 500 MB, but it should not take more than 2 seconds to process
++    splitter = SentenceSplitter()
++    text = " " + '"' * 20 + "A" * 50000000 + "B"
++    start = time.time()
++    _ = splitter.split_sentences(text)
++    end = time.time()
++
++    assert end - start < 2, f"Execution time exceeded 2 seconds: {end - start:.2f} seconds"
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

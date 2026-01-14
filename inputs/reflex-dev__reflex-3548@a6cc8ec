@@ -1,0 +1,172 @@
+  Task-ID: reflex-dev__reflex-3548@a6cc8ec
+  Please checkout to this commit first: 44233c9cd111f282f574b890d51ccc226a47e019
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Dev Mode Clear Dark Cookie
+During dev mode sometimes when you are on another app and running dark mode stop that app and go to a new one the cookie for local host is cached, and your other app has dark mode. On every run dev, we should clear this cookie
+  </issue>
+  
+  <patch>
+  diff --git a/integration/test_client_storage.py b/integration/test_client_storage.py
+index 393ea104410..03dbd168147 100644
+--- a/integration/test_client_storage.py
++++ b/integration/test_client_storage.py
+@@ -311,6 +311,7 @@ def set_sub_sub(var: str, value: str):
+     assert not driver.get_cookies()
+     local_storage_items = local_storage.items()
+     local_storage_items.pop("chakra-ui-color-mode", None)
++    local_storage_items.pop("last_compiled_time", None)
+     assert not local_storage_items
+ 
+     # set some cookies and local storage values
+@@ -426,6 +427,7 @@ def set_sub_sub(var: str, value: str):
+ 
+     local_storage_items = local_storage.items()
+     local_storage_items.pop("chakra-ui-color-mode", None)
++    local_storage_items.pop("last_compiled_time", None)
+     assert (
+         local_storage_items.pop("state.client_side_state.client_side_sub_state.l1")
+         == "l1 value"
+diff --git a/reflex/.templates/jinja/web/pages/_app.js.jinja2 b/reflex/.templates/jinja/web/pages/_app.js.jinja2
+index 832bb61fb64..d4322b171e2 100644
+--- a/reflex/.templates/jinja/web/pages/_app.js.jinja2
++++ b/reflex/.templates/jinja/web/pages/_app.js.jinja2
+@@ -8,7 +8,6 @@ import '/styles/styles.css'
+ import { EventLoopProvider, StateProvider, defaultColorMode } from "/utils/context.js";
+ import { ThemeProvider } from 'next-themes'
+ 
+-
+ {% for custom_code in custom_codes %}
+ {{custom_code}}
+ {% endfor %}
+diff --git a/reflex/.templates/jinja/web/utils/context.js.jinja2 b/reflex/.templates/jinja/web/utils/context.js.jinja2
+index 95e9fb3ab01..caee4e0cac1 100644
+--- a/reflex/.templates/jinja/web/utils/context.js.jinja2
++++ b/reflex/.templates/jinja/web/utils/context.js.jinja2
+@@ -64,6 +64,8 @@ export const initialEvents = () => []
+ 
+ export const isDevMode = {{ is_dev_mode|json_dumps }}
+ 
++export const lastCompiledTimeStamp = {{ last_compiled_time|json_dumps }}
++
+ export function UploadFilesProvider({ children }) {
+   const [filesById, setFilesById] = useState({})
+   refs["__clear_selected_files"] = (id) => setFilesById(filesById => {
+diff --git a/reflex/.templates/web/components/reflex/radix_themes_color_mode_provider.js b/reflex/.templates/web/components/reflex/radix_themes_color_mode_provider.js
+index 1756c9101d9..d16e4e30ad8 100644
+--- a/reflex/.templates/web/components/reflex/radix_themes_color_mode_provider.js
++++ b/reflex/.templates/web/components/reflex/radix_themes_color_mode_provider.js
+@@ -1,6 +1,11 @@
+ import { useTheme } from "next-themes";
+ import { useEffect, useState } from "react";
+-import { ColorModeContext, defaultColorMode } from "/utils/context.js";
++import {
++  ColorModeContext,
++  defaultColorMode,
++  isDevMode,
++} from "/utils/context.js";
++import { lastCompiledTimeStamp } from "/utils/context.js";
+ 
+ export default function RadixThemesColorModeProvider({ children }) {
+   const { theme, resolvedTheme, setTheme } = useTheme();
+@@ -8,6 +13,19 @@ export default function RadixThemesColorModeProvider({ children }) {
+   const [resolvedColorMode, setResolvedColorMode] = useState("dark");
+ 
+   useEffect(() => {
++    if (isDevMode) {
++      const lastCompiledTimeInLocalStorage =
++        localStorage.getItem("last_compiled_time");
++      if (
++        lastCompiledTimeInLocalStorage &&
++        lastCompiledTimeInLocalStorage !== lastCompiledTimeStamp
++      ) {
++        // on app startup, make sure the application color mode is persisted correctly.
++        setTheme(defaultColorMode);
++        localStorage.setItem("last_compiled_time", lastCompiledTimeStamp);
++        return;
++      }
++    }
+     setRawColorMode(theme);
+     setResolvedColorMode(resolvedTheme);
+   }, [theme, resolvedTheme]);
+@@ -19,7 +37,7 @@ export default function RadixThemesColorModeProvider({ children }) {
+     const allowedModes = ["light", "dark", "system"];
+     if (!allowedModes.includes(mode)) {
+       console.error(
+-        `Invalid color mode "${mode}". Defaulting to "${defaultColorMode}".`
++        `Invalid color mode "${mode}". Defaulting to "${defaultColorMode}".`,
+       );
+       mode = defaultColorMode;
+     }
+diff --git a/reflex/compiler/compiler.py b/reflex/compiler/compiler.py
+index 002c3b75058..4345e244ff4 100644
+--- a/reflex/compiler/compiler.py
++++ b/reflex/compiler/compiler.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import os
++from datetime import datetime
+ from pathlib import Path
+ from typing import Dict, Iterable, Optional, Type, Union
+ 
+@@ -79,20 +80,24 @@ def _compile_contexts(state: Optional[Type[BaseState]], theme: Component | None)
+         The compiled context file.
+     """
+     appearance = getattr(theme, "appearance", None)
+-    if appearance is None:
++    if appearance is None or Var.create_safe(appearance)._var_name == "inherit":
+         appearance = SYSTEM_COLOR_MODE
++
++    last_compiled_time = str(datetime.now())
+     return (
+         templates.CONTEXT.render(
+             initial_state=utils.compile_state(state),
+             state_name=state.get_name(),
+             client_storage=utils.compile_client_storage(state),
+             is_dev_mode=not is_prod_mode(),
++            last_compiled_time=last_compiled_time,
+             default_color_mode=appearance,
+         )
+         if state
+         else templates.CONTEXT.render(
+             is_dev_mode=not is_prod_mode(),
+             default_color_mode=appearance,
++            last_compiled_time=last_compiled_time,
+         )
+     )
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

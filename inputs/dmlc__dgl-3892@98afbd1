@@ -1,0 +1,658 @@
+  Task-ID: dmlc__dgl-3892@98afbd1
+  Please checkout to this commit first: 0d878ff8ef063e80d437c3a0535a92fd3d96d225
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Allow UVA sampling where train_nid/train_eid is provided on the CPU
+## 🚀 Feature
+For many sampling techniques, the number of input nodes is much larger than the number of output nodes. As a result the cost of copying the output_nodes in a mini-batch to the GPU is relatively negligible (especially since intermediate layer seed nodes will be produced on the GPU in UVA sampling).
+
+If `use_uva=True` in the dataloader, it would be great if it would then copy the output_nodes for the  mini-batch to the GPU before calling sampling. This would simplify the use_ddp workflow, as users could just store their train_nid in shared memory, and not duplicate them across all GPUs.
+
+
+[bug] DDP in DataLoader can place repeated 0's in batches
+## 🐛 Bug
+
+This most commonly happens when using large batch sizes with 8 GPUs. It results in the below error after sampling:
+```
+-- Process 7 terminated with the following error:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.8/dist-packages/torch/multiprocessing/spawn.py", line 59, in _wrap
+    fn(i, *args)
+  File "/workspace/dgl/examples/pytorch/graphsage/multi_gpu_node_classification.py", line 202, in train
+    pred = model.module.inference(graph, device='cuda', batch_size=2**16)
+  File "/workspace/dgl/examples/pytorch/graphsage/multi_gpu_node_classification.py", line 115, in inference
+    h = self._forward_layer(l, blocks[0], x)
+  File "/workspace/dgl/examples/pytorch/graphsage/multi_gpu_node_classification.py", line 60, in _forward_layer
+    h = self.layers[l](block, x)
+  File "/usr/local/lib/python3.8/dist-packages/torch/nn/modules/module.py", line 1102, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/usr/local/lib/python3.8/dist-packages/dgl-0.9-py3.8-linux-x86_64.egg/dgl/nn/pytorch/conv/sageconv.py", line 235, in forward
+    graph.update_all(msg_fn, fn.mean('m', 'neigh'))
+  File "/usr/local/lib/python3.8/dist-packages/dgl-0.9-py3.8-linux-x86_64.egg/dgl/heterograph.py", line 4900, in update_all
+    self._set_n_repr(dtid, ALL, ndata)
+  File "/usr/local/lib/python3.8/dist-packages/dgl-0.9-py3.8-linux-x86_64.egg/dgl/heterograph.py", line 4136, in _set_n_repr
+    self._node_frames[ntid].update(data)
+  File "/usr/lib/python3.8/_collections_abc.py", line 832, in update
+    self[key] = other[key]
+  File "/usr/local/lib/python3.8/dist-packages/dgl-0.9-py3.8-linux-x86_64.egg/dgl/frame.py", line 535, in __setitem__
+    self.update_column(name, data)
+  File "/usr/local/lib/python3.8/dist-packages/dgl-0.9-py3.8-linux-x86_64.egg/dgl/frame.py", line 612, in update_column
+    raise DGLError('Expected data to have %d rows, got %d.' %
+dgl._ffi.base.DGLError: Expected data to have 43985 rows, got 43983.
+```
+
+## To Reproduce
+
+Steps to reproduce the behavior:
+
+```
+import dgl
+import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
+
+def test(rank, world_size, n):
+    dist.init_process_group('gloo', 'tcp://127.0.0.1:12347',
+        world_size=world_size, rank=rank)
+
+    dataset = dgl.dataloading.DDPTensorizedDataset(
+        torch.arange(0, world_size*n+1), batch_size=n, ddp_seed=0,
+        drop_last=False)
+
+    for output_nodes in dataset:
+        print("proc {}: output_nodes = {}".format(
+            rank,  output_nodes))
+
+
+if __name__ == "__main__":
+    n = 10
+    nprocs = 8
+    mp.spawn(test, args=(nprocs, n,), nprocs=nprocs)
+```
+
+```
+$ python3 test.py
+proc 0: output_nodes = tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+proc 0: output_nodes = tensor([10])
+proc 4: output_nodes = tensor([44, 45, 46, 47, 48, 49, 50, 51, 52, 53])
+proc 1: output_nodes = tensor([11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
+proc 4: output_nodes = tensor([54])
+proc 1: output_nodes = tensor([21])
+proc 2: output_nodes = tensor([22, 23, 24, 25, 26, 27, 28, 29, 30, 31])
+proc 6: output_nodes = tensor([66, 67, 68, 69, 70, 71, 72, 73, 74, 75])
+proc 5: output_nodes = tensor([55, 56, 57, 58, 59, 60, 61, 62, 63, 64])
+proc 3: output_nodes = tensor([33, 34, 35, 36, 37, 38, 39, 40, 41, 42])
+proc 7: output_nodes = tensor([77, 78, 79, 80,  0,  0,  0,  0,  0,  0])                    <-- problem here
+proc 2: output_nodes = tensor([32])
+proc 6: output_nodes = tensor([76])
+proc 5: output_nodes = tensor([65])
+proc 3: output_nodes = tensor([43])
+proc 7: output_nodes = tensor([0])
+```
+
+## Expected behavior
+
+Ideally, processor 7 should only have [77,78,79,80] in its first batch.
+
+## Environment
+
+ - DGL Version (e.g., 1.0): 0.8
+ - Backend Library & Version (e.g., PyTorch 0.4.1, MXNet/Gluon 1.3): pytorch 1.10
+ - OS (e.g., Linux): ubunt 18.04
+ - How you installed DGL (`conda`, `pip`, source): pip
+ - Build command you used (if compiling from source):
+ - Python version: 3.6
+ - CUDA/cuDNN version (if applicable): 11.4
+ - GPU models and configuration (e.g. V100): NVIDIA Titan V
+ - Any other relevant information:
+  </issue>
+  
+  <patch>
+  diff --git a/docs/source/api/python/dgl.multiprocessing.rst b/docs/source/api/python/dgl.multiprocessing.rst
+index 879d5bcda97d..059747ec27f2 100644
+--- a/docs/source/api/python/dgl.multiprocessing.rst
++++ b/docs/source/api/python/dgl.multiprocessing.rst
+@@ -12,3 +12,10 @@ additional documentation.
+ 
+ In addition, if your backend is PyTorch, this module will also be compatible with
+ :mod:`torch.multiprocessing` module.
++
++.. currentmodule:: dgl.multiprocessing.pytorch
++.. autosummary::
++    :toctree: ../../generated/
++
++    spawn
++    call_once_and_share
+diff --git a/examples/pytorch/GATNE-T/src/main_sparse_multi_gpus.py b/examples/pytorch/GATNE-T/src/main_sparse_multi_gpus.py
+index e70c718e4773..e63805320fe9 100644
+--- a/examples/pytorch/GATNE-T/src/main_sparse_multi_gpus.py
++++ b/examples/pytorch/GATNE-T/src/main_sparse_multi_gpus.py
+@@ -15,7 +15,7 @@
+ from torch.nn.parameter import Parameter
+ import dgl
+ import dgl.function as fn
+-import torch.multiprocessing as mp
++import dgl.multiprocessing as mp
+ 
+ from utils import *
+ 
+diff --git a/examples/pytorch/gcmc/train_sampling.py b/examples/pytorch/gcmc/train_sampling.py
+index d66799d2a63f..c3bcbe03e14d 100644
+--- a/examples/pytorch/gcmc/train_sampling.py
++++ b/examples/pytorch/gcmc/train_sampling.py
+@@ -20,7 +20,7 @@
+ from model import GCMCLayer, DenseBiDecoder, BiDecoder
+ from utils import get_activation, get_optimizer, torch_total_param_num, torch_net_info, MetricLogger, to_etype_name
+ import dgl
+-import torch.multiprocessing as mp
++import dgl.multiprocessing as mp
+ 
+ class Net(nn.Module):
+     def __init__(self, args, dev_id):
+diff --git a/examples/pytorch/graphsage/advanced/train_sampling_unsupervised.py b/examples/pytorch/graphsage/advanced/train_sampling_unsupervised.py
+index 87079b843a15..3e24d65fffd8 100644
+--- a/examples/pytorch/graphsage/advanced/train_sampling_unsupervised.py
++++ b/examples/pytorch/graphsage/advanced/train_sampling_unsupervised.py
+@@ -5,7 +5,7 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+ import torch.optim as optim
+-import torch.multiprocessing as mp
++import dgl.multiprocessing as mp
+ import dgl.function as fn
+ import dgl.nn.pytorch as dglnn
+ import time
+diff --git a/examples/pytorch/graphsage/multi_gpu_node_classification.py b/examples/pytorch/graphsage/multi_gpu_node_classification.py
+index 9ba7ed0e8072..ac996c7a6bc3 100644
+--- a/examples/pytorch/graphsage/multi_gpu_node_classification.py
++++ b/examples/pytorch/graphsage/multi_gpu_node_classification.py
+@@ -68,9 +68,6 @@ def train(rank, world_size, graph, num_classes, split_idx):
+ 
+     train_idx, valid_idx, test_idx = split_idx['train'], split_idx['valid'], split_idx['test']
+ 
+-    train_idx = train_idx.to('cuda')
+-    valid_idx = valid_idx.to('cuda')
+-
+     sampler = dgl.dataloading.NeighborSampler(
+             [15, 10, 5], prefetch_node_feats=['feat'], prefetch_labels=['label'])
+     train_dataloader = dgl.dataloading.DataLoader(
+@@ -129,9 +126,9 @@ def train(rank, world_size, graph, num_classes, split_idx):
+     graph.create_formats_()     # must be called before mp.spawn().
+     split_idx = dataset.get_idx_split()
+     num_classes = dataset.num_classes
+-    n_procs = 4
++    n_procs = 2
+ 
+     # Tested with mp.spawn and fork.  Both worked and got 4s per epoch with 4 GPUs
+     # and 3.86s per epoch with 8 GPUs on p2.8x, compared to 5.2s from official examples.
+-    import torch.multiprocessing as mp
++    import dgl.multiprocessing as mp
+     mp.spawn(train, args=(n_procs, graph, num_classes, split_idx), nprocs=n_procs)
+diff --git a/examples/pytorch/graphsage/node_classification.py b/examples/pytorch/graphsage/node_classification.py
+index 2b4da64b4556..1a445836aa73 100644
+--- a/examples/pytorch/graphsage/node_classification.py
++++ b/examples/pytorch/graphsage/node_classification.py
+@@ -63,8 +63,8 @@ def inference(self, g, device, batch_size, num_workers, buffer_device=None):
+ train_idx, valid_idx, test_idx = split_idx['train'], split_idx['valid'], split_idx['test']
+ 
+ device = 'cuda'
+-train_idx = train_idx.to(device)
+-valid_idx = valid_idx.to(device)
++#train_idx = train_idx.to(device)
++#valid_idx = valid_idx.to(device)
+ 
+ model = SAGE(graph.ndata['feat'].shape[1], 256, dataset.num_classes).to(device)
+ opt = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
+@@ -73,10 +73,10 @@ def inference(self, g, device, batch_size, num_workers, buffer_device=None):
+         [15, 10, 5], prefetch_node_feats=['feat'], prefetch_labels=['label'])
+ train_dataloader = dgl.dataloading.DataLoader(
+         graph, train_idx, sampler, device=device, batch_size=1024, shuffle=True,
+-        drop_last=False, num_workers=0, use_uva=True)
++        drop_last=False, num_workers=12, use_uva=False, persistent_workers=True)
+ valid_dataloader = dgl.dataloading.NodeDataLoader(
+         graph, valid_idx, sampler, device=device, batch_size=1024, shuffle=True,
+-        drop_last=False, num_workers=0, use_uva=True)
++        drop_last=False, num_workers=12, use_uva=False, persistent_workers=True)
+ 
+ durations = []
+ for _ in range(10):
+diff --git a/examples/pytorch/ogb_lsc/MAG240M/train_multi_gpus.py b/examples/pytorch/ogb_lsc/MAG240M/train_multi_gpus.py
+index b9e599d4077b..396a0315cb50 100644
+--- a/examples/pytorch/ogb_lsc/MAG240M/train_multi_gpus.py
++++ b/examples/pytorch/ogb_lsc/MAG240M/train_multi_gpus.py
+@@ -11,7 +11,7 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+ import argparse
+-import torch.multiprocessing as mp
++import dgl.multiprocessing as mp
+ import sys
+ from torch.nn.parallel import DistributedDataParallel
+ from collections import OrderedDict
+diff --git a/examples/pytorch/rgcn/entity_sample_multi_gpu.py b/examples/pytorch/rgcn/entity_sample_multi_gpu.py
+index fe514002cf0d..504d301b2ca4 100644
+--- a/examples/pytorch/rgcn/entity_sample_multi_gpu.py
++++ b/examples/pytorch/rgcn/entity_sample_multi_gpu.py
+@@ -6,8 +6,8 @@
+ import gc
+ import torch as th
+ import torch.nn.functional as F
+-import torch.multiprocessing as mp
+ import dgl
++import dgl.multiprocessing as mp
+ 
+ from torchmetrics.functional import accuracy
+ from torch.nn.parallel import DistributedDataParallel
+diff --git a/examples/pytorch/vrgcn/train_cv_multi_gpu.py b/examples/pytorch/vrgcn/train_cv_multi_gpu.py
+index ae097437b30a..7b513e933973 100644
+--- a/examples/pytorch/vrgcn/train_cv_multi_gpu.py
++++ b/examples/pytorch/vrgcn/train_cv_multi_gpu.py
+@@ -4,7 +4,7 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+ import torch.optim as optim
+-import torch.multiprocessing as mp
++import dgl.multiprocessing as mp
+ import dgl.function as fn
+ import dgl.nn.pytorch as dglnn
+ import time
+diff --git a/python/dgl/dataloading/dataloader.py b/python/dgl/dataloading/dataloader.py
+index 44c439b55b10..59193c0618e0 100644
+--- a/python/dgl/dataloading/dataloader.py
++++ b/python/dgl/dataloading/dataloader.py
+@@ -4,7 +4,6 @@
+ import itertools
+ import threading
+ from distutils.version import LooseVersion
+-import random
+ import math
+ import inspect
+ import re
+@@ -18,15 +17,15 @@
+ from ..base import NID, EID, dgl_warning
+ from ..batch import batch as batch_graphs
+ from ..heterograph import DGLHeteroGraph
+-from .. import ndarray as nd
+ from ..utils import (
+     recursive_apply, ExceptionWrapper, recursive_apply_pair, set_num_threads,
+-    create_shared_mem_array, get_shared_mem_array, context_of, dtype_of)
++    context_of, dtype_of)
+ from ..frame import LazyFeature
+ from ..storages import wrap_storage
+ from .base import BlockSampler, as_edge_prediction_sampler
+ from .. import backend as F
+ from ..distributed import DistGraph
++from ..multiprocessing import call_once_and_share
+ 
+ PYTHON_EXIT_STATUS = False
+ def _set_python_exit_flag():
+@@ -115,7 +114,6 @@ class TensorizedDataset(torch.utils.data.IterableDataset):
+     When the dataset is on the GPU, this significantly reduces the overhead.
+     """
+     def __init__(self, indices, batch_size, drop_last):
+-        name, _ = _generate_shared_mem_name_id()
+         if isinstance(indices, Mapping):
+             self._mapping_keys = list(indices.keys())
+             self._device = next(iter(indices.values())).device
+@@ -128,12 +126,10 @@ def __init__(self, indices, batch_size, drop_last):
+         # Use a shared memory array to permute indices for shuffling.  This is to make sure that
+         # the worker processes can see it when persistent_workers=True, where self._indices
+         # would not be duplicated every epoch.
+-        self._indices = create_shared_mem_array(name, (self._id_tensor.shape[0],), torch.int64)
++        self._indices = torch.empty(self._id_tensor.shape[0], dtype=torch.int64).share_memory_()
+         self._indices[:] = torch.arange(self._id_tensor.shape[0])
+         self.batch_size = batch_size
+         self.drop_last = drop_last
+-        self.shared_mem_name = name
+-        self.shared_mem_size = self._indices.shape[0]
+ 
+     def shuffle(self):
+         """Shuffle the dataset."""
+@@ -150,17 +146,6 @@ def __len__(self):
+         num_samples = self._id_tensor.shape[0]
+         return (num_samples + (0 if self.drop_last else (self.batch_size - 1))) // self.batch_size
+ 
+-def _get_shared_mem_name(id_):
+-    return f'ddp_{id_}'
+-
+-def _generate_shared_mem_name_id():
+-    for _ in range(3):     # 3 trials
+-        id_ = random.getrandbits(32)
+-        name = _get_shared_mem_name(id_)
+-        if not nd.exist_shared_mem_array(name):
+-            return name, id_
+-    raise DGLError('Unable to generate a shared memory array')
+-
+ class DDPTensorizedDataset(torch.utils.data.IterableDataset):
+     """Custom Dataset wrapper that returns a minibatch as tensors or dicts of tensors.
+     When the dataset is on the GPU, this significantly reduces the overhead.
+@@ -197,33 +182,21 @@ def __init__(self, indices, batch_size, drop_last, ddp_seed):
+ 
+         if isinstance(indices, Mapping):
+             self._device = next(iter(indices.values())).device
+-            self._id_tensor = _get_id_tensor_from_mapping(
+-                    indices, self._device, self._mapping_keys)
++            self._id_tensor = call_once_and_share(
++                lambda: _get_id_tensor_from_mapping(
++                    indices, self._device, self._mapping_keys))
+         else:
+             self._id_tensor = indices
+             self._device = self._id_tensor.device
+ 
+-        if self.rank == 0:
+-            name, id_ = _generate_shared_mem_name_id()
+-            self._indices = create_shared_mem_array(
+-                name, (self.shared_mem_size,), torch.int64)
+-            self._indices[:self._id_tensor.shape[0]] = torch.arange(self._id_tensor.shape[0])
+-            meta_info = torch.LongTensor([id_, self._indices.shape[0]])
+-        else:
+-            meta_info = torch.LongTensor([0, 0])
+-
+-        if dist.get_backend() == 'nccl':
+-            # Use default CUDA device; PyTorch DDP required the users to set the CUDA
+-            # device for each process themselves so calling .cuda() should be safe.
+-            meta_info = meta_info.cuda()
+-        dist.broadcast(meta_info, src=0)
++        self._indices = call_once_and_share(self._create_shared_indices)
+ 
+-        if self.rank != 0:
+-            id_, num_samples = meta_info.tolist()
+-            name = _get_shared_mem_name(id_)
+-            indices_shared = get_shared_mem_array(name, (num_samples,), torch.int64)
+-            self._indices = indices_shared
+-        self.shared_mem_name = name
++    def _create_shared_indices(self):
++        indices = torch.empty(self.shared_mem_size, dtype=torch.int64)
++        num_ids = self._id_tensor.shape[0]
++        indices[:num_ids] = torch.arange(num_ids)
++        indices[num_ids:] = torch.arange(self.shared_mem_size - num_ids)
++        return indices
+ 
+     def shuffle(self):
+         """Shuffles the dataset."""
+@@ -525,11 +498,16 @@ class CollateWrapper(object):
+     """Wraps a collate function with :func:`remove_parent_storage_columns` for serializing
+     from PyTorch DataLoader workers.
+     """
+-    def __init__(self, sample_func, g):
++    def __init__(self, sample_func, g, use_uva, device):
+         self.sample_func = sample_func
+         self.g = g
++        self.use_uva = use_uva
++        self.device = device
+ 
+     def __call__(self, items):
++        if self.use_uva:
++            # Only copy the indices to the given device if in UVA mode.
++            items = recursive_apply(items, lambda x: x.to(self.device))
+         batch = self.sample_func(self.g, items)
+         return recursive_apply(batch, remove_parent_storage_columns, self.g)
+ 
+@@ -732,10 +710,6 @@ def __init__(self, graph, indices, graph_sampler, device='cpu', use_ddp=False,
+             if use_uva:
+                 if self.graph.device.type != 'cpu':
+                     raise ValueError('Graph must be on CPU if UVA sampling is enabled.')
+-                if indices_device != self.device:
+-                    raise ValueError(
+-                        f'Indices must be on the same device as the device argument '
+-                        f'({self.device})')
+                 if num_workers > 0:
+                     raise ValueError('num_workers must be 0 if UVA sampling is enabled.')
+ 
+@@ -805,7 +779,8 @@ def __init__(self, graph, indices, graph_sampler, device='cpu', use_ddp=False,
+ 
+         super().__init__(
+             self.dataset,
+-            collate_fn=CollateWrapper(self.graph_sampler.sample, graph),
++            collate_fn=CollateWrapper(
++                self.graph_sampler.sample, graph, self.use_uva, self.device),
+             batch_size=None,
+             worker_init_fn=worker_init_fn,
+             **kwargs)
+diff --git a/python/dgl/multiprocessing/__init__.py b/python/dgl/multiprocessing/__init__.py
+index a7f944ace2ca..f14967e95b6b 100644
+--- a/python/dgl/multiprocessing/__init__.py
++++ b/python/dgl/multiprocessing/__init__.py
+@@ -9,8 +9,8 @@
+ if F.get_preferred_backend() == 'pytorch':
+     # Wrap around torch.multiprocessing...
+     from torch.multiprocessing import *
+-    # ... and override the Process initializer
+-    from .pytorch import Process
++    # ... and override the Process initializer and spawn function.
++    from .pytorch import *
+ else:
+     # Just import multiprocessing module.
+     from multiprocessing import *           # pylint: disable=redefined-builtin
+diff --git a/python/dgl/multiprocessing/pytorch.py b/python/dgl/multiprocessing/pytorch.py
+index f4d4602c8d8e..c8d9846fb41a 100644
+--- a/python/dgl/multiprocessing/pytorch.py
++++ b/python/dgl/multiprocessing/pytorch.py
+@@ -1,5 +1,7 @@
+ """PyTorch multiprocessing wrapper."""
+ from functools import wraps
++import os
++from collections import namedtuple
+ import traceback
+ from _thread import start_new_thread
+ import torch.multiprocessing as mp
+@@ -35,3 +37,57 @@ class Process(mp.Process):
+     def __init__(self, group=None, target=None, name=None, args=(), kwargs={}, *, daemon=None):
+         target = thread_wrapped_func(target)
+         super().__init__(group, target, name, args, kwargs, daemon=daemon)
++
++ProcessContext = namedtuple('ProcessContext', ['queue', 'queue_ack', 'rank', 'nprocs'])
++mp_timeout = int(os.environ.get('DGL_MP_TIMEOUT', '10'))
++_PROCESS_CONTEXT = None
++
++def call_once_and_share(func, rank=0):
++    """Invoke the function in a single process of the process group spawned by
++    :func:`spawn`, and share the result to other processes.
++
++    Requires the subprocesses to be spawned with :func:`dgl.multiprocessing.pytorch.spawn`.
++
++    Parameters
++    ----------
++    func : callable
++        Any callable that accepts no arguments and returns an arbitrary object.
++    rank : int, optional
++        The process ID to actually execute the function.
++    """
++    global _PROCESS_CONTEXT
++    if _PROCESS_CONTEXT is None:
++        raise RuntimeError(
++            'call_once_and_share can only be called within processes spawned by '
++            'dgl.multiprocessing.spawn() function. '
++            'Please replace torch.multiprocessing.spawn() with dgl.multiprocessing.spawn().')
++
++    if _PROCESS_CONTEXT.rank == rank:
++        result = func()
++        for _ in range(_PROCESS_CONTEXT.nprocs - 1):
++            _PROCESS_CONTEXT.queue.put(result)
++        # Synchronize
++        for _ in range(_PROCESS_CONTEXT.nprocs - 1):
++            _PROCESS_CONTEXT.queue_ack.get(timeout=mp_timeout)
++    else:
++        result = _PROCESS_CONTEXT.queue.get(timeout=mp_timeout)
++        # Synchronize
++        _PROCESS_CONTEXT.queue_ack.put(None)
++    return result
++
++def _spawn_entry(rank, queue, queue_ack, nprocs, fn, *args):
++    global _PROCESS_CONTEXT
++    _PROCESS_CONTEXT = ProcessContext(queue, queue_ack, rank, nprocs)
++    fn(rank, *args)
++
++def spawn(fn, args=(), nprocs=1, join=True, daemon=False, start_method='spawn'):
++    """A wrapper around :func:`torch.multiprocessing.spawn` that allows calling
++    DGL-specific multiprocessing functions in :mod:`dgl.multiprocessing` namespace."""
++    ctx = mp.get_context(start_method)
++
++    # The following two queues are for call_once_and_share
++    queue = ctx.Queue()
++    queue_ack = ctx.Queue()
++
++    mp.spawn(_spawn_entry, args=(queue, queue_ack, nprocs, fn) + tuple(args), nprocs=nprocs,
++             join=join, daemon=daemon, start_method=start_method)
+diff --git a/tests/backend/__init__.py b/tests/backend/__init__.py
+index 1040a6043ab6..b9a9a2179069 100644
+--- a/tests/backend/__init__.py
++++ b/tests/backend/__init__.py
+@@ -51,8 +51,8 @@ def randn(shape):
+ def tensor(data, dtype=None):
+     return copy_to(_tensor(data, dtype), _default_context)
+ 
+-def arange(start, stop, dtype=int64):
+-    return copy_to(_arange(start, stop, dtype), _default_context)
++def arange(start, stop, dtype=int64, ctx=None):
++    return _arange(start, stop, dtype, ctx if ctx is not None else _default_context)
+ 
+ def full(shape, fill_value, dtype, ctx=_default_context):
+     return _full(shape, fill_value, dtype, ctx)
+diff --git a/tests/pytorch/test_dataloader.py b/tests/pytorch/test_dataloader.py
+index 94be391327ba..8cfbce69a667 100644
+--- a/tests/pytorch/test_dataloader.py
++++ b/tests/pytorch/test_dataloader.py
+@@ -112,14 +112,27 @@ def _check_device(data):
+ 
+ @parametrize_dtype
+ @pytest.mark.parametrize('sampler_name', ['full', 'neighbor', 'neighbor2'])
+-@pytest.mark.parametrize('pin_graph', [False, True])
++@pytest.mark.parametrize('pin_graph', [None, 'cuda_indices', 'cpu_indices'])
+ def test_node_dataloader(idtype, sampler_name, pin_graph):
+     g1 = dgl.graph(([0, 0, 0, 1, 1], [1, 2, 3, 3, 4])).astype(idtype)
+-    if F.ctx() != F.cpu() and pin_graph:
+-        g1.create_formats_()
+-        g1.pin_memory_()
+     g1.ndata['feat'] = F.copy_to(F.randn((5, 8)), F.cpu())
+     g1.ndata['label'] = F.copy_to(F.randn((g1.num_nodes(),)), F.cpu())
++    indices = F.arange(0, g1.num_nodes(), idtype)
++    if F.ctx() != F.cpu():
++        if pin_graph:
++            g1.create_formats_()
++            g1.pin_memory_()
++            if pin_graph == 'cpu_indices':
++                indices = F.arange(0, g1.num_nodes(), idtype, F.cpu())
++            elif pin_graph == 'cuda_indices':
++                if F._default_context_str == 'gpu':
++                    indices = F.arange(0, g1.num_nodes(), idtype, F.cuda())
++                else:
++                    return  # skip
++        else:
++            g1 = g1.to('cuda')
++
++    use_uva = pin_graph is not None and F.ctx() != F.cpu()
+ 
+     for num_workers in [0, 1, 2]:
+         sampler = {
+@@ -127,9 +140,10 @@ def test_node_dataloader(idtype, sampler_name, pin_graph):
+             'neighbor': dgl.dataloading.MultiLayerNeighborSampler([3, 3]),
+             'neighbor2': dgl.dataloading.MultiLayerNeighborSampler([3, 3])}[sampler_name]
+         dataloader = dgl.dataloading.NodeDataLoader(
+-            g1, g1.nodes(), sampler, device=F.ctx(),
++            g1, indices, sampler, device=F.ctx(),
+             batch_size=g1.num_nodes(),
+-            num_workers=num_workers)
++            num_workers=(num_workers if (pin_graph and F.ctx() == F.cpu()) else 0),
++            use_uva=use_uva)
+         for input_nodes, output_nodes, blocks in dataloader:
+             _check_device(input_nodes)
+             _check_device(output_nodes)
+@@ -137,6 +151,8 @@ def test_node_dataloader(idtype, sampler_name, pin_graph):
+             _check_dtype(input_nodes, idtype, 'dtype')
+             _check_dtype(output_nodes, idtype, 'dtype')
+             _check_dtype(blocks, idtype, 'idtype')
++    if g1.is_pinned():
++        g1.unpin_memory_()
+ 
+     g2 = dgl.heterograph({
+          ('user', 'follow', 'user'): ([0, 0, 0, 1, 1, 1, 2], [1, 2, 3, 0, 2, 3, 0]),
+@@ -146,6 +162,21 @@ def test_node_dataloader(idtype, sampler_name, pin_graph):
+     }).astype(idtype)
+     for ntype in g2.ntypes:
+         g2.nodes[ntype].data['feat'] = F.copy_to(F.randn((g2.num_nodes(ntype), 8)), F.cpu())
++    indices = {nty: F.arange(0, g2.num_nodes(nty)) for nty in g2.ntypes}
++    if F.ctx() != F.cpu():
++        if pin_graph:
++            g2.create_formats_()
++            g2.pin_memory_()
++            if pin_graph == 'cpu_indices':
++                indices = {nty: F.arange(0, g2.num_nodes(nty), idtype, F.cpu()) for nty in g2.ntypes}
++            elif pin_graph == 'cuda_indices':
++                if F._default_context_str == 'gpu':
++                    indices = {nty: F.arange(0, g2.num_nodes(), idtype, F.cuda()) for nty in g2.ntypes}
++                else:
++                    return  # skip
++        else:
++            g2 = g2.to('cuda')
++
+     batch_size = max(g2.num_nodes(nty) for nty in g2.ntypes)
+     sampler = {
+         'full': dgl.dataloading.MultiLayerFullNeighborSampler(2),
+@@ -154,7 +185,9 @@ def test_node_dataloader(idtype, sampler_name, pin_graph):
+ 
+     dataloader = dgl.dataloading.NodeDataLoader(
+         g2, {nty: g2.nodes(nty) for nty in g2.ntypes},
+-        sampler, device=F.ctx(), batch_size=batch_size)
++        sampler, device=F.ctx(), batch_size=batch_size,
++        num_workers=(num_workers if (pin_graph and F.ctx() == F.cpu()) else 0),
++        use_uva=use_uva)
+     assert isinstance(iter(dataloader), Iterator)
+     for input_nodes, output_nodes, blocks in dataloader:
+         _check_device(input_nodes)
+@@ -164,8 +197,8 @@ def test_node_dataloader(idtype, sampler_name, pin_graph):
+         _check_dtype(output_nodes, idtype, 'dtype')
+         _check_dtype(blocks, idtype, 'idtype')
+ 
+-    if g1.is_pinned():
+-        g1.unpin_memory_()
++    if g2.is_pinned():
++        g2.unpin_memory_()
+ 
+ @pytest.mark.parametrize('sampler_name', ['full', 'neighbor'])
+ @pytest.mark.parametrize('neg_sampler', [
+@@ -331,9 +364,4 @@ def test_edge_dataloader_excludes(exclude, always_exclude_flag):
+             assert not np.isin(edges_to_exclude, block_eids).any()
+ 
+ if __name__ == '__main__':
+-    test_graph_dataloader()
+-    test_cluster_gcn(0)
+-    test_neighbor_nonuniform(0)
+-    for exclude in [None, 'self', 'reverse_id', 'reverse_types']:
+-        test_edge_dataloader_excludes(exclude, False)
+-        test_edge_dataloader_excludes(exclude, True)
++    test_node_dataloader(F.int32, 'neighbor', None)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

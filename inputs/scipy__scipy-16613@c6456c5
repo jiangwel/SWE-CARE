@@ -1,0 +1,149 @@
+  Task-ID: scipy__scipy-16613@c6456c5
+  Please checkout to this commit first: 0bb3a79eb5258012f11caf601a5460bba9851b46
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: find_peaks() fails if x.flags.writable = False
+### Describe your issue.
+
+If the writable flag has been set to False on a np.array, then find_peaks() fails with a ValueError: buffer source array is read-only.
+ 
+It seems that the View.MemoryView functions require writable arrays, but then why are they called "View"?
+
+
+### Reproducing Code Example
+
+```python
+import numpy, scipy.signal
+
+x = numpy.linspace(0,1,100)
+x.flags.writeable = False
+p = scipy.signal.find_peaks(x)
+```
+
+
+### Error message
+
+```shell
+Traceback (most recent call last):
+  File "<ipython-input-18-b0e8a4dbfe44>", line 1, in <module>
+    p=scipy.signal.find_peaks(x)
+  File "/usr/lib/python3/dist-packages/scipy/signal/_peak_finding.py", line 936, in find_peaks
+    peaks, left_edges, right_edges = _local_maxima_1d(x)
+  File "_peak_finding_utils.pyx", line 20, in scipy.signal._peak_finding_utils._local_maxima_1d
+  File "stringsource", line 658, in View.MemoryView.memoryview_cwrapper
+  File "stringsource", line 349, in View.MemoryView.memoryview.__cinit__
+ValueError: buffer source array is read-only
+```
+
+
+### SciPy/NumPy/Python version information
+
+1.8.0 1.21.5 sys.version_info(major=3, minor=10, micro=4, releaselevel='final', serial=0)
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/signal/_peak_finding_utils.pyx b/scipy/signal/_peak_finding_utils.pyx
+index 4a523f135ca2..60cef5736bf3 100644
+--- a/scipy/signal/_peak_finding_utils.pyx
++++ b/scipy/signal/_peak_finding_utils.pyx
+@@ -17,7 +17,7 @@ __all__ = ['_local_maxima_1d', '_select_by_peak_distance', '_peak_prominences',
+            '_peak_widths']
+ 
+ 
+-def _local_maxima_1d(np.float64_t[::1] x not None):
++def _local_maxima_1d(const np.float64_t[::1] x not None):
+     """
+     Find local maxima in a 1D array.
+ 
+@@ -163,7 +163,7 @@ class PeakPropertyWarning(RuntimeWarning):
+     pass
+ 
+ 
+-def _peak_prominences(np.float64_t[::1] x not None,
++def _peak_prominences(const np.float64_t[::1] x not None,
+                       np.intp_t[::1] peaks not None,
+                       np.intp_t wlen):
+     """
+@@ -261,7 +261,7 @@ def _peak_prominences(np.float64_t[::1] x not None,
+     return prominences.base, left_bases.base, right_bases.base
+ 
+ 
+-def _peak_widths(np.float64_t[::1] x not None,
++def _peak_widths(const np.float64_t[::1] x not None,
+                  np.intp_t[::1] peaks not None,
+                  np.float64_t rel_height,
+                  np.float64_t[::1] prominences not None,
+diff --git a/scipy/signal/tests/test_peak_finding.py b/scipy/signal/tests/test_peak_finding.py
+index 57ba16181de5..1dee4e87fad5 100644
+--- a/scipy/signal/tests/test_peak_finding.py
++++ b/scipy/signal/tests/test_peak_finding.py
+@@ -135,7 +135,7 @@ def test_exceptions(self):
+         """Test input validation and raised exceptions."""
+         with raises(ValueError, match="wrong number of dimensions"):
+             _local_maxima_1d(np.ones((1, 1)))
+-        with raises(ValueError, match="expected 'float64_t'"):
++        with raises(ValueError, match="expected 'const float64_t'"):
+             _local_maxima_1d(np.ones(1, dtype=int))
+         with raises(TypeError, match="list"):
+             _local_maxima_1d([1., 2.])
+@@ -770,6 +770,26 @@ def test_wlen_smaller_plateau(self):
+         for key in ("left_bases", "right_bases", "left_ips", "right_ips"):
+             assert_equal(props[key], peaks)
+ 
++    @pytest.mark.parametrize("kwargs", [
++        {},
++        {"distance": 3.0},
++        {"prominence": (None, None)},
++        {"width": (None, 2)},
++
++    ])
++    def test_readonly_array(self, kwargs):
++        """
++        Test readonly arrays are accepted.
++        """
++        x = np.linspace(0, 10, 15)
++        peaks, _ = find_peaks(x)
++
++        x_readonly = x.copy()
++        x_readonly.flags.writeable = False
++        peaks_readonly, _ = find_peaks(x_readonly, **kwargs)
++
++        assert_allclose(peaks, peaks_readonly)
++
+ 
+ class TestFindPeaksCwt:
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

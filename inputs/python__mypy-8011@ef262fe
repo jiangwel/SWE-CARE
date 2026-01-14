@@ -1,0 +1,87 @@
+  Task-ID: python__mypy-8011@ef262fe
+  Please checkout to this commit first: 0d056ada0e216c77737e1abe6eeb20ea1d80296b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  False positive on returning Any from function declared to return object
+mypy with `--warn-return-any` gives a warning for this function:
+```python
+def f() -> object:
+    x: Any = 1
+    return x
+```
+This code is correct in fact: any type is `object`, so we can safely return `Any`.
+It can be fixed like that:
+```python
+def f() -> object:
+    x: Any = 1
+    return cast(object, x)
+```
+but `cast(object, ...)` should be a no-op for mypy IMO.
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 0387ffce8549..91b3ad9d19da 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -3036,7 +3036,9 @@ def check_return_stmt(self, s: ReturnStmt) -> None:
+                         and not self.current_node_deferred
+                         and not is_proper_subtype(AnyType(TypeOfAny.special_form), return_type)
+                         and not (defn.name in BINARY_MAGIC_METHODS and
+-                                 is_literal_not_implemented(s.expr))):
++                                 is_literal_not_implemented(s.expr))
++                        and not (isinstance(return_type, Instance) and
++                                return_type.type.fullname == 'builtins.object')):
+                         self.msg.incorrectly_returning_any(return_type, s)
+                     return
+ 
+diff --git a/test-data/unit/check-basic.test b/test-data/unit/check-basic.test
+index e6f7f98de200..313f0446871c 100644
+--- a/test-data/unit/check-basic.test
++++ b/test-data/unit/check-basic.test
+@@ -466,3 +466,11 @@ a = (a.A(), A())
+ a.x  # E: "Tuple[a.A, b.A]" has no attribute "x"
+ 
+ [builtins fixtures/dict.pyi]
++
++[case testReturnAnyFromFunctionDeclaredToReturnObject]
++# flags: --warn-return-any
++from typing import Any
++
++def f() -> object:
++    x: Any = 1
++    return x
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

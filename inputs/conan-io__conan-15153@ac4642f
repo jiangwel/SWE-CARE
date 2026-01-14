@@ -1,0 +1,238 @@
+  Task-ID: conan-io__conan-15153@ac4642f
+  Please checkout to this commit first: 08433724b662f83111aed3aa2410e9d2e48e0dcd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [question] Using tool_requires dependencies in source method
+### What is your question?
+
+I maintain a number of Conan packages for internal use by our team, and have recently been working to migrate them to Conan 2.x. Some of these packages have actions in their `source` method that require an external tool — for example:
+- Using CVS to check out source files from legacy source control.
+- Using CMake to run a time-consuming code generation step that's independent of the host context (and would therefore be redundant to repeat for each build configuration).
+- Using NuGet to fetch prebuilt binaries. (I think that this step does belong in the `source` method, because each NuGet package contains a collection of binaries for every supported build configurations: the desired NuGet package is therefore the same no matter the settings of the Conan package being built, and it's redundant to fetch it again for each configuration.)
+
+I've packaged these external tools (CVS, CMake, Nuget) as `tool_requires` dependencies; this worked well under Conan 1.x.
+
+However, it seems that the changes to how `tool_requires` dependencies work in Conan 2.x mean that this is no longer possible. Specifically, now that the `tool_requires` dependencies are made available via the `VirtualBuildEnv` generator (which can't be called from the `source` method), I can't see a supported way to use those tools in the `source` method.
+
+The recipes do remain correct if I move these steps out of the `source` method and into `build`, but doing so means that a lot of redundant work is repeated for each build configuration. In some cases, this increases the time taken to build a set of packages from a recipe by several hours.
+
+Is there any other way to use this `tool_requires` functionality from the `source` method in Conan 2.x?
+
+### Have you read the CONTRIBUTING guide?
+
+- [X] I've read the CONTRIBUTING guide
+  </issue>
+  
+  <patch>
+  diff --git a/conan/tools/env/__init__.py b/conan/tools/env/__init__.py
+index 2a6b6da6f97..6b4c29b8a7d 100644
+--- a/conan/tools/env/__init__.py
++++ b/conan/tools/env/__init__.py
+@@ -1,3 +1,4 @@
+ from conan.tools.env.environment import Environment
+ from conan.tools.env.virtualbuildenv import VirtualBuildEnv
+ from conan.tools.env.virtualrunenv import VirtualRunEnv
++from conan.tools.env.virtualbuildenv import buildenv
+diff --git a/conan/tools/env/virtualbuildenv.py b/conan/tools/env/virtualbuildenv.py
+index b97e1beac21..cebdb713d71 100644
+--- a/conan/tools/env/virtualbuildenv.py
++++ b/conan/tools/env/virtualbuildenv.py
+@@ -1,8 +1,16 @@
++from contextlib import contextmanager
++
+ from conan.internal import check_duplicated_generator
+ from conan.tools.env import Environment
+ from conan.tools.env.virtualrunenv import runenv_from_cpp_info
+ 
+ 
++@contextmanager
++def buildenv(conanfile):
++    with VirtualBuildEnv(conanfile).vars().apply():
++        yield
++
++
+ class VirtualBuildEnv:
+     """ Calculates the environment variables of the build time context and produces a conanbuildenv
+         .bat or .sh script
+@@ -12,21 +20,27 @@ def __init__(self, conanfile):
+         self._conanfile = conanfile
+         self._conanfile.virtualbuildenv = False
+         self.basename = "conanbuildenv"
+-        # TODO: Make this use the settings_build
+-        self.configuration = conanfile.settings.get_safe("build_type")
+-        if self.configuration:
+-            self.configuration = self.configuration.lower()
+-        self.arch = conanfile.settings.get_safe("arch")
+-        if self.arch:
+-            self.arch = self.arch.lower()
++        self.configuration = None
++        self.arch = None
+ 
+     @property
+     def _filename(self):
++        if not self.configuration:
++            # TODO: Make this use the settings_build
++            configuration = self._conanfile.settings.get_safe("build_type")
++            configuration = configuration.lower() if configuration else None
++        else:
++            configuration = self.configuration
++        if not self.arch:
++            arch = self._conanfile.settings.get_safe("arch")
++            arch = arch.lower() if arch else None
++        else:
++            arch = self.arch
+         f = self.basename
+-        if self.configuration:
+-            f += "-" + self.configuration.replace(".", "_")
+-        if self.arch:
+-            f += "-" + self.arch.replace(".", "_")
++        if configuration:
++            f += "-" + configuration.replace(".", "_")
++        if arch:
++            f += "-" + arch.replace(".", "_")
+         return f
+ 
+     def environment(self):
+diff --git a/conans/client/source.py b/conans/client/source.py
+index fac2037eee4..856f4a8fe05 100644
+--- a/conans/client/source.py
++++ b/conans/client/source.py
+@@ -67,7 +67,6 @@ def config_source(export_source_folder, conanfile, hook_manager):
+             # First of all get the exported scm sources (if auto) or clone (if fixed)
+             # Now move the export-sources to the right location
+             merge_directories(export_source_folder, conanfile.folders.base_source)
+-
+             run_source_method(conanfile, hook_manager)
+ 
+ 
+diff --git a/conans/test/integration/build_requires/test_build_requires_source_method.py b/conans/test/integration/build_requires/test_build_requires_source_method.py
+new file mode 100644
+index 00000000000..749e3f29610
+--- /dev/null
++++ b/conans/test/integration/build_requires/test_build_requires_source_method.py
+@@ -0,0 +1,91 @@
++import textwrap
++
++from conans.test.utils.tools import TestClient
++
++
++def test_build_requires_source():
++    c = TestClient()
++    tool = textwrap.dedent(r"""
++        import os
++        from conan import ConanFile
++        from conan.tools.files import chdir, save
++
++        class Tool(ConanFile):
++            name = "tool"
++            version = "0.1"
++            def package(self):
++                with chdir(self, self.package_folder):
++                    echo = f"@echo off\necho MY-TOOL! {self.name}/{self.version}!!"
++                    save(self, "bin/mytool.bat", echo)
++                    save(self, "bin/mytool.sh", echo)
++                    os.chmod("bin/mytool.sh", 0o777)
++        """)
++    pkg = textwrap.dedent("""
++        from conan import ConanFile
++        from conan.tools.env import buildenv
++        import platform
++
++        class Pkg(ConanFile):
++            name = "pkg"
++            version = "0.1"
++            tool_requires = "tool/0.1"
++
++            def source(self):
++                cmd = "mytool.bat" if platform.system() == "Windows" else "mytool.sh"
++                with buildenv(self):
++                    self.run(cmd)
++        """)
++    c.save({"tool/conanfile.py": tool,
++            "pkg/conanfile.py": pkg})
++    c.run("create tool")
++    c.run("create pkg")
++    assert "MY-TOOL! tool/0.1" in c.out
++
++    c.run("install pkg")  # to generate conanbuild script first, so it is available
++    c.run("source pkg")
++    assert "MY-TOOL! tool/0.1" in c.out
++
++
++"""
++ALTERNATIVE 1: in recipe, explicit
++def source(self):
++    cmd = "mytool.bat" if platform.system() == "Windows" else "mytool.sh"
++    with VirtualBuildEnv(conanfile).vars().apply():
++        self.run(cmd)
++
++- Need to bypass ``settings`` restriction in ``source()``
++- we can make a nice helper ``with buildenv``
++"""
++
++"""
++ALTERNATIVE 2: in recipe, attribute
++inject_source_buildenv = True
++
++def source(self):
++    cmd = "mytool.bat" if platform.system() == "Windows" else "mytool.sh"
++    self.run(cmd)
++
++- No need to bypass ``settings`` restriction in ``source()``
++"""
++
++"""
++ALTERNATIVE 3: always, this should be the expected default behavior
++
++def source(self):
++    cmd = "mytool.bat" if platform.system() == "Windows" else "mytool.sh"
++    self.run(cmd)
++
++- No need to bypass ``settings`` restriction in ``source()``
++- We might want to do an opt-out, just in case?
++"""
++
++"""
++ALTERNATIVE 4: global, controlled by conf
++
++def source(self):
++    cmd = "mytool.bat" if platform.system() == "Windows" else "mytool.sh"
++    self.run(cmd)
++
++- No need to bypass ``settings`` restriction in ``source()``
++- [conf] core.source:inject_buildenv=True/False
++"""
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

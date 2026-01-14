@@ -1,0 +1,199 @@
+  Task-ID: psf__black-2939@d4fb955
+  Please checkout to this commit first: 14d84ba2e96c5ca1351b8fe4d0d415cc148f4117
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Remove redundant brackets from `except` clause
+**Is your feature request related to a problem? Please describe.**
+
+The except clause can accept a parenthesised tuple of exceptions. However, in the case of only a single exception the brackets should be removed.
+
+Black currently leaves both of these examples unchanged:
+```
+a = 1
+try:
+    a.something
+except (AttributeError) as err:
+    raise err
+```
+and
+```
+a = 1
+try:
+    a.something
+except (AttributeError,) as err:
+    raise err
+```
+
+**Describe the solution you'd like**
+
+I would expect both examples to be corrected to:
+```
+a = 1
+try:
+    a.something
+except AttributeError as err:
+    raise err
+```
+
+**Describe alternatives you've considered**
+
+I could see an argument to leave the tuple example (with the trailing comma) as is, maybe the user wants to add more exceptions in the future. Easy either way on that one, but we should at least fix the first (non-tuple) example.
+
+**Additional context**
+
+I actually came across this when someone assumed the `except` was a function in a PR. Black added the space before the brackets, but also removing the brackets would really help highlight that it's a keyword not a function 😄 
+```
+try:
+    a.something
+except(AttributeError) as err:
+    raise err
+```
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGES.md b/CHANGES.md
+index bb3ccb9ed9f..f7fdd1db3d4 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -14,6 +14,8 @@
+ 
+ <!-- Changes that affect Black's preview style -->
+ 
++- Remove unnecessary parentheses from `except` statements (#2939)
++
+ ### _Blackd_
+ 
+ <!-- Changes to blackd -->
+diff --git a/src/black/linegen.py b/src/black/linegen.py
+index 4dc242a1dfe..2a5105b0154 100644
+--- a/src/black/linegen.py
++++ b/src/black/linegen.py
+@@ -313,7 +313,12 @@ def __post_init__(self) -> None:
+         self.visit_try_stmt = partial(
+             v, keywords={"try", "except", "else", "finally"}, parens=Ø
+         )
+-        self.visit_except_clause = partial(v, keywords={"except"}, parens=Ø)
++        if Preview.remove_except_parens in self.mode:
++            self.visit_except_clause = partial(
++                v, keywords={"except"}, parens={"except"}
++            )
++        else:
++            self.visit_except_clause = partial(v, keywords={"except"}, parens=Ø)
+         self.visit_with_stmt = partial(v, keywords={"with"}, parens=Ø)
+         self.visit_funcdef = partial(v, keywords={"def"}, parens=Ø)
+         self.visit_classdef = partial(v, keywords={"class"}, parens=Ø)
+diff --git a/src/black/mode.py b/src/black/mode.py
+index 35a072c23e0..a091d432c92 100644
+--- a/src/black/mode.py
++++ b/src/black/mode.py
+@@ -127,6 +127,7 @@ class Preview(Enum):
+     """Individual preview style features."""
+ 
+     string_processing = auto()
++    remove_except_parens = auto()
+ 
+ 
+ class Deprecated(UserWarning):
+@@ -162,9 +163,7 @@ def __contains__(self, feature: Preview) -> bool:
+         """
+         if feature is Preview.string_processing:
+             return self.preview or self.experimental_string_processing
+-        # TODO: Remove type ignore comment once preview contains more features
+-        #  than just ESP
+-        return self.preview  # type: ignore
++        return self.preview
+ 
+     def get_cache_key(self) -> str:
+         if self.target_versions:
+diff --git a/tests/data/remove_except_parens.py b/tests/data/remove_except_parens.py
+new file mode 100644
+index 00000000000..f49c837330c
+--- /dev/null
++++ b/tests/data/remove_except_parens.py
+@@ -0,0 +1,40 @@
++# These brackets are redundant, therefore remove.
++try:
++    a.something
++except (AttributeError) as err:
++    raise err
++
++# This is tuple of exceptions.
++# Although this could be replaced with just the exception,
++# we do not remove brackets to preserve AST.
++try:
++    a.something
++except (AttributeError,) as err:
++    raise err
++
++# This is a tuple of exceptions. Do not remove brackets.
++try:
++    a.something
++except (AttributeError, ValueError) as err:
++    raise err
++
++# output
++# These brackets are redundant, therefore remove.
++try:
++    a.something
++except AttributeError as err:
++    raise err
++
++# This is tuple of exceptions.
++# Although this could be replaced with just the exception,
++# we do not remove brackets to preserve AST.
++try:
++    a.something
++except (AttributeError,) as err:
++    raise err
++
++# This is a tuple of exceptions. Do not remove brackets.
++try:
++    a.something
++except (AttributeError, ValueError) as err:
++    raise err
+diff --git a/tests/test_format.py b/tests/test_format.py
+index 269bbacd249..64f4ad135ea 100644
+--- a/tests/test_format.py
++++ b/tests/test_format.py
+@@ -79,6 +79,7 @@
+     "long_strings__edge_case",
+     "long_strings__regression",
+     "percent_precedence",
++    "remove_except_parens",
+ ]
+ 
+ SOURCES: List[str] = [
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

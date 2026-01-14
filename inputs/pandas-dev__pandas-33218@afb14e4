@@ -1,0 +1,421 @@
+  Task-ID: pandas-dev__pandas-33218@afb14e4
+  Please checkout to this commit first: 42a5c1c1aac401735a9e06e21fece93f58a4b4ec
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Deprecate groupby() squeeze option
+#### Code Sample
+
+```python
+import pandas as pd
+print(pd.DataFrame([{
+    'A': 1,
+    'B': 1,
+}, {
+    'A': 2,
+    'B': 2,
+}, {
+    'A': 2,
+    'B': 3,
+}]).groupby('A', squeeze=True).count())
+
+```
+#### Problem description
+
+I expected `.groupby(squeeze=True)` to, well, squeeze, and `count()` to return a Series. Instead `squeeze=True` doesn't seem to do anything, and `count()` returns a DataFrame.
+
+A workaround is to write `.groupby('A').count().squeeze()`, which does work.
+
+#### Expected Output
+
+```
+A
+1    1
+2    2
+Name: B, dtype: int64
+```
+
+#### Actual output
+
+```
+   B
+A
+1  1
+2  2
+```
+
+#### Output of ``pd.show_versions()``
+
+<details>
+INSTALLED VERSIONS
+------------------
+commit           : None
+python           : 3.7.6.final.0
+python-bits      : 64
+OS               : Linux
+OS-release       : 5.4.0-4-amd64
+machine          : x86_64
+processor        :
+byteorder        : little
+LC_ALL           : None
+LANG             : en_GB.UTF-8
+LOCALE           : en_GB.UTF-8
+
+pandas           : 1.0.1
+numpy            : 1.17.4
+pytz             : 2019.3
+dateutil         : 2.8.1
+pip              : 18.1
+setuptools       : 44.0.0
+Cython           : None
+pytest           : 4.6.9
+hypothesis       : None
+sphinx           : None
+blosc            : None
+feather          : None
+xlsxwriter       : None
+lxml.etree       : 4.5.0
+html5lib         : None
+pymysql          : None
+psycopg2         : None
+jinja2           : 2.11.1
+IPython          : 7.12.0
+pandas_datareader: None
+bs4              : None
+bottleneck       : None
+fastparquet      : None
+gcsfs            : None
+lxml.etree       : 4.5.0
+matplotlib       : None
+numexpr          : None
+odfpy            : None
+openpyxl         : None
+pandas_gbq       : None
+pyarrow          : None
+pytables         : None
+pytest           : 4.6.9
+pyxlsb           : None
+s3fs             : None
+scipy            : None
+sqlalchemy       : None
+tables           : None
+tabulate         : None
+xarray           : None
+xlrd             : None
+xlwt             : None
+xlsxwriter       : None
+numba            : None
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v1.1.0.rst b/doc/source/whatsnew/v1.1.0.rst
+index 8db837a38170b..91ecb4fc7893a 100644
+--- a/doc/source/whatsnew/v1.1.0.rst
++++ b/doc/source/whatsnew/v1.1.0.rst
+@@ -254,6 +254,7 @@ Deprecations
+ - :meth:`DataFrame.to_dict` has deprecated accepting short names for ``orient`` in future versions (:issue:`32515`)
+ - :meth:`Categorical.to_dense` is deprecated and will be removed in a future version, use ``np.asarray(cat)`` instead (:issue:`32639`)
+ - The ``fastpath`` keyword in the ``SingleBlockManager`` constructor is deprecated and will be removed in a future version (:issue:`33092`)
++- The ``squeeze`` keyword in the ``groupby`` function is deprecated and will be removed in a future version (:issue:`32380`)
+ 
+ .. ---------------------------------------------------------------------------
+ 
+diff --git a/pandas/core/frame.py b/pandas/core/frame.py
+index 8ada8e830b834..79fc60d40772a 100644
+--- a/pandas/core/frame.py
++++ b/pandas/core/frame.py
+@@ -40,6 +40,7 @@
+ from pandas._config import get_option
+ 
+ from pandas._libs import algos as libalgos, lib, properties
++from pandas._libs.lib import no_default
+ from pandas._typing import Axes, Axis, Dtype, FilePathOrBuffer, Label, Level, Renamer
+ from pandas.compat import PY37
+ from pandas.compat._optional import import_optional_dependency
+@@ -5813,16 +5814,25 @@ def groupby(
+         as_index: bool = True,
+         sort: bool = True,
+         group_keys: bool = True,
+-        squeeze: bool = False,
++        squeeze: bool = no_default,
+         observed: bool = False,
+     ) -> "DataFrameGroupBy":
+         from pandas.core.groupby.generic import DataFrameGroupBy
+ 
++        if squeeze is not no_default:
++            warnings.warn(
++                (
++                    "The `squeeze` parameter in pd.groupby is deprecated and "
++                    "will be removed in a future version."
++                ),
++                FutureWarning,
++                stacklevel=2,
++            )
++
+         if level is None and by is None:
+             raise TypeError("You have to supply one of 'by' and 'level'")
+         axis = self._get_axis_number(axis)
+-
+-        return DataFrameGroupBy(
++        grouped = DataFrameGroupBy(
+             obj=self,
+             keys=by,
+             axis=axis,
+@@ -5830,9 +5840,9 @@ def groupby(
+             as_index=as_index,
+             sort=sort,
+             group_keys=group_keys,
+-            squeeze=squeeze,
+             observed=observed,
+         )
++        return grouped
+ 
+     _shared_docs[
+         "pivot"
+diff --git a/pandas/core/generic.py b/pandas/core/generic.py
+index 62f5419c1f4c8..c2ceb54d44116 100644
+--- a/pandas/core/generic.py
++++ b/pandas/core/generic.py
+@@ -7419,6 +7419,8 @@ def clip(
+         squeeze : bool, default False
+             Reduce the dimensionality of the return type if possible,
+             otherwise return a consistent type.
++            deprecated:: 1.1.0
++
+         observed : bool, default False
+             This only applies if any of the groupers are Categoricals.
+             If True: only show observed values for categorical groupers.
+diff --git a/pandas/core/groupby/generic.py b/pandas/core/groupby/generic.py
+index 093c925acbc49..2c9dceb041dbd 100644
+--- a/pandas/core/groupby/generic.py
++++ b/pandas/core/groupby/generic.py
+@@ -1253,34 +1253,7 @@ def first_not_none(values):
+ 
+             if isinstance(v, (np.ndarray, Index, Series)):
+                 if isinstance(v, Series):
+-                    applied_index = self._selected_obj._get_axis(self.axis)
+                     all_indexed_same = all_indexes_same([x.index for x in values])
+-                    singular_series = len(values) == 1 and applied_index.nlevels == 1
+-
+-                    # GH3596
+-                    # provide a reduction (Frame -> Series) if groups are
+-                    # unique
+-                    if self.squeeze:
+-                        # assign the name to this series
+-                        if singular_series:
+-                            values[0].name = keys[0]
+-
+-                            # GH2893
+-                            # we have series in the values array, we want to
+-                            # produce a series:
+-                            # if any of the sub-series are not indexed the same
+-                            # OR we don't have a multi-index and we have only a
+-                            # single values
+-                            return self._concat_objects(
+-                                keys, values, not_indexed_same=not_indexed_same
+-                            )
+-
+-                        # still a series
+-                        # path added as of GH 5545
+-                        elif all_indexed_same:
+-                            from pandas.core.reshape.concat import concat
+-
+-                            return concat(values)
+ 
+                     if not all_indexed_same:
+                         # GH 8467
+diff --git a/pandas/core/groupby/groupby.py b/pandas/core/groupby/groupby.py
+index ebdb0062491be..69690a47e42d1 100644
+--- a/pandas/core/groupby/groupby.py
++++ b/pandas/core/groupby/groupby.py
+@@ -369,7 +369,6 @@ def __init__(
+         as_index: bool = True,
+         sort: bool = True,
+         group_keys: bool = True,
+-        squeeze: bool = False,
+         observed: bool = False,
+         mutated: bool = False,
+     ):
+@@ -391,7 +390,6 @@ def __init__(
+         self.keys = keys
+         self.sort = sort
+         self.group_keys = group_keys
+-        self.squeeze = squeeze
+         self.observed = observed
+         self.mutated = mutated
+ 
+@@ -2521,7 +2519,6 @@ def get_groupby(
+     as_index: bool = True,
+     sort: bool = True,
+     group_keys: bool = True,
+-    squeeze: bool = False,
+     observed: bool = False,
+     mutated: bool = False,
+ ) -> GroupBy:
+@@ -2549,7 +2546,6 @@ def get_groupby(
+         as_index=as_index,
+         sort=sort,
+         group_keys=group_keys,
+-        squeeze=squeeze,
+         observed=observed,
+         mutated=mutated,
+     )
+diff --git a/pandas/core/resample.py b/pandas/core/resample.py
+index 9e3318db3cfb9..3b34dd7c06cee 100644
+--- a/pandas/core/resample.py
++++ b/pandas/core/resample.py
+@@ -76,7 +76,6 @@ def __init__(self, obj, groupby=None, axis=0, kind=None, **kwargs):
+         self.sort = True
+         self.axis = axis
+         self.kind = kind
+-        self.squeeze = False
+         self.group_keys = True
+         self.as_index = True
+         self.exclusions = set()
+diff --git a/pandas/core/series.py b/pandas/core/series.py
+index 7e575bf9e6115..106f4693f9cf8 100644
+--- a/pandas/core/series.py
++++ b/pandas/core/series.py
+@@ -22,6 +22,7 @@
+ from pandas._config import get_option
+ 
+ from pandas._libs import lib, properties, reshape, tslibs
++from pandas._libs.lib import no_default
+ from pandas._typing import Axis, DtypeObj, Label
+ from pandas.compat.numpy import function as nv
+ from pandas.util._decorators import Appender, Substitution, doc
+@@ -1646,11 +1647,21 @@ def groupby(
+         as_index: bool = True,
+         sort: bool = True,
+         group_keys: bool = True,
+-        squeeze: bool = False,
++        squeeze: bool = no_default,
+         observed: bool = False,
+     ) -> "SeriesGroupBy":
+         from pandas.core.groupby.generic import SeriesGroupBy
+ 
++        if squeeze is not no_default:
++            warnings.warn(
++                (
++                    "The `squeeze` parameter in pd.groupby is deprecated and "
++                    "will be removed in a future version."
++                ),
++                FutureWarning,
++                stacklevel=2,
++            )
++
+         if level is None and by is None:
+             raise TypeError("You have to supply one of 'by' and 'level'")
+         axis = self._get_axis_number(axis)
+@@ -1663,7 +1674,6 @@ def groupby(
+             as_index=as_index,
+             sort=sort,
+             group_keys=group_keys,
+-            squeeze=squeeze,
+             observed=observed,
+         )
+ 
+diff --git a/pandas/tests/groupby/test_groupby.py b/pandas/tests/groupby/test_groupby.py
+index b8d8f56512a69..4aaf68e36b673 100644
+--- a/pandas/tests/groupby/test_groupby.py
++++ b/pandas/tests/groupby/test_groupby.py
+@@ -94,6 +94,11 @@ def max_value(group):
+     tm.assert_series_equal(result, expected)
+ 
+ 
++@pytest.mark.xfail(
++    reason="GH#32380; the squeeze option will be "
++    "deprecated, so the DataFrame won't be converted "
++    "to a Series."
++)
+ def test_groupby_return_type():
+ 
+     # GH2893, return a reduced type
+@@ -109,7 +114,8 @@ def test_groupby_return_type():
+     def func(dataf):
+         return dataf["val2"] - dataf["val2"].mean()
+ 
+-    result = df1.groupby("val1", squeeze=True).apply(func)
++    with tm.assert_produces_warning(FutureWarning):
++        result = df1.groupby("val1", squeeze=True).apply(func)
+     assert isinstance(result, Series)
+ 
+     df2 = DataFrame(
+@@ -124,12 +130,14 @@ def func(dataf):
+     def func(dataf):
+         return dataf["val2"] - dataf["val2"].mean()
+ 
+-    result = df2.groupby("val1", squeeze=True).apply(func)
++    with tm.assert_produces_warning(FutureWarning):
++        result = df2.groupby("val1", squeeze=True).apply(func)
+     assert isinstance(result, Series)
+ 
+     # GH3596, return a consistent type (regression in 0.11 from 0.10.1)
+     df = DataFrame([[1, 1], [1, 1]], columns=["X", "Y"])
+-    result = df.groupby("X", squeeze=False).count()
++    with tm.assert_produces_warning(FutureWarning):
++        result = df.groupby("X", squeeze=False).count()
+     assert isinstance(result, DataFrame)
+ 
+ 
+@@ -2057,3 +2065,26 @@ def test_groups_repr_truncates(max_seq_items, expected):
+ 
+         result = df.groupby(np.array(df.a)).groups.__repr__()
+         assert result == expected
++
++
++@pytest.mark.parametrize("param", [True, False])
++def test_groupy_squeeze_is_deprecated(param):
++    # GH 32380: Deprecate the squeeze option in groupby
++    df = DataFrame(
++        [
++            {"val1": 1, "val2": 20},
++            {"val1": 1, "val2": 19},
++            {"val1": 1, "val2": 27},
++            {"val1": 1, "val2": 12},
++        ]
++    )
++
++    def func(dataf):
++        return dataf["val2"] - dataf["val2"].mean()
++
++    with tm.assert_produces_warning(FutureWarning):
++        result = df.groupby("val1", squeeze=param).apply(func)
++    assert isinstance(result, DataFrame)
++
++    with tm.assert_produces_warning(FutureWarning):
++        df["val1"].groupby(["a", "b", "a", "b"], squeeze=False)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

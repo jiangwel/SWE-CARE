@@ -1,0 +1,223 @@
+  Task-ID: geldata__gel-5130@2e5341f
+  Please checkout to this commit first: 70599154f6d3d7333f2c152368411c120716c959
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Ban `inserts` and `updates` in `filter` and `order by` clauses of `selects`
+We should not allow queries like the following:
+
+```
+with X := Person select (X {name}, 1) filter {count ((insert Person {name := "t7"})) = 1} ;
+```
+
+```
+select Foo
+filter (insert Bar{val := 1}).val = 1 and false
+```
+  </issue>
+  
+  <patch>
+  diff --git a/edb/edgeql/compiler/context.py b/edb/edgeql/compiler/context.py
+index 0c47a23b396..693317667a9 100644
+--- a/edb/edgeql/compiler/context.py
++++ b/edb/edgeql/compiler/context.py
+@@ -537,6 +537,10 @@ class ContextLevel(compiler.ContextLevel):
+     active_computeds: ordered.OrderedSet[s_pointers.Pointer]
+     """A ordered set of currently compiling computeds"""
+ 
++    disallow_dml: bool
++    """Whether we are currently in a place where no dml is allowed,
++        e.g. the where and order clauses of a select"""
++
+     def __init__(
+         self,
+         prevlevel: Optional[ContextLevel],
+@@ -592,6 +596,8 @@ def __init__(
+             self.active_computeds = ordered.OrderedSet()
+             self.recompiling_schema_alias = False
+ 
++            self.disallow_dml = False
++
+         else:
+             self.env = prevlevel.env
+             self.derived_target_module = prevlevel.derived_target_module
+@@ -631,6 +637,8 @@ def __init__(
+             self.active_computeds = prevlevel.active_computeds
+             self.recompiling_schema_alias = prevlevel.recompiling_schema_alias
+ 
++            self.disallow_dml = prevlevel.disallow_dml
++
+             if mode == ContextSwitchMode.SUBQUERY:
+                 self.anchors = prevlevel.anchors.copy()
+                 self.modaliases = prevlevel.modaliases.copy()
+diff --git a/edb/edgeql/compiler/stmt.py b/edb/edgeql/compiler/stmt.py
+index 22a00802938..bcfc8b7394a 100644
+--- a/edb/edgeql/compiler/stmt.py
++++ b/edb/edgeql/compiler/stmt.py
+@@ -133,10 +133,14 @@ def compile_SelectQuery(
+             forward_rptr=forward_rptr,
+             ctx=sctx)
+ 
+-        stmt.where = clauses.compile_where_clause(expr.where, ctx=sctx)
++        with sctx.new(context.ContextSwitchMode.NEW) as sctx_no_dml:
++            sctx_no_dml.disallow_dml = True
+ 
+-        stmt.orderby = clauses.compile_orderby_clause(
+-            expr.orderby, ctx=sctx)
++            stmt.where = clauses.compile_where_clause(
++                expr.where, ctx=sctx_no_dml)
++
++            stmt.orderby = clauses.compile_orderby_clause(
++                expr.orderby, ctx=sctx_no_dml)
+ 
+         stmt.offset = clauses.compile_limit_offset_clause(
+             expr.offset, ctx=sctx)
+@@ -421,6 +425,16 @@ def compile_InsertQuery(
+             context=expr.context,
+         )
+ 
++    if ctx.disallow_dml:
++        raise errors.QueryError(
++            'INSERT statements cannot be used here',
++            hint=(
++                f'To resolve this try to factor out the mutation '
++                f'expression into the top-level WITH block.'
++            ),
++            context=expr.context,
++        )
++
+     # Record this node in the list of potential DML expressions.
+     ctx.env.dml_exprs.append(expr)
+ 
+@@ -560,6 +574,16 @@ def compile_UpdateQuery(
+             context=expr.context,
+         )
+ 
++    if ctx.disallow_dml:
++        raise errors.QueryError(
++            'UPDATE statements cannot be used here',
++            hint=(
++                f'To resolve this try to factor out the mutation '
++                f'expression into the top-level WITH block.'
++            ),
++            context=expr.context,
++        )
++
+     # Record this node in the list of DML statements.
+     ctx.env.dml_exprs.append(expr)
+ 
+@@ -656,6 +680,16 @@ def compile_DeleteQuery(
+             context=expr.context,
+         )
+ 
++    if ctx.disallow_dml:
++        raise errors.QueryError(
++            'DELETE statements cannot be used here',
++            hint=(
++                f'To resolve this try to factor out the mutation '
++                f'expression into the top-level WITH block.'
++            ),
++            context=expr.context,
++        )
++
+     # Record this node in the list of potential DML expressions.
+     ctx.env.dml_exprs.append(expr)
+ 
+diff --git a/tests/test_edgeql_select.py b/tests/test_edgeql_select.py
+index 680008a2b63..9e0ba7e4cf5 100644
+--- a/tests/test_edgeql_select.py
++++ b/tests/test_edgeql_select.py
+@@ -8002,3 +8002,60 @@ async def test_edgeql_select_paths_01(self):
+             ''',
+             tb.bag(["Repl tweak.", "Regression."]),
+         )
++
++    async def test_edgeql_select_where_order_dml(self):
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "INSERT statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } filter
++                        (INSERT User {
++                            name := 't1',
++                        })
++            ''')
++
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "UPDATE statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } filter
++                        (UPDATE User set {
++                            name := 't1',
++                        })
++            ''')
++
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "DELETE statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } filter
++                        (DELETE User filter .name = 't1')
++            ''')
++
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "INSERT statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } order by
++                        (INSERT User {
++                            name := 't1',
++                        })
++            ''')
++
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "UPDATE statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } order by
++                        (UPDATE User set {
++                            name := 't1',
++                        })
++            ''')
++
++        async with self.assertRaisesRegexTx(
++                edgedb.QueryError,
++                "DELETE statements cannot be used here"):
++            await self.con.query('''
++                select { foo := 1 } order by
++                        (DELETE User filter .name = 't1')
++            ''')
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

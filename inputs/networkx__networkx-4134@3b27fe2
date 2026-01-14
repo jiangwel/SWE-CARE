@@ -1,0 +1,213 @@
+  Task-ID: networkx__networkx-4134@3b27fe2
+  Please checkout to this commit first: 123fc2be585c6ebbf46b7fe876ba85dd34f92b2e
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Viewable documentation builds for PRs
+Travis CI supports uploading artifacts, but
+
+> Note that the artifacts addon is not available for pull request builds.
+
+So I think going with Circle CI to build the docs on PRs seems like a
+good solution.  Since you are familiar with how NumPy does it, it should
+be straightforward.  It will also speed up our Travis CI time.
+
+It might be a good idea to add more checks if possible.
+For instance, sphinx can check that links aren't broken.
+There maybe other stuff that can be checked.
+If possible it would be nice to somehow automatically check that
+new functions have been added to the documentation and, if not,
+to post a note on the PR.
+It would be nice to get this in sooner, rather than later.
+So you may want to do the easiest things in one PR and create
+a separate PR for additional checks.
+
+You should double check that I haven't missed anything, but here are
+some pointers:
+
+In ``.travisci``, we can remove
+```
+    - os: linux
+      python: 3.7
+      env:
+      - OPTIONAL_DEPS=1
+      - BUILD_DOCS=1
+      - DEPLOY_DOCS=1
+      addons:
+        apt:
+          packages:
+          - libgdal-dev
+          - graphviz
+          - texlive
+          - texlive-latex-extra
+          - latexmk
+```
+and
+```
+script:
+  - if [[ "${BUILD_DOCS}" == 1 ]]; then
+      source tools/travis/build_docs.sh;
+    else
+      source tools/travis/script.sh;
+    fi
+
+after_success:
+  - if [[ "${REPORT_COVERAGE}" == 1 ]]; then
+      codecov;
+    fi
+  - if [[ "${BUILD_DOCS}" == 1 && "${DEPLOY_DOCS}" == 1 ]]; then
+      source tools/travis/deploy_docs.sh;
+    fi
+```
+can be replaced with
+```
+script:
+  - source tools/travis/script.sh
+
+after_success:
+  - if [[ "${REPORT_COVERAGE}" == 1 ]]; then
+      codecov;
+    fi
+```
+
+You should also remove:
+- tools/travis/build_docs.sh
+- tools/travis/deploy_docs.sh
+
+The basic recipe for building docs should be something like:
+```
+## Depending on what OS circle CI you will need somehow install
+## libgdal-dev graphviz texlive texlive-latex-extra latexmk
+
+# Install
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -r requirements/optional.txt
+pip install -r requirements/extras.txt
+pip install -r requirements/doc.txt
+pip install .
+
+# Build docs
+cd doc
+make html
+make latexpdf LATEXMKOPTS="-silent"
+cd ..
+
+# Deploy docs on PR
+# I don't know how to do this
+
+# Deploy docs on master
+# somehow set up a deploy key (see tools/travis/deploy_docs.sh)
+
+# Push the latest docs to the networkx/documentation repo (gh-pages branch)
+GH_REF=git@github.com:networkx/documentation.git
+echo "-- pushing docs --"
+
+# The next two lines should be updated ...
+git config --global user.email "travis@travis-ci.com"
+git config --global user.name "NetworkX Travis Bot"
+
+cd doc
+git clone --quiet --branch=gh-pages --depth=1 ${GH_REF} ghpages_build
+cd ghpages_build
+
+# Overwrite previous commit
+git rm -r latest
+cp -a ../build/html latest
+cp -a ../build/latex/networkx_reference.pdf latest/_downloads/.
+git add latest
+git commit -m "Deploy GitHub Pages"
+
+git push --force --quiet "${GH_REF}" gh-pages > /dev/null 2>&1
+```
+  </issue>
+  
+  <patch>
+  diff --git a/.circleci/config.yml b/.circleci/config.yml
+index 487ac9b82d3..8bc77c131f0 100644
+--- a/.circleci/config.yml
++++ b/.circleci/config.yml
+@@ -47,3 +47,48 @@ jobs:
+ 
+       - store_artifacts:
+           path: doc/build/html
++
++      - persist_to_workspace:
++          root: doc/build
++          paths:
++            - html
++
++  deploy:
++    working_directory: ~/repo
++    docker:
++      - image: circleci/python:3.8.3-buster
++
++    steps:
++      - attach_workspace:
++          at: /tmp/build
++
++      - add_ssh_keys:
++          fingerprints:
++            - "e5:04:e6:c4:d6:c3:34:b9:02:e6:9f:25:1c:01:9e:e9"
++
++      - run:
++          name: upload_devdocs
++          command: |
++            set -e
++            git clone git@github.com:networkx/documentation.git
++            cd documentation
++            rm -rf latest
++            cp -R /tmp/build/html latest
++            touch latest/.nojekyll
++            git config --global user.email "networkx-circleci-bot@nomail"
++            git config --global user.name "networkx-circleci-bot"
++            git config --global push.default simple;
++            git commit -am "Docs built from $CIRCLE_SHA1"
++            git push origin gh-pages
++
++workflows:
++  version: 2
++  default:
++    jobs:
++      - build
++      - deploy:
++          requires:
++            - build
++          filters:
++            branches:
++              only: master
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

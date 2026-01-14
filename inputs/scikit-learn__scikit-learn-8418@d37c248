@@ -1,0 +1,186 @@
+  Task-ID: scikit-learn__scikit-learn-8418@d37c248
+  Please checkout to this commit first: 4493d37058938c85f78b40562e2741812b983291
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  model_selection.KFold and GroupKFold cannot handle column labelled 'fit' in pandas dataframe
+
+#### Description
+When supplying a pandas dataframe to model_selection.KFold or GroupKFold the split function fails if the dataframe contains a column labelled 'fit'.  Renaming the column to something other than 'fit' fixes the issue.  This is especially problematic for users of CountVectorizer (or similar) when using the feature names as column names in a dataframe that is later used for machine learning.
+
+#### Steps/Code to Reproduce
+
+BUG:
+```
+from sklearn import datasets
+from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import KFold
+import pandas as pd
+
+
+iris = datasets.load_iris()
+X = pd.DataFrame(iris.data, columns=iris.feature_names)
+Y = iris.target
+
+X['fit'] = 0
+gkf = GroupKFold(n_splits=10)
+
+for train, test in gkf.split(X, Y, groups=X['petal width (cm)']):
+        pass
+```
+
+WORKS:
+```
+from sklearn import datasets
+from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import KFold
+import pandas as pd
+
+
+iris = datasets.load_iris()
+X = pd.DataFrame(iris.data, columns=iris.feature_names)
+Y = iris.target
+
+X['fit_'] = 0
+gkf = GroupKFold(n_splits=10)
+
+for train, test in gkf.split(X, Y, groups=X['petal width (cm)']):
+        pass
+```
+
+Only difference between two code samples is using 'fit' vs 'fit_'
+
+#### Expected Results
+
+No output, loop should complete silently.
+
+
+#### Actual Results
+
+```
+---------------------------------------------------------------------------
+TypeError                                 Traceback (most recent call last)
+<ipython-input-20-4e085b2f516b> in <module>()
+     13 gkf = GroupKFold(n_splits=10)
+     14 
+---> 15 for train, test in gkf.split(X, Y, groups=X['petal width (cm)']):
+     16         pass
+
+AppData\Local\Continuum\Anaconda2\lib\site-packages\sklearn\model_selection\_split.pyc in split(self, X, y, groups)
+    312             The testing set indices for that split.
+    313         """
+--> 314         X, y, groups = indexable(X, y, groups)
+    315         n_samples = _num_samples(X)
+    316         if self.n_splits > n_samples:
+
+AppData\Local\Continuum\Anaconda2\lib\site-packages\sklearn\utils\validation.pyc in indexable(*iterables)
+    204         else:
+    205             result.append(np.array(X))
+--> 206     check_consistent_length(*result)
+    207     return result
+    208 
+
+AppData\Local\Continuum\Anaconda2\lib\site-packages\sklearn\utils\validation.pyc in check_consistent_length(*arrays)
+    175     """
+    176 
+--> 177     lengths = [_num_samples(X) for X in arrays if X is not None]
+    178     uniques = np.unique(lengths)
+    179     if len(uniques) > 1:
+
+AppData\Local\Continuum\Anaconda2\lib\site-packages\sklearn\utils\validation.pyc in _num_samples(x)
+    114         # Don't get num_samples from an ensembles length!
+    115         raise TypeError('Expected sequence or array-like, got '
+--> 116                         'estimator %s' % x)
+    117     if not hasattr(x, '__len__') and not hasattr(x, 'shape'):
+    118         if hasattr(x, '__array__'):
+
+TypeError: Expected sequence or array-like, got estimator      sepal length (cm)  sepal width (cm)  petal length (cm)  petal width (cm)  \
+```
+
+
+
+#### Versions
+
+Windows-10-10.0.14393
+('Python', '2.7.12 |Anaconda custom (64-bit)| (default, Jun 29 2016, 11:07:13) [MSC v.1500 64 bit (AMD64)]')
+('NumPy', '1.11.1')
+('SciPy', '0.18.1')
+('Scikit-Learn', '0.18.1')
+
+<!-- Thanks for contributing! -->
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/utils/tests/test_validation.py b/sklearn/utils/tests/test_validation.py
+index 37469f165da15..9a899add7734a 100644
+--- a/sklearn/utils/tests/test_validation.py
++++ b/sklearn/utils/tests/test_validation.py
+@@ -15,6 +15,7 @@
+ from sklearn.utils.testing import assert_warns_message
+ from sklearn.utils.testing import assert_warns
+ from sklearn.utils.testing import ignore_warnings
++from sklearn.utils.testing import SkipTest
+ from sklearn.utils import as_float_array, check_array, check_symmetric
+ from sklearn.utils import check_X_y
+ from sklearn.utils.mocking import MockDataFrame
+@@ -500,4 +501,14 @@ def test_check_consistent_length():
+     # Despite ensembles having __len__ they must raise TypeError
+     assert_raises_regexp(TypeError, 'estimator', check_consistent_length,
+                          [1, 2], RandomForestRegressor())
++    
++    #check pandas dataframe with 'fit' column does not raise error
++    try:
++        import pandas as pd
++        X = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
++        X_df = pd.DataFrame(X,columns=['a','b','fit'])
++        check_consistent_length(X_df)
++    except ImportError:
++        raise SkipTest("Pandas not found")
++    
+     # XXX: We should have a test with a string, but what is correct behaviour?
+diff --git a/sklearn/utils/validation.py b/sklearn/utils/validation.py
+index 58ea733c3a118..e87b6c25df5ea 100644
+--- a/sklearn/utils/validation.py
++++ b/sklearn/utils/validation.py
+@@ -92,7 +92,7 @@ def _is_arraylike(x):
+ 
+ def _num_samples(x):
+     """Return number of samples in array-like x."""
+-    if hasattr(x, 'fit'):
++    if hasattr(x, 'fit') and hasattr(x.fit, '__call__'):
+         # Don't get num_samples from an ensembles length!
+         raise TypeError('Expected sequence or array-like, got '
+                         'estimator %s' % x)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

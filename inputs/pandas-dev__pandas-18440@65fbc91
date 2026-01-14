@@ -1,0 +1,269 @@
+  Task-ID: pandas-dev__pandas-18440@65fbc91
+  Please checkout to this commit first: aaee541b538559f8887881ab23d2734dddd920d3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: in Python3 MultiIndex.from_tuples cannot take "zipped" tuples
+#### Code Sample, a copy-pastable example if possible
+
+```python
+# This code fails in python 3
+import pandas as pd
+my_index = pd.MultiIndex.from_tuples(zip(['a', 'b'], ['c', 'd'], ['e', 'f']), names=['A','B', 'C'])
+```
+#### Problem description
+The code above gives an Exception 
+
+TypeError: object of type 'zip' has no len()
+
+Because in python3, unlike in python2, the return from zip is NOT a list and cannot get length. 
+
+In pandas, there are multiple instances in MultiIndex and related classes, where the code tries to get len() from the arguments, which are valid input but no longer have __len__ property in python3.
+
+#### Expected Output
+
+Same as in python2
+In the case above, should be
+```python
+MultiIndex(levels=[['a', 'b'], ['c', 'd'], ['e', 'f']],
+           labels=[[0, 1], [0, 1], [0, 1]],
+           names=['A', 'B', 'C'])
+```
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 3.6.3.final.0
+python-bits: 64
+OS: Darwin
+OS-release: 16.7.0
+machine: x86_64
+processor: i386
+byteorder: little
+LC_ALL: None
+LANG: en_US.UTF-8
+LOCALE: en_US.UTF-8
+
+pandas: 0.21.0
+pytest: None
+pip: 9.0.1
+setuptools: 36.5.0
+Cython: None
+numpy: 1.13.3
+scipy: 1.0.0
+pyarrow: None
+xarray: None
+IPython: 6.0.0
+sphinx: None
+patsy: 0.4.1
+dateutil: 2.6.1
+pytz: 2017.3
+blosc: None
+bottleneck: None
+tables: 3.4.2
+numexpr: 2.6.4
+feather: None
+matplotlib: 2.0.2
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: None
+lxml: None
+bs4: None
+html5lib: None
+sqlalchemy: None
+pymysql: None
+psycopg2: None
+jinja2: None
+s3fs: None
+fastparquet: None
+pandas_gbq: None
+pandas_datareader: None
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.22.0.txt b/doc/source/whatsnew/v0.22.0.txt
+index 4bdff1355874e..a32035d0d906f 100644
+--- a/doc/source/whatsnew/v0.22.0.txt
++++ b/doc/source/whatsnew/v0.22.0.txt
+@@ -140,6 +140,7 @@ Indexing
+ - Bug in :func:`Series.truncate` which raises ``TypeError`` with a monotonic ``PeriodIndex`` (:issue:`17717`)
+ - Bug in :func:`DataFrame.groupby` where tuples were interpreted as lists of keys rather than as keys (:issue:`17979`, :issue:`18249`)
+ - Bug in :func:`MultiIndex.remove_unused_levels`` which would fill nan values (:issue:`18417`)
++- Bug in :func:`MultiIndex.from_tuples`` which would fail to take zipped tuples in python3 (:issue:`18434`)
+ - Bug in :class:`IntervalIndex` where empty and purely NA data was constructed inconsistently depending on the construction method (:issue:`18421`)
+ -
+ 
+diff --git a/pandas/core/indexes/multi.py b/pandas/core/indexes/multi.py
+index 81d892fba0fe2..456999b94c523 100644
+--- a/pandas/core/indexes/multi.py
++++ b/pandas/core/indexes/multi.py
+@@ -1162,6 +1162,11 @@ def from_arrays(cls, arrays, sortorder=None, names=None):
+         MultiIndex.from_product : Make a MultiIndex from cartesian product
+                                   of iterables
+         """
++        if not is_list_like(arrays):
++            raise TypeError("Input must be a list / sequence of array-likes.")
++        elif is_iterator(arrays):
++            arrays = list(arrays)
++
+         # Check if lengths of all arrays are equal or not,
+         # raise ValueError, if not
+         for i in range(1, len(arrays)):
+@@ -1206,6 +1211,11 @@ def from_tuples(cls, tuples, sortorder=None, names=None):
+         MultiIndex.from_product : Make a MultiIndex from cartesian product
+                                   of iterables
+         """
++        if not is_list_like(tuples):
++            raise TypeError('Input must be a list / sequence of tuple-likes.')
++        elif is_iterator(tuples):
++            tuples = list(tuples)
++
+         if len(tuples) == 0:
+             if names is None:
+                 msg = 'Cannot infer number of levels from empty list'
+@@ -1260,6 +1270,11 @@ def from_product(cls, iterables, sortorder=None, names=None):
+         from pandas.core.categorical import _factorize_from_iterables
+         from pandas.core.reshape.util import cartesian_product
+ 
++        if not is_list_like(iterables):
++            raise TypeError("Input must be a list / sequence of iterables.")
++        elif is_iterator(iterables):
++            iterables = list(iterables)
++
+         labels, levels = _factorize_from_iterables(iterables)
+         labels = cartesian_product(labels)
+         return MultiIndex(levels, labels, sortorder=sortorder, names=names)
+diff --git a/pandas/tests/indexes/test_multi.py b/pandas/tests/indexes/test_multi.py
+index 2f8c27f1abb7d..22347f6a62567 100644
+--- a/pandas/tests/indexes/test_multi.py
++++ b/pandas/tests/indexes/test_multi.py
+@@ -672,6 +672,7 @@ def test_from_arrays(self):
+         for lev, lab in zip(self.index.levels, self.index.labels):
+             arrays.append(np.asarray(lev).take(lab))
+ 
++        # list of arrays as input
+         result = MultiIndex.from_arrays(arrays)
+         assert list(result) == list(self.index)
+ 
+@@ -681,6 +682,21 @@ def test_from_arrays(self):
+         assert result.levels[0].equals(Index([Timestamp('20130101')]))
+         assert result.levels[1].equals(Index(['a', 'b']))
+ 
++    def test_from_arrays_iterator(self):
++        # GH 18434
++        arrays = []
++        for lev, lab in zip(self.index.levels, self.index.labels):
++            arrays.append(np.asarray(lev).take(lab))
++
++        # iterator as input
++        result = MultiIndex.from_arrays(iter(arrays))
++        assert list(result) == list(self.index)
++
++        # invalid iterator input
++        with tm.assert_raises_regex(
++                TypeError, "Input must be a list / sequence of array-likes."):
++            MultiIndex.from_arrays(0)
++
+     def test_from_arrays_index_series_datetimetz(self):
+         idx1 = pd.date_range('2015-01-01 10:00', freq='D', periods=3,
+                              tz='US/Eastern')
+@@ -827,6 +843,26 @@ def test_from_product(self):
+         tm.assert_index_equal(result, expected)
+         assert result.names == names
+ 
++    def test_from_product_iterator(self):
++        # GH 18434
++        first = ['foo', 'bar', 'buz']
++        second = ['a', 'b', 'c']
++        names = ['first', 'second']
++        tuples = [('foo', 'a'), ('foo', 'b'), ('foo', 'c'), ('bar', 'a'),
++                  ('bar', 'b'), ('bar', 'c'), ('buz', 'a'), ('buz', 'b'),
++                  ('buz', 'c')]
++        expected = MultiIndex.from_tuples(tuples, names=names)
++
++        # iterator as input
++        result = MultiIndex.from_product(iter([first, second]), names=names)
++        assert result.equals(expected)
++        assert result.names == names
++
++        # Invalid non-iterable input
++        with tm.assert_raises_regex(
++                TypeError, "Input must be a list / sequence of iterables."):
++            MultiIndex.from_product(0)
++
+     def test_from_product_empty(self):
+         # 0 levels
+         with tm.assert_raises_regex(
+@@ -1725,8 +1761,30 @@ def test_from_tuples(self):
+                                'from empty list',
+                                MultiIndex.from_tuples, [])
+ 
+-        idx = MultiIndex.from_tuples(((1, 2), (3, 4)), names=['a', 'b'])
+-        assert len(idx) == 2
++        expected = MultiIndex(levels=[[1, 3], [2, 4]],
++                              labels=[[0, 1], [0, 1]],
++                              names=['a', 'b'])
++
++        # input tuples
++        result = MultiIndex.from_tuples(((1, 2), (3, 4)), names=['a', 'b'])
++        assert expected.names == result.names
++        assert result.equals(expected)
++
++    def test_from_tuples_iterator(self):
++        # GH 18434
++        # input iterator for tuples
++        expected = MultiIndex(levels=[[1, 3], [2, 4]],
++                              labels=[[0, 1], [0, 1]],
++                              names=['a', 'b'])
++
++        result = MultiIndex.from_tuples(zip([1, 3], [2, 4]), names=['a', 'b'])
++        assert expected.names == result.names
++        assert result.equals(expected)
++
++        # input non-iterables
++        with tm.assert_raises_regex(
++                TypeError, 'Input must be a list / sequence of tuple-likes.'):
++            MultiIndex.from_tuples(0)
+ 
+     def test_from_tuples_empty(self):
+         # GH 16777
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

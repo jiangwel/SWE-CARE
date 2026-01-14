@@ -1,0 +1,155 @@
+  Task-ID: keephq__keep-2661@ced3ca4
+  Please checkout to this commit first: b73c1ea824e36b36a586a85ee08847204cb3178d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [🐛 Bug]: Topology page issues
+1. When hovering over an item in topology view, if there's no space in the bottom, open the hover card up
+2. Replace number of firing alerts (which could be big) with number of incidents associated with this service (more interesting)
+3. We can add more context based on the category of the service, for example, if it's Kafka, include the queue name, cloud provider, etc.
+  </issue>
+  
+  <patch>
+  diff --git a/keep-ui/app/(keep)/topology/ui/map/service-node.tsx b/keep-ui/app/(keep)/topology/ui/map/service-node.tsx
+index 41560005b3..d1b840a50b 100644
+--- a/keep-ui/app/(keep)/topology/ui/map/service-node.tsx
++++ b/keep-ui/app/(keep)/topology/ui/map/service-node.tsx
+@@ -1,13 +1,12 @@
+-import React, { useEffect, useState } from "react";
++import React, { useEffect, useRef, useState } from "react";
+ import { Handle, NodeProps, NodeToolbar, Position } from "@xyflow/react";
+-import { useAlerts } from "@/utils/hooks/useAlerts";
+-import { useAlertPolling } from "@/utils/hooks/usePusher";
+ import { useRouter } from "next/navigation";
+ import { ServiceNodeType, TopologyService } from "../../model/models";
+ import { Badge } from "@tremor/react";
+ import { getColorForUUID } from "@/app/(keep)/topology/lib/badge-colors";
+ import { clsx } from "clsx";
+ import Image from "next/image";
++import { useIncidents, usePollIncidents } from "@/utils/hooks/useIncidents";
+ 
+ const THRESHOLD = 5;
+ 
+@@ -73,34 +72,52 @@ function ServiceDetailsTooltip({ data }: { data: TopologyService }) {
+ }
+ 
+ export function ServiceNode({ data, selected }: NodeProps<ServiceNodeType>) {
+-  const { useAllAlerts } = useAlerts();
+-  const { data: alerts, mutate } = useAllAlerts("feed");
+-  const { data: pollAlerts } = useAlertPolling();
++  const { data: incidents, mutate: incidentsMutate } = useIncidents(
++    true,
++    25,
++    0,
++    {
++      id: "creation_time",
++      desc: false,
++    },
++    { affected_services: [data.display_name] }
++  );
++  usePollIncidents(incidentsMutate);
+   const router = useRouter();
+   const [showDetails, setShowDetails] = useState(false);
++  const [tooltipDirection, setTooltipDirection] = useState<Position>(
++    Position.Bottom
++  );
++  const nodeRef = useRef<HTMLDivElement | null>(null);
+ 
+   useEffect(() => {
+-    if (pollAlerts) {
+-      mutate();
+-    }
+-  }, [pollAlerts, mutate]);
++    if (!showDetails || !nodeRef.current) return;
+ 
+-  const relevantAlerts = alerts?.filter(
+-    (alert) => alert.service === data.service
+-  );
++    const rect = nodeRef.current.getBoundingClientRect();
++    const viewportHeight = window.innerHeight;
++    console.log(rect.bottom, viewportHeight, rect);
++
++    if (rect.bottom + 150 > viewportHeight) {
++      setTooltipDirection(Position.Top);
++    } else {
++      setTooltipDirection(Position.Bottom);
++    }
++  }, [showDetails]);
+ 
+   const handleClick = () => {
+     router.push(
+-      `/alerts/feed?cel=service%3D%3D${encodeURIComponent(`"${data.service}"`)}`
++      `/incidents?services={encodeURIComponent("${data.display_name}")}`
+     );
+   };
+ 
+-  const alertCount = relevantAlerts?.length || 0;
+-  const badgeColor = alertCount < THRESHOLD ? "bg-orange-500" : "bg-red-500";
++  const incidentsCount = incidents?.count || 0;
++  const badgeColor =
++    incidentsCount < THRESHOLD ? "bg-orange-500" : "bg-red-500";
+ 
+   return (
+     <>
+       <div
++        ref={nodeRef}
+         className={clsx(
+           "flex flex-col gap-1 bg-white p-4 border-2 border-gray-200 rounded-xl shadow-lg relative transition-colors",
+           selected && "border-tremor-brand"
+@@ -121,12 +138,12 @@ export function ServiceNode({ data, selected }: NodeProps<ServiceNodeType>) {
+           </div>
+         )}
+         <strong className="text-lg">{data.display_name || data.service}</strong>
+-        {alertCount > 0 && (
++        {incidentsCount > 0 && (
+           <span
+             className={`absolute top-[-20px] right-[-20px] mt-2 mr-2 px-2 py-1 text-white text-xs font-bold rounded-full ${badgeColor} hover:cursor-pointer`}
+             onClick={handleClick}
+           >
+-            {alertCount}
++            {incidentsCount}
+           </span>
+         )}
+         <div className="flex flex-wrap gap-1">
+@@ -141,7 +158,7 @@ export function ServiceNode({ data, selected }: NodeProps<ServiceNodeType>) {
+         </div>
+       </div>
+ 
+-      <NodeToolbar isVisible={showDetails} position={Position.Bottom}>
++      <NodeToolbar isVisible={showDetails} position={tooltipDirection}>
+         <ServiceDetailsTooltip data={data} />
+       </NodeToolbar>
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

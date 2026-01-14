@@ -1,0 +1,151 @@
+  Task-ID: apache__airflow-42758@2f64e19
+  Please checkout to this commit first: 5973c9cce1a51042298e198df2097a94fd48ac5d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Fail the PR if it modifies old "ui"
+In case PR contains changes to the "old" uI ("airflow/www") and the PR does not have the "legacy UI" label set by the maintainer, the PR should fail. This is in order to limit changes that are implemented in the old UI to only bugfixes and necessary changes to enable "new UI" in Airflow 3.0.
+
+This can be easily done via producing the right outputs in Breeze's selective checks.
+
+* Breeze already has features to see if files in the incoming PR have belong to certain "file group" (and we have both "WWW" and "UI" groups defined
+* Breeze already has access to labels that are assigned to PR
+
+
+So it shoudl be as easy as simply exiting with error in selective checks and informing the user `Please ask maintainer to assign the "legacy UI" label to the PR in order to continue`
+  </issue>
+  
+  <patch>
+  diff --git a/dev/breeze/src/airflow_breeze/utils/selective_checks.py b/dev/breeze/src/airflow_breeze/utils/selective_checks.py
+index 3b3408d06cfc2..32852325e33e1 100644
+--- a/dev/breeze/src/airflow_breeze/utils/selective_checks.py
++++ b/dev/breeze/src/airflow_breeze/utils/selective_checks.py
+@@ -76,6 +76,8 @@
+ FULL_TESTS_NEEDED_LABEL = "full tests needed"
+ INCLUDE_SUCCESS_OUTPUTS_LABEL = "include success outputs"
+ LATEST_VERSIONS_ONLY_LABEL = "latest versions only"
++LEGACY_UI_LABEL = "legacy ui"
++LEGACY_API_LABEL = "legacy api"
+ NON_COMMITTER_BUILD_LABEL = "non committer build"
+ UPGRADE_TO_NEWER_DEPENDENCIES_LABEL = "upgrade to newer dependencies"
+ USE_PUBLIC_RUNNERS_LABEL = "use public runners"
+@@ -102,11 +104,12 @@ class FileGroupForCi(Enum):
+     ALWAYS_TESTS_FILES = "always_test_files"
+     API_TEST_FILES = "api_test_files"
+     API_CODEGEN_FILES = "api_codegen_files"
++    LEGACY_API_FILES = "legacy_api_files"
+     HELM_FILES = "helm_files"
+     DEPENDENCY_FILES = "dependency_files"
+     DOC_FILES = "doc_files"
+     UI_FILES = "ui_files"
+-    WWW_FILES = "www_files"
++    LEGACY_WWW_FILES = "legacy_www_files"
+     SYSTEM_TEST_FILES = "system_tests"
+     KUBERNETES_FILES = "kubernetes_files"
+     ALL_PYTHON_FILES = "all_python_files"
+@@ -157,6 +160,10 @@ def __hash__(self):
+             r"^airflow/api_connexion/openapi/v1\.yaml",
+             r"^clients/gen",
+         ],
++        FileGroupForCi.LEGACY_API_FILES: [
++            r"^airflow/api/",
++            r"^airflow/api_connexion/",
++        ],
+         FileGroupForCi.HELM_FILES: [
+             r"^chart",
+             r"^airflow/kubernetes",
+@@ -185,7 +192,7 @@ def __hash__(self):
+             r"^airflow/ui/[^/]+\.json$",
+             r"^airflow/ui/.*\.lock$",
+         ],
+-        FileGroupForCi.WWW_FILES: [
++        FileGroupForCi.LEGACY_WWW_FILES: [
+             r"^airflow/www/.*\.ts[x]?$",
+             r"^airflow/www/.*\.js[x]?$",
+             r"^airflow/www/[^/]+\.json$",
+@@ -680,7 +687,7 @@ def run_ui_tests(self) -> bool:
+ 
+     @cached_property
+     def run_www_tests(self) -> bool:
+-        return self._should_be_run(FileGroupForCi.WWW_FILES)
++        return self._should_be_run(FileGroupForCi.LEGACY_WWW_FILES)
+ 
+     @cached_property
+     def run_amazon_tests(self) -> bool:
+@@ -1055,7 +1062,9 @@ def skip_pre_commits(self) -> str:
+             # when full tests are needed, we do not want to skip any checks and we should
+             # run all the pre-commits just to be sure everything is ok when some structural changes occurred
+             return ",".join(sorted(pre_commits_to_skip))
+-        if not self._matching_files(FileGroupForCi.WWW_FILES, CI_FILE_GROUP_MATCHES, CI_FILE_GROUP_EXCLUDES):
++        if not self._matching_files(
++            FileGroupForCi.LEGACY_WWW_FILES, CI_FILE_GROUP_MATCHES, CI_FILE_GROUP_EXCLUDES
++        ):
+             pre_commits_to_skip.add("ts-compile-format-lint-www")
+         if not self._matching_files(FileGroupForCi.UI_FILES, CI_FILE_GROUP_MATCHES, CI_FILE_GROUP_EXCLUDES):
+             pre_commits_to_skip.add("ts-compile-format-lint-ui")
+@@ -1354,3 +1363,32 @@ def _is_canary_run(self):
+             self._github_event in [GithubEvents.SCHEDULE, GithubEvents.PUSH]
+             and self._github_repository == APACHE_AIRFLOW_GITHUB_REPOSITORY
+         ) or CANARY_LABEL in self._pr_labels
++
++    @cached_property
++    def is_legacy_ui_api_labeled(self) -> bool:
++        # Selective check for legacy UI/API updates.
++        # It is to ping the maintainer to add the label and make them aware of the changes.
++        if (
++            self._matching_files(
++                FileGroupForCi.LEGACY_API_FILES, CI_FILE_GROUP_MATCHES, CI_FILE_GROUP_EXCLUDES
++            )
++            and LEGACY_API_LABEL not in self._pr_labels
++        ):
++            get_console().print(
++                f"[error]Please ask maintainer to assign "
++                f"the '{LEGACY_API_LABEL}' label to the PR in order to continue"
++            )
++            sys.exit(1)
++        elif (
++            self._matching_files(
++                FileGroupForCi.LEGACY_WWW_FILES, CI_FILE_GROUP_MATCHES, CI_FILE_GROUP_EXCLUDES
++            )
++            and LEGACY_UI_LABEL not in self._pr_labels
++        ):
++            get_console().print(
++                f"[error]Please ask maintainer to assign "
++                f"the '{LEGACY_UI_LABEL}' label to the PR in order to continue"
++            )
++            sys.exit(1)
++        else:
++            return True
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,502 @@
+  Task-ID: PostHog__posthog-4868@1372f68
+  Please checkout to this commit first: 628b431b6c6c204a3d935cf6ffb32eba54329e29
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Funnel unordered steps
+## Is your feature request related to a problem?
+
+*Please describe.*
+I want to be able to search for funnels as unordered steps meaning the X amount of steps should just occur within the conversion window
+
+## Describe the solution you'd like
+Same interface just allow me to specify the funnel is unordered so it doesn't need to be step A -> step B -> step C in that specific order
+
+
+#### *Thank you* for your feature request – we love each and every one!
+  </issue>
+  
+  <patch>
+  diff --git a/ee/clickhouse/queries/funnels/base.py b/ee/clickhouse/queries/funnels/base.py
+index 3202fba9c8d03..62648a8e96b3e 100644
+--- a/ee/clickhouse/queries/funnels/base.py
++++ b/ee/clickhouse/queries/funnels/base.py
+@@ -73,7 +73,7 @@ def _exec_query(self) -> List[Tuple]:
+             filter=self._filter, table="events.", team_id=self._team.pk
+         )
+         self.params.update(prop_filter_params)
+-        steps = [self._build_step_query(entity, index) for index, entity in enumerate(self._filter.entities)]
++        steps = [self._build_step_query(entity, index, "events") for index, entity in enumerate(self._filter.entities)]
+ 
+         format_properties = {
+             "team_id": self._team.id,
+@@ -90,7 +90,6 @@ def _exec_query(self) -> List[Tuple]:
+         }
+ 
+         query = self.get_query(format_properties)
+-
+         return sync_execute(query, self.params)
+ 
+     def _get_steps_per_person_query(self):
+@@ -177,15 +176,22 @@ def _get_sorting_condition(self, curr_index: int, max_steps: int):
+ 
+         return f"if({' AND '.join(conditions)}, {curr_index}, {self._get_sorting_condition(curr_index - 1, max_steps)})"
+ 
+-    def _get_inner_event_query(self) -> str:
+-        event_query, params = FunnelEventQuery(filter=self._filter, team_id=self._team.pk).get_query()
++    def _get_inner_event_query(self, entities=[], entity_name="events") -> str:
++        entities_to_use = self._filter.entities
++        if entities:
++            entities_to_use = entities
++
++        event_query, params = FunnelEventQuery(filter=self._filter, team_id=self._team.pk).get_query(
++            entities_to_use, entity_name
++        )
++
+         self.params.update(params)
+-        steps_conditions = self._get_steps_conditions(length=len(self._filter.entities))
++        steps_conditions = self._get_steps_conditions(length=len(entities_to_use))
+ 
+         all_step_cols: List[str] = []
+-        for index, entity in enumerate(self._filter.entities):
+-            step_cols = self._get_step_col(entity, index)
+-            all_step_cols = [*all_step_cols, *step_cols]
++        for index, entity in enumerate(entities_to_use):
++            step_cols = self._get_step_col(entity, index, entity_name)
++            all_step_cols.extend(step_cols)
+ 
+         steps = ", ".join(all_step_cols)
+ 
+@@ -217,30 +223,31 @@ def _get_steps_conditions(self, length: int) -> str:
+ 
+         return " OR ".join(step_conditions)
+ 
+-    def _get_step_col(self, entity: Entity, index: int) -> List[str]:
++    def _get_step_col(self, entity: Entity, index: int, entity_name: str) -> List[str]:
+         step_cols: List[str] = []
+-        condition = self._build_step_query(entity, index)
++        condition = self._build_step_query(entity, index, entity_name)
+         step_cols.append(f"if({condition}, 1, 0) as step_{index}")
+         step_cols.append(f"if(step_{index} = 1, timestamp, null) as latest_{index}")
+ 
+         return step_cols
+ 
+-    def _build_step_query(self, entity: Entity, index: int) -> str:
++    def _build_step_query(self, entity: Entity, index: int, entity_name: str) -> str:
+         filters = self._build_filters(entity, index)
+         if entity.type == TREND_FILTER_TYPE_ACTIONS:
+             action = Action.objects.get(pk=entity.id)
+             for action_step in action.steps.all():
+-                self.params["events"].append(action_step.event)
+-            action_query, action_params = format_action_filter(action, "step_{}".format(index))
++                self.params[entity_name].append(action_step.event)
++            action_query, action_params = format_action_filter(action, "{}_step_{}".format(entity_name, index))
+             if action_query == "":
+                 return ""
+ 
+             self.params.update(action_params)
+             content_sql = "{actions_query} {filters}".format(actions_query=action_query, filters=filters,)
+         else:
+-            self.params["events"].append(entity.id)
+-            self.params[f"event_{index}"] = entity.id
+-            content_sql = f"event = %(event_{index})s {filters}"
++            self.params[entity_name].append(entity.id)
++            event_param_key = f"{entity_name}_event_{index}"
++            self.params[event_param_key] = entity.id
++            content_sql = f"event = %({event_param_key})s {filters}"
+         return content_sql
+ 
+     def _build_filters(self, entity: Entity, index: int) -> str:
+diff --git a/ee/clickhouse/queries/funnels/funnel_event_query.py b/ee/clickhouse/queries/funnels/funnel_event_query.py
+index 111e5750e6a6d..c6ec32048d5d6 100644
+--- a/ee/clickhouse/queries/funnels/funnel_event_query.py
++++ b/ee/clickhouse/queries/funnels/funnel_event_query.py
+@@ -6,7 +6,7 @@
+ 
+ 
+ class FunnelEventQuery(ClickhouseEventQuery):
+-    def get_query(self) -> Tuple[str, Dict[str, Any]]:
++    def get_query(self, entities=[], entity_name="events") -> Tuple[str, Dict[str, Any]]:
+         _fields = (
+             f"{self.EVENT_TABLE_ALIAS}.event as event, {self.EVENT_TABLE_ALIAS}.team_id as team_id, {self.EVENT_TABLE_ALIAS}.distinct_id as distinct_id, {self.EVENT_TABLE_ALIAS}.timestamp as timestamp, {self.EVENT_TABLE_ALIAS}.properties as properties, {self.EVENT_TABLE_ALIAS}.elements_chain as elements_chain"
+             + (f", {self.DISTINCT_ID_TABLE_ALIAS}.person_id as person_id" if self._should_join_distinct_ids else "")
+@@ -20,7 +20,7 @@ def get_query(self) -> Tuple[str, Dict[str, Any]]:
+         prop_query, prop_params = self._get_props(prop_filters)
+         self.params.update(prop_params)
+ 
+-        entity_query, entity_params = self._get_entity_query()
++        entity_query, entity_params = self._get_entity_query(entities, entity_name)
+         self.params.update(entity_params)
+ 
+         query = f"""
+@@ -38,9 +38,12 @@ def get_query(self) -> Tuple[str, Dict[str, Any]]:
+     def _determine_should_join_distinct_ids(self) -> None:
+         self._should_join_distinct_ids = True
+ 
+-    def _get_entity_query(self) -> Tuple[str, Dict[str, Any]]:
++    def _get_entity_query(self, entities=[], entity_name="events") -> Tuple[str, Dict[str, Any]]:
+         events = []
+-        for entity in self._filter.entities:
++        entities_to_use = self._filter.entities
++        if len(entities) > 0:
++            entities_to_use = entities
++        for entity in entities_to_use:
+             if entity.type == TREND_FILTER_TYPE_ACTIONS:
+                 action = Action.objects.get(pk=entity.id)
+                 for action_step in action.steps.all():
+@@ -48,4 +51,4 @@ def _get_entity_query(self) -> Tuple[str, Dict[str, Any]]:
+             else:
+                 events.append(entity.id)
+ 
+-        return "AND event IN %(events)s", {"events": events}
++        return f"AND event IN %({entity_name})s", {entity_name: events}
+diff --git a/ee/clickhouse/queries/funnels/funnel_unordered.py b/ee/clickhouse/queries/funnels/funnel_unordered.py
+index e69de29bb2d1d..15a0880c2a2b0 100644
+--- a/ee/clickhouse/queries/funnels/funnel_unordered.py
++++ b/ee/clickhouse/queries/funnels/funnel_unordered.py
+@@ -0,0 +1,74 @@
++from typing import List
++
++from ee.clickhouse.queries.funnels.base import ClickhouseFunnelBase
++
++
++class ClickhouseFunnelUnordered(ClickhouseFunnelBase):
++    """
++    Unordered Funnel is a funnel where the order of steps doesn't matter.
++
++    ## Query Intuition
++
++    Imagine a funnel with three events: A, B, and C.
++    This query splits the problem into two parts:
++    1. Given the first event is A, find the furthest everyone went starting from A.
++       This finds any B's and C's that happen after A (without ordering them)
++    2. Repeat the above, assuming first event to be B, and then C.
++    
++    Then, the outer query unions the result of (2) and takes the maximum of these.
++
++    ## Results
++
++    The result format is the same as the basic funnel, i.e. [step, count].
++    Here, `step_i` (0 indexed) signifies the number of people that did at least `i+1` steps.
++    """
++
++    def get_query(self, format_properties):
++        return self.get_step_counts_query()
++
++    def get_step_counts_query(self):
++
++        max_steps = len(self._filter.entities)
++        union_queries = []
++        entities_to_use = list(self._filter.entities)
++
++        partition_select = self.get_partition_cols(1, max_steps)
++        sorting_condition = self.get_sorting_condition(max_steps)
++
++        for i in range(max_steps):
++            inner_query = f"""
++                SELECT 
++                person_id,
++                timestamp,
++                {partition_select}
++                FROM ({self._get_inner_event_query(entities_to_use, f"events_{i}")})
++            """
++
++            formatted_query = f"""
++                SELECT *, {sorting_condition} AS steps FROM (
++                        {inner_query}
++                    ) WHERE step_0 = 1"""
++
++            #  rotate entities by 1 to get new first event
++            entities_to_use.append(entities_to_use.pop(0))
++            union_queries.append(formatted_query)
++
++        union_formatted_query = " UNION ALL ".join(union_queries)
++
++        return f"""
++        SELECT furthest, count(1), groupArray(100)(person_id) FROM (
++            SELECT person_id, max(steps) AS furthest FROM (
++                {union_formatted_query}
++            ) GROUP BY person_id
++        ) GROUP BY furthest SETTINGS allow_experimental_window_functions = 1
++        """
++
++    def get_sorting_condition(self, max_steps: int):
++
++        basic_conditions: List[str] = []
++        for i in range(1, max_steps):
++            basic_conditions.append(
++                f"if(latest_0 < latest_{i} AND latest_{i} <= latest_0 + INTERVAL {self._filter.funnel_window_days} DAY, 1, 0)"
++            )
++
++        return f"arraySum([{','.join(basic_conditions)}, 1])"
+diff --git a/ee/clickhouse/queries/funnels/test/test_funnel_unordered.py b/ee/clickhouse/queries/funnels/test/test_funnel_unordered.py
+new file mode 100644
+index 0000000000000..8d8e5034151d5
+--- /dev/null
++++ b/ee/clickhouse/queries/funnels/test/test_funnel_unordered.py
+@@ -0,0 +1,232 @@
++from datetime import datetime, timedelta
++from uuid import uuid4
++
++from ee.clickhouse.models.event import create_event
++from ee.clickhouse.queries.funnels.funnel_unordered import ClickhouseFunnelUnordered
++from ee.clickhouse.util import ClickhouseTestMixin
++from posthog.constants import INSIGHT_FUNNELS
++from posthog.models.filters import Filter
++from posthog.models.person import Person
++from posthog.test.base import APIBaseTest
++
++FORMAT_TIME = "%Y-%m-%d 00:00:00"
++
++
++def _create_person(**kwargs):
++    person = Person.objects.create(**kwargs)
++    return Person(id=person.uuid, uuid=person.uuid)
++
++
++def _create_event(**kwargs):
++    kwargs.update({"event_uuid": uuid4()})
++    create_event(**kwargs)
++
++
++class TestFunnelUnorderedSteps(ClickhouseTestMixin, APIBaseTest):
++    def test_basic_unordered_funnel(self):
++        filter = Filter(
++            data={
++                "insight": INSIGHT_FUNNELS,
++                "events": [
++                    {"id": "user signed up", "order": 0},
++                    {"id": "$pageview", "order": 1},
++                    {"id": "insight viewed", "order": 2},
++                ],
++            }
++        )
++
++        funnel = ClickhouseFunnelUnordered(filter, self.team)
++
++        person1_stopped_after_signup = _create_person(distinct_ids=["stopped_after_signup1"], team_id=self.team.pk)
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_signup1")
++
++        person2_stopped_after_one_pageview = _create_person(
++            distinct_ids=["stopped_after_pageview1"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_pageview1")
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_pageview1")
++
++        person3_stopped_after_insight_view = _create_person(
++            distinct_ids=["stopped_after_insightview"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview")
++
++        person4_stopped_after_insight_view_reverse_order = _create_person(
++            distinct_ids=["stopped_after_insightview2"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview2")
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview2")
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview2")
++
++        person5_stopped_after_insight_view_random = _create_person(
++            distinct_ids=["stopped_after_insightview3"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview3")
++
++        person6_did_only_insight_view = _create_person(
++            distinct_ids=["stopped_after_insightview4"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview4")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview4")
++
++        person7_did_only_pageview = _create_person(distinct_ids=["stopped_after_insightview5"], team_id=self.team.pk)
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview5")
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview5")
++
++        person8_didnot_signup = _create_person(distinct_ids=["stopped_after_insightview6"], team_id=self.team.pk)
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview6")
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview6")
++
++        result = funnel.run()
++
++        self.assertEqual(result[0]["name"], "user signed up")
++        self.assertEqual(result[1]["name"], "$pageview")
++        self.assertEqual(result[2]["name"], "insight viewed")
++        self.assertEqual(result[0]["count"], 8)
++
++        self.assertCountEqual(
++            result[0]["people"],
++            [
++                person1_stopped_after_signup.uuid,
++                person2_stopped_after_one_pageview.uuid,
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++                person6_did_only_insight_view.uuid,
++                person7_did_only_pageview.uuid,
++                person8_didnot_signup.uuid,
++            ],
++        )
++
++        self.assertCountEqual(
++            result[1]["people"],
++            [
++                person2_stopped_after_one_pageview.uuid,
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++                person8_didnot_signup.uuid,
++            ],
++        )
++
++        self.assertCountEqual(
++            result[2]["people"],
++            [
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++            ],
++        )
++
++    def test_big_multi_step_unordered_funnel(self):
++        filter = Filter(
++            data={
++                "insight": INSIGHT_FUNNELS,
++                "events": [
++                    {"id": "user signed up", "order": 0},
++                    {"id": "$pageview", "order": 1},
++                    {"id": "insight viewed", "order": 2},
++                    {"id": "crying", "order": 3},
++                ],
++            }
++        )
++
++        funnel = ClickhouseFunnelUnordered(filter, self.team)
++
++        person1_stopped_after_signup = _create_person(distinct_ids=["stopped_after_signup1"], team_id=self.team.pk)
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_signup1")
++
++        person2_stopped_after_one_pageview = _create_person(
++            distinct_ids=["stopped_after_pageview1"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_pageview1")
++        _create_event(team=self.team, event="crying", distinct_id="stopped_after_pageview1")
++
++        person3_stopped_after_insight_view = _create_person(
++            distinct_ids=["stopped_after_insightview"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview")
++
++        person4_stopped_after_insight_view_reverse_order = _create_person(
++            distinct_ids=["stopped_after_insightview2"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview2")
++        _create_event(team=self.team, event="crying", distinct_id="stopped_after_insightview2")
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview2")
++
++        person5_stopped_after_insight_view_random = _create_person(
++            distinct_ids=["stopped_after_insightview3"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="user signed up", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="crying", distinct_id="stopped_after_insightview3")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview3")
++
++        person6_did_only_insight_view = _create_person(
++            distinct_ids=["stopped_after_insightview4"], team_id=self.team.pk
++        )
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview4")
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview4")
++
++        person7_did_only_pageview = _create_person(distinct_ids=["stopped_after_insightview5"], team_id=self.team.pk)
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview5")
++        _create_event(team=self.team, event="blaah blaa", distinct_id="stopped_after_insightview5")
++
++        person8_didnot_signup = _create_person(distinct_ids=["stopped_after_insightview6"], team_id=self.team.pk)
++        _create_event(team=self.team, event="insight viewed", distinct_id="stopped_after_insightview6")
++        _create_event(team=self.team, event="$pageview", distinct_id="stopped_after_insightview6")
++
++        result = funnel.run()
++
++        self.assertEqual(result[0]["name"], "user signed up")
++        self.assertEqual(result[1]["name"], "$pageview")
++        self.assertEqual(result[2]["name"], "insight viewed")
++        self.assertEqual(result[3]["name"], "crying")
++        self.assertEqual(result[0]["count"], 8)
++
++        self.assertCountEqual(
++            result[0]["people"],
++            [
++                person1_stopped_after_signup.uuid,
++                person2_stopped_after_one_pageview.uuid,
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++                person6_did_only_insight_view.uuid,
++                person7_did_only_pageview.uuid,
++                person8_didnot_signup.uuid,
++            ],
++        )
++
++        self.assertCountEqual(
++            result[1]["people"],
++            [
++                person2_stopped_after_one_pageview.uuid,
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++                person8_didnot_signup.uuid,
++            ],
++        )
++
++        self.assertCountEqual(
++            result[2]["people"],
++            [
++                person3_stopped_after_insight_view.uuid,
++                person4_stopped_after_insight_view_reverse_order.uuid,
++                person5_stopped_after_insight_view_random.uuid,
++            ],
++        )
++
++        self.assertCountEqual(
++            result[3]["people"], [person5_stopped_after_insight_view_random.uuid,],
++        )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

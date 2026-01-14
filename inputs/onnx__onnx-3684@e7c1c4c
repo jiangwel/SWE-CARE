@@ -1,0 +1,181 @@
+  Task-ID: onnx__onnx-3684@e7c1c4c
+  Please checkout to this commit first: 208ac9b998556cbc5112cdf1b43e7ef679831560
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  The latest ONNX package doesn't work with some old protobuf package
+# Bug Report
+The ONNX python dependency doesn't set minimal version on protobuf.
+But I just noticed that with protobuf 3.11, there is an exception on loading an onnx model.
+E   AttributeError: module 'google.protobuf.descriptor' has no attribute '_internal_create_key' on Windows Platform.
+
+After I have upgraded to the latest protobuf 3.17, it was fixed.
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/manylinux/test_package_i686.sh b/.github/workflows/manylinux/test_package_i686.sh
+index da9e53b69ef..f4bca307163 100644
+--- a/.github/workflows/manylinux/test_package_i686.sh
++++ b/.github/workflows/manylinux/test_package_i686.sh
+@@ -43,4 +43,9 @@ $PIP_UNINSTALL_COMMAND protobuf onnx && $PIP_INSTALL_COMMAND protobuf
+ $PIP_INSTALL_COMMAND dist/*manylinux2010_i686.whl
+ $PYTEST_COMMAND
+ 
++# Verify ONNX the minimum supported protobuf (from requirements.txt)
++$PIP_UNINSTALL_COMMAND protobuf onnx && $PIP_INSTALL_COMMAND protobuf==3.12.0
++$PIP_INSTALL_COMMAND dist/*manylinux2010_i686.whl
++$PYTEST_COMMAND
++
+ echo "Succesfully test the wheel"
+\ No newline at end of file
+diff --git a/.github/workflows/release_linux_aarch64.yml b/.github/workflows/release_linux_aarch64.yml
+index d226e8cd05e..b6f079ac184 100644
+--- a/.github/workflows/release_linux_aarch64.yml
++++ b/.github/workflows/release_linux_aarch64.yml
+@@ -104,7 +104,20 @@ jobs:
+           ${{ env.img }} \
+           bash -exc '\
+           source .env/bin/activate && \
+-          python -m pip uninstall -y numpy onnx && python -m pip install numpy && \
++          python -m pip uninstall -y numpy onnx protobuf && python -m pip install numpy protobuf && \
++          python -m pip install dist/*manylinux2014_aarch64.whl && \
++          python -m pip install pytest && \
++          pytest && \
++          deactivate'
++
++    - name: Verify ONNX with the minimum supported protobuf (from requirements.txt)
++      if: ${{ always() }}
++      run: |
++         docker run --rm -v ${{ github.workspace }}:/ws:rw --workdir=/ws \
++          ${{ env.img }} \
++          bash -exc '\
++          source .env/bin/activate && \
++          python -m pip uninstall -y onnx && python -m pip install protobuf==3.12.0 && \
+           python -m pip install dist/*manylinux2014_aarch64.whl && \
+           python -m pip install pytest && \
+           pytest && \
+diff --git a/.github/workflows/release_linux_x86_64.yml b/.github/workflows/release_linux_x86_64.yml
+index 25fc7c1907b..a8691a76833 100644
+--- a/.github/workflows/release_linux_x86_64.yml
++++ b/.github/workflows/release_linux_x86_64.yml
+@@ -95,6 +95,13 @@ jobs:
+         python -m pip install dist/*manylinux2010_x86_64.whl
+         pytest        
+ 
++    - name: Verify ONNX with the minimum supported protobuf (from requirements.txt)
++      if: ${{ always() }}
++      run: |
++        python -m pip uninstall -y protobuf onnx && python -m pip install protobuf==3.12.0
++        python -m pip install dist/*manylinux2010_x86_64.whl
++        pytest
++
+     - name: Verify ONNX with ort-nightly
+       if: ${{ always() }}
+       run: |
+diff --git a/.github/workflows/release_mac.yml b/.github/workflows/release_mac.yml
+index e3da28cbeb4..b403bd1d13a 100644
+--- a/.github/workflows/release_mac.yml
++++ b/.github/workflows/release_mac.yml
+@@ -121,7 +121,14 @@ jobs:
+       run: |
+         python -m pip uninstall -y protobuf onnx && python -m pip install protobuf
+         for file in dist/*.whl; do python -m pip install --upgrade $file; done
+-        pytest        
++        pytest
++
++    - name: Verify ONNX with the minimum supported protobuf (from requirements.txt)
++      if: ${{ always() }}
++      run: |
++        python -m pip uninstall -y protobuf onnx && python -m pip install protobuf==3.12.0
++        for file in dist/*.whl; do python -m pip install --upgrade $file; done
++        pytest
+ 
+     - name: Verify ONNX with ort-nightly
+       if: ${{ always() }}
+diff --git a/.github/workflows/release_win.yml b/.github/workflows/release_win.yml
+index 1256fb30dbe..761b3d12da3 100644
+--- a/.github/workflows/release_win.yml
++++ b/.github/workflows/release_win.yml
+@@ -140,7 +140,15 @@ jobs:
+         cd onnx
+         python -m pip uninstall -y protobuf onnx && python -m pip install protobuf
+         Get-ChildItem -Path dist/*.whl | foreach {python -m pip install --upgrade $_.fullname}
+-        pytest        
++        pytest
++
++    - name: Verify ONNX with the minimum supported protobuf (from requirements.txt)
++      if: ${{ always() }}
++      run: |
++        cd onnx
++        python -m pip uninstall -y protobuf onnx && python -m pip install protobuf==3.11.3
++        Get-ChildItem -Path dist/*.whl | foreach {python -m pip install --upgrade $_.fullname}
++        pytest  
+ 
+     - name: Verify ONNX with ort-nightly
+       if: ${{ always() }}
+diff --git a/README.md b/README.md
+index d9918213687..91a645a7385 100644
+--- a/README.md
++++ b/README.md
+@@ -50,6 +50,15 @@ Stay up to date with the latest ONNX news. [[Facebook](https://www.facebook.com/
+ 
+ # Installation
+ 
++## Prerequisites
++
++```
++numpy >= 1.16.6
++protobuf >= 3.12.0
++six
++typing-extensions >= 3.6.2.1
++```
++
+ ## Official Python packages
+ ONNX released packages are published in PyPi.
+ ```
+diff --git a/requirements.txt b/requirements.txt
+index 208584f965e..1ba94b9d1c9 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,4 @@
+ numpy >= 1.16.6
+-protobuf
++protobuf >= 3.12.0
+ six
+-typing-extensions>=3.6.2.1
+\ No newline at end of file
++typing-extensions >= 3.6.2.1
+\ No newline at end of file
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

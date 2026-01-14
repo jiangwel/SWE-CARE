@@ -1,0 +1,341 @@
+  Task-ID: deepset-ai__haystack-9290@3f511f6
+  Please checkout to this commit first: 7db719981d230e08de526526d46b18379c5b9f02
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Investigate how to stream output from Tool calls in Agents
+As @mathislucka has worked with Agents he has found that streaming Tool calls to be extremely helpful for transparency and visibility. It allows users to see what is happening while they wait for a final answer and can make it easier to debug by seeing where the Agent may have made an incorrect decision. 
+
+So it would be worthwhile if we could investigate whether we could easily stream the output of tool calls similar as to what we do for our ChatGenerators. 
+
+@mathislucka please add any additional relevant context. 
+
+It would be great to support streaming for:
+- ToolCall: Stream that the LLM decided to make a tool call along with its arguments
+- ToolCallResult: Stream/dump the output of the Tool
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/components/agents/agent.py b/haystack/components/agents/agent.py
+index ebebcae34b..b28a0303a3 100644
+--- a/haystack/components/agents/agent.py
++++ b/haystack/components/agents/agent.py
+@@ -15,7 +15,7 @@
+ from haystack.dataclasses import ChatMessage
+ from haystack.dataclasses.state import State, _schema_from_dict, _schema_to_dict, _validate_schema
+ from haystack.dataclasses.state_utils import merge_lists
+-from haystack.dataclasses.streaming_chunk import StreamingCallbackT
++from haystack.dataclasses.streaming_chunk import StreamingCallbackT, select_streaming_callback
+ from haystack.tools import Tool, Toolset, deserialize_tools_or_toolset_inplace, serialize_tools_or_toolset
+ from haystack.utils.callable_serialization import deserialize_callable, serialize_callable
+ from haystack.utils.deserialization import deserialize_chatgenerator_inplace
+@@ -68,6 +68,7 @@ def __init__(
+         max_agent_steps: int = 100,
+         raise_on_tool_invocation_failure: bool = False,
+         streaming_callback: Optional[StreamingCallbackT] = None,
++        stream_tool_result: bool = False,
+     ):
+         """
+         Initialize the agent component.
+@@ -84,6 +85,11 @@ def __init__(
+         :param raise_on_tool_invocation_failure: Should the agent raise an exception when a tool invocation fails?
+             If set to False, the exception will be turned into a chat message and passed to the LLM.
+         :param streaming_callback: A callback that will be invoked when a response is streamed from the LLM.
++            If stream_tool_result is set to True, this callback will also be triggered to emit tool
++            results when a tool is called.
++        :param stream_tool_result: If set to True, the tool result will be emitted via the streaming callback.
++            Note that the result is only emitted once it becomes available — it is not
++            streamed incrementally in real time.
+         :raises TypeError: If the chat_generator does not support tools parameter in its run method.
+         """
+         # Check if chat_generator supports tools parameter
+@@ -134,7 +140,11 @@ def __init__(
+ 
+         self._tool_invoker = None
+         if self.tools:
+-            self._tool_invoker = ToolInvoker(tools=self.tools, raise_on_failure=self.raise_on_tool_invocation_failure)
++            self._tool_invoker = ToolInvoker(
++                tools=self.tools,
++                raise_on_failure=self.raise_on_tool_invocation_failure,
++                streaming_callback=self.streaming_callback if stream_tool_result else None,
++            )
+         else:
+             logger.warning(
+                 "No tools provided to the Agent. The Agent will behave like a ChatGenerator and only return text "
+@@ -201,9 +211,8 @@ def from_dict(cls, data: Dict[str, Any]) -> "Agent":
+     def _prepare_generator_inputs(self, streaming_callback: Optional[StreamingCallbackT] = None) -> Dict[str, Any]:
+         """Prepare inputs for the chat generator."""
+         generator_inputs: Dict[str, Any] = {"tools": self.tools}
+-        selected_callback = streaming_callback or self.streaming_callback
+-        if selected_callback is not None:
+-            generator_inputs["streaming_callback"] = selected_callback
++        if streaming_callback is not None:
++            generator_inputs["streaming_callback"] = streaming_callback
+         return generator_inputs
+ 
+     def _create_agent_span(self) -> Any:
+@@ -239,6 +248,10 @@ def run(
+         if self.system_prompt is not None:
+             messages = [ChatMessage.from_system(self.system_prompt)] + messages
+ 
++        streaming_callback = select_streaming_callback(
++            init_callback=self.streaming_callback, runtime_callback=streaming_callback, requires_async=False
++        )
++
+         input_data = deepcopy({"messages": messages, "streaming_callback": streaming_callback, **kwargs})
+ 
+         state = State(schema=self.state_schema, data=kwargs)
+@@ -322,6 +335,10 @@ async def run_async(
+         if self.system_prompt is not None:
+             messages = [ChatMessage.from_system(self.system_prompt)] + messages
+ 
++        streaming_callback = select_streaming_callback(
++            init_callback=self.streaming_callback, runtime_callback=streaming_callback, requires_async=False
++        )
++
+         input_data = deepcopy({"messages": messages, "streaming_callback": streaming_callback, **kwargs})
+ 
+         state = State(schema=self.state_schema, data=kwargs)
+diff --git a/haystack/components/generators/chat/openai.py b/haystack/components/generators/chat/openai.py
+index dbe869c4ad..723944a28e 100644
+--- a/haystack/components/generators/chat/openai.py
++++ b/haystack/components/generators/chat/openai.py
+@@ -282,6 +282,7 @@ def run(
+                 chat_completion,  # type: ignore
+                 streaming_callback,  # type: ignore
+             )
++
+         else:
+             assert isinstance(chat_completion, ChatCompletion), "Unexpected response type for non-streaming request."
+             completions = [
+@@ -361,6 +362,7 @@ async def run_async(
+                 chat_completion,  # type: ignore
+                 streaming_callback,  # type: ignore
+             )
++
+         else:
+             assert isinstance(chat_completion, ChatCompletion), "Unexpected response type for non-streaming request."
+             completions = [
+diff --git a/haystack/components/generators/utils.py b/haystack/components/generators/utils.py
+index 4b31f0d06b..67045458ed 100644
+--- a/haystack/components/generators/utils.py
++++ b/haystack/components/generators/utils.py
+@@ -2,6 +2,8 @@
+ #
+ # SPDX-License-Identifier: Apache-2.0
+ 
++from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
++
+ from haystack.dataclasses import StreamingChunk
+ 
+ 
+@@ -11,4 +13,12 @@ def print_streaming_chunk(chunk: StreamingChunk) -> None:
+ 
+     Prints the tokens of the first completion to stdout as soon as they are received
+     """
++    if chunk.meta.get("tool_calls"):
++        for tool_call in chunk.meta["tool_calls"]:
++            if isinstance(tool_call, ChoiceDeltaToolCall) and tool_call.function:
++                # pick the name of the function, otherwise the arguments
++                output = tool_call.function.name or tool_call.function.arguments
++                if output:
++                    print(output, flush=True, end="")
++
+     print(chunk.content, flush=True, end="")
+diff --git a/haystack/components/tools/tool_invoker.py b/haystack/components/tools/tool_invoker.py
+index 43bc383f14..f22de2bf6e 100644
+--- a/haystack/components/tools/tool_invoker.py
++++ b/haystack/components/tools/tool_invoker.py
+@@ -4,11 +4,13 @@
+ 
+ import inspect
+ import json
++from datetime import datetime
+ from typing import Any, Dict, List, Optional, Union
+ 
+ from haystack import component, default_from_dict, default_to_dict, logging
+ from haystack.core.component.sockets import Sockets
+ from haystack.dataclasses import ChatMessage, State, ToolCall
++from haystack.dataclasses.streaming_chunk import StreamingCallbackT, StreamingChunk, select_streaming_callback
+ from haystack.tools import (
+     ComponentTool,
+     Tool,
+@@ -159,6 +161,7 @@ def __init__(
+         tools: Union[List[Tool], Toolset],
+         raise_on_failure: bool = True,
+         convert_result_to_json_string: bool = False,
++        streaming_callback: Optional[StreamingCallbackT] = None,
+     ):
+         """
+         Initialize the ToolInvoker component.
+@@ -173,6 +176,8 @@ def __init__(
+         :param convert_result_to_json_string:
+             If True, the tool invocation result will be converted to a string using `json.dumps`.
+             If False, the tool invocation result will be converted to a string using `str`.
++        :param streaming_callback:
++            A callback function that will be called to emit tool results.
+         :raises ValueError:
+             If no tools are provided or if duplicate tool names are found.
+         """
+@@ -181,6 +186,7 @@ def __init__(
+ 
+         # could be a Toolset instance or a list of Tools
+         self.tools = tools
++        self.streaming_callback = streaming_callback
+ 
+         # Convert Toolset to list for internal use
+         if isinstance(tools, Toolset):
+@@ -358,13 +364,19 @@ def _merge_tool_outputs(tool: Tool, result: Any, state: State) -> None:
+             state.set(state_key, output_value, handler_override=handler)
+ 
+     @component.output_types(tool_messages=List[ChatMessage], state=State)
+-    def run(self, messages: List[ChatMessage], state: Optional[State] = None) -> Dict[str, Any]:
++    def run(
++        self,
++        messages: List[ChatMessage],
++        state: Optional[State] = None,
++        streaming_callback: Optional[StreamingCallbackT] = None,
++    ) -> Dict[str, Any]:
+         """
+         Processes ChatMessage objects containing tool calls and invokes the corresponding tools, if available.
+ 
+         :param messages:
+             A list of ChatMessage objects.
+         :param state: The runtime state that should be used by the tools.
++        :param streaming_callback: A callback function that will be called to emit tool results.
+         :returns:
+             A dictionary with the key `tool_messages` containing a list of ChatMessage objects with tool role.
+             Each ChatMessage objects wraps the result of a tool invocation.
+@@ -383,6 +395,9 @@ def run(self, messages: List[ChatMessage], state: Optional[State] = None) -> Dic
+ 
+         # Only keep messages with tool calls
+         messages_with_tool_calls = [message for message in messages if message.tool_calls]
++        streaming_callback = select_streaming_callback(
++            init_callback=self.streaming_callback, runtime_callback=streaming_callback, requires_async=False
++        )
+ 
+         tool_messages = []
+         for message in messages_with_tool_calls:
+@@ -406,6 +421,14 @@ def run(self, messages: List[ChatMessage], state: Optional[State] = None) -> Dic
+                 # 2) Invoke the tool
+                 try:
+                     tool_result = tool_to_invoke.invoke(**final_args)
++                    if streaming_callback is not None:
++                        self._stream_tool_result(
++                            result=tool_result,
++                            tool_call=tool_call,
++                            tool_to_invoke=tool_to_invoke,
++                            streaming_callback=streaming_callback,
++                        )
++
+                 except ToolInvocationError as e:
+                     error_message = self._handle_error(e)
+                     tool_messages.append(ChatMessage.from_tool(tool_result=error_message, origin=tool_call, error=True))
+@@ -436,6 +459,25 @@ def run(self, messages: List[ChatMessage], state: Optional[State] = None) -> Dic
+ 
+         return {"tool_messages": tool_messages, "state": state}
+ 
++    def _stream_tool_result(
++        self, result: Any, tool_call: ToolCall, tool_to_invoke: Tool, streaming_callback: StreamingCallbackT
++    ) -> None:
++        """
++        Streams the tool result to the streaming callback.
++
++        Note that the result is passed to callback as a `StreamingChunk` object once the
++        result becomes available — it is not streamed incrementally in real time.
++        """
++        chunk = StreamingChunk(
++            content=result,
++            meta={
++                "tool_calls": {"tool_name": tool_to_invoke.name, "arguments": tool_call.arguments, "id": tool_call.id},
++                "received_at": datetime.now().isoformat(),
++            },
++        )
++
++        streaming_callback(chunk)
++
+     def to_dict(self) -> Dict[str, Any]:
+         """
+         Serializes the component to a dictionary.
+diff --git a/releasenotes/notes/stream-tool-results-agent-7eaa5c2ccfa5e4bb.yaml b/releasenotes/notes/stream-tool-results-agent-7eaa5c2ccfa5e4bb.yaml
+new file mode 100644
+index 0000000000..0b173beaee
+--- /dev/null
++++ b/releasenotes/notes/stream-tool-results-agent-7eaa5c2ccfa5e4bb.yaml
+@@ -0,0 +1,5 @@
++---
++features:
++  - |
++    Agents can now emit `tool_call` information when a tool is invoked.
++    Introduced a new parameter, `stream_tool_result`: if set to True, the tool result is emitted via the provided `streaming_callback` once the tool execution completes. Tool results are delivered as `StreamingChunk` objects and are not streamed incrementally.
+diff --git a/test/components/agents/test_agent.py b/test/components/agents/test_agent.py
+index abdb62d2e1..0dd98aa066 100644
+--- a/test/components/agents/test_agent.py
++++ b/test/components/agents/test_agent.py
+@@ -24,6 +24,7 @@
+ from haystack.dataclasses import ChatMessage, ToolCall
+ from haystack.dataclasses.chat_message import ChatRole, TextContent
+ from haystack.dataclasses.streaming_chunk import StreamingChunk
++
+ from haystack.tools import Tool, ComponentTool
+ from haystack.tools.toolset import Toolset
+ from haystack.utils import serialize_callable, Secret
+@@ -778,6 +779,25 @@ async def test_run_async_uses_chat_generator_run_async_when_available(self, weat
+         assert [isinstance(reply, ChatMessage) for reply in result["messages"]]
+         assert "Hello from run_async" in result["messages"][1].text
+ 
++    @pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY not set")
++    def test_agent_streaming_with_tool_call(self, monkeypatch, weather_tool):
++        chat_generator = OpenAIChatGenerator()
++        agent = Agent(chat_generator=chat_generator, tools=[weather_tool])
++        agent.warm_up()
++        streaming_callback_called = False
++
++        def streaming_callback(chunk: StreamingChunk) -> None:
++            nonlocal streaming_callback_called
++            streaming_callback_called = True
++
++        result = agent.run(
++            [ChatMessage.from_user("What's the weather in Paris?")], streaming_callback=streaming_callback
++        )
++
++        assert result is not None
++        assert result["messages"] is not None
++        assert streaming_callback_called
++
+ 
+ class TestAgentTracing:
+     def test_agent_tracing_span_run(self, caplog, monkeypatch, weather_tool):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,193 @@
+  Task-ID: saltstack__salt-64599@0fbfdc8
+  Please checkout to this commit first: 9a4da7d2e3e07e675c9d6bfc410a058f83141982
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [BUG] groups with duplicate GIDs are not returned by get_group_list
+**Description**
+
+The following error is thrown when attempting to enforce optional group membership for a group which does not have a unique GID.
+
+```
+[ERROR   ] These values could not be changed: {'groups': ['adm', 'audio', 'cdrom', 'dialout', 'dip', 'floppy', 'netdev', 'plugdev', 'sudo', 'user', 'users', 'video']}
+local:
+----------
+          ID: groups_manage_user
+    Function: user.present
+        Name: debian
+      Result: False
+     Comment: These values could not be changed: {'groups': ['adm', 'audio', 'cdrom', 'dialout', 'dip', 'floppy', 'netdev', 'plugdev', 'sudo', 'user', 'users', 'video']}
+     Started: 14:57:44.820074
+    Duration: 39.273 ms
+     Changes:   
+
+Summary for local
+------------
+Succeeded: 0
+Failed:    1
+------------
+Total states run:     1
+Total run time:  39.273 ms
+```
+
+**Setup**
+
+Example state file:
+
+```
+# /srv/salt/groups.sls
+
+manage_user:
+  user.present:
+    - name: debian
+    - optional_groups: [user]
+```
+  
+**Steps to Reproduce the behavior**
+
+Add the `user` group with a duplicate GID, such as copying the `users` group line in `/etc/group` and then run the state.
+
+```
+salt-call state.apply groups
+```
+
+Running in `TRACE` log level points toward the problem:
+
+```
+TRACE   ] Trying os.getgrouplist for 'debian'
+[TRACE   ] Group list for user 'debian': ['adm', 'audio', 'cdrom', 'debian', 'dialout', 'dip', 'floppy', 'netdev', 'plugdev', 'sudo', 'users', 'video']
+```
+
+The group listing is derived from GIDs, so the `user` group is not shown.
+
+**Expected behavior**
+While not the best practice, duplicate GIDs are a valid configuration which might be experienced on systems. The function should be able to list unique group names which might have duplicate GIDs.
+
+**Versions Report**
+<details><summary>salt --versions-report</summary>
+(Provided by running salt --versions-report. Please also mention any differences in master/minion versions.) 
+
+```yaml
+Salt Version:
+          Salt: 3005+0na.b18281e
+ 
+Dependency Versions:
+          cffi: Not Installed
+      cherrypy: Not Installed
+      dateutil: Not Installed
+     docker-py: Not Installed
+         gitdb: Not Installed
+     gitpython: Not Installed
+        Jinja2: 3.1.2
+       libgit2: Not Installed
+      M2Crypto: Not Installed
+          Mako: Not Installed
+       msgpack: 1.0.3
+  msgpack-pure: Not Installed
+  mysql-python: Not Installed
+     pycparser: Not Installed
+      pycrypto: 2.6.1
+  pycryptodome: 3.14.1
+        pygit2: Not Installed
+        Python: 3.7.3 (default, Jan 22 2021, 20:04:44)
+  python-gnupg: Not Installed
+        PyYAML: 6.0
+         PyZMQ: 23.0.0
+         smmap: Not Installed
+       timelib: Not Installed
+       Tornado: 4.5.3
+           ZMQ: 4.3.4
+ 
+System Versions:
+          dist: debian 10 buster
+        locale: UTF-8
+       machine: x86_64
+       release: 4.19.0-21-amd64
+        system: Linux
+       version: Debian GNU/Linux 10 buster
+
+```
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/salt/utils/user.py b/salt/utils/user.py
+index 97636674430a..2f1ca65cf99a 100644
+--- a/salt/utils/user.py
++++ b/salt/utils/user.py
+@@ -352,7 +352,11 @@ def get_group_dict(user=None, include_default=True):
+     group_dict = {}
+     group_names = get_group_list(user, include_default=include_default)
+     for group in group_names:
+-        group_dict.update({group: grp.getgrnam(group).gr_gid})
++        try:
++            group_dict.update({group: grp.getgrnam(group).gr_gid})
++        except KeyError:
++            # In case if imporer duplicate group was returned by get_group_list
++            pass
+     return group_dict
+ 
+ 
+diff --git a/tests/pytests/functional/utils/user/test_get_group_dict.py b/tests/pytests/functional/utils/user/test_get_group_dict.py
+new file mode 100644
+index 000000000000..abd569eec2c8
+--- /dev/null
++++ b/tests/pytests/functional/utils/user/test_get_group_dict.py
+@@ -0,0 +1,24 @@
++import logging
++
++import pytest
++
++import salt.utils.platform
++import salt.utils.user
++from tests.support.mock import patch
++
++log = logging.getLogger(__name__)
++
++pytestmark = [
++    pytest.mark.skip_on_windows,
++]
++
++
++@pytest.mark.skip_on_platforms(
++    darwin=True,
++    freebsd=True,
++    reason="This test should not run on FreeBSD and Mac due to lack of duplicate GID support",
++)
++def test_get_group_dict_with_improper_duplicate_root_group():
++    with patch("salt.utils.user.get_group_list", return_value=["+", "root"]):
++        group_list = salt.utils.user.get_group_dict("root")
++        assert group_list == {"root": 0}
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

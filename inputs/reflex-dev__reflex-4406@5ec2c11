@@ -1,0 +1,274 @@
+  Task-ID: reflex-dev__reflex-4406@5ec2c11
+  Please checkout to this commit first: 681b61600025c67e1438c2252917ff078ff0db2c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Unable to compare `date` objects
+**Describe the bug**
+I'm getting an error when trying to compare two `date` objects and one of them is a `State var` (see code below)
+
+**To Reproduce**
+Here's a code example
+ ```
+rx.flex(
+      rx.cond(
+          datetime.now(pytz.utc).date() <= competition.end_date,
+          rx.button("Join", on_click=lambda: rx.redirect(f"/competitions/{competition.id}/join"), size="4"),
+      ),
+  ),
+```
+and the error I'm getting:
+reflex.utils.exceptions.VarTypeError: Unsupported Operand type(s) for <: state__state.selected_competition?.end_date of type date and 2024-11-05 of type date
+
+**Expected behavior**
+No errors raised
+
+**Screenshots**
+Na
+
+**Specifics (please complete the following information):**
+ - Python Version: 3.12
+ - Reflex Version: 0.5.2
+ - OS: macOS Sonoma 14.5
+ - Browser (Optional): Firefox
+ 
+**Additional context**
+Na
+  </issue>
+  
+  <patch>
+  diff --git a/reflex/vars/__init__.py b/reflex/vars/__init__.py
+index 1a4cebe19a3..cb02319bc6a 100644
+--- a/reflex/vars/__init__.py
++++ b/reflex/vars/__init__.py
+@@ -9,6 +9,7 @@
+ from .base import get_uuid_string_var as get_uuid_string_var
+ from .base import var_operation as var_operation
+ from .base import var_operation_return as var_operation_return
++from .datetime import DateTimeVar as DateTimeVar
+ from .function import FunctionStringVar as FunctionStringVar
+ from .function import FunctionVar as FunctionVar
+ from .function import VarOperationCall as VarOperationCall
+diff --git a/reflex/vars/datetime.py b/reflex/vars/datetime.py
+new file mode 100644
+index 00000000000..cd2208fb228
+--- /dev/null
++++ b/reflex/vars/datetime.py
+@@ -0,0 +1,184 @@
++"""Immutable datetime and date vars."""
++
++from __future__ import annotations
++
++from datetime import date, datetime
++from typing import Any, NoReturn, TypeVar, Union, overload
++
++from reflex.utils.exceptions import VarTypeError
++from reflex.vars.number import BooleanVar
++
++from .base import CustomVarOperationReturn, Var, var_operation, var_operation_return
++
++DATETIME_T = TypeVar("DATETIME_T", datetime, date)
++
++datetime_types = Union[datetime, date]
++
++
++def raise_var_type_error():
++    """Raise a VarTypeError.
++
++    Raises:
++        VarTypeError: Cannot compare a datetime object with a non-datetime object.
++    """
++    raise VarTypeError("Cannot compare a datetime object with a non-datetime object.")
++
++
++class DateTimeVar(Var[DATETIME_T], python_types=(datetime, date)):
++    """A variable that holds a datetime or date object."""
++
++    @overload
++    def __lt__(self, other: datetime_types) -> BooleanVar: ...
++
++    @overload
++    def __lt__(self, other: NoReturn) -> NoReturn: ...
++
++    def __lt__(self, other: Any):
++        """Less than comparison.
++
++        Args:
++            other: The other datetime to compare.
++
++        Returns:
++            The result of the comparison.
++        """
++        if not isinstance(other, DATETIME_TYPES):
++            raise_var_type_error()
++        return date_lt_operation(self, other)
++
++    @overload
++    def __le__(self, other: datetime_types) -> BooleanVar: ...
++
++    @overload
++    def __le__(self, other: NoReturn) -> NoReturn: ...
++
++    def __le__(self, other: Any):
++        """Less than or equal comparison.
++
++        Args:
++            other: The other datetime to compare.
++
++        Returns:
++            The result of the comparison.
++        """
++        if not isinstance(other, DATETIME_TYPES):
++            raise_var_type_error()
++        return date_le_operation(self, other)
++
++    @overload
++    def __gt__(self, other: datetime_types) -> BooleanVar: ...
++
++    @overload
++    def __gt__(self, other: NoReturn) -> NoReturn: ...
++
++    def __gt__(self, other: Any):
++        """Greater than comparison.
++
++        Args:
++            other: The other datetime to compare.
++
++        Returns:
++            The result of the comparison.
++        """
++        if not isinstance(other, DATETIME_TYPES):
++            raise_var_type_error()
++        return date_gt_operation(self, other)
++
++    @overload
++    def __ge__(self, other: datetime_types) -> BooleanVar: ...
++
++    @overload
++    def __ge__(self, other: NoReturn) -> NoReturn: ...
++
++    def __ge__(self, other: Any):
++        """Greater than or equal comparison.
++
++        Args:
++            other: The other datetime to compare.
++
++        Returns:
++            The result of the comparison.
++        """
++        if not isinstance(other, DATETIME_TYPES):
++            raise_var_type_error()
++        return date_ge_operation(self, other)
++
++
++@var_operation
++def date_gt_operation(lhs: Var | Any, rhs: Var | Any) -> CustomVarOperationReturn:
++    """Greater than comparison.
++
++    Args:
++        lhs: The left-hand side of the operation.
++        rhs: The right-hand side of the operation.
++
++    Returns:
++        The result of the operation.
++    """
++    return date_compare_operation(rhs, lhs, strict=True)
++
++
++@var_operation
++def date_lt_operation(lhs: Var | Any, rhs: Var | Any) -> CustomVarOperationReturn:
++    """Less than comparison.
++
++    Args:
++        lhs: The left-hand side of the operation.
++        rhs: The right-hand side of the operation.
++
++    Returns:
++        The result of the operation.
++    """
++    return date_compare_operation(lhs, rhs, strict=True)
++
++
++@var_operation
++def date_le_operation(lhs: Var | Any, rhs: Var | Any) -> CustomVarOperationReturn:
++    """Less than or equal comparison.
++
++    Args:
++        lhs: The left-hand side of the operation.
++        rhs: The right-hand side of the operation.
++
++    Returns:
++        The result of the operation.
++    """
++    return date_compare_operation(lhs, rhs)
++
++
++@var_operation
++def date_ge_operation(lhs: Var | Any, rhs: Var | Any) -> CustomVarOperationReturn:
++    """Greater than or equal comparison.
++
++    Args:
++        lhs: The left-hand side of the operation.
++        rhs: The right-hand side of the operation.
++
++    Returns:
++        The result of the operation.
++    """
++    return date_compare_operation(rhs, lhs)
++
++
++def date_compare_operation(
++    lhs: DateTimeVar[DATETIME_T] | Any,
++    rhs: DateTimeVar[DATETIME_T] | Any,
++    strict: bool = False,
++) -> CustomVarOperationReturn:
++    """Check if the value is less than the other value.
++
++    Args:
++        lhs: The left-hand side of the operation.
++        rhs: The right-hand side of the operation.
++        strict: Whether to use strict comparison.
++
++    Returns:
++        The result of the operation.
++    """
++    return var_operation_return(
++        f"isTrue({lhs} { '<' if strict else '<='} {rhs})",
++        bool,
++    )
++
++
++DATETIME_TYPES = (datetime, date, DateTimeVar)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,231 @@
+  Task-ID: Avaiga__taipy-799@31dcba2
+  Please checkout to this commit first: 0877043a9fab3879dc04ff9d188dc7102a830ded
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Chalk'it .xprjson file life-cycle
+For ensuring taipy-chalkit use-case, consider the simplest program:
+
+```python
+from taipy.gui import Gui
+from taipy.chalkit import Page
+ 
+a = 8
+b = 10
+c = a + b * 2
+ 
+def on_change(state):
+    state.c = state.a + state.b * 2
+
+gui = Gui()
+page = Page("my_project.xprjson")
+gui.add_page("page", page)
+gui.run(run_browser=True)
+```
+
+This program should:
+- create an `my_project.xprjson` file at the same level as the calling module, with empty xprjson content, if this file does not exist
+- if this file exists, or after its creation, its content should be provided to Chalk'it. A potential way is by extending the existing `taipyApp` with a new JavaScript function callback that could be named `loadProjectCallback`:
+
+```javascript
+const init = () => {
+    // Init taipy app
+    window.taipyApp = TaipyGuiBase.createApp(onInit);
+    window.taipyApp.onChange = onChange;
+    window.taipyApp.loadProjectCallback= loadProject;
+```
+
+An example of empty xprjson is the following:
+
+```json
+{
+	"meta": {
+		"version": "2.940.8734",
+		"date": "Thu Jan 25 2024 23:26:07 GMT+0100 (heure normale d’Europe centrale)",
+		"name": "my_project",
+		"description": "",
+		"groupName": "",
+		"tags": [],
+		"schedulerLogOff": true
+	},
+	"data": {
+		"datanodes": []
+	},
+	"libraries": {
+		"pyodideStandard": [],
+		"pyodideMicropip": []
+	},
+	"scaling": {
+		"widthPx": 1295,
+		"heightPx": 590,
+		"scrollWidthPx": 1295,
+		"scrollHeightPx": 590,
+		"widthVw": 84.75130890052355,
+		"heightVh": 78.66666666666667,
+		"scrollWidthVw": 84.75130890052355,
+		"scrollHeightVh": 78.66666666666667,
+		"scalingMethod": "scaleTwh",
+		"media": "large",
+		"colDims": {
+			"widthPx": 1295.4,
+			"heightPx": 590.4,
+			"widthVw": 84.77748691099477,
+			"heightVh": 78.72,
+			"rowHeightPercent": 100
+		}
+	},
+	"device": {
+		"cols": {
+			"valueRow": "1",
+			"valueCol": "1",
+			"maxCells": 1,
+			"maxCols": 1,
+			"classType": "col-md-12"
+		},
+		"droppers": {
+			"dpr1": {}
+		},
+		"backgroundColor": "",
+		"theme": "default"
+	},
+	"dashboard": {},
+	"connections": {},
+	"exportOptions": "projectToTargetWindow",
+	"pages": {
+		"pageNames": [
+			"Page 1"
+		],
+		"defaultPage": {}
+	},
+	"checkExportOptions": true,
+	"navBarNotification": false
+}
+```
+
+A JavaScript `saveProject` function needs also to be provided
+
+```JavaScript
+window.taipyApp.saveProject(project_name, xprjson_content);
+```
+  </issue>
+  
+  <patch>
+  diff --git a/frontend/taipy-gui/base/src/app.ts b/frontend/taipy-gui/base/src/app.ts
+index db665a50c1..187d3e4c7b 100644
+--- a/frontend/taipy-gui/base/src/app.ts
++++ b/frontend/taipy-gui/base/src/app.ts
+@@ -1,4 +1,5 @@
+ import { sendWsMessage } from "../../src/context/wsUtils";
++import { uploadFile } from "../../src/workers/fileupload";
+ 
+ import { Socket, io } from "socket.io-client";
+ import { VariableManager } from "./variableManager";
+@@ -39,9 +40,9 @@ export class TaipyApp {
+     }
+     set onInit(handler: OnInitHandler | undefined) {
+         if (handler !== undefined && handler?.length !== 1) {
+-            throw new Error("onInit function requires 1 parameter")
++            throw new Error("onInit function requires 1 parameter");
+         }
+-        this._onInit = handler
++        this._onInit = handler;
+     }
+ 
+     get onChange() {
+@@ -49,9 +50,9 @@ export class TaipyApp {
+     }
+     set onChange(handler: OnChangeHandler | undefined) {
+         if (handler !== undefined && handler?.length !== 3) {
+-            throw new Error("onChange function requires 3 parameters")
++            throw new Error("onChange function requires 3 parameters");
+         }
+-        this._onChange = handler
++        this._onChange = handler;
+     }
+ 
+     // Public methods
+@@ -95,6 +96,15 @@ export class TaipyApp {
+         }
+         sendWsMessage(this.socket, "GMC", "get_module_context", { path: path }, this.clientId);
+     }
++
++    trigger(actionName: string, triggerId: string, payload: Record<string, unknown> = {}) {
++        payload["action"] = actionName;
++        sendWsMessage(this.socket, "A", triggerId, payload, this.clientId, this.context);
++    }
++
++    uploadFile(encodedName: string, files: FileList, progressCallback: (val: number) => void) {
++        return uploadFile(encodedName, files, progressCallback, this.clientId);
++    }
+ }
+ 
+ export const createApp = (onInit?: OnInitHandler, onChange?: OnChangeHandler, path?: string, socket?: Socket) => {
+diff --git a/taipy/gui/custom/_page.py b/taipy/gui/custom/_page.py
+index c9982b06c9..646387029e 100644
+--- a/taipy/gui/custom/_page.py
++++ b/taipy/gui/custom/_page.py
+@@ -48,7 +48,7 @@ def get_id(self) -> str:
+         return self.id if id != "" else str(id(self))
+ 
+     @abstractmethod
+-    def get_resources(self, path: str, base_bundle_path: str) -> t.Any:
++    def get_resources(self, path: str, taipy_resource_path: str) -> t.Any:
+         raise NotImplementedError
+ 
+ 
+diff --git a/taipy/gui/server.py b/taipy/gui/server.py
+index a275db8d08..9977edbac4 100644
+--- a/taipy/gui/server.py
++++ b/taipy/gui/server.py
+@@ -49,7 +49,6 @@ class _Server:
+     __OPENING_CURLY = r"\1&#x7B;"
+     __CLOSING_CURLY = r"&#x7D;\2"
+     _RESOURCE_HANDLER_ARG = "tprh"
+-    __BASE_FILE_NAME = "taipy-gui-base.js"
+ 
+     def __init__(
+         self,
+@@ -158,9 +157,7 @@ def my_index(path):
+                 if resource_handler is None:
+                     return (f"Invalid value for query {_Server._RESOURCE_HANDLER_ARG}", 404)
+                 try:
+-                    return resource_handler.get_resources(
+-                        path, f"{static_folder}{os.path.sep}{_Server.__BASE_FILE_NAME}"
+-                    )
++                    return resource_handler.get_resources(path, static_folder)
+                 except Exception as e:
+                     raise RuntimeError("Can't get resources from custom resource handler") from e
+             if path == "" or path == "index.html" or "." not in path:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

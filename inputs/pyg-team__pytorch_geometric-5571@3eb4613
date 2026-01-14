@@ -1,0 +1,162 @@
+  Task-ID: pyg-team__pytorch_geometric-5571@3eb4613
+  Please checkout to this commit first: d5e65e6f25e3e2cd4951f6aa4cb6cea37c0155f7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  GNN (SAGE Convolutional) ONNX export
+## 🐛 Bug
+
+<!-- A clear and concise description of what the bug is. -->
+Hello Everyone, So past few days I have been trying to run GNN using ONNX runtime (Python and eventually on C++). However I get the following error after I successfully export the onnx model from pytorch which uses pytorch geometric layers (SAGE Convolution to be precise) and functions for the GNNs. Before blaming the ONNX runtime I want to make sure that the ONNX exporter indeed FULLY supports SAGEConv conversion. When I try to run the converted ONNX model I get the following error: 
+
+`InvalidArgument: [ONNXRuntimeError] : 2 : INVALID_ARGUMENT : Non-zero status code returned while running ScatterElements node. Name:'ScatterElements_26' Status Message: Indices dim=12 at pos=0 is greater than input dim=6`
+## To Reproduce
+
+Steps to reproduce the behavior:
+
+Here is the code I used for pytorch model creation:
+```python
+#%debug
+import torch
+import torchvision
+import torch_geometric
+import torch.nn.functional as F
+from torch.nn import Linear as Lin, Sequential as Seq, ReLU, AvgPool1d, Dropout, Softmax, Sigmoid, BatchNorm1d
+from torch_geometric.nn import EdgeConv, DynamicEdgeConv, BatchNorm, avg_pool_x, knn_graph, EdgePooling, DenseSAGEConv, dense_diff_pool, dense_mincut_pool, SAGEConv, max_pool_x, SAGPooling, JumpingKnowledge, global_mean_pool as gap, global_max_pool as gmp
+#from torch_cluster import knn_graph
+
+#dummy_input = (torch.randn(10,5, device='cuda'),torch.randn(2,10, device='cuda').type(torch.int64))
+coords0 = torch.randn(1,6)
+coords1 = torch.randn(1,6)
+
+
+coords = torch.transpose(torch.cat((coords0,coords1),dim=0),0,1)
+adj = knn_graph(coords, k=2, batch=None, loop=True)
+
+edge_from = adj[0:1,:]
+edge_to = adj[1:,:]
+
+input_values = (coords0,coords1, edge_from, edge_to)
+#model = torchvision.models.alexnet(pretrained=True).cuda()
+class trial1(torch.nn.Module):
+    def __init__(self):
+        super(trial1, self).__init__()
+        
+        self.SAGEConvBlock1 = SAGEConv(2, 512, normalize=True)
+        self.bano1 = BatchNorm(512)
+        self.relu = ReLU()
+        self.dense1 = Seq(Lin(512,1))
+        self.sigmoid = Sigmoid()
+    def forward(self, coords0, coords1, edge_from, edge_to):
+      adj = torch.cat((edge_from,edge_to),dim=0)
+      gra = torch.transpose(torch.cat((coords0,coords1),dim=0),0,1)
+      
+      x1 = self.SAGEConvBlock1(gra, edge_index=adj)
+      x = torch.unsqueeze(torch.sum(x1), dim=0)
+      return x
+
+model2 = trial1()
+
+input_names = ["coords0","coords1", "edge_from", "edge_to"]
+output_names = [ "outputs" ]
+
+torch.onnx.export(model2, input_values, "ONNX_models/trial2.onnx", verbose=True, input_names=input_names, output_names=output_names, opset_version=11, dynamic_axes={'coords0':{0:'batch_size',1:'features'}, 'coords1':{0:'batch_size',1:'features'}, 'edge_from':{0:'batch_size',1:'features'}, 'edge_to':{0:'batch_size',1:'features'}, 'outputs':{0:'batch_size'}})
+```
+
+The onnx runtime code to perform the inference is:
+```python
+import onnxruntime
+print(onnxruntime.__version__)
+ort_session = onnxruntime.InferenceSession("ONNX_models/trial2.onnx")
+
+def to_numpy(tensor):
+    return tensor.detach().cpu().numpy() if tensor.requires_grad else tensor.cpu().numpy()
+
+ort_inputs = {ort_session.get_inputs()[0].name: to_numpy(coords0), ort_session.get_inputs()[1].name: to_numpy(coords1), ort_session.get_inputs()[2].name: to_numpy(edge_from), ort_session.get_inputs()[3].name: to_numpy(edge_to)}
+ort_outs = ort_session.run(["outputs"], ort_inputs)
+``` 
+
+I get the error in the last line of the above code: 
+`ort_outs = ort_session.run(["outputs"], ort_inputs)`
+
+
+
+
+ - PyTorch Version (e.g., 1.0): 1.9.0
+ - OS (e.g., Linux): Linux/Google Colab
+ - How you installed PyTorch (`conda`, `pip`, source): pip
+ 
+ - Python version: 3.x
+ - CUDA/cuDNN version: 10.2
+ - GPU models and configuration: Google Colab (K80)
+ - Any other relevant information:
+
+## Additional context
+
+Also, there is no error and the inference runs perfectly fine when I remove the SAGEConv layer from the model. The technical issue is the dimension mismatch between gra (shape: [6,2] )  and adj (shape: [2,36] )  where apparently the gra.shape[0] should be equal to adj.shape[1]. And it indeed works if we use only the first 6 elements of the adj (shape: [2,6] ) which essentially is not what we would intend to do. For my application I need to have multiple inputs of shape ('batch_size',nodes) and edges of the shape ('batch_size', k*nodes) where k indicates the number of k nearest neighbours.
+
+### Notes
+I would really appreciate if someone has any leads on this or if anyone has successfully deployed a GNN on ONNX using different input dimensions (where rank of each input <= 2).
+
+After verification, I am inclined towards believing that the issue is with the ONNX exporter which when creating ONNX compatible graph disturbs the shapes of the tensors. ONNX exporter is not yet mature enough to handle Pytorch Geometric's GNN functions like SAGEConv, etc. This needs to be improved.
+
+cc @BowenBao @neginraoof
+  </issue>
+  
+  <patch>
+  diff --git a/torch_geometric/nn/dense/linear.py b/torch_geometric/nn/dense/linear.py
+index 21da2434f219..caa5312d1079 100644
+--- a/torch_geometric/nn/dense/linear.py
++++ b/torch_geometric/nn/dense/linear.py
+@@ -145,12 +145,16 @@ def initialize_parameters(self, module, input):
+         delattr(self, '_hook')
+ 
+     def _save_to_state_dict(self, destination, prefix, keep_vars):
+-        if is_uninitialized_parameter(self.weight):
++        if is_uninitialized_parameter(
++                self.weight) or torch.onnx.is_in_onnx_export():
+             destination[prefix + 'weight'] = self.weight
+         else:
+             destination[prefix + 'weight'] = self.weight.detach()
+         if self.bias is not None:
+-            destination[prefix + 'bias'] = self.bias.detach()
++            if torch.onnx.is_in_onnx_export():
++                destination[prefix + 'bias'] = self.bias
++            else:
++                destination[prefix + 'bias'] = self.bias.detach()
+ 
+     def _lazy_load_hook(self, state_dict, prefix, local_metadata, strict,
+                         missing_keys, unexpected_keys, error_msgs):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

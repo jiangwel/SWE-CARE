@@ -1,0 +1,110 @@
+  Task-ID: jax-ml__jax-9239@cbb2f7b
+  Please checkout to this commit first: d6ea8b28973c820f2f44ab347d34767d94e10763
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Redundant computation in expm?
+Hi all:
+
+It looks to me there are redundant calculations in the `expm` function, but wanted to ask to see if I'm missing something (perhaps something clever is happening in compilation). 
+
+E.g., for `float64` and `complex128`, the numerator/denominator for the Pade approximant is generated as follows:
+
+```
+if A.dtype == 'float64' or A.dtype == 'complex128':
+   U3, V3 = _pade3(A)
+   U5, V5 = _pade5(A)
+   U7, V7 = _pade7(A)
+   U9, V9 = _pade9(A)
+   maxnorm = 5.371920351148152
+   n_squarings = jnp.maximum(0, jnp.floor(jnp.log2(A_L1 / maxnorm)))
+   A = A / 2**n_squarings
+   U13, V13 = _pade13(A)
+   conds=jnp.array([1.495585217958292e-002, 2.539398330063230e-001,
+                    9.504178996162932e-001, 2.097847961257068e+000])
+   U = jnp.select((A_L1<conds), (U3, U5, U7, U9), U13)
+   V = jnp.select((A_L1<conds), (V3, V5, V7, V9), V13)
+```
+
+The algorithm being used (I believe by Al-Mohy and Higham, same as in `scipy`) prescribes choosing between 1 of 5 different Pade approximations (of various orders) based on the norm of `A`. In the above, it appears all potential Pade approximations are being computed, and only afterwards is one chosen based on the norm of `A`. Hence, the computations for the others are discarded and ultimately unnecessary.
+
+It seems this function could benefit from changing the above logic to use nested `lax.cond` statements (or perhaps `switch`?) to avoid computing all possible versions. To motivate this: I quickly tried modifying the `expm` function to simply always do the `U13, V13` version of of the computation (the most expensive) and not compute any of the lower order versions, and observed roughly a factor of 2 speed increase in compiled execution. My speed tests weren't rigorous - I didn't test it for a variety of norms - but I believe this should speed things up in all cases (again, unless I'm missing something with lax behaviour). Edit: This is on CPU.
+
+Thoughts?
+
+P.s. In some of my use cases of jax, the most expensive piece is a ton of matrix exponentials, so I'm very interested in potential speed gains for this function :D.
+  </issue>
+  
+  <patch>
+  diff --git a/jax/_src/scipy/linalg.py b/jax/_src/scipy/linalg.py
+index bd710892a3e8..7f0212b74028 100644
+--- a/jax/_src/scipy/linalg.py
++++ b/jax/_src/scipy/linalg.py
+@@ -289,28 +289,20 @@ def _calc_P_Q(A):
+   A_L1 = np_linalg.norm(A,1)
+   n_squarings = 0
+   if A.dtype == 'float64' or A.dtype == 'complex128':
+-   U3, V3 = _pade3(A)
+-   U5, V5 = _pade5(A)
+-   U7, V7 = _pade7(A)
+-   U9, V9 = _pade9(A)
+    maxnorm = 5.371920351148152
+    n_squarings = jnp.maximum(0, jnp.floor(jnp.log2(A_L1 / maxnorm)))
+    A = A / 2**n_squarings
+-   U13, V13 = _pade13(A)
+    conds = jnp.array([1.495585217958292e-002, 2.539398330063230e-001,
+-                      9.504178996162932e-001, 2.097847961257068e+000])
+-   U = jnp.select((A_L1 < conds), (U3, U5, U7, U9), U13)
+-   V = jnp.select((A_L1 < conds), (V3, V5, V7, V9), V13)
++                      9.504178996162932e-001, 2.097847961257068e+000, jnp.inf])
++   idx = jnp.argwhere(A_L1 < conds, size=1).squeeze()
++   U, V = lax.switch(idx, [_pade3, _pade5, _pade7, _pade9, _pade13], A)
+   elif A.dtype == 'float32' or A.dtype == 'complex64':
+-    U3,V3 = _pade3(A)
+-    U5,V5 = _pade5(A)
+     maxnorm = 3.925724783138660
+     n_squarings = jnp.maximum(0, jnp.floor(jnp.log2(A_L1 / maxnorm)))
+     A = A / 2**n_squarings
+-    U7,V7 = _pade7(A)
+-    conds = jnp.array([4.258730016922831e-001, 1.880152677804762e+000])
+-    U = jnp.select((A_L1 < conds), (U3, U5), U7)
+-    V = jnp.select((A_L1 < conds), (V3, V5), V7)
++    conds = jnp.array([4.258730016922831e-001, 1.880152677804762e+000, jnp.inf])
++    idx = jnp.argwhere(A_L1 < conds, size=1).squeeze()
++    U, V = lax.switch(idx, [_pade3, _pade5, _pade7], A)
+   else:
+     raise TypeError("A.dtype={} is not supported.".format(A.dtype))
+   P = U + V  # p_m(A) : numerator
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

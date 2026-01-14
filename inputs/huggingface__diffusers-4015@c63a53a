@@ -1,0 +1,237 @@
+  Task-ID: huggingface__diffusers-4015@c63a53a
+  Please checkout to this commit first: b9feed87958c27074b0618cc543696c05f58e2c9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [SD-XL] Enhanced inference control
+## Feature Request: Enhanced Control of the Inference Process in SDXL Pipeline
+We are seeking to enhance the control over the denoising process within the SDXL pipeline. The objective is to better handle the generation and refinement of images through fine-tuning of noise application and control of the inference process.
+
+**Describe the solution you'd like**
+
+1. **Introduce a new parameter, `max_inference_steps`**: This new parameter, optional, will control the number of steps in the inference process before returning the outputs. This provides an early exit option during the denoising process. For instance, if `num_inference_steps=20` and `max_inference_steps=10`, the pipeline will output a latent that is half denoised. 
+
+2. **Introduce a new parameter, `add_noise`**: This optional parameter, defaulting to `True` for backward compatibility, controls the addition of noise to the input in the SDXL Img2Img pipeline. When set to `False`, this parameter will prevent further noise from being added to the inputs. We need this, so that the details from the base image are not overwritten by the refiner, which does not have great composition in its data distribution.
+
+3. **Introduce a new parameter, `first_inference_step`**: This optional parameter, defaulting to `None` for backward compatibility, is intended for the SDXL Img2Img pipeline. When set, the pipeline will not use the `strength` parameter to reduce `num_inference_steps`, and early timesteps will be skipped, allowing alignment and reducing artifacts.
+
+**Describe alternatives you've considered**
+
+Using the callback function from the base pipeline to retrieve the latents halfway through, and pass them in as `latents` to the Refiner model is a hack approach, but it's the only other one there is.
+
+**Intended outcome**
+
+These enhancements will allow for more nuanced and precise control over the image generation and refining process within the SDXL pipeline, leading to more effective and desired results. 
+
+Kindly review and consider this proposal. I can begin this work, if it is accepted.
+  </issue>
+  
+  <patch>
+  diff --git a/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py b/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py
+index 265e325a45e0..4f0854c3c142 100644
+--- a/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py
++++ b/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py
+@@ -545,6 +545,7 @@ def __call__(
+         height: Optional[int] = None,
+         width: Optional[int] = None,
+         num_inference_steps: int = 50,
++        max_inference_steps: Optional[int] = None,
+         guidance_scale: float = 5.0,
+         negative_prompt: Optional[Union[str, List[str]]] = None,
+         num_images_per_prompt: Optional[int] = 1,
+@@ -579,6 +580,9 @@ def __call__(
+             num_inference_steps (`int`, *optional*, defaults to 50):
+                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                 expense of slower inference.
++            max_inference_steps (`int`, *optional*):
++                Instead of completing the backwards pass entirely, stop and return the output after this many steps.
++                Can be useful with `output_type="latent"` and an img2img pipeline, possibly with better fine detail.
+             guidance_scale (`float`, *optional*, defaults to 7.5):
+                 Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                 `guidance_scale` is defined as `w` of equation 2. of [Imagen
+@@ -782,6 +786,9 @@ def __call__(
+                     progress_bar.update()
+                     if callback is not None and i % callback_steps == 0:
+                         callback(i, t, latents)
++                if max_inference_steps is not None and i >= max_inference_steps:
++                    logger.debug(f'Breaking inference loop at step {i} as we have reached max_inference_steps={max_inference_steps}')
++                    break
+ 
+         # make sure the VAE is in float32 mode, as it overflows in float16
+         self.vae.to(dtype=torch.float32)
+diff --git a/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py b/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py
+index 1618d9d04a74..dec3b1ad37e1 100644
+--- a/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py
++++ b/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py
+@@ -455,11 +455,27 @@ def prepare_extra_step_kwargs(self, generator, eta):
+         return extra_step_kwargs
+ 
+     def check_inputs(
+-        self, prompt, strength, callback_steps, negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None
++        self, prompt, strength, num_inference_steps, first_inference_step, callback_steps, negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None
+     ):
+         if strength < 0 or strength > 1:
+             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
+-
++        if num_inference_steps is None:
++            raise ValueError("`num_inference_steps` cannot be None.")
++        elif not isinstance(num_inference_steps, int) or num_inference_steps <= 0:
++            raise ValueError(
++                f"`num_inference_steps` has to be a positive integer but is {num_inference_steps} of type"
++                f" {type(num_inference_steps)}."
++            )
++        if first_inference_step is not None and (not isinstance(first_inference_step, int) or first_inference_step <= 0):
++            raise ValueError(
++                f"`first_inference_step` has to be a positive integer but is {first_inference_step} of type"
++                f" {type(first_inference_step)}."
++            )
++        if first_inference_step is not None and first_inference_step > num_inference_steps:
++            raise ValueError(
++                f"`first_inference_step` has to be smaller than `num_inference_steps` but is {first_inference_step} and"
++                f" `num_inference_steps` is {num_inference_steps}."
++            )
+         if (callback_steps is None) or (
+             callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+         ):
+@@ -494,16 +510,19 @@ def check_inputs(
+                     f" {negative_prompt_embeds.shape}."
+                 )
+ 
+-    def get_timesteps(self, num_inference_steps, strength, device):
++    def get_timesteps(self, num_inference_steps, first_inference_step, strength, device):
+         # get the original timestep using init_timestep
+-        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
++        if first_inference_step is None:
++            init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
++        else:
++            init_timestep = first_inference_step - 1
+ 
+         t_start = max(num_inference_steps - init_timestep, 0)
+         timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
+ 
+         return timesteps, num_inference_steps - t_start
+ 
+-    def prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
++    def prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None, add_noise=True):
+         if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
+             raise ValueError(
+                 f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
+@@ -555,12 +574,12 @@ def prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dt
+             )
+         else:
+             init_latents = torch.cat([init_latents], dim=0)
++        if add_noise:
++            shape = init_latents.shape
++            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+ 
+-        shape = init_latents.shape
+-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+-
+-        # get latents
+-        init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
++            # get latents
++            init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
+         latents = init_latents
+ 
+         return latents
+@@ -619,6 +638,8 @@ def __call__(
+         ] = None,
+         strength: float = 0.3,
+         num_inference_steps: int = 50,
++        max_inference_steps: Optional[int] = None,
++        first_inference_step: Optional[int] = None,
+         guidance_scale: float = 5.0,
+         negative_prompt: Optional[Union[str, List[str]]] = None,
+         num_images_per_prompt: Optional[int] = 1,
+@@ -650,7 +671,7 @@ def __call__(
+                 instead.
+             image (`torch.FloatTensor` or `PIL.Image.Image` or `np.ndarray` or `List[torch.FloatTensor]` or `List[PIL.Image.Image]` or `List[np.ndarray]`):
+                 The image(s) to modify with the pipeline.
+-            strength (`float`, *optional*, defaults to 0.8):
++            strength (`float`, *optional*, defaults to 0.3):
+                 Conceptually, indicates how much to transform the reference `image`. Must be between 0 and 1. `image`
+                 will be used as a starting point, adding more noise to it the larger the `strength`. The number of
+                 denoising steps depends on the amount of noise initially added. When `strength` is 1, added noise will
+@@ -659,6 +680,12 @@ def __call__(
+             num_inference_steps (`int`, *optional*, defaults to 50):
+                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                 expense of slower inference.
++            max_inference_steps (`int`, *optional*):
++                Instead of completing the backwards pass entirely, stop and return the output after this many steps.
++                Can be useful with `output_type="latent"` and an img2img pipeline, possibly with better fine detail.
++            first_inference_step (`int`, *optional*):
++                Ignore the first steps of the denoising process, and start from here.
++                Useful if the input is a latent tensor that still has residual noise, eg. using `max_inference_steps`.
+             guidance_scale (`float`, *optional*, defaults to 7.5):
+                 Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                 `guidance_scale` is defined as `w` of equation 2. of [Imagen
+@@ -737,7 +764,7 @@ def __call__(
+             "not-safe-for-work" (nsfw) content, according to the `safety_checker`.
+         """
+         # 1. Check inputs. Raise error if not correct
+-        self.check_inputs(prompt, strength, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds)
++        self.check_inputs(prompt, strength, num_inference_steps, first_inference_step, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds)
+ 
+         # 2. Define call parameters
+         if prompt is not None and isinstance(prompt, str):
+@@ -781,12 +808,14 @@ def __call__(
+ 
+         # 5. Prepare timesteps
+         self.scheduler.set_timesteps(num_inference_steps, device=device)
+-        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
++        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, first_inference_step, strength, device)
+         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+-
++        add_noise = True
++        if first_inference_step is not None:
++            add_noise = False
+         # 6. Prepare latent variables
+         latents = self.prepare_latents(
+-            image, latent_timestep, batch_size, num_images_per_prompt, prompt_embeds.dtype, device, generator
++            image, latent_timestep, batch_size, num_images_per_prompt, prompt_embeds.dtype, device, generator, add_noise
+         )
+         # 7. Prepare extra step kwargs.
+         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+@@ -855,6 +884,9 @@ def __call__(
+                     progress_bar.update()
+                     if callback is not None and i % callback_steps == 0:
+                         callback(i, t, latents)
++                if max_inference_steps is not None and i >= max_inference_steps:
++                    logger.debug(f'Breaking inference loop at step {i} as we have reached max_inference_steps={max_inference_steps}')
++                    break
+ 
+         # make sure the VAE is in float32 mode, as it overflows in float16
+         self.vae.to(dtype=torch.float32)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,208 @@
+  Task-ID: pandas-dev__pandas-25434@7cf9716
+  Please checkout to this commit first: 85572de5e7bb188cfecc575ee56786406e79dc79
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: Index type casting in read_json with orient='table' and float index
+#### Code Sample, a copy-pastable example if possible
+
+```python
+expected = pd.DataFrame({'a':[5,5]}, index=[1.,2.])
+result = pd.read_json(expected.to_json(orient='table'), orient='table')
+```
+```
+In [141]: expected
+Out[141]: 
+     a
+1.0  5
+2.0  5
+
+In [142]: result
+Out[142]: 
+   a
+1  5
+2  5
+```
+#### Problem description
+
+Round trip should recover the original DataFrame. But the `result` index has been cast from float to integer.
+
+#### Expected Output
+The same as `expected`.
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+AttributeError: module 'tables' has no attribute '__version__'
+
+</details>
+
+
+BUG: Weird column name type conversion in read_json with orient='table' and string columns
+#### Code Sample, a copy-pastable example if possible
+
+```python
+expected = pd.DataFrame({'1.': [1, 2]})
+result = pd.read_json(expected.to_json(orient='table'), orient='table')
+```
+```
+In [7]: expected                                                                                                                               
+Out[7]: 
+   1.
+0   1
+1   2
+
+In [8]: result                                                                                                                                 
+Out[8]: 
+   1970-01-01 00:00:01
+0                    1
+1                    2
+```
+#### Problem description
+There is a weird column type conversion from string to Timestamp.
+
+#### Expected Output
+
+The result should be equal to expected.
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+AttributeError: module 'tables' has no attribute '**version**'
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v0.25.0.rst b/doc/source/whatsnew/v0.25.0.rst
+index 170e7f14da397..60b0d828ac4d2 100644
+--- a/doc/source/whatsnew/v0.25.0.rst
++++ b/doc/source/whatsnew/v0.25.0.rst
+@@ -194,6 +194,7 @@ I/O
+ 
+ - Fixed bug in missing text when using :meth:`to_clipboard` if copying utf-16 characters in Python 3 on Windows (:issue:`25040`)
+ - Bug in :func:`read_json` for ``orient='table'`` when it tries to infer dtypes by default, which is not applicable as dtypes are already defined in the JSON schema (:issue:`21345`)
++- Bug in :func:`read_json` for ``orient='table'`` and float index, as it infers index dtype by default, which is not applicable because index dtype is already defined in the JSON schema (:issue:`25433`)
+ -
+ -
+ -
+diff --git a/pandas/io/json/json.py b/pandas/io/json/json.py
+index 725e2d28ffd67..0836ba71d158f 100644
+--- a/pandas/io/json/json.py
++++ b/pandas/io/json/json.py
+@@ -227,7 +227,7 @@ def _write(self, obj, orient, double_precision, ensure_ascii,
+ 
+ 
+ def read_json(path_or_buf=None, orient=None, typ='frame', dtype=None,
+-              convert_axes=True, convert_dates=True, keep_default_dates=True,
++              convert_axes=None, convert_dates=True, keep_default_dates=True,
+               numpy=False, precise_float=False, date_unit=None, encoding=None,
+               lines=False, chunksize=None, compression='infer'):
+     """
+@@ -289,6 +289,13 @@ def read_json(path_or_buf=None, orient=None, typ='frame', dtype=None,
+ 
+     convert_axes : boolean, default True
+         Try to convert the axes to the proper dtypes.
++
++        Not applicable with ``orient='table'``.
++
++        .. versionchanged:: 0.25
++
++           Not applicable with ``orient='table'``.
++
+     convert_dates : boolean, default True
+         List of columns to parse for dates; If True, then try to parse
+         datelike columns default is True; a column label is datelike if
+@@ -417,8 +424,12 @@ def read_json(path_or_buf=None, orient=None, typ='frame', dtype=None,
+ 
+     if orient == 'table' and dtype:
+         raise ValueError("cannot pass both dtype and orient='table'")
++    if orient == 'table' and convert_axes:
++        raise ValueError("cannot pass both convert_axes and orient='table'")
+ 
+     dtype = orient != 'table' if dtype is None else dtype
++    if convert_axes is None:
++        convert_axes = orient != 'table'
+ 
+     compression = _infer_compression(path_or_buf, compression)
+     filepath_or_buffer, _, compression, should_close = get_filepath_or_buffer(
+diff --git a/pandas/tests/io/json/test_json_table_schema.py b/pandas/tests/io/json/test_json_table_schema.py
+index 3002d1dfb5f8a..04fadabce9fbe 100644
+--- a/pandas/tests/io/json/test_json_table_schema.py
++++ b/pandas/tests/io/json/test_json_table_schema.py
+@@ -564,17 +564,11 @@ def test_multiindex(self, index_names):
+         result = pd.read_json(out, orient="table")
+         tm.assert_frame_equal(df, result)
+ 
+-    @pytest.mark.parametrize("strict_check", [
+-        pytest.param(True, marks=pytest.mark.xfail),
+-        False
+-    ])
+-    def test_empty_frame_roundtrip(self, strict_check):
++    def test_empty_frame_roundtrip(self):
+         # GH 21287
+         df = pd.DataFrame([], columns=['a', 'b', 'c'])
+         expected = df.copy()
+         out = df.to_json(orient='table')
+         result = pd.read_json(out, orient='table')
+         # TODO: When DF coercion issue (#21345) is resolved tighten type checks
+-        tm.assert_frame_equal(expected, result,
+-                              check_dtype=strict_check,
+-                              check_index_type=strict_check)
++        tm.assert_frame_equal(expected, result)
+diff --git a/pandas/tests/io/json/test_pandas.py b/pandas/tests/io/json/test_pandas.py
+index fecd0f0572757..ce6de319bb5c5 100644
+--- a/pandas/tests/io/json/test_pandas.py
++++ b/pandas/tests/io/json/test_pandas.py
+@@ -1202,6 +1202,16 @@ def test_data_frame_size_after_to_json(self):
+ 
+         assert size_before == size_after
+ 
++    @pytest.mark.parametrize('index', [None, [1, 2], [1., 2.], ['a', 'b'],
++                                       ['1', '2'], ['1.', '2.']])
++    @pytest.mark.parametrize('columns', [['a', 'b'], ['1', '2'], ['1.', '2.']])
++    def test_from_json_to_json_table_index_and_columns(self, index, columns):
++        # GH25433 GH25435
++        expected = DataFrame([[1, 2], [3, 4]], index=index, columns=columns)
++        dfjson = expected.to_json(orient='table')
++        result = pd.read_json(dfjson, orient='table')
++        assert_frame_equal(result, expected)
++
+     def test_from_json_to_json_table_dtypes(self):
+         # GH21345
+         expected = pd.DataFrame({'a': [1, 2], 'b': [3., 4.], 'c': ['5', '6']})
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,152 @@
+  Task-ID: scipy__scipy-16077@1fee8a2
+  Please checkout to this commit first: 9137ef1c201aa75f891fe2ad5ac056ad9d2ff5d4
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  incorrect handling of nan by RegularGridInterpolator
+RegularGridInterpolator does not seem to handle nans correctly when the interpolation method is nearest-neighbor. Sample script follows below.
+
+--Bram
+### 
+
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+
+f = RegularGridInterpolator(([1,2,3],), [10,20,30], bounds_error=False, fill_value=-999, method='linear')
+
+print f([1]), f([0]), f([np.nan])
+'# [ 10.] [-999.] [ nan]: correct handling'
+
+f = RegularGridInterpolator(([1,2,3],), [10,20,30], bounds_error=False, fill_value=-999, method='nearest')
+
+print f([1]), f([0]), f([np.nan])
+'# [ 10.] [-999.] [ 30.] --> last value should be nan I guess...'
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/interpolate/_interpolate.py b/scipy/interpolate/_interpolate.py
+index ae89c726dc98..833fc6b24f29 100644
+--- a/scipy/interpolate/_interpolate.py
++++ b/scipy/interpolate/_interpolate.py
+@@ -2534,6 +2534,9 @@ def __call__(self, xi, method=None):
+         xi_shape = xi.shape
+         xi = xi.reshape(-1, xi_shape[-1])
+ 
++        # find nans in input
++        nans = np.any(np.isnan(xi), axis=-1)
++
+         if self.bounds_error:
+             for i, p in enumerate(xi.T):
+                 if not np.logical_and(np.all(self.grid[i][0] <= p),
+@@ -2559,6 +2562,9 @@ def __call__(self, xi, method=None):
+         if not self.bounds_error and self.fill_value is not None:
+             result[out_of_bounds] = self.fill_value
+ 
++        # f(nan) = nan, if any
++        if np.any(nans):
++            result[nans] = np.nan
+         return result.reshape(xi_shape[:-1] + self.values.shape[ndim:])
+ 
+     def _evaluate_linear(self, indices, norm_distances, out_of_bounds):
+diff --git a/scipy/interpolate/tests/test_interpolate.py b/scipy/interpolate/tests/test_interpolate.py
+index 392ba8e0a349..94905f61df43 100644
+--- a/scipy/interpolate/tests/test_interpolate.py
++++ b/scipy/interpolate/tests/test_interpolate.py
+@@ -2744,6 +2744,64 @@ def test_length_one_axis2(self, fill_value, method):
+         else:
+             assert_allclose(zb, fill_value)
+ 
++    @pytest.mark.parametrize("method", ['nearest', 'linear'])
++    def test_nan_x_1d(self, method):
++        # gh-6624 : if x is nan, result should be nan
++        f = RegularGridInterpolator(([1, 2, 3],), [10, 20, 30], fill_value=1,
++                                    bounds_error=False, method=method)
++        assert np.isnan(f([np.nan]))
++
++        # test arbitrary nan pattern
++        rng = np.random.default_rng(8143215468)
++        x = rng.random(size=100)*4
++        i = rng.random(size=100) > 0.5
++        x[i] = np.nan
++        with np.errstate(invalid='ignore'):
++            # out-of-bounds comparisons, `out_of_bounds += x < grid[0]`,
++            # generate numpy warnings if `x` contains nans.
++            # These warnings should propagate to user (since `x` is user
++            # input) and we simply filter them out.
++            res = f(x)
++
++        assert_equal(res[i], np.nan)
++        assert_equal(res[~i], f(x[~i]))
++
++    @pytest.mark.parametrize("method", ['nearest', 'linear'])
++    def test_nan_x_2d(self, method):
++        x, y = np.array([0, 1, 2]), np.array([1, 3, 7])
++
++        def f(x, y):
++            return x**2 + y**2
++
++        xg, yg = np.meshgrid(x, y, indexing='ij', sparse=True)
++        data = f(xg, yg)
++        interp = RegularGridInterpolator((x, y), data,
++                                         method=method, bounds_error=False)
++
++        res = interp([[1.5, np.nan], [1, 1]])
++        assert_allclose(res[1], 2, atol=1e-14)
++        assert np.isnan(res[0])
++
++        # test arbitrary nan pattern
++        rng = np.random.default_rng(8143215468)
++        x = rng.random(size=100)*4-1
++        y = rng.random(size=100)*8
++        i1 = rng.random(size=100) > 0.5
++        i2 = rng.random(size=100) > 0.5
++        i = i1 | i2
++        x[i1] = np.nan
++        y[i2] = np.nan
++        z = np.array([x, y]).T
++        with np.errstate(invalid='ignore'):
++            # out-of-bounds comparisons, `out_of_bounds += x < grid[0]`,
++            # generate numpy warnings if `x` contains nans.
++            # These warnings should propagate to user (since `x` is user
++            # input) and we simply filter them out.
++            res = interp(z)
++
++        assert_equal(res[i], np.nan)
++        assert_equal(res[~i], interp(z[~i]))
++
+     def test_broadcastable_input(self):
+         # input data
+         np.random.seed(0)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

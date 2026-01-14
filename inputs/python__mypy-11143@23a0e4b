@@ -1,0 +1,420 @@
+  Task-ID: python__mypy-11143@23a0e4b
+  Please checkout to this commit first: a6166b2f7e8e4cf9d176107277da223e45c3a6a1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  sitecustomize/full sys.path  support
+Looking at sitepkgs.py, the current implementation only looks for PEP 561 packages in `site.usersitepackages()` and `site.getsitepackages()`. My environment has a sitecustomize.py that adds additional paths to `sys.path` based on some in-house env vars (not really my choice, I inherited this setup). Could we add a mypy flag to indicate that it should use the full sys.path? I don't really see a harm in including PYTHONPATH too.
+
+On a related note, shouldnt user site packages have precedence over system site packages?
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/main.py b/mypy/main.py
+index 57727821274e..14b318ead3e7 100644
+--- a/mypy/main.py
++++ b/mypy/main.py
+@@ -16,7 +16,7 @@
+ from mypy import util
+ from mypy.modulefinder import (
+     BuildSource, FindModuleCache, SearchPaths,
+-    get_site_packages_dirs, mypy_path,
++    get_search_dirs, mypy_path,
+ )
+ from mypy.find_sources import create_source_list, InvalidSourceList
+ from mypy.fscache import FileSystemCache
+@@ -1043,10 +1043,10 @@ def set_strict_flags() -> None:
+     # Set target.
+     if special_opts.modules + special_opts.packages:
+         options.build_type = BuildType.MODULE
+-        egg_dirs, site_packages = get_site_packages_dirs(options.python_executable)
++        search_dirs = get_search_dirs(options.python_executable)
+         search_paths = SearchPaths((os.getcwd(),),
+                                    tuple(mypy_path() + options.mypy_path),
+-                                   tuple(egg_dirs + site_packages),
++                                   tuple(search_dirs),
+                                    ())
+         targets = []
+         # TODO: use the same cache that the BuildManager will
+diff --git a/mypy/modulefinder.py b/mypy/modulefinder.py
+index 43cc4fc0a6d3..e35779c68f13 100644
+--- a/mypy/modulefinder.py
++++ b/mypy/modulefinder.py
+@@ -19,7 +19,7 @@
+ else:
+     import tomli as tomllib
+ 
+-from typing import Dict, Iterator, List, NamedTuple, Optional, Set, Tuple, Union
++from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+ from typing_extensions import Final, TypeAlias as _TypeAlias
+ 
+ from mypy.fscache import FileSystemCache
+@@ -330,6 +330,8 @@ def _find_module_non_stub_helper(self, components: List[str],
+             elif not plausible_match and (self.fscache.isdir(dir_path)
+                                           or self.fscache.isfile(dir_path + ".py")):
+                 plausible_match = True
++            if not self.fscache.isdir(dir_path):
++                break
+         if is_legacy_bundled_package(components[0], self.python_major_ver):
+             if (len(components) == 1
+                     or (self.find_module(components[0]) is
+@@ -724,97 +726,32 @@ def default_lib_path(data_dir: str,
+ 
+ 
+ @functools.lru_cache(maxsize=None)
+-def get_prefixes(python_executable: Optional[str]) -> Tuple[str, str]:
+-    """Get the sys.base_prefix and sys.prefix for the given python.
+-
+-    This runs a subprocess call to get the prefix paths of the given Python executable.
+-    To avoid repeatedly calling a subprocess (which can be slow!) we
+-    lru_cache the results.
+-    """
+-    if python_executable is None:
+-        return '', ''
+-    elif python_executable == sys.executable:
+-        # Use running Python's package dirs
+-        return pyinfo.getprefixes()
+-    else:
+-        # Use subprocess to get the package directory of given Python
+-        # executable
+-        return ast.literal_eval(
+-            subprocess.check_output([python_executable, pyinfo.__file__, 'getprefixes'],
+-            stderr=subprocess.PIPE).decode())
+-
+-
+-@functools.lru_cache(maxsize=None)
+-def get_site_packages_dirs(python_executable: Optional[str]) -> Tuple[List[str], List[str]]:
++def get_search_dirs(python_executable: Optional[str]) -> List[str]:
+     """Find package directories for given python.
+ 
+-    This runs a subprocess call, which generates a list of the egg directories, and the site
+-    package directories. To avoid repeatedly calling a subprocess (which can be slow!) we
++    This runs a subprocess call, which generates a list of the directories in sys.path.
++    To avoid repeatedly calling a subprocess (which can be slow!) we
+     lru_cache the results.
+     """
+ 
+     if python_executable is None:
+-        return [], []
++        return []
+     elif python_executable == sys.executable:
+         # Use running Python's package dirs
+-        site_packages = pyinfo.getsitepackages()
++        sys_path = pyinfo.getsearchdirs()
+     else:
+         # Use subprocess to get the package directory of given Python
+         # executable
+         try:
+-            site_packages = ast.literal_eval(
+-                subprocess.check_output([python_executable, pyinfo.__file__, 'getsitepackages'],
++            sys_path = ast.literal_eval(
++                subprocess.check_output([python_executable, pyinfo.__file__, 'getsearchdirs'],
+                 stderr=subprocess.PIPE).decode())
+         except OSError as err:
+             reason = os.strerror(err.errno)
+             raise CompileError(
+                 [f"mypy: Invalid python executable '{python_executable}': {reason}"]
+             ) from err
+-    return expand_site_packages(site_packages)
+-
+-
+-def expand_site_packages(site_packages: List[str]) -> Tuple[List[str], List[str]]:
+-    """Expands .pth imports in site-packages directories"""
+-    egg_dirs: List[str] = []
+-    for dir in site_packages:
+-        if not os.path.isdir(dir):
+-            continue
+-        pth_filenames = sorted(name for name in os.listdir(dir) if name.endswith(".pth"))
+-        for pth_filename in pth_filenames:
+-            egg_dirs.extend(_parse_pth_file(dir, pth_filename))
+-
+-    return egg_dirs, site_packages
+-
+-
+-def _parse_pth_file(dir: str, pth_filename: str) -> Iterator[str]:
+-    """
+-    Mimics a subset of .pth import hook from Lib/site.py
+-    See https://github.com/python/cpython/blob/3.5/Lib/site.py#L146-L185
+-    """
+-
+-    pth_file = os.path.join(dir, pth_filename)
+-    try:
+-        f = open(pth_file)
+-    except OSError:
+-        return
+-    with f:
+-        for line in f.readlines():
+-            if line.startswith("#"):
+-                # Skip comment lines
+-                continue
+-            if line.startswith(("import ", "import\t")):
+-                # import statements in .pth files are not supported
+-                continue
+-
+-            yield _make_abspath(line.rstrip(), dir)
+-
+-
+-def _make_abspath(path: str, root: str) -> str:
+-    """Take a path and make it absolute relative to root if not already absolute."""
+-    if os.path.isabs(path):
+-        return os.path.normpath(path)
+-    else:
+-        return os.path.join(root, os.path.normpath(path))
++    return sys_path
+ 
+ 
+ def add_py2_mypypath_entries(mypypath: List[str]) -> List[str]:
+@@ -903,27 +840,21 @@ def compute_search_paths(sources: List[BuildSource],
+     if options.python_version[0] == 2:
+         mypypath = add_py2_mypypath_entries(mypypath)
+ 
+-    egg_dirs, site_packages = get_site_packages_dirs(options.python_executable)
+-    base_prefix, prefix = get_prefixes(options.python_executable)
+-    is_venv = base_prefix != prefix
+-    for site_dir in site_packages:
+-        assert site_dir not in lib_path
+-        if (site_dir in mypypath or
+-                any(p.startswith(site_dir + os.path.sep) for p in mypypath) or
+-                os.path.altsep and any(p.startswith(site_dir + os.path.altsep) for p in mypypath)):
+-            print(f"{site_dir} is in the MYPYPATH. Please remove it.", file=sys.stderr)
++    search_dirs = get_search_dirs(options.python_executable)
++    for search_dir in search_dirs:
++        assert search_dir not in lib_path
++        if (search_dir in mypypath or
++                any(p.startswith(search_dir + os.path.sep) for p in mypypath) or
++                (os.path.altsep
++                    and any(p.startswith(search_dir + os.path.altsep) for p in mypypath))):
++            print(f"{search_dir} is in the MYPYPATH. Please remove it.", file=sys.stderr)
+             print("See https://mypy.readthedocs.io/en/stable/running_mypy.html"
+                   "#how-mypy-handles-imports for more info", file=sys.stderr)
+             sys.exit(1)
+-        elif site_dir in python_path and (is_venv and not site_dir.startswith(prefix)):
+-            print("{} is in the PYTHONPATH. Please change directory"
+-                  " so it is not.".format(site_dir),
+-                  file=sys.stderr)
+-            sys.exit(1)
+ 
+     return SearchPaths(python_path=tuple(reversed(python_path)),
+                        mypy_path=tuple(mypypath),
+-                       package_path=tuple(egg_dirs + site_packages),
++                       package_path=tuple(search_dirs),
+                        typeshed_path=tuple(lib_path))
+ 
+ 
+diff --git a/mypy/pyinfo.py b/mypy/pyinfo.py
+index ab2d3286bd5c..c129063a01a4 100644
+--- a/mypy/pyinfo.py
++++ b/mypy/pyinfo.py
+@@ -6,41 +6,39 @@
+ library found in Python 2. This file is run each mypy run, so it should be kept as fast as
+ possible.
+ """
+-import site
++import os
+ import sys
++import sysconfig
+ 
+ if __name__ == '__main__':
+     sys.path = sys.path[1:]  # we don't want to pick up mypy.types
+ 
+ MYPY = False
+ if MYPY:
+-    from typing import List, Tuple
++    from typing import List
+ 
+ 
+-def getprefixes():
+-    # type: () -> Tuple[str, str]
+-    return getattr(sys, "base_prefix", sys.prefix), sys.prefix
+-
+-
+-def getsitepackages():
++def getsearchdirs():
+     # type: () -> List[str]
+-    res = []
+-    if hasattr(site, 'getsitepackages'):
+-        res.extend(site.getsitepackages())
+-
+-        if hasattr(site, 'getusersitepackages') and site.ENABLE_USER_SITE:
+-            res.insert(0, site.getusersitepackages())
+-    else:
+-        from distutils.sysconfig import get_python_lib
+-        res = [get_python_lib()]
+-    return res
++    # Do not include things from the standard library
++    # because those should come from typeshed.
++    stdlib_zip = os.path.join(
++        sys.base_exec_prefix,
++        getattr(sys, "platlibdir", "lib"),
++        "python{}{}.zip".format(sys.version_info.major, sys.version_info.minor)
++    )
++    stdlib = sysconfig.get_path("stdlib")
++    stdlib_ext = os.path.join(stdlib, "lib-dynload")
++    cwd = os.path.abspath(os.getcwd())
++    excludes = set([cwd, stdlib_zip, stdlib, stdlib_ext])
++
++    abs_sys_path = (os.path.abspath(p) for p in sys.path)
++    return [p for p in abs_sys_path if p not in excludes]
+ 
+ 
+ if __name__ == '__main__':
+-    if sys.argv[-1] == 'getsitepackages':
+-        print(repr(getsitepackages()))
+-    elif sys.argv[-1] == 'getprefixes':
+-        print(repr(getprefixes()))
++    if sys.argv[-1] == 'getsearchdirs':
++        print(repr(getsearchdirs()))
+     else:
+         print("ERROR: incorrect argument to pyinfo.py.", file=sys.stderr)
+         sys.exit(1)
+diff --git a/mypy/test/testcmdline.py b/mypy/test/testcmdline.py
+index 62e258677c7f..9983dc554323 100644
+--- a/mypy/test/testcmdline.py
++++ b/mypy/test/testcmdline.py
+@@ -65,7 +65,10 @@ def test_python_cmdline(testcase: DataDrivenTestCase, step: int) -> None:
+     fixed = [python3_path, '-m', 'mypy']
+     env = os.environ.copy()
+     env.pop('COLUMNS', None)
++    extra_path = os.path.join(os.path.abspath(test_temp_dir), 'pypath')
+     env['PYTHONPATH'] = PREFIX
++    if os.path.isdir(extra_path):
++        env['PYTHONPATH'] += os.pathsep + extra_path
+     process = subprocess.Popen(fixed + args,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+diff --git a/mypy/test/testmodulefinder.py b/mypy/test/testmodulefinder.py
+index d26e7c1efe0c..a17a44f60cbf 100644
+--- a/mypy/test/testmodulefinder.py
++++ b/mypy/test/testmodulefinder.py
+@@ -1,11 +1,11 @@
+ import os
++from typing import Iterator, List, Tuple
+ 
+ from mypy.options import Options
+ from mypy.modulefinder import (
+     FindModuleCache,
+     SearchPaths,
+     ModuleNotFoundReason,
+-    expand_site_packages
+ )
+ 
+ from mypy.test.helpers import Suite, assert_equal
+@@ -13,6 +13,50 @@
+ data_path = os.path.relpath(os.path.join(package_path, "modulefinder"))
+ 
+ 
++def expand_site_packages(site_packages: List[str]) -> Tuple[List[str], List[str]]:
++    """Mimic the .pth imports in site-packages directories."""
++    egg_dirs: List[str] = []
++    for dir in site_packages:
++        if not os.path.isdir(dir):
++            continue
++        pth_filenames = sorted(name for name in os.listdir(dir) if name.endswith(".pth"))
++        for pth_filename in pth_filenames:
++            egg_dirs.extend(_parse_pth_file(dir, pth_filename))
++
++    return egg_dirs, site_packages
++
++
++def _parse_pth_file(dir: str, pth_filename: str) -> Iterator[str]:
++    """
++    Mimics a subset of .pth import hook from Lib/site.py
++    See https://github.com/python/cpython/blob/3.5/Lib/site.py#L146-L185
++    """
++
++    pth_file = os.path.join(dir, pth_filename)
++    try:
++        f = open(pth_file, "r")
++    except OSError:
++        return
++    with f:
++        for line in f.readlines():
++            if line.startswith("#"):
++                # Skip comment lines
++                continue
++            if line.startswith(("import ", "import\t")):
++                # import statements in .pth files are not supported
++                continue
++
++            yield _make_abspath(line.rstrip(), dir)
++
++
++def _make_abspath(path: str, root: str) -> str:
++    """Take a path and make it absolute relative to root if not already absolute."""
++    if os.path.isabs(path):
++        return os.path.normpath(path)
++    else:
++        return os.path.join(root, os.path.normpath(path))
++
++
+ class ModuleFinderSuite(Suite):
+ 
+     def setUp(self) -> None:
+diff --git a/test-data/unit/cmdline.test b/test-data/unit/cmdline.test
+index 86a975fc4949..7d97c1b1cd56 100644
+--- a/test-data/unit/cmdline.test
++++ b/test-data/unit/cmdline.test
+@@ -365,6 +365,30 @@ main.py:6: error: Unsupported operand types for + ("int" and "str")
+ main.py:7: error: Module has no attribute "y"
+ main.py:8: error: Unsupported operand types for + (Module and "int")
+ 
++[case testConfigFollowImportsSysPath]
++# cmd: mypy main.py
++[file main.py]
++from a import x
++x + 0
++x + ''  # E
++import a
++a.x + 0
++a.x + ''  # E
++a.y  # E
++a + 0  # E
++[file mypy.ini]
++\[mypy]
++follow_imports = normal
++[file pypath/a/__init__.py]
++x = 0
++x += ''  # Error reported here
++[file pypath/a/py.typed]
++[out]
++main.py:3: error: Unsupported operand types for + ("int" and "str")
++main.py:6: error: Unsupported operand types for + ("int" and "str")
++main.py:7: error: Module has no attribute "y"
++main.py:8: error: Unsupported operand types for + (Module and "int")
++
+ [case testConfigFollowImportsSilent]
+ # cmd: mypy main.py
+ [file main.py]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

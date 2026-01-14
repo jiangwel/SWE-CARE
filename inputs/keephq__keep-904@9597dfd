@@ -1,0 +1,325 @@
+  Task-ID: keephq__keep-904@9597dfd
+  Please checkout to this commit first: dc4b8b66085f879169ebab06b38ac49159d69dd7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Create presets for each user
+The feature to create presets it's awesome but right now if i create a preset, all users have the same presets. I think it will be great that each user have their own presets. This way each user can choose the alerts they want to see and have their own customize dashboard.
+  </issue>
+  
+  <patch>
+  diff --git a/keep-ui/app/alerts/alert-presets.tsx b/keep-ui/app/alerts/alert-presets.tsx
+index ecbcf8b871..1a546fabfe 100644
+--- a/keep-ui/app/alerts/alert-presets.tsx
++++ b/keep-ui/app/alerts/alert-presets.tsx
+@@ -1,14 +1,16 @@
+-import { useState, useEffect, useRef, useMemo } from "react";
++import React, { useState, useEffect, useRef, useMemo } from "react";
+ import { Dispatch, SetStateAction } from "react";
+ import { AlertDto, Preset } from "./models";
+ import CreatableSelect from "react-select/creatable";
+-import { Button, Subtitle } from "@tremor/react";
++import Modal from '@/components/ui/Modal';
++import {Button, Subtitle, TextInput} from "@tremor/react";
+ import { CheckIcon, PlusIcon, TrashIcon } from "@radix-ui/react-icons";
+ import { getApiURL } from "utils/apiUrl";
+ import { toast } from "react-toastify";
+ import { useSession } from "next-auth/react";
+ import { usePresets } from "utils/hooks/usePresets";
+ import { useRouter } from "next/navigation";
++import AlertTableCheckbox from "./alert-table-checkbox";
+ 
+ export interface Option {
+   readonly label: string;
+@@ -42,6 +44,9 @@ export default function AlertPresets({
+   const [options, setOptions] = useState<Option[]>([]);
+   const [inputValue, setInputValue] = useState("");
+   const [isMenuOpen, setIsMenuOpen] = useState(false);
++  const [isModalOpen, setIsModalOpen] = useState(false);
++  const [presetName, setPresetName] = useState(preset?.name === "feed" || preset?.name === "deleted" ? "" : preset?.name);
++  const [isPrivate, setIsPrivate] = useState(preset?.is_private);
+   const uniqueValuesMap = useMemo(() => {
+     const newUniqueValuesMap = new Map<string, Set<string>>();
+     if (alerts) {
+@@ -168,11 +173,14 @@ export default function AlertPresets({
+   }
+ 
+   async function addOrUpdatePreset() {
+-    const newPresetName = prompt(
+-      `${preset?.name ? "Update preset name?" : "Enter new preset name"}`,
+-      preset?.name === "feed" || preset?.name === "deleted" ? "" : preset?.name
+-    );
+-    if (newPresetName) {
++    // console.log("HELLO WORLD");
++    // setIsModalOpen(false);
++    // const newPresetName = prompt(
++    //   `${preset?.name ? "Update preset name?" : "Enter new preset name"}`,
++    //   preset?.name === "feed" || preset?.name === "deleted" ? "" : preset?.name
++    // );
++
++    if (presetName) {
+       const options = selectedOptions.map((option) => {
+         return {
+           value: option.value,
+@@ -187,21 +195,22 @@ export default function AlertPresets({
+             Authorization: `Bearer ${session?.accessToken}`,
+             "Content-Type": "application/json",
+           },
+-          body: JSON.stringify({ name: newPresetName, options: options }),
++          body: JSON.stringify({ name: presetName, options: options, is_private: isPrivate }),
+         }
+       );
+       if (response.ok) {
++        setIsModalOpen(false);
+         toast(
+           preset?.name
+-            ? `Preset ${newPresetName} updated!`
+-            : `Preset ${newPresetName} created!`,
++            ? `Preset ${presetName} updated!`
++            : `Preset ${presetName} created!`,
+           {
+             position: "top-left",
+             type: "success",
+           }
+         );
+         await presetsMutator();
+-        router.push(`/alerts/${newPresetName.toLowerCase()}`);
++        router.push(`/alerts/${presetName.toLowerCase()}`);
+       }
+     }
+   }
+@@ -210,6 +219,57 @@ export default function AlertPresets({
+     <>
+       <Subtitle>Filters</Subtitle>
+       <div className="flex w-full">
++        <Modal
++        isOpen={isModalOpen}
++        onClose={() => {}}
++        className="w-[30%] max-w-screen-2xl max-h-[710px] transform overflow-auto ring-tremor bg-white p-6 text-left align-middle shadow-tremor transition-all rounded-xl">
++        <div className="space-y-2">
++          <div className="text-lg font-semibold">
++            <p>{presetName ? "Update preset name?" : "Enter new preset name"}</p>
++          </div>
++
++          <div className="space-y-2">
++            <TextInput
++              error={!presetName}
++              errorMessage="Preset name is required"
++              placeholder={presetName === "feed" || presetName === "deleted" ? "" : presetName}
++              value={presetName}
++              onChange={(e) => setPresetName(e.target.value)}
++              className="w-full"
++            />
++          </div>
++
++          <div className="flex items-center space-x-2">
++            <AlertTableCheckbox
++              id={"private"}
++              checked={isPrivate}
++              onChange={() => setIsPrivate(!isPrivate)}
++            />
++            <label htmlFor={"private"}>Private</label>
++          </div>
++
++          <div className="flex justify-end space-x-2.5">
++            <Button
++              size="lg"
++              variant="secondary"
++              color="orange"
++              onClick={() => setIsModalOpen(false)}
++              tooltip="Close Modal"
++            >
++              Close
++            </Button>
++            <Button
++              size="lg"
++              color="orange"
++              onClick={addOrUpdatePreset}
++              tooltip="Save Modal"
++            >
++              Save
++            </Button>
++          </div>
++        </div>
++      </Modal>
++
+         <CreatableSelect
+           isMulti
+           options={options}
+@@ -235,7 +295,7 @@ export default function AlertPresets({
+             color="orange"
+             className="ml-2.5"
+             disabled={selectedOptions.length <= 0}
+-            onClick={async () => await addOrUpdatePreset()}
++            onClick={() => setIsModalOpen(true)}
+             tooltip="Save current filter as a view"
+           >
+             Create Preset
+@@ -250,7 +310,7 @@ export default function AlertPresets({
+               title="Save preset"
+               className="mr-1"
+               disabled={selectedOptions.length <= 0}
+-              onClick={async () => await addOrUpdatePreset()}
++              onClick={() => setIsModalOpen(true)}
+             >
+               Save Preset
+             </Button>
+diff --git a/keep-ui/app/alerts/models.tsx b/keep-ui/app/alerts/models.tsx
+index d7fb04d8db..f5a452100e 100644
+--- a/keep-ui/app/alerts/models.tsx
++++ b/keep-ui/app/alerts/models.tsx
+@@ -41,6 +41,7 @@ export interface Preset {
+   id?: string;
+   name: string;
+   options: Option[];
++  is_private: boolean;
+ }
+ 
+ export const AlertKnownKeys = [
+diff --git a/keep/api/models/db/preset.py b/keep/api/models/db/preset.py
+index d0c54d238c..cdeb376a6c 100644
+--- a/keep/api/models/db/preset.py
++++ b/keep/api/models/db/preset.py
+@@ -1,5 +1,5 @@
+ from uuid import UUID, uuid4
+-
++from typing import Optional
+ from pydantic import BaseModel
+ from sqlmodel import JSON, Column, Field, SQLModel
+ 
+@@ -7,7 +7,13 @@
+ class Preset(SQLModel, table=True):
+     # Unique ID for each preset
+     id: UUID = Field(default_factory=uuid4, primary_key=True)
++
+     tenant_id: str = Field(foreign_key="tenant.id", index=True)
++
++    # if created_by is not null then it means this preset is only for this user
++    # keeping index=True for better search
++    created_by: Optional[str] = Field(index=True, nullable=False)
++    is_private: Optional[bool] = Field(nullable=True)
+     name: str = Field(unique=True)
+     options: list = Field(sa_column=Column(JSON))  # [{"label": "", "value": ""}]
+ 
+@@ -16,8 +22,10 @@ class PresetDto(BaseModel, extra="ignore"):
+     id: UUID
+     name: str
+     options: list = []
++    created_by: Optional[str] = None
++    is_private: Optional[bool] = Field(nullable=True)
+ 
+ 
+ class PresetOption(BaseModel, extra="ignore"):
+     label: str
+-    value: str
++    value: str
+\ No newline at end of file
+diff --git a/keep/api/routes/preset.py b/keep/api/routes/preset.py
+index b3e448d5df..f4c53a5d08 100644
+--- a/keep/api/routes/preset.py
++++ b/keep/api/routes/preset.py
+@@ -2,7 +2,8 @@
+ 
+ from fastapi import APIRouter, Depends, HTTPException
+ from pydantic import BaseModel
+-from sqlmodel import Session, select
++from sqlmodel import Session, select, or_
++
+ 
+ from keep.api.core.db import get_session
+ from keep.api.core.dependencies import AuthenticatedEntity, AuthVerifier
+@@ -22,7 +23,19 @@ def get_presets(
+ ) -> list[PresetDto]:
+     tenant_id = authenticated_entity.tenant_id
+     logger.info("Getting all presets")
+-    statement = select(Preset).where(Preset.tenant_id == tenant_id)
++
++    # only global presets
++    statement = (
++        select(Preset)
++        .where(Preset.tenant_id == tenant_id)
++        .where(
++            or_(
++                Preset.created_by == None,
++                Preset.created_by == authenticated_entity.email,
++            )
++        )
++    )
++
+     presets = session.exec(statement).all()
+     logger.info("Got all presets")
+     return [PresetDto(**preset.dict()) for preset in presets]
+@@ -31,6 +44,7 @@ def get_presets(
+ class CreateOrUpdatePresetDto(BaseModel):
+     name: str | None
+     options: list[PresetOption]
++    is_private: bool = False  # if true visible to all users of that tenant
+ 
+ 
+ @router.post("", description="Create a preset for tenant")
+@@ -40,13 +54,22 @@ def create_preset(
+     session: Session = Depends(get_session),
+ ) -> PresetDto:
+     tenant_id = authenticated_entity.tenant_id
+-    logger.info("Creating preset")
+     if not body.options or not body.name:
+         raise HTTPException(400, "Options and name are required")
+     if body.name == "Feed" or body.name == "Deleted":
+         raise HTTPException(400, "Cannot create preset with this name")
+     options_dict = [option.dict() for option in body.options]
+-    preset = Preset(tenant_id=tenant_id, options=options_dict, name=body.name)
++
++    created_by = authenticated_entity.email
++
++    preset = Preset(
++        tenant_id=tenant_id,
++        options=options_dict,
++        name=body.name,
++        created_by=created_by,
++        is_private=body.is_private,
++    )
++
+     session.add(preset)
+     session.commit()
+     session.refresh(preset)
+@@ -100,6 +123,7 @@ def update_preset(
+             raise HTTPException(400, "Cannot create preset with this name")
+         if body.name != preset.name:
+             preset.name = body.name
++    preset.is_private = body.is_private
+     options_dict = [option.dict() for option in body.options]
+     if not options_dict:
+         raise HTTPException(400, "Options cannot be empty")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

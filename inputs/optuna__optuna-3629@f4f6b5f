@@ -1,0 +1,257 @@
+  Task-ID: optuna__optuna-3629@f4f6b5f
+  Please checkout to this commit first: 6739e8fa71532361c8723aa7d8ae99c7b1ac9c55
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add a `skip_if_exists` option to `Study.enqueue_trial`
+### Motivation
+
+Currently, `Study.enqueue_trial` does not support a `skip_if_exists` option, so it is possible to unintentionally add duplicate trials with the same parameters to the `Study`. For example, in a clustered environment, where processes are often preempted, it is often the case that the parameters of a previously running trial are enqueued back into the study when the process is restarted. In such cases, it is undesirable to repeatedly insert the same parameters.
+
+This PR suggests to add a `skip_if_exists` option to `Study.enqueue_trial`.
+
+### Description
+
+Please add a `skip_if_exists` option to `Study.enqueue_trial`. This option has a value of `bool`. If `Study.enqueue_trial(params, skip_if_exists=True)` and the `Study` already includes the trial with given `params`, the trial is not enqueued (skipped).
+
+Thr `np.isclose` may be used to determine the identity of `params` and parameters of existing trials.
+
+### Alternatives (optional)
+
+_No response_
+
+### Additional context (optional)
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/optuna/study/study.py b/optuna/study/study.py
+index 41c4416c44c..0880abc0ede 100644
+--- a/optuna/study/study.py
++++ b/optuna/study/study.py
+@@ -14,6 +14,8 @@
+ from typing import Union
+ import warnings
+ 
++import numpy as np
++
+ from optuna import exceptions
+ from optuna import logging
+ from optuna import pruners
+@@ -753,7 +755,10 @@ def objective(trial):
+         self._stop_flag = True
+ 
+     def enqueue_trial(
+-        self, params: Dict[str, Any], user_attrs: Optional[Dict[str, Any]] = None
++        self,
++        params: Dict[str, Any],
++        user_attrs: Optional[Dict[str, Any]] = None,
++        skip_if_exists: bool = True,
+     ) -> None:
+         """Enqueue a trial with given parameter values.
+ 
+@@ -786,6 +791,12 @@ def objective(trial):
+                 Parameter values to pass your objective function.
+             user_attrs:
+                 A dictionary of user-specific attributes other than ``params``.
++            skip_if_exists:
++                When :obj:`True`, prevents duplicate trials from being enqueued again.
++
++                .. note::
++                    This method might produce duplicated trials if called simultaneously
++                    by multiple processes at the same time with same ``params`` dict.
+ 
+         .. seealso::
+ 
+@@ -793,6 +804,12 @@ def objective(trial):
+             hyperparameters manually.
+         """
+ 
++        if skip_if_exists and self._should_skip_enqueue(params):
++            warnings.warn(
++                f"Trial with params {params} already exists. Skipping enqueue.", RuntimeWarning
++            )
++            return
++
+         self.add_trial(
+             create_trial(
+                 state=TrialState.WAITING,
+@@ -928,6 +945,31 @@ def _pop_waiting_trial_id(self) -> Optional[int]:
+ 
+         return None
+ 
++    def _should_skip_enqueue(self, params: Dict[str, Any]) -> bool:
++
++        for trial in self.get_trials(deepcopy=False):
++            trial_params = trial.system_attrs.get("fixed_params", trial.params)
++            if trial_params.keys() != params.keys():
++                # Can't have repeated trials if different params are suggested.
++                continue
++
++            for param_name, param_value in params.items():
++                existing_param = trial_params[param_name]
++                if not isinstance(param_value, type(existing_param)):
++                    # Enqueued param has distribution that does not match existing param
++                    # (e.g. trying to enqueue categorical to float param).
++                    # We are not doing anything about it here, since sanitization should
++                    # be handled regardless if `skip_if_exists` is `True`.
++                    continue
++
++                if isinstance(param_value, (float, np.floating)):
++                    if np.isnan(param_value) or np.isclose(param_value, existing_param):
++                        return True
++                else:
++                    if param_value == existing_param:
++                        return True
++        return False
++
+     @deprecated_func("2.5.0", "4.0.0")
+     def _ask(self) -> trial_module.Trial:
+         return self.ask()
+diff --git a/tests/study_tests/test_study.py b/tests/study_tests/test_study.py
+index 1cc1123b440..651bf627387 100644
+--- a/tests/study_tests/test_study.py
++++ b/tests/study_tests/test_study.py
+@@ -687,6 +687,100 @@ def objective(trial: Trial) -> float:
+         assert t.params["x"] == fixed_value
+ 
+ 
++@pytest.mark.parametrize("storage_mode", STORAGE_MODES)
++def test_enqueue_trial_skips_existing_finished(storage_mode: str) -> None:
++
++    with StorageSupplier(storage_mode) as storage:
++        study = create_study(storage=storage)
++        assert len(study.trials) == 0
++
++        def objective(trial: Trial) -> float:
++
++            x = trial.suggest_int("x", -10, 10)
++            y = trial.suggest_int("y", -10, 10)
++            return x**2 + y**2
++
++        study.enqueue_trial({"x": -5, "y": 5})
++        study.optimize(objective, n_trials=1)
++
++        t0 = study.trials[0]
++        assert t0.params["x"] == -5
++        assert t0.params["y"] == 5
++
++        with pytest.warns(RuntimeWarning):
++            study.enqueue_trial({"x": -5, "y": 5})
++
++
++@pytest.mark.parametrize("storage_mode", STORAGE_MODES)
++def test_enqueue_trial_skips_existing_waiting(storage_mode: str) -> None:
++
++    with StorageSupplier(storage_mode) as storage:
++        study = create_study(storage=storage)
++        assert len(study.trials) == 0
++
++        def objective(trial: Trial) -> float:
++
++            x = trial.suggest_int("x", -10, 10)
++            y = trial.suggest_int("y", -10, 10)
++            return x**2 + y**2
++
++        study.enqueue_trial({"x": -5, "y": 5})
++        with pytest.warns(RuntimeWarning):
++            study.enqueue_trial({"x": -5, "y": 5})
++
++        study.optimize(objective, n_trials=1)
++        t0 = study.trials[0]
++        assert t0.params["x"] == -5
++        assert t0.params["y"] == 5
++
++
++@pytest.mark.parametrize("storage_mode", STORAGE_MODES)
++@pytest.mark.parametrize("new_params", [{"x": -5, "y": 5, "z": 5}, {"x": -5}, {"x": -5, "z": 5}])
++def test_enqueue_trial_skip_existing_allows_unfixed(
++    storage_mode: str, new_params: Dict[str, int]
++) -> None:
++
++    with StorageSupplier(storage_mode) as storage:
++        study = create_study(storage=storage)
++        assert len(study.trials) == 0
++
++        def objective(trial: Trial) -> float:
++
++            x = trial.suggest_int("x", -10, 10)
++            y = trial.suggest_int("y", -10, 10)
++            if trial.number == 1:
++                z = trial.suggest_int("z", -10, 10)
++                return x**2 + y**2 + z**2
++            return x**2 + y**2
++
++        study.enqueue_trial({"x": -5, "y": 5})
++        study.optimize(objective, n_trials=1)
++        t0 = study.trials[0]
++        assert t0.params["x"] == -5
++        assert t0.params["y"] == 5
++
++        study.enqueue_trial(new_params)
++        study.optimize(objective, n_trials=1)
++
++        unfixed_params = {"x", "y", "z"} - set(new_params)
++        t1 = study.trials[1]
++        assert all(t1.params[k] == new_params[k] for k in new_params)
++        assert all(-10 <= t1.params[k] <= 10 for k in unfixed_params)
++
++
++@pytest.mark.parametrize("storage_mode", STORAGE_MODES)
++@pytest.mark.parametrize(
++    "param", ["foo", 1, 1.1, 1e17, 1e-17, float("inf"), float("-inf"), float("nan"), None]
++)
++def test_enqueue_trial_skip_existing_handles_common_types(storage_mode: str, param: Any) -> None:
++
++    with StorageSupplier(storage_mode) as storage:
++        study = create_study(storage=storage)
++        study.enqueue_trial({"x": param})
++        with pytest.warns(RuntimeWarning):
++            study.enqueue_trial({"x": param})
++
++
+ @patch("optuna.study._optimize.gc.collect")
+ def test_optimize_with_gc(collect_mock: Mock) -> None:
+ 
+@@ -1428,6 +1522,6 @@ def objective(trial: Trial) -> float:
+ 
+         # Study summary with completed trials should have nonnull datetime_start
+         study.optimize(objective, n_trials=1)
+-        study.enqueue_trial(params={"x": 1})
++        study.enqueue_trial(params={"x": 1}, skip_if_exists=False)
+         summaries = study._storage.get_all_study_summaries(include_best_trial=True)
+         assert summaries[0].datetime_start is not None
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

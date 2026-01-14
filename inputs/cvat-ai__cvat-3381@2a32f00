@@ -1,0 +1,116 @@
+  Task-ID: cvat-ai__cvat-3381@2a32f00
+  Please checkout to this commit first: 7f4b1853aba06584afb7698bd07358cb2f4ae7ca
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  get_prpgress function of VideoReader can compatible with more video format
+<!---
+Copyright (C) 2020 Intel Corporation
+
+SPDX-License-Identifier: MIT
+-->
+
+### My actions before raising this issue
+while extract from video with typical format, like mkv, it can't show precise progress. Like shown in the code:
+```python
+    def get_progress(self, pos):
+        container = self._get_av_container()
+        # Not for all containers return real value
+        stream = container.streams.video[0]
+        return pos / stream.duration if stream.duration else None
+```
+VideoStream object may not have a real duration value.
+
+<!--- Provide a general summary of the issue in the Title above -->
+
+### Expected Behaviour
+<!--- If you're describing a bug, tell us what should happen. If you're
+suggesting a change/improvement, tell us how it should work -->
+But we can find duration information from metadata of VideoStream object, then we can calculate precise progress instead of showing "Images are being compressed |/-\\"
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 98964a61b1af..a4a1b4063c1b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ - Duplication of the cuboids when redraw them (<https://github.com/openvinotoolkit/cvat/pull/3308>)
+ - Some code issues in Deep Extreme Cut handler code (<https://github.com/openvinotoolkit/cvat/pull/3325>)
+ - UI fails when inactive user is assigneed to a task/job (<https://github.com/openvinotoolkit/cvat/pull/3343>)
++- Can't calculat precise progress of image extraction and compression when operating video with particular format (https://github.com/openvinotoolkit/cvat/pull/3381)
+ 
+ ### Security
+ 
+diff --git a/cvat/apps/engine/media_extractors.py b/cvat/apps/engine/media_extractors.py
+index d3184e0968d7..109fd7bad861 100644
+--- a/cvat/apps/engine/media_extractors.py
++++ b/cvat/apps/engine/media_extractors.py
+@@ -325,16 +325,30 @@ def __iter__(self):
+         return self._decode(container)
+ 
+     def get_progress(self, pos):
+-        container = self._get_av_container()
+-        # Not for all containers return real value
+-        stream = container.streams.video[0]
+-        return pos / stream.duration if stream.duration else None
++        duration = self._get_duration()
++        return pos / duration if duration else None
+ 
+     def _get_av_container(self):
+         if isinstance(self._source_path[0], io.BytesIO):
+             self._source_path[0].seek(0) # required for re-reading
+         return av.open(self._source_path[0])
+ 
++    def _get_duration(self):
++        container = self._get_av_container()
++        stream = container.streams.video[0]
++        duration = None
++        if stream.duration:
++            duration = stream.duration
++        else:
++            # may have a DURATION in format like "01:16:45.935000000"
++            duration_str = stream.metadata.get("DURATION", None)
++            tb_denominator = stream.time_base.denominator
++            if duration_str and tb_denominator:
++                _hour, _min, _sec = duration_str.split(':')
++                duration_sec = 60*60*float(_hour) + 60*float(_min) + float(_sec)
++                duration = duration_sec * tb_denominator
++        return duration
++
+     def get_preview(self):
+         container = self._get_av_container()
+         stream = container.streams.video[0]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

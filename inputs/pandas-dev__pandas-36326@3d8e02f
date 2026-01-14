@@ -1,0 +1,182 @@
+  Task-ID: pandas-dev__pandas-36326@3d8e02f
+  Please checkout to this commit first: 4c4db192858658f8f9368a1fd032180946c48dcd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  DataFrameGroupBy.ffill with Duplicate Column Labels ValueError
+#### Code Sample, a copy-pastable example if possible
+
+```python
+import pandas as pd
+import numpy as np
+
+
+df1 = pd.DataFrame({'field1': [1, 2, 3, 4],
+                   'field2': [1, 2, 3, 4],
+                   'field3': [1, 2, 3, 4]
+                   })
+df2 = pd.DataFrame({'field1': [1, 2, np.nan, 4],
+                   })
+
+same_col = pd.concat([df1, df2], axis=1)
+
+print(same_col)
+#    field1  field2  field3  field1
+# 0       1       1       1     1.0
+# 1       2       2       2     2.0
+# 2       3       3       3     NaN
+# 3       4       4       4     4.0
+
+
+print(same_col.ffill())
+#    field1  field2  field3  field1
+# 0       1       1       1     1.0
+# 1       2       2       2     2.0
+# 2       3       3       3     2.0
+# 3       4       4       4     4.0
+
+for k, v in same_col.groupby(by=['field2']):
+    print(v.ffill())
+    #    field1  field2  field3  field1
+    # 0       1       1       1     1.0
+    #    field1  field2  field3  field1
+    # 1       2       2       2     2.0
+    #    field1  field2  field3  field1
+    # 2       3       3       3     NaN
+    #    field1  field2  field3  field1
+    # 3       4       4       4     4.0
+
+same_col.groupby(by=['field2']).ffill()
+ValueError: Buffer has wrong number of dimensions (expected 1, got 2)
+
+```
+
+#### Problem description
+A _DataFrameGroupBy.ffill_ with 2 or more column with the same name produce an error:
+`ValueError: Buffer has wrong number of dimensions (expected 1, got 2)`
+Pandas 0.22.0 did not have this bud. It seems that it was introduced recently. Or if this is an expected behaviour, it must be consistent with the behaviour of a _DataFrame.ffill_ with 2 or more column with the same name and have a meaningful error.
+
+#### Expected Output
+
+```
+#    field1  field2  field3  field1
+# 0       1       1       1     1.0
+# 1       2       2       2     2.0
+# 2       3       3       3     NaN
+# 3       4       4       4     4.0
+```
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+[paste the output of ``pd.show_versions()`` here below this line]
+pd.show_versions()
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 3.7.1.final.0
+python-bits: 64
+OS: Darwin
+OS-release: 18.2.0
+machine: x86_64
+processor: i386
+byteorder: little
+LC_ALL: None
+LANG: None
+LOCALE: en_GB.UTF-8
+pandas: 0.24.1
+pytest: None
+pip: 10.0.1
+setuptools: 39.1.0
+Cython: None
+numpy: 1.16.2
+scipy: None
+pyarrow: None
+xarray: None
+IPython: None
+sphinx: None
+patsy: None
+dateutil: 2.8.0
+pytz: 2018.9
+blosc: None
+bottleneck: None
+tables: None
+numexpr: None
+feather: None
+matplotlib: None
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: None
+lxml.etree: None
+bs4: None
+html5lib: None
+sqlalchemy: None
+pymysql: None
+psycopg2: None
+jinja2: None
+s3fs: None
+fastparquet: None
+pandas_gbq: None
+pandas_datareader: None
+gcsfs: None
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/tests/groupby/test_groupby.py b/pandas/tests/groupby/test_groupby.py
+index 69397228dd941..bce23d4d95a06 100644
+--- a/pandas/tests/groupby/test_groupby.py
++++ b/pandas/tests/groupby/test_groupby.py
+@@ -2146,3 +2146,16 @@ def test_groupby_column_index_name_lost_fill_funcs(func):
+     result = getattr(df_grouped, func)().columns
+     expected = pd.Index(["a", "b"], name="idx")
+     tm.assert_index_equal(result, expected)
++
++
++@pytest.mark.parametrize("func", ["ffill", "bfill"])
++def test_groupby_fill_duplicate_column_names(func):
++    # GH: 25610 ValueError with duplicate column names
++    df1 = pd.DataFrame({"field1": [1, 3, 4], "field2": [1, 3, 4]})
++    df2 = pd.DataFrame({"field1": [1, np.nan, 4]})
++    df_grouped = pd.concat([df1, df2], axis=1).groupby(by=["field2"])
++    expected = pd.DataFrame(
++        [[1, 1.0], [3, np.nan], [4, 4.0]], columns=["field1", "field1"]
++    )
++    result = getattr(df_grouped, func)()
++    tm.assert_frame_equal(result, expected)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

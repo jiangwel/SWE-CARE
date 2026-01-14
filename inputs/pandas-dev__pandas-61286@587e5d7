@@ -1,0 +1,252 @@
+  Task-ID: pandas-dev__pandas-61286@587e5d7
+  Please checkout to this commit first: d739c92dd476196bd750c2ac1680aa2d2235f410
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  StataWriter for version 117 fails on None in a string column long enough to be a Stata StrL.
+The version 114 writer seems to handle columns of strings containing `None` just fine, but the 117 writer produces the `AttributeError` below.
+
+#### Code to reproduce
+
+```python
+
+import pandas as pd
+
+sample_data1 = [
+    {'str1': 'string' * 30,
+     'number': 0},
+    {'str1': None,
+     'number': 1}
+]
+
+sample_data2 = [
+    {'str1': 'string' * 500,
+     'number': 0},
+    {'str1': None,
+     'number': 1}
+]
+
+data1 = pd.DataFrame(sample_data1)
+data2 = pd.DataFrame(sample_data2)
+
+data1.to_stata('./sample1_114.dta')
+data1.to_stata('./sample1_117.dta', version=117)
+
+# Will produce the ValueError for over 244 characters.
+# data2.to_stata('./sample1_114.dta')
+
+data2.to_stata('./sample2_117.dta', version=117)
+
+```
+
+Error:
+
+```python
+---------------------------------------------------------------------------
+AttributeError                            Traceback (most recent call last)
+<ipython-input-23-f2347fb2dfc8> in <module>
+     24 # data2.to_stata('./sample1_114.dta')
+     25 
+---> 26 data2.to_stata('./sample2_117.dta', version=117)
+
+~/anaconda3/lib/python3.6/site-packages/pandas/core/frame.py in to_stata(self, fname, convert_dates, write_index, encoding, byteorder, time_stamp, data_label, variable_labels, version, convert_strl)
+   1875                              write_index=write_index,
+   1876                              variable_labels=variable_labels, **kwargs)
+-> 1877         writer.write_file()
+   1878 
+   1879     def to_feather(self, fname):
+
+~/anaconda3/lib/python3.6/site-packages/pandas/io/stata.py in write_file(self)
+   2214             self._write_expansion_fields()
+   2215             self._write_characteristics()
+-> 2216             self._prepare_data()
+   2217             self._write_data()
+   2218             self._write_strls()
+
+~/anaconda3/lib/python3.6/site-packages/pandas/io/stata.py in _prepare_data(self)
+   2375                                                                self.fmtlist[i])
+   2376         # 2. Convert strls
+-> 2377         data = self._convert_strls(data)
+   2378 
+   2379         # 3. Convert bad string data to '' and pad to correct length
+
+~/anaconda3/lib/python3.6/site-packages/pandas/io/stata.py in _convert_strls(self, data)
+   2963             tab, new_data = ssw.generate_table()
+   2964             data = new_data
+-> 2965             self._strl_blob = ssw.generate_blob(tab)
+   2966         return data
+   2967 
+
+~/anaconda3/lib/python3.6/site-packages/pandas/io/stata.py in generate_blob(self, gso_table)
+   2652 
+   2653             # llll
+-> 2654             encoded = self._encode(strl)
+   2655             bio.write(struct.pack(len_type, len(encoded) + 1))
+   2656 
+
+~/anaconda3/lib/python3.6/site-packages/pandas/io/stata.py in _encode(self, s)
+   2592         """
+   2593         if compat.PY3:
+-> 2594             return s.encode(self._encoding)
+   2595         else:
+   2596             if isinstance(s, text_type):
+
+AttributeError: 'NoneType' object has no attribute 'encode'
+```
+
+
+#### Problem description
+
+This seems like a fairly straightforward regression in the Stata StrL part of the 117 writer compared to how the 114 writer does some more checking on regular strings before working with them.
+
+Note: I'm not sure if other datatypes are handled differently and may have a similar issue, but this is the one I encountered and could reproduce.
+
+If you're wondering why my actual data is so ugly that I encountered this, I'd like to blame something else, but I wrote the code that parses the data that ends up there.
+
+
+#### Expected Output
+
+I'd expect the 117 writer to clean up these StrL columns like the 114 writer cleans up standard strings (and so does the 117 writer, because it appears to use the same codepath for standard strings and only handles StrLs differently).
+
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 3.6.6.final.0
+python-bits: 64
+OS: Darwin
+OS-release: 18.2.0
+machine: x86_64
+processor: i386
+byteorder: little
+LC_ALL: None
+LANG: en_US.UTF-8
+LOCALE: en_US.UTF-8
+
+pandas: 0.23.4
+pytest: 3.10.0
+pip: 18.1
+setuptools: 40.5.0
+Cython: 0.29
+numpy: 1.15.4
+scipy: 1.1.0
+pyarrow: 0.9.0
+xarray: None
+IPython: 7.1.1
+sphinx: 1.8.1
+patsy: 0.5.1
+dateutil: 2.7.5
+pytz: 2018.7
+blosc: None
+bottleneck: 1.2.1
+tables: 3.4.4
+numexpr: 2.6.8
+feather: None
+matplotlib: 3.0.1
+openpyxl: 2.5.9
+xlrd: 1.1.0
+xlwt: 1.2.0
+xlsxwriter: 1.1.2
+lxml: 4.2.5
+bs4: 4.6.3
+html5lib: 1.0.1
+sqlalchemy: 1.2.13
+pymysql: None
+psycopg2: 2.7.4 (dt dec pq3 ext lo64)
+jinja2: 2.10
+s3fs: None
+fastparquet: 0.1.6
+pandas_gbq: None
+pandas_datareader: 0.7.0
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/doc/source/whatsnew/v2.3.0.rst b/doc/source/whatsnew/v2.3.0.rst
+index 230332319e0ac..5770f02c409d9 100644
+--- a/doc/source/whatsnew/v2.3.0.rst
++++ b/doc/source/whatsnew/v2.3.0.rst
+@@ -150,6 +150,7 @@ MultiIndex
+ I/O
+ ^^^
+ - :meth:`DataFrame.to_excel` was storing decimals as strings instead of numbers (:issue:`49598`)
++- :meth:`DataFrame.to_stata` no longer throws a ``TypeError('encoding without a string argument')`` when exporting a column containing both long strings (Stata strL) and :class:`pd.NA` values (:issue:`23633`)
+ -
+ 
+ Period
+diff --git a/pandas/io/stata.py b/pandas/io/stata.py
+index 34d95fb59a21c..49080144abee5 100644
+--- a/pandas/io/stata.py
++++ b/pandas/io/stata.py
+@@ -3196,8 +3196,8 @@ def generate_table(self) -> tuple[dict[str, tuple[int, int]], DataFrame]:
+         for o, (idx, row) in enumerate(selected.iterrows()):
+             for j, (col, v) in enumerate(col_index):
+                 val = row[col]
+-                # Allow columns with mixed str and None (GH 23633)
+-                val = "" if val is None else val
++                # Allow columns with mixed str and None or pd.NA (GH 23633)
++                val = "" if (val is None) or isna(val) else val
+                 key = gso_table.get(val, None)
+                 if key is None:
+                     # Stata prefers human numbers
+diff --git a/pandas/tests/io/test_stata.py b/pandas/tests/io/test_stata.py
+index 9288b98d79fbe..e73de78847c8f 100644
+--- a/pandas/tests/io/test_stata.py
++++ b/pandas/tests/io/test_stata.py
+@@ -2587,3 +2587,17 @@ def test_many_strl(temp_file, version):
+     lbls = ["".join(v) for v in itertools.product(*([string.ascii_letters] * 3))]
+     value_labels = {"col": {i: lbls[i] for i in range(n)}}
+     df.to_stata(temp_file, value_labels=value_labels, version=version)
++
++
++@pytest.mark.parametrize("version", [117, 118, 119, None])
++def test_strl_missings(temp_file, version):
++    # GH 23633
++    # Check that strl supports None and pd.NA
++    df = DataFrame(
++        [
++            {"str1": "string" * 500, "number": 0},
++            {"str1": None, "number": 1},
++            {"str1": pd.NA, "number": 1},
++        ]
++    )
++    df.to_stata(temp_file, version=version)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

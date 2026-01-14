@@ -1,0 +1,226 @@
+  Task-ID: getmoto__moto-4402@c526f32
+  Please checkout to this commit first: 198f2696b92444c05d06dab9ac5379b4a767aa95
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  mock_dynamodb2 does not raise ResourceNotFoundError in call to boto3.client("dynamodb").batch_write_item() with an inexistent table
+## Description
+
+Specifying a DynamoDB table that does not exist in the `boto3.client("dynamodb").batch_write_item()` or `boto3.resource("dynamodb").batch_write_item()` functions is expected to raise a `ResourceNotFoundError`. When using `mock_dynamodb2`, no exception is raised.
+
+## Steps to reproduce
+
+Run the following tests:
+
+```python
+import boto3
+from moto import mock_dynamodb2
+import pytest
+
+
+@mock_dynamodb2
+def test_client_batch_write_item_exceptions():
+    client = boto3.client("dynamodb")
+
+    with pytest.raises(client.exceptions.ResourceNotFoundException):
+        # Table my-table does not exist
+        client.batch_write_item(
+            RequestItems={"my-table": [{"PutRequest": {"Item": {}}}]}
+        )
+
+
+@mock_dynamodb2
+def test_resource_batch_write_item_exceptions():
+    ddb = boto3.resource("dynamodb")
+    client = boto3.client("dynamodb")
+
+    with pytest.raises(client.exceptions.ResourceNotFoundException):
+        # Table my-table does not exist
+        ddb.batch_write_item(
+            RequestItems={"my-table": [{"PutRequest": {"Item": {}}}]}
+        )
+```
+
+## Expected behavior
+
+The tests pass, i.e. a `ResourceNotFoundException` is raised.
+
+## Actual behavior
+
+No exceptions are raised.
+
+```
+$ python -m pytest -v tests/test_tests.py
+========================================= test session starts =========================================
+platform linux -- Python 3.8.10, pytest-6.2.4, py-1.10.0, pluggy-0.13.1 -- /home/jul/git/dynamo-pandas/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/jul/git/dynamo-pandas, configfile: tox.ini
+plugins: cov-2.12.1
+collected 4 items / 2 deselected / 2 selected                                                         
+
+tests/test_tests.py::test_client_batch_write_item_exceptions FAILED                             [ 50%]
+tests/test_tests.py::test_resource_batch_write_item_exceptions FAILED                           [100%]
+
+============================================== FAILURES ===============================================
+_______________________________ test_client_batch_write_item_exceptions _______________________________
+
+    @mock_dynamodb2
+    def test_client_batch_write_item_exceptions():
+        client = boto3.client("dynamodb")
+    
+        with pytest.raises(client.exceptions.ResourceNotFoundException):
+            # Table my-table does not exist
+>           client.batch_write_item(
+                RequestItems={"my-table": [{"PutRequest": {"Item": {}}}]}
+            )
+E           Failed: DID NOT RAISE <class 'botocore.errorfactory.ResourceNotFoundException'>
+
+tests/test_tests.py:12: Failed
+______________________________ test_resource_batch_write_item_exceptions ______________________________
+
+    @mock_dynamodb2
+    def test_resource_batch_write_item_exceptions():
+        ddb = boto3.resource("dynamodb")
+        client = boto3.client("dynamodb")
+    
+        with pytest.raises(client.exceptions.ResourceNotFoundException):
+            # Table my-table does not exist
+>           ddb.batch_write_item(
+                RequestItems={"my-table": [{"PutRequest": {"Item": {}}}]}
+            )
+E           Failed: DID NOT RAISE <class 'botocore.errorfactory.ResourceNotFoundException'>
+
+tests/test_tests.py:24: Failed
+======================================= short test summary info =======================================
+FAILED tests/test_tests.py::test_client_batch_write_item_exceptions - Failed: DID NOT RAISE <class '...
+FAILED tests/test_tests.py::test_resource_batch_write_item_exceptions - Failed: DID NOT RAISE <class...
+=================================== 2 failed, 2 deselected in 0.29s ===================================
+
+```
+
+## Environment
+
+Packages installed with pip in a virtual environment on Ubuntu 20.04.
+
+```
+boto3                             1.18.48
+botocore                          1.21.48
+moto                              2.2.7
+```
+  </issue>
+  
+  <patch>
+  diff --git a/moto/dynamodb2/responses.py b/moto/dynamodb2/responses.py
+index 884a7ea71961..14f4ad3af385 100644
+--- a/moto/dynamodb2/responses.py
++++ b/moto/dynamodb2/responses.py
+@@ -379,7 +379,12 @@ def batch_write_item(self):
+                 request = list(table_request.values())[0]
+                 if request_type == "PutRequest":
+                     item = request["Item"]
+-                    self.dynamodb_backend.put_item(table_name, item)
++                    res = self.dynamodb_backend.put_item(table_name, item)
++                    if not res:
++                        return self.error(
++                            "com.amazonaws.dynamodb.v20111205#ResourceNotFoundException",
++                            "Requested resource not found",
++                        )
+                 elif request_type == "DeleteRequest":
+                     keys = request["Key"]
+                     item = self.dynamodb_backend.delete_item(table_name, keys)
+diff --git a/tests/test_dynamodb2/test_dynamodb.py b/tests/test_dynamodb2/test_dynamodb.py
+index 39c264c05fc4..0bc1ffafd1f6 100644
+--- a/tests/test_dynamodb2/test_dynamodb.py
++++ b/tests/test_dynamodb2/test_dynamodb.py
+@@ -5920,3 +5920,58 @@ def test_update_non_existing_item_raises_error_and_does_not_contain_item_afterwa
+     err.value.response["Error"]["Code"].should.equal("ValidationException")
+ 
+     conn.scan(TableName=name)["Items"].should.have.length_of(0)
++
++
++@mock_dynamodb2
++def test_batch_write_item():
++    conn = boto3.resource("dynamodb", region_name="us-west-2")
++    tables = [f"table-{i}" for i in range(3)]
++    for name in tables:
++        conn.create_table(
++            TableName=name,
++            KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
++            AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
++            BillingMode="PAY_PER_REQUEST",
++        )
++
++    conn.batch_write_item(
++        RequestItems={
++            tables[0]: [{"PutRequest": {"Item": {"id": "0"}}}],
++            tables[1]: [{"PutRequest": {"Item": {"id": "1"}}}],
++            tables[2]: [{"PutRequest": {"Item": {"id": "2"}}}],
++        }
++    )
++
++    for idx, name in enumerate(tables):
++        table = conn.Table(f"table-{idx}")
++        res = table.get_item(Key={"id": str(idx)})
++        assert res["Item"].should.equal({"id": str(idx)})
++        scan = table.scan()
++        assert scan["Count"].should.equal(1)
++
++    conn.batch_write_item(
++        RequestItems={
++            tables[0]: [{"DeleteRequest": {"Key": {"id": "0"}}}],
++            tables[1]: [{"DeleteRequest": {"Key": {"id": "1"}}}],
++            tables[2]: [{"DeleteRequest": {"Key": {"id": "2"}}}],
++        }
++    )
++
++    for idx, name in enumerate(tables):
++        table = conn.Table(f"table-{idx}")
++        scan = table.scan()
++        assert scan["Count"].should.equal(0)
++
++
++@mock_dynamodb2
++def test_batch_write_item_non_existing_table():
++    client = boto3.client("dynamodb", region_name="us-west-2")
++
++    with pytest.raises(client.exceptions.ResourceNotFoundException) as exc:
++        # Table my-table does not exist
++        client.batch_write_item(
++            RequestItems={"my-table": [{"PutRequest": {"Item": {}}}]}
++        )
++    err = exc.value.response["Error"]
++    assert err["Code"].should.equal("ResourceNotFoundException")
++    assert err["Message"].should.equal("Requested resource not found")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

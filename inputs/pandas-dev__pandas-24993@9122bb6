@@ -1,0 +1,315 @@
+  Task-ID: pandas-dev__pandas-24993@9122bb6
+  Please checkout to this commit first: b9f2e2bd526ad69fe3d737d395742193e29fd0e5
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  .memory_usage(deep=True) errors on some objects 
+#### Code Sample, a copy-pastable example if possible
+
+```python
+import pandas as pd
+pd.Series([(1,2), (3,4)]).memory_usage(deep=True)
+
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/series.py", line 3913, in memory_usage
+    v = super(Series, self).memory_usage(deep=deep)
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/base.py", line 1410, in memory_usage
+    v += lib.memory_usage_of_objects(self.array)
+  File "pandas/_libs/lib.pyx", line 101, in pandas._libs.lib.memory_usage_of_objects
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 226, in __getitem__
+    result = type(self)(result)
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 131, in __init__
+    raise ValueError("'values' must be a NumPy array.")
+ValueError: 'values' must be a NumPy array.
+```
+It seems to be related to calling `self.array` on the series which might makes sense given PandasArray is supposed be 1-dimensional
+```python
+pd.array([(1,2), (3,4)])
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/array_.py", line 273, in array
+    result = PandasArray._from_sequence(data, dtype=dtype, copy=copy)
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 150, in _from_sequence
+    return cls(result)
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 134, in __init__
+    raise ValueError("PandasArray must be 1-dimensional.")
+ValueError: PandasArray must be 1-dimensional.
+```
+This also happens with Python objects
+```python
+class Dummy(object):
+    def __init__(self):
+        pass
+
+pd.array([Dummy(), Dummy()])
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/base.py", line 848, in __repr__
+    indent_for_name=False).rstrip(', \n')
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/io/formats/printing.py", line 348, in format_object_summary
+    first = formatter(obj[0])
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 226, in __getitem__
+    result = type(self)(result)
+  File "/home/roy/ftpyenv/clean/lib/python3.7/site-packages/pandas/core/arrays/numpy_.py", line 131, in __init__
+    raise ValueError("'values' must be a NumPy array.")
+ValueError: 'values' must be a NumPy array.
+```
+#### Problem description
+
+The current behavior is a problem because if a dataframe has a column with non-standard data like tuples the `.memory_usage(deep=True)` call fails.
+
+#### Expected Output
+
+```python
+pd.Series([(1,2)]).memory_usage(deep=True)
+176
+```
+
+#### Output of ``pd.show_versions()``
+
+<details>
+
+INSTALLED VERSIONS
+------------------
+commit: None
+python: 3.7.1.final.0
+python-bits: 64
+OS: Linux
+OS-release: 4.15.0-43-generic
+machine: x86_64
+processor: x86_64
+byteorder: little
+LC_ALL: None
+LANG: en_US.UTF-8
+LOCALE: en_US.UTF-8
+
+pandas: 0.24.0
+pytest: 3.8.2
+pip: 18.1
+setuptools: 40.6.2
+Cython: None
+numpy: 1.16.0
+scipy: 1.1.0
+pyarrow: None
+xarray: None
+IPython: 7.1.1
+sphinx: 1.8.1
+patsy: None
+dateutil: 2.7.5
+pytz: 2018.7
+blosc: None
+bottleneck: None
+tables: None
+numexpr: None
+feather: None
+matplotlib: 3.0.1
+openpyxl: None
+xlrd: None
+xlwt: None
+xlsxwriter: None
+lxml.etree: None
+bs4: None
+html5lib: None
+sqlalchemy: None
+pymysql: None
+psycopg2: None
+jinja2: 2.10
+s3fs: 0.2.0
+fastparquet: 0.2.1
+pandas_gbq: None
+pandas_datareader: None
+gcsfs: None
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/core/arrays/numpy_.py b/pandas/core/arrays/numpy_.py
+index 47517782e2bbf..791ff44303e96 100644
+--- a/pandas/core/arrays/numpy_.py
++++ b/pandas/core/arrays/numpy_.py
+@@ -222,7 +222,7 @@ def __getitem__(self, item):
+             item = item._ndarray
+ 
+         result = self._ndarray[item]
+-        if not lib.is_scalar(result):
++        if not lib.is_scalar(item):
+             result = type(self)(result)
+         return result
+ 
+diff --git a/pandas/tests/extension/numpy_/__init__.py b/pandas/tests/extension/numpy_/__init__.py
+new file mode 100644
+index 0000000000000..e69de29bb2d1d
+diff --git a/pandas/tests/extension/numpy_/conftest.py b/pandas/tests/extension/numpy_/conftest.py
+new file mode 100644
+index 0000000000000..6cad25d971bb2
+--- /dev/null
++++ b/pandas/tests/extension/numpy_/conftest.py
+@@ -0,0 +1,53 @@
++import pytest
++
++# A set of Base EA tests that are know to not work for
++# the object-dtype PandasArray holding nested data.
++skips = {
++    'BaseCastingTests.test_astype_str',
++    'BaseConstructorsTests.test_array_from_scalars',
++    # tuple isn't instance of np.object
++    'BaseGetitemTests.test_getitem_scalar',
++    # Can't pass tuples to _from_sequence
++    'BaseGetitemTests.test_take_series',
++    # np.array shape inference
++    'BaseInterfaceTests.test_array_interface',
++    # Can't construct expected.
++    'BaseMethodsTests.test_unique',
++    'BaseMethodsTests.test_combine_add',
++    'BaseMethodsTests.test_shift_fill_value',
++    'BaseMethodsTests.test_where_series',
++    'BaseMethodsTests.test_repeat',
++    # Can't hash ndarray[tuple]
++    'BaseMethodsTests.test_hash_pandas_object_works',
++    # Can't construct expected.
++    'BaseReshapingTests.test_merge',
++    'BaseReshapingTests.test_merge_on_extension_array',
++    'BaseReshapingTests.test_merge_on_extension_array_duplicates',
++
++    # ndarray setting
++    'BaseSetitemTests.test_setitem_scalar_series',
++    'BaseSetitemTests.test_setitem_sequence',
++    'BaseSetitemTests.test_setitem_sequence_mismatched_length_raises',
++    'BaseSetitemTests.test_setitem_sequence_broadcasts',
++    'BaseSetitemTests.test_setitem_sequence_broadcasts',
++    'BaseSetitemTests.test_setitem_loc_scalar_mixed',
++    'BaseSetitemTests.test_setitem_iloc_scalar_mixed',
++    'BaseSetitemTests.test_setitem_loc_scalar_multiple_homogoneous',
++    'BaseSetitemTests.test_setitem_iloc_scalar_multiple_homogoneous',
++    'BaseSetitemTests.test_setitem_mask_broadcast',
++    'BaseSetitemTests.test_setitem_scalar_key_sequence_raise',
++
++    'BaseParsingTests.test_EA_types',
++}
++
++
++def pytest_collection_modifyitems(config, items):
++    skip = pytest.mark.skip(reason="Skipping this because ...")
++    for item in items:
++        # TODO: See if pytest has a better way to resolve the *value*
++        # supplied to a fixture. Right now .keywords gets things
++        # like 'object' or 'data-object'.
++        parts = item.name.split("[")
++        if (len(parts) > 1 and 'object' in item.name.split('[')[1]
++                and item.obj.__qualname__ in skips):
++            item.add_marker(skip)
+diff --git a/pandas/tests/extension/test_numpy.py b/pandas/tests/extension/numpy_/test_numpy.py
+similarity index 81%
+rename from pandas/tests/extension/test_numpy.py
+rename to pandas/tests/extension/numpy_/test_numpy.py
+index 7ca6882c7441b..f2c6b956b0bbd 100644
+--- a/pandas/tests/extension/test_numpy.py
++++ b/pandas/tests/extension/numpy_/test_numpy.py
+@@ -6,12 +6,12 @@
+ from pandas.core.arrays.numpy_ import PandasArray, PandasDtype
+ import pandas.util.testing as tm
+ 
+-from . import base
++from .. import base
+ 
+ 
+-@pytest.fixture
+-def dtype():
+-    return PandasDtype(np.dtype('float'))
++@pytest.fixture(params=['float', 'object'])
++def dtype(request):
++    return PandasDtype(np.dtype(request.param))
+ 
+ 
+ @pytest.fixture
+@@ -38,6 +38,8 @@ def allow_in_pandas(monkeypatch):
+ 
+ @pytest.fixture
+ def data(allow_in_pandas, dtype):
++    if dtype.numpy_dtype == 'object':
++        return pd.Series([(i,) for i in range(100)]).array
+     return PandasArray(np.arange(1, 101, dtype=dtype._dtype))
+ 
+ 
+@@ -150,6 +152,19 @@ class TestArithmetics(BaseNumPyTests, base.BaseArithmeticOpsTests):
+     frame_scalar_exc = None
+     series_array_exc = None
+ 
++    def _check_op(self, s, op, other, op_name, exc=NotImplementedError):
++        if s.dtype == 'object':
++            raise pytest.skip("Skipping for object dtype.")
++        super(TestArithmetics, self)._check_op(s, op, other, op_name, exc)
++
++    def _check_divmod_op(self, s, op, other, exc=Exception):
++        if isinstance(s, pd.Series) and s.dtype == 'object':
++            raise pytest.skip("Skipping for object dtype.")
++        elif isinstance(other, pd.Series) and other.dtype == 'object':
++            raise pytest.skip("Skipping for object dtype.")
++
++        super(TestArithmetics, self)._check_divmod_op(s, op, other, exc)
++
+     def test_divmod_series_array(self, data):
+         s = pd.Series(data)
+         self._check_divmod_op(s, divmod, data, exc=None)
+@@ -186,6 +201,8 @@ class TestPrinting(BaseNumPyTests, base.BasePrintingTests):
+ class TestNumericReduce(BaseNumPyTests, base.BaseNumericReduceTests):
+ 
+     def check_reduce(self, s, op_name, skipna):
++        if s.dtype == 'object':
++            raise pytest.skip("Skipping for object dtype.")
+         result = getattr(s, op_name)(skipna=skipna)
+         # avoid coercing int -> float. Just cast to the actual numpy type.
+         expected = getattr(s.astype(s.dtype._dtype), op_name)(skipna=skipna)
+@@ -193,10 +210,15 @@ def check_reduce(self, s, op_name, skipna):
+ 
+ 
+ class TestBooleanReduce(BaseNumPyTests, base.BaseBooleanReduceTests):
+-    pass
++
++    def check_reduce(self, s, op_name, skipna):
++        if s.dtype == 'object':
++            raise pytest.skip("Skipping for object dtype.")
++
++        super(TestBooleanReduce, self).check_reduce(s, op_name, skipna)
+ 
+ 
+-class TestMising(BaseNumPyTests, base.BaseMissingTests):
++class TestMissing(BaseNumPyTests, base.BaseMissingTests):
+     pass
+ 
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

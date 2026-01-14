@@ -1,0 +1,693 @@
+  Task-ID: saleor__saleor-4863@90332b3
+  Please checkout to this commit first: fe68e5e59b244fc86a0bc8e04eabb0f00a611149
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Configure storefront URL through the API
+In the dashboard, we have a view for creating customers, which can automatically send them a link to set up their passwords. The issue is that the dashboard doesn't know what is the storefront's URL, and in particular, what is the address of a view to set the password. 
+
+I suggest that we add a field for this in the `SiteSettings` model and allow for managing it thorough the API. The field could be called something like `customerPasswordResetURL`. 
+
+If we need to support multiple storefronts or allow for more configurable links (e.g. storefront's product details page URL etc. we will extend this in the future).
+  </issue>
+  
+  <patch>
+  diff --git a/.isort.cfg b/.isort.cfg
+index 72a7c64739e..13f594c9866 100644
+--- a/.isort.cfg
++++ b/.isort.cfg
+@@ -1,2 +1,2 @@
+ [settings]
+-known_third_party = PIL,babel,bleach,bootstrap4,braintree,bs4,captcha,celery,dj_database_url,dj_email_url,django,django_babel,django_cache_url,django_countries,django_elasticsearch_dsl,django_filters,django_measurement,django_prices,django_prices_openexchangerates,django_prices_vatlayer,draftjs_sanitizer,elasticsearch_dsl,faker,freezegun,geolite2,google_measurement_protocol,graphene,graphene_django,graphene_django_optimizer,graphql,graphql_jwt,graphql_relay,html5lib,html_to_draftjs,i18naddress,impersonate,markdown,measurement,mptt,oauthlib,phonenumber_field,phonenumbers,prices,promise,pytest,razorpay,requests,sentry_sdk,six,social_core,storages,stripe,templated_email,text_unidecode,tqdm,versatileimagefield
++known_third_party = PIL,babel,bleach,bootstrap4,braintree,bs4,captcha,celery,dj_database_url,dj_email_url,django,django_babel,django_cache_url,django_countries,django_elasticsearch_dsl,django_filters,django_measurement,django_prices,django_prices_openexchangerates,django_prices_vatlayer,draftjs_sanitizer,elasticsearch_dsl,faker,freezegun,geolite2,google_measurement_protocol,graphene,graphene_django,graphene_django_optimizer,graphene_federation,graphql,graphql_jwt,graphql_relay,html5lib,html_to_draftjs,i18naddress,impersonate,markdown,measurement,mptt,oauthlib,phonenumber_field,phonenumbers,prices,promise,pytest,razorpay,requests,sentry_sdk,six,social_core,storages,stripe,templated_email,text_unidecode,tqdm,versatileimagefield
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e2f2721d26c..a73365d47a4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -100,6 +100,7 @@ All notable, unreleased changes to this project will be documented in this file.
+ - Fix ProductVariant with duplicated AttributeValues - #4829 by @fowczarek
+ - Saleor can now be part of Apollo Federation, making seamless GraphQL schema extension possible - #4825 by @salwator
+ - Added the possibility to customize the sender address and name from the dashboard - #4820 by @NyanKiyoshi
++- Add customer set password url to Site settings - #4863 by @fowczarek
+ 
+ ## 2.8.0
+ 
+diff --git a/saleor/core/utils/url.py b/saleor/core/utils/url.py
+index a4ef24d873d..8a8ab526fbe 100644
+--- a/saleor/core/utils/url.py
++++ b/saleor/core/utils/url.py
+@@ -4,8 +4,6 @@
+ from django.core.exceptions import ValidationError
+ from django.http.request import split_domain_port, validate_host
+ 
+-from ...account.error_codes import AccountErrorCode
+-
+ 
+ def validate_storefront_url(url):
+     """Validate the storefront URL.
+@@ -16,15 +14,15 @@ def validate_storefront_url(url):
+     try:
+         parsed_url = urlparse(url)
+         domain, _ = split_domain_port(parsed_url.netloc)
++        if not parsed_url.netloc:
++            raise ValidationError(
++                "Invalid URL. Please check if URL is in RFC 1808 format."
++            )
+     except ValueError as error:
+-        raise ValidationError(
+-            {"redirectUrl": str(error)}, code=AccountErrorCode.INVALID
+-        )
++        raise ValidationError(error)
+     if not validate_host(domain, settings.ALLOWED_CLIENT_HOSTS):
+         error_message = (
+             f"{domain or url} is not allowed. Please check "
+             "`ALLOWED_CLIENT_HOSTS` configuration."
+         )
+-        raise ValidationError(
+-            {"redirectUrl": error_message}, code=AccountErrorCode.INVALID
+-        )
++        raise ValidationError(error_message)
+diff --git a/saleor/graphql/account/mutations/account.py b/saleor/graphql/account/mutations/account.py
+index bdcbeb01d93..ffcfbab71b1 100644
+--- a/saleor/graphql/account/mutations/account.py
++++ b/saleor/graphql/account/mutations/account.py
+@@ -106,7 +106,12 @@ def check_permissions(cls, context):
+     def perform_mutation(cls, root, info, **data):
+         user = info.context.user
+         redirect_url = data["redirect_url"]
+-        validate_storefront_url(redirect_url)
++        try:
++            validate_storefront_url(redirect_url)
++        except ValidationError as error:
++            raise ValidationError(
++                {"redirect_url": error}, code=AccountErrorCode.INVALID
++            )
+         emails.send_account_delete_confirmation_email_with_url(redirect_url, user)
+         return AccountRequestDeletion()
+ 
+diff --git a/saleor/graphql/account/mutations/base.py b/saleor/graphql/account/mutations/base.py
+index 4e85a88ae53..f33d17a13f3 100644
+--- a/saleor/graphql/account/mutations/base.py
++++ b/saleor/graphql/account/mutations/base.py
+@@ -128,7 +128,12 @@ class Meta:
+     def perform_mutation(cls, _root, info, **data):
+         email = data["email"]
+         redirect_url = data["redirect_url"]
+-        validate_storefront_url(redirect_url)
++        try:
++            validate_storefront_url(redirect_url)
++        except ValidationError as error:
++            raise ValidationError(
++                {"redirect_url": error}, code=AccountErrorCode.INVALID
++            )
+ 
+         try:
+             user = models.User.objects.get(email=email)
+@@ -297,7 +302,11 @@ class CustomerInput(UserInput, UserAddressInput):
+ 
+ class UserCreateInput(CustomerInput):
+     send_password_email = graphene.Boolean(
+-        description="Send an email with a link to set a password."
++        description=(
++            "DEPRECATED: Will be removed in Saleor 2.10, if mutation has `redirect_url`"
++            " in input then customer get email with link to set a password. "
++            "Send an email with a link to set a password."
++        )
+     )
+     redirect_url = graphene.String(
+         description=(
+@@ -337,6 +346,8 @@ def clean_input(cls, info, instance, data):
+             )
+             cleaned_input[BILLING_ADDRESS_FIELD] = billing_address
+ 
++        # DEPRECATED: We shoud remove this confition whe drop `send_password_email`
++        # from mutation imput.
+         if cleaned_input.get("send_password_email"):
+             if not cleaned_input.get("redirect_url"):
+                 raise ValidationError(
+@@ -347,7 +358,14 @@ def clean_input(cls, info, instance, data):
+                         )
+                     }
+                 )
+-            validate_storefront_url(cleaned_input.get("redirect_url"))
++
++        if cleaned_input.get("redirect_url"):
++            try:
++                validate_storefront_url(cleaned_input.get("redirect_url"))
++            except ValidationError as error:
++                raise ValidationError(
++                    {"redirect_url": error}, code=AccountErrorCode.INVALID
++                )
+ 
+         return cleaned_input
+ 
+@@ -372,7 +390,7 @@ def save(cls, info, instance, cleaned_input):
+             info.context.extensions.customer_created(customer=instance)
+             account_events.customer_account_created_event(user=instance)
+ 
+-        if cleaned_input.get("send_password_email"):
++        if cleaned_input.get("redirect_url"):
+             send_set_password_email_with_url(
+                 cleaned_input.get("redirect_url"), instance
+             )
+diff --git a/saleor/graphql/account/mutations/staff.py b/saleor/graphql/account/mutations/staff.py
+index 64e80937a41..1b9e624b577 100644
+--- a/saleor/graphql/account/mutations/staff.py
++++ b/saleor/graphql/account/mutations/staff.py
+@@ -46,7 +46,11 @@ class StaffInput(UserInput):
+ 
+ class StaffCreateInput(StaffInput):
+     send_password_email = graphene.Boolean(
+-        description="Send an email with a link to set the password."
++        description=(
++            "DEPRECATED: Will be removed in Saleor 2.10, if mutation has `redirect_url`"
++            " in input then staff get email with link to set a password. "
++            "Send an email with a link to set the password."
++        )
+     )
+     redirect_url = graphene.String(
+         description=(
+@@ -172,6 +176,8 @@ class Meta:
+     def clean_input(cls, info, instance, data):
+         cleaned_input = super().clean_input(info, instance, data)
+ 
++        # DEPRECATED: We shoud remove this confition whe drop `send_password_email`
++        # from mutation imput.
+         if cleaned_input.get("send_password_email"):
+             if not cleaned_input.get("redirect_url"):
+                 raise ValidationError(
+@@ -182,7 +188,14 @@ def clean_input(cls, info, instance, data):
+                         )
+                     }
+                 )
+-            validate_storefront_url(cleaned_input.get("redirect_url"))
++
++        if cleaned_input.get("redirect_url"):
++            try:
++                validate_storefront_url(cleaned_input.get("redirect_url"))
++            except ValidationError as error:
++                raise ValidationError(
++                    {"redirect_url": error}, code=AccountErrorCode.INVALID
++                )
+ 
+         # set is_staff to True to create a staff user
+         cleaned_input["is_staff"] = True
+@@ -201,7 +214,7 @@ def save(cls, info, user, cleaned_input):
+         user.save()
+         if create_avatar:
+             create_user_avatar_thumbnails.delay(user_id=user.pk)
+-        if cleaned_input.get("send_password_email"):
++        if cleaned_input.get("redirect_url"):
+             send_set_password_email_with_url(
+                 redirect_url=cleaned_input.get("redirect_url"), user=user, staff=True
+             )
+diff --git a/saleor/graphql/schema.graphql b/saleor/graphql/schema.graphql
+index a845ef15bba..a2c53e4fc9c 100644
+--- a/saleor/graphql/schema.graphql
++++ b/saleor/graphql/schema.graphql
+@@ -3767,6 +3767,7 @@ type Shop {
+   defaultDigitalMaxDownloads: Int
+   defaultDigitalUrlValidDays: Int
+   companyAddress: Address
++  customerSetPasswordUrl: String
+ }
+ 
+ type ShopAddressUpdate {
+@@ -3816,6 +3817,7 @@ input ShopSettingsInput {
+   defaultDigitalUrlValidDays: Int
+   defaultMailSenderName: String
+   defaultMailSenderAddress: String
++  customerSetPasswordUrl: String
+ }
+ 
+ type ShopSettingsTranslate {
+diff --git a/saleor/graphql/shop/mutations.py b/saleor/graphql/shop/mutations.py
+index 81dff20673b..3b7fca69d77 100644
+--- a/saleor/graphql/shop/mutations.py
++++ b/saleor/graphql/shop/mutations.py
+@@ -5,6 +5,7 @@
+ 
+ from ...account.models import Address
+ from ...core.error_codes import ShopErrorCode
++from ...core.utils.url import validate_storefront_url
+ from ...site import models as site_models
+ from ..account.i18n import I18nMixin
+ from ..account.types import AddressInput
+@@ -42,6 +43,9 @@ class ShopSettingsInput(graphene.InputObjectType):
+     default_mail_sender_address = graphene.String(
+         description="Default email sender's address."
+     )
++    customer_set_password_url = graphene.String(
++        description="Storefront url address in which the client sets the password."
++    )
+ 
+ 
+ class SiteDomainInput(graphene.InputObjectType):
+@@ -64,13 +68,30 @@ class Meta:
+         error_type_field = "shop_errors"
+ 
+     @classmethod
+-    def perform_mutation(cls, _root, info, **data):
+-        instance = info.context.site.settings
+-        data = data.get("input")
+-        for field_name, desired_value in data.items():
++    def clean_input(cls, _info, _instance, data):
++        if data.get("customer_set_password_url"):
++            try:
++                validate_storefront_url(data["customer_set_password_url"])
++            except ValidationError as error:
++                raise ValidationError(
++                    {"customer_set_password_url": error}, code=ShopErrorCode.INVALID
++                )
++        return data
++
++    @classmethod
++    def construct_instance(cls, instance, cleaned_data):
++        for field_name, desired_value in cleaned_data.items():
+             current_value = getattr(instance, field_name)
+             if current_value != desired_value:
+                 setattr(instance, field_name, desired_value)
++        return instance
++
++    @classmethod
++    def perform_mutation(cls, _root, info, **data):
++        instance = info.context.site.settings
++        data = data.get("input")
++        cleaned_input = cls.clean_input(info, instance, data)
++        instance = cls.construct_instance(instance, cleaned_input)
+         cls.clean_instance(instance)
+         instance.save()
+         return ShopSettingsUpdate(shop=Shop())
+diff --git a/saleor/graphql/shop/types.py b/saleor/graphql/shop/types.py
+index b43ab1c50c6..1ea4a92a832 100644
+--- a/saleor/graphql/shop/types.py
++++ b/saleor/graphql/shop/types.py
+@@ -149,6 +149,10 @@ class Shop(graphene.ObjectType):
+     company_address = graphene.Field(
+         Address, description="Company address.", required=False
+     )
++    customer_set_password_url = graphene.String(
++        description="storefront url address in which the client sets the password.",
++        required=False,
++    )
+ 
+     class Meta:
+         description = (
+@@ -289,6 +293,10 @@ def resolve_default_mail_sender_address(_, info):
+     def resolve_company_address(_, info):
+         return info.context.site.settings.company_address
+ 
++    @staticmethod
++    def resolve_customer_set_password_url(_, info):
++        return info.context.site.settings.customer_set_password_url
++
+     @staticmethod
+     def resolve_translation(_, info, language_code):
+         return resolve_translation(info.context.site.settings, info, language_code)
+diff --git a/saleor/site/migrations/0024_sitesettings_customer_set_password_url.py b/saleor/site/migrations/0024_sitesettings_customer_set_password_url.py
+new file mode 100644
+index 00000000000..46eb9085022
+--- /dev/null
++++ b/saleor/site/migrations/0024_sitesettings_customer_set_password_url.py
+@@ -0,0 +1,16 @@
++# Generated by Django 2.2.6 on 2019-10-21 11:40
++
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    dependencies = [("site", "0023_auto_20191007_0835")]
++
++    operations = [
++        migrations.AddField(
++            model_name="sitesettings",
++            name="customer_set_password_url",
++            field=models.CharField(blank=True, max_length=255, null=True),
++        )
++    ]
+diff --git a/saleor/site/models.py b/saleor/site/models.py
+index 145fdf0157a..4eaba2be389 100644
+--- a/saleor/site/models.py
++++ b/saleor/site/models.py
+@@ -61,7 +61,6 @@ class SiteSettings(models.Model):
+     company_address = models.ForeignKey(
+         "account.Address", blank=True, null=True, on_delete=models.CASCADE
+     )
+-
+     default_mail_sender_name = models.CharField(
+         max_length=settings.DEFAULT_MAX_EMAIL_DISPLAY_NAME_LENGTH,
+         blank=True,
+@@ -69,7 +68,7 @@ class SiteSettings(models.Model):
+         validators=EMAIL_SENDER_NAME_VALIDATORS,
+     )
+     default_mail_sender_address = models.EmailField(blank=True, null=True)
+-
++    customer_set_password_url = models.CharField(max_length=255, blank=True, null=True)
+     translated = TranslationProxy()
+ 
+     class Meta:
+diff --git a/tests/api/test_account.py b/tests/api/test_account.py
+index 758484ae153..0d0dea254bc 100644
+--- a/tests/api/test_account.py
++++ b/tests/api/test_account.py
+@@ -646,6 +646,10 @@ def test_customer_register(user_api_client, query, mutation_name):
+                 field
+                 message
+             }
++            accountErrors {
++                field
++                code
++            }
+             user {
+                 id
+                 defaultBillingAddress {
+@@ -683,7 +687,6 @@ def test_customer_create(
+         "note": note,
+         "shipping": address_data,
+         "billing": address_data,
+-        "send_mail": True,
+         "redirect_url": "https://www.example.com",
+     }
+ 
+@@ -727,11 +730,7 @@ def test_customer_create_send_password_with_url(
+     permission_manage_users,
+ ):
+     email = "api_user@example.com"
+-    variables = {
+-        "email": email,
+-        "send_mail": True,
+-        "redirect_url": "https://www.example.com",
+-    }
++    variables = {"email": email, "redirect_url": "https://www.example.com"}
+ 
+     response = staff_api_client.post_graphql(
+         CUSTOMER_CREATE_MUTATION, variables, permissions=[permission_manage_users]
+@@ -763,7 +762,7 @@ def test_customer_create_without_send_password(
+     User.objects.get(email=email)
+ 
+ 
+-def test_customer_create_without_redirect_url(
++def test_customer_create_without_redirect_url_deprecated_send_mail_flag(
+     staff_api_client, permission_manage_users
+ ):
+     email = "api_user@example.com"
+@@ -773,20 +772,26 @@ def test_customer_create_without_redirect_url(
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["customerCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.REQUIRED.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+ 
+ def test_customer_create_with_invalid_url(staff_api_client, permission_manage_users):
+     email = "api_user@example.com"
+-    variables = {"email": email, "send_mail": True, "redirect_url": "invalid"}
++    variables = {"email": email, "redirect_url": "invalid"}
+     response = staff_api_client.post_graphql(
+         CUSTOMER_CREATE_MUTATION, variables, permissions=[permission_manage_users]
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["customerCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.INVALID.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+@@ -795,17 +800,16 @@ def test_customer_create_with_not_allowed_url(
+     staff_api_client, permission_manage_users
+ ):
+     email = "api_user@example.com"
+-    variables = {
+-        "email": email,
+-        "send_mail": True,
+-        "redirectUrl": "https://www.fake.com",
+-    }
++    variables = {"email": email, "redirect_url": "https://www.fake.com"}
+     response = staff_api_client.post_graphql(
+         CUSTOMER_CREATE_MUTATION, variables, permissions=[permission_manage_users]
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["customerCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.INVALID.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+@@ -1110,6 +1114,10 @@ def test_logged_customer_update_anonymous_user(api_client, query):
+                 field
+                 message
+             }
++            accountErrors {
++                code
++                field
++            }
+         }
+     }
+ """
+@@ -1173,7 +1181,10 @@ def test_account_request_deletion_storefront_hosts_not_allowed(
+     content = get_graphql_content(response)
+     data = content["data"]["accountRequestDeletion"]
+     assert len(data["errors"]) == 1
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.INVALID.name,
++    }
+     send_account_delete_confirmation_email_with_url_mock.assert_not_called()
+ 
+ 
+@@ -1358,7 +1369,6 @@ def test_customer_delete_errors(customer_user, admin_user, staff_user):
+             }
+             accountErrors {
+                 field
+-                message
+                 code
+             }
+             user {
+@@ -1386,7 +1396,6 @@ def test_staff_create(
+     variables = {
+         "email": email,
+         "permissions": [PermissionEnum.MANAGE_PRODUCTS.name],
+-        "send_mail": True,
+         "redirect_url": "https://www.example.com",
+     }
+ 
+@@ -1423,11 +1432,7 @@ def test_staff_create_send_password_with_url(
+     permission_manage_staff,
+ ):
+     email = "api_user@example.com"
+-    variables = {
+-        "email": email,
+-        "send_mail": True,
+-        "redirect_url": "https://www.example.com",
+-    }
++    variables = {"email": email, "redirect_url": "https://www.example.com"}
+ 
+     response = staff_api_client.post_graphql(
+         STAFF_CREATE_MUTATION, variables, permissions=[permission_manage_staff]
+@@ -1459,7 +1464,7 @@ def test_staff_create_without_send_password(
+     User.objects.get(email=email)
+ 
+ 
+-def test_staff_create_without_redirect_url(
++def test_staff_create_without_redirect_url_deprecated_send_mail_flag(
+     staff_api_client, media_root, permission_manage_staff
+ ):
+     email = "api_user@example.com"
+@@ -1469,7 +1474,10 @@ def test_staff_create_without_redirect_url(
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["staffCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.REQUIRED.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+@@ -1478,13 +1486,16 @@ def test_staff_create_with_invalid_url(
+     staff_api_client, media_root, permission_manage_staff
+ ):
+     email = "api_user@example.com"
+-    variables = {"email": email, "send_mail": True, "redirect_url": "invalid"}
++    variables = {"email": email, "redirect_url": "invalid"}
+     response = staff_api_client.post_graphql(
+         STAFF_CREATE_MUTATION, variables, permissions=[permission_manage_staff]
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["staffCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.INVALID.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+@@ -1492,18 +1503,17 @@ def test_staff_create_with_invalid_url(
+ def test_staff_create_with_not_allowed_url(
+     staff_api_client, media_root, permission_manage_staff
+ ):
+-    email = "api_user@example.com"
+-    variables = {
+-        "email": email,
+-        "send_mail": True,
+-        "redirectUrl": "https://www.fake.com",
+-    }
++    email = "api_userrr@example.com"
++    variables = {"email": email, "redirect_url": "https://www.fake.com"}
+     response = staff_api_client.post_graphql(
+         STAFF_CREATE_MUTATION, variables, permissions=[permission_manage_staff]
+     )
+     content = get_graphql_content(response)
+     data = content["data"]["staffCreate"]
+-    assert data["errors"][0]["field"] == "redirectUrl"
++    assert data["accountErrors"][0] == {
++        "field": "redirectUrl",
++        "code": AccountErrorCode.INVALID.name,
++    }
+     staff_user = User.objects.filter(email=email)
+     assert not staff_user
+ 
+@@ -1558,7 +1568,6 @@ def test_staff_update_doesnt_change_existing_avatar(
+             }
+             accountErrors {
+                 field
+-                message
+                 code
+             }
+         }
+diff --git a/tests/api/test_shop.py b/tests/api/test_shop.py
+index 43d42948e25..ebb2d25e0a9 100644
+--- a/tests/api/test_shop.py
++++ b/tests/api/test_shop.py
+@@ -1,7 +1,10 @@
++from unittest.mock import ANY
++
+ import graphene
+ import pytest
+ from django_countries import countries
+ 
++from saleor.core.error_codes import ShopErrorCode
+ from saleor.core.permissions import MODELS_PERMISSIONS
+ from saleor.graphql.core.utils import str_to_enum
+ from saleor.site import AuthenticationBackends
+@@ -513,6 +516,72 @@ def test_shop_domain_update(staff_api_client, permission_manage_settings):
+     assert site.name == new_name
+ 
+ 
++MUTATION_CUSTOMER_SET_PASSWORD_URL_UPDATE = """
++    mutation updateSettings($customerSetPasswordUrl: String!) {
++        shopSettingsUpdate(input: {customerSetPasswordUrl: $customerSetPasswordUrl}){
++            shop {
++                customerSetPasswordUrl
++            }
++            shopErrors {
++                message
++                field
++                code
++            }
++        }
++    }
++"""
++
++
++def test_shop_customer_set_password_url_update(
++    staff_api_client, site_settings, permission_manage_settings
++):
++    customer_set_password_url = "http://www.example.com/set_pass/"
++    variables = {"customerSetPasswordUrl": customer_set_password_url}
++    assert site_settings.customer_set_password_url != customer_set_password_url
++    response = staff_api_client.post_graphql(
++        MUTATION_CUSTOMER_SET_PASSWORD_URL_UPDATE,
++        variables,
++        permissions=[permission_manage_settings],
++    )
++    content = get_graphql_content(response)
++    data = content["data"]["shopSettingsUpdate"]
++    assert not data["shopErrors"]
++    site_settings = Site.objects.get_current().settings
++    assert site_settings.customer_set_password_url == customer_set_password_url
++
++
++@pytest.mark.parametrize(
++    "customer_set_password_url",
++    [
++        ("http://not-allowed-storefron.com/pass"),
++        ("http://[value-error-in-urlparse@test/pass"),
++        ("without-protocole.com/pass"),
++    ],
++)
++def test_shop_customer_set_password_url_update_invalid_url(
++    staff_api_client,
++    site_settings,
++    permission_manage_settings,
++    customer_set_password_url,
++):
++    variables = {"customerSetPasswordUrl": customer_set_password_url}
++    assert not site_settings.customer_set_password_url
++    response = staff_api_client.post_graphql(
++        MUTATION_CUSTOMER_SET_PASSWORD_URL_UPDATE,
++        variables,
++        permissions=[permission_manage_settings],
++    )
++    content = get_graphql_content(response)
++    data = content["data"]["shopSettingsUpdate"]
++    assert data["shopErrors"][0] == {
++        "field": "customerSetPasswordUrl",
++        "code": ShopErrorCode.INVALID.name,
++        "message": ANY,
++    }
++    site_settings.refresh_from_db()
++    assert not site_settings.customer_set_password_url
++
++
+ def test_homepage_collection_update(
+     staff_api_client, collection, permission_manage_settings
+ ):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

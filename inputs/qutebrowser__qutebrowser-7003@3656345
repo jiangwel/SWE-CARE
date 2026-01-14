@@ -1,0 +1,191 @@
+  Task-ID: qutebrowser__qutebrowser-7003@3656345
+  Please checkout to this commit first: 3f31e36bc79516cd827ca739588abd5c3df3c34a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add an option to use the native filepicker for downloads
+Some users would prefer a native filepicker dialog to the current statusbar input (without completion), so there should be an option to use that.
+
+edit: In addition, this should allow to switch from the default behavior of using the native file dialog for uploads to using the statusbar input as well.
+  </issue>
+  
+  <patch>
+  diff --git a/qutebrowser/browser/shared.py b/qutebrowser/browser/shared.py
+index f195bbf28cc..7d11773ae7c 100644
+--- a/qutebrowser/browser/shared.py
++++ b/qutebrowser/browser/shared.py
+@@ -404,7 +404,7 @@ class FileSelectionMode(enum.Enum):
+ 
+ 
+ def choose_file(qb_mode: FileSelectionMode) -> List[str]:
+-    """Select file(s)/folder for uploading, using external command defined in config.
++    """Select file(s)/folder for uploading/downloading, using external command defined in config.
+ 
+     Args:
+         qb_mode: File selection mode
+@@ -450,7 +450,7 @@ def _execute_fileselect_command(
+     """Execute external command to choose file.
+ 
+     Args:
+-        multiple: Should selecting multiple files be allowed.
++        qb_mode: Should selecting multiple files be allowed.
+         tmpfilename: Path to the temporary file if used, otherwise None.
+ 
+     Return:
+diff --git a/qutebrowser/config/configdata.yml b/qutebrowser/config/configdata.yml
+index 95338b36fdc..ff333d21d18 100644
+--- a/qutebrowser/config/configdata.yml
++++ b/qutebrowser/config/configdata.yml
+@@ -3780,6 +3780,7 @@ bindings.default:
+       <Down>: prompt-item-focus next
+       <Alt-Y>: prompt-yank
+       <Alt-Shift-Y>: prompt-yank --sel
++      <Alt-E>: prompt-fileselect-external
+       <Ctrl-B>: rl-backward-char
+       <Ctrl-F>: rl-forward-char
+       <Alt-B>: rl-backward-word
+diff --git a/qutebrowser/mainwindow/prompt.py b/qutebrowser/mainwindow/prompt.py
+index 29ea9a45fc3..6d41a26ffc8 100644
+--- a/qutebrowser/mainwindow/prompt.py
++++ b/qutebrowser/mainwindow/prompt.py
+@@ -467,6 +467,31 @@ def prompt_yank(self, sel=False):
+         utils.set_clipboard(question.url, sel)
+         message.info("Yanked to {}: {}".format(target, question.url))
+ 
++    @cmdutils.register(
++        instance='prompt-container', scope='window',
++        modes=[usertypes.KeyMode.prompt])
++    def prompt_fileselect_external(self):
++        """Choose a location using a configured external picker."""
++        if not (self._prompt and isinstance(self._prompt, FilenamePrompt)):
++            raise cmdutils.CommandError(
++                f"Can only launch external fileselect for FilenamePrompt, not {self._prompt}"
++            )
++        picker = config.val.fileselect.folder.command
++        if not picker:
++            raise cmdutils.CommandError(
++                "No external location picker (fileselect.folder.command) configured."
++            )
++        # TODO fix cyclic import
++        from qutebrowser.browser import shared
++        folders = shared.choose_file(shared.FileSelectionMode.folder)
++        if not folders:
++            message.info("No folder chosen.")
++            return
++        # choose_file already checks that this is max one folder
++        assert len(folders) == 1
++        folder = folders[0]
++        self._prompt.accept(folder)
++
+ 
+ class LineEdit(QLineEdit):
+ 
+@@ -834,6 +859,7 @@ def _allowed_commands(self):
+             ('prompt-open-download', "Open download"),
+             ('prompt-open-download --pdfjs', "Open download via PDF.js"),
+             ('prompt-yank', "Yank URL"),
++            ('prompt-fileselect-external', "Launch external fileselect"),
+         ]
+         return cmds
+ 
+diff --git a/tests/end2end/features/downloads.feature b/tests/end2end/features/downloads.feature
+index dfdb247040a..2d5ed8a2c0e 100644
+--- a/tests/end2end/features/downloads.feature
++++ b/tests/end2end/features/downloads.feature
+@@ -684,3 +684,16 @@ Feature: Downloading things from a website.
+         When I set downloads.location.prompt to false
+         And I open 500-inline
+         Then the error "Download error: *INTERNAL SERVER ERROR" should be shown
++
++    ## External download path fileselector
++
++    Scenario: Select download path
++        When I set downloads.location.prompt to true
++        And I set fileselect.handler to external
++        And I setup a fake folder fileselector selecting "tests/end2end/data/backforward/" and writes to a temporary file
++        And I open data/downloads/downloads.html
++        And I run :click-element id download
++        And I wait for the download prompt for "*/download.bin"
++        And I run :prompt-external-picker
++        # TODO what should the check be?
++        Then the javascript message "Files: 1.txt" should be logged
+diff --git a/tests/end2end/features/test_downloads_bdd.py b/tests/end2end/features/test_downloads_bdd.py
+index 804ed40fefd..79cc84551a6 100644
+--- a/tests/end2end/features/test_downloads_bdd.py
++++ b/tests/end2end/features/test_downloads_bdd.py
+@@ -19,6 +19,7 @@
+ 
+ import os
+ import sys
++import json
+ import shlex
+ 
+ import pytest
+@@ -167,3 +168,34 @@ def fifo_should_be_fifo(tmpdir):
+     download_dir = tmpdir / 'downloads'
+     assert download_dir.exists()
+     assert not os.path.isfile(str(download_dir / 'fifo'))
++
++
++# TODO how to share this with test_editor_bdd.py?
++@bdd.when(bdd.parsers.parse('I setup a fake {kind} fileselector '
++                            'selecting "{files}" and writes to {output_type}'))
++def set_up_fileselector(quteproc, py_proc, kind, files, output_type):
++    """Set up fileselect.xxx.command to select the file(s)."""
++    cmd, args = py_proc(r"""
++        import os
++        import sys
++        tmp_file = None
++        for i, arg in enumerate(sys.argv):
++            if arg.startswith('--file='):
++                tmp_file = arg[len('--file='):]
++                sys.argv.pop(i)
++                break
++        selected_files = sys.argv[1:]
++        if tmp_file is None:
++            for selected_file in selected_files:
++                print(os.path.abspath(selected_file))
++        else:
++            with open(tmp_file, 'w') as f:
++                for selected_file in selected_files:
++                    f.write(os.path.abspath(selected_file) + '\n')
++    """)
++    args += files.split(' ')
++    if output_type == "a temporary file":
++        args += ['--file={}']
++    fileselect_cmd = json.dumps([cmd, *args])
++    quteproc.set_setting('fileselect.handler', 'external')
++    quteproc.set_setting(f'fileselect.{kind}.command', fileselect_cmd)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

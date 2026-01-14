@@ -1,0 +1,299 @@
+  Task-ID: skypilot-org__skypilot-1297@fd5782f
+  Please checkout to this commit first: e536f7edaadad9d55f0a7c057ae6fe6d9834dffa
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support autostop option for interactive node CLIs
+I found myself wanting to use autostopping when launching `sky gpunode`.  We can add the following option from `sky launch` to the interactive node CLIs:
+```
+  -i, --idle-minutes-to-autostop INTEGER
+                                  Automatically stop the cluster after this
+                                  many minutes of idleness, i.e., no running
+                                  or pending jobs in the cluster's job queue.
+                                  Idleness starts counting after
+                                  setup/file_mounts are done; the clock gets
+                                  reset whenever there are running/pending
+                                  jobs in the job queue. Setting this flag is
+                                  equivalent to running ``sky launch -d ...``
+                                  and then ``sky autostop -i <minutes>``. If
+                                  not set, the cluster will not be auto-
+                                  stopped.
+```
+
+
+Interactive node CLIs should have feature parity with YAML specification
+The interactive node CLIs (gpunode, tpunode) are missing key functionality I'd like to use:
+* specification of a single region and zone to use for provisioning
+* `--retry-until-up`
+
+Overriding the Skypilot optimizer with a single region is helpful since it doesn't consider factors such as bucket locations. I'd prefer to have Skypilot wait until it can allocate a VM in a single region until successful. Currently, it will search all regions for a VM and then fail as there is zero on-demand A100 capacity across supported Skypilot AWS regions (US only).
+  </issue>
+  
+  <patch>
+  diff --git a/sky/cli.py b/sky/cli.py
+index 705e2500a7a..45702514b06 100644
+--- a/sky/cli.py
++++ b/sky/cli.py
+@@ -208,15 +208,53 @@ def _interactive_node_cli_command(cli_func):
+                               default=False,
+                               required=False,
+                               help='Skip confirmation prompt.')
++    idle_autostop = click.option('--idle-minutes-to-autostop',
++                                 '-i',
++                                 default=None,
++                                 type=int,
++                                 required=False,
++                                 help=('Automatically stop the cluster after '
++                                       'this many minutes of idleness, i.e. '
++                                       'no running or pending jobs in the '
++                                       'cluster\'s job queue. Idleness starts '
++                                       'counting after setup/file_mounts are '
++                                       'done; the clock gets reset whenever '
++                                       'there are running/pending jobs in the '
++                                       'job queue. If not set, the cluster '
++                                       'will not be auto-stopped.'))
++    retry_until_up = click.option('--retry-until-up',
++                                  '-r',
++                                  is_flag=True,
++                                  default=False,
++                                  required=False,
++                                  help=('Whether to retry provisioning '
++                                        'infinitely until the cluster is up '
++                                        'if we fail to launch the cluster on '
++                                        'any possible region/cloud due to '
++                                        'unavailability errors.'))
++    region_option = click.option('--region',
++                                 default=None,
++                                 type=str,
++                                 required=False,
++                                 help='The region to use.')
++    zone_option = click.option('--zone',
++                               default=None,
++                               type=str,
++                               required=False,
++                               help='The zone to use.')
+ 
+     click_decorators = [
+         cli.command(cls=_DocumentedCodeCommand),
+         cluster_option,
+         no_confirm,
+         port_forward_option,
++        idle_autostop,
++        retry_until_up,
+ 
+         # Resource options
+         *([cloud_option] if cli_func.__name__ != 'tpunode' else []),
++        region_option,
++        zone_option,
+         instance_type_option,
+         *([gpus] if cli_func.__name__ == 'gpunode' else []),
+         *([tpus] if cli_func.__name__ == 'tpunode' else []),
+@@ -657,6 +695,13 @@ def _launch_with_confirm(
+     elif not confirm_shown:
+         click.secho(f'Running task on cluster {cluster}...', fg='yellow')
+ 
++    if node_type is not None and idle_minutes_to_autostop is not None \
++            and maybe_status == global_user_state.ClusterStatus.UP:
++        # We do not sky.launch if interactive node is already up, so we need
++        # to update idle timeout here.
++        handle = global_user_state.get_handle_from_cluster_name(cluster)
++        backend.set_autostop(handle, idle_minutes_to_autostop)
++
+     if node_type is None or maybe_status != global_user_state.ClusterStatus.UP:
+         # No need to sky.launch again when interactive node is already up.
+         sky.launch(
+@@ -683,6 +728,8 @@ def _create_and_ssh_into_node(
+     session_manager: Optional[str] = None,
+     user_requested_resources: Optional[bool] = False,
+     no_confirm: bool = False,
++    idle_minutes_to_autostop: Optional[int] = None,
++    retry_until_up: bool = False,
+ ):
+     """Creates and attaches to an interactive node.
+ 
+@@ -695,6 +742,14 @@ def _create_and_ssh_into_node(
+         session_manager: Attach session manager: { 'screen', 'tmux' }.
+         user_requested_resources: If true, user requested resources explicitly.
+         no_confirm: If true, skips confirmation prompt presented to user.
++        idle_minutes_to_autostop: Automatically stop the cluster after
++                                  specified minutes of idleness. Idleness
++                                  starts counting after setup/file_mounts are
++                                  done; the clock gets reset whenever there
++                                  are running/pending jobs in the job queue.
++        retry_until_up: Whether to retry provisioning infinitely until the
++                        cluster is up if we fail to launch due to
++                        unavailability errors.
+     """
+     assert node_type in _INTERACTIVE_NODE_TYPES, node_type
+     assert session_manager in (None, 'screen', 'tmux'), session_manager
+@@ -733,6 +788,8 @@ def _create_and_ssh_into_node(
+         dryrun=False,
+         detach_run=True,
+         no_confirm=no_confirm,
++        idle_minutes_to_autostop=idle_minutes_to_autostop,
++        retry_until_up=retry_until_up,
+         node_type=node_type,
+     )
+     handle = global_user_state.get_handle_from_cluster_name(cluster_name)
+@@ -2126,10 +2183,11 @@ def _down_or_stop(name: str):
+ @usage_lib.entrypoint
+ # pylint: disable=redefined-outer-name
+ def gpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+-            cloud: Optional[str], instance_type: Optional[str],
+-            gpus: Optional[str], use_spot: Optional[bool],
+-            screen: Optional[bool], tmux: Optional[bool],
+-            disk_size: Optional[int]):
++            cloud: Optional[str], region: Optional[str], zone: Optional[str],
++            instance_type: Optional[str], gpus: Optional[str],
++            use_spot: Optional[bool], screen: Optional[bool],
++            tmux: Optional[bool], disk_size: Optional[int],
++            idle_minutes_to_autostop: Optional[int], retry_until_up: bool):
+     """Launch or attach to an interactive GPU node.
+ 
+     Examples:
+@@ -2166,7 +2224,8 @@ def gpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if name is None:
+         name = _default_interactive_node_name('gpunode')
+ 
+-    user_requested_resources = not (cloud is None and instance_type is None and
++    user_requested_resources = not (cloud is None and region is None and
++                                    zone is None and instance_type is None and
+                                     gpus is None and use_spot is None)
+     default_resources = _INTERACTIVE_NODE_DEFAULT_RESOURCES['gpunode']
+     cloud_provider = clouds.CLOUD_REGISTRY.from_str(cloud)
+@@ -2177,6 +2236,8 @@ def gpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if use_spot is None:
+         use_spot = default_resources.use_spot
+     resources = sky.Resources(cloud=cloud_provider,
++                              region=region,
++                              zone=zone,
+                               instance_type=instance_type,
+                               accelerators=gpus,
+                               use_spot=use_spot,
+@@ -2190,6 +2251,8 @@ def gpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+         session_manager=session_manager,
+         user_requested_resources=user_requested_resources,
+         no_confirm=yes,
++        idle_minutes_to_autostop=idle_minutes_to_autostop,
++        retry_until_up=retry_until_up,
+     )
+ 
+ 
+@@ -2197,9 +2260,11 @@ def gpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+ @usage_lib.entrypoint
+ # pylint: disable=redefined-outer-name
+ def cpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+-            cloud: Optional[str], instance_type: Optional[str],
+-            use_spot: Optional[bool], screen: Optional[bool],
+-            tmux: Optional[bool], disk_size: Optional[int]):
++            cloud: Optional[str], region: Optional[str], zone: Optional[str],
++            instance_type: Optional[str], use_spot: Optional[bool],
++            screen: Optional[bool], tmux: Optional[bool],
++            disk_size: Optional[int], idle_minutes_to_autostop: Optional[int],
++            retry_until_up: bool):
+     """Launch or attach to an interactive CPU node.
+ 
+     Examples:
+@@ -2235,7 +2300,8 @@ def cpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if name is None:
+         name = _default_interactive_node_name('cpunode')
+ 
+-    user_requested_resources = not (cloud is None and instance_type is None and
++    user_requested_resources = not (cloud is None and region is None and
++                                    zone is None and instance_type is None and
+                                     use_spot is None)
+     default_resources = _INTERACTIVE_NODE_DEFAULT_RESOURCES['cpunode']
+     cloud_provider = clouds.CLOUD_REGISTRY.from_str(cloud)
+@@ -2244,6 +2310,8 @@ def cpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if use_spot is None:
+         use_spot = default_resources.use_spot
+     resources = sky.Resources(cloud=cloud_provider,
++                              region=region,
++                              zone=zone,
+                               instance_type=instance_type,
+                               use_spot=use_spot,
+                               disk_size=disk_size)
+@@ -2256,6 +2324,8 @@ def cpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+         session_manager=session_manager,
+         user_requested_resources=user_requested_resources,
+         no_confirm=yes,
++        idle_minutes_to_autostop=idle_minutes_to_autostop,
++        retry_until_up=retry_until_up,
+     )
+ 
+ 
+@@ -2263,10 +2333,12 @@ def cpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+ @usage_lib.entrypoint
+ # pylint: disable=redefined-outer-name
+ def tpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
++            region: Optional[str], zone: Optional[str],
+             instance_type: Optional[str], tpus: Optional[str],
+             use_spot: Optional[bool], tpu_vm: Optional[bool],
+             screen: Optional[bool], tmux: Optional[bool],
+-            disk_size: Optional[int]):
++            disk_size: Optional[int], idle_minutes_to_autostop: Optional[int],
++            retry_until_up: bool):
+     """Launch or attach to an interactive TPU node.
+ 
+     Examples:
+@@ -2302,7 +2374,8 @@ def tpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if name is None:
+         name = _default_interactive_node_name('tpunode')
+ 
+-    user_requested_resources = not (instance_type is None and tpus is None and
++    user_requested_resources = not (region is None and zone is None and
++                                    instance_type is None and tpus is None and
+                                     use_spot is None)
+     default_resources = _INTERACTIVE_NODE_DEFAULT_RESOURCES['tpunode']
+     accelerator_args = default_resources.accelerator_args
+@@ -2316,6 +2389,8 @@ def tpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+     if use_spot is None:
+         use_spot = default_resources.use_spot
+     resources = sky.Resources(cloud=sky.GCP(),
++                              region=region,
++                              zone=zone,
+                               instance_type=instance_type,
+                               accelerators=tpus,
+                               accelerator_args=accelerator_args,
+@@ -2330,6 +2405,8 @@ def tpunode(cluster: str, yes: bool, port_forward: Optional[List[int]],
+         session_manager=session_manager,
+         user_requested_resources=user_requested_resources,
+         no_confirm=yes,
++        idle_minutes_to_autostop=idle_minutes_to_autostop,
++        retry_until_up=retry_until_up,
+     )
+ 
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

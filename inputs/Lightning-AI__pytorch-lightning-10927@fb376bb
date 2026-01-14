@@ -1,0 +1,242 @@
+  Task-ID: Lightning-AI__pytorch-lightning-10927@fb376bb
+  Please checkout to this commit first: 21caff1f19448d0065c85835db0d1403083ec93b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Frozen Dataclasses as samples produce an error in 1.5+
+## 🐛 Bug
+
+When using a frozen dataclass to define a sample, an error is thrown.
+```
+File ".../python3.9/site-packages/pytorch_lightning/utilities/apply_func.py", line 146, in apply_to_collection
+  setattr(result, field_name, v)
+File "<string>", line 4, in __setattr__
+dataclasses.FrozenInstanceError: cannot assign to field 'x'
+```
+This only started happening in 1.5+, the snippet below runs fine in 1.4.9.
+
+### To Reproduce
+
+```
+import os
+from dataclasses import dataclass, fields, is_dataclass
+from typing import Any, Optional, Sequence
+
+import pytorch_lightning as pl
+import torch
+from pytorch_lightning import Trainer
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data._utils.collate import default_collate_err_msg_format
+
+
+@dataclass(frozen=True)
+class Sample:
+    x: torch.Tensor
+    y: torch.Tensor
+
+
+class my_collate:
+    def _collate(self, batch: Sequence[Any]) -> Any:
+        elem = batch[0]
+        elem_type = type(elem)
+        if isinstance(elem, Tensor):
+            out = None
+            if torch.utils.data.get_worker_info() is not None:
+                numel = sum(x.numel() for x in batch)
+                storage = elem.storage()._new_shared(numel)
+                out = elem.new(storage)
+            ndims = elem.dim()
+            if (ndims > 0) and ((ndims % 2) == 0):
+                return torch.cat(batch, dim=0, out=out)
+            return torch.stack(batch, dim=0, out=out)
+        elif isinstance(elem, int):
+            return torch.tensor(batch)
+        elif is_dataclass(elem):
+            return elem_type(
+                **{
+                    field.name: self._collate([getattr(d, field.name) for d in batch])
+                    for field in fields(elem)
+                }
+            )
+        raise TypeError(default_collate_err_msg_format.format(elem_type))
+
+    def __call__(self, batch: Sequence[Any]) -> Any:
+        return self._collate(batch=batch)
+
+
+class RandomDataset(Dataset):
+    def __init__(self, size, length):
+        self.len = length
+        self.data = torch.randn(length, size)
+        self.labels = torch.randint(0, 2, (length,))
+
+    def __getitem__(self, index):
+        return Sample(x=self.data[index], y=self.labels[index])
+
+    def __len__(self):
+        return self.len
+
+
+class MyDataModule(pl.LightningDataModule):
+    def __init__(self, batch_size: int = 2):
+        super().__init__()
+        self.batch_size = batch_size
+
+    def setup(self, stage: Optional[str] = None):
+        self._train = RandomDataset(32, 64)
+        self._val = RandomDataset(32, 64)
+        self._test = RandomDataset(32, 64)
+        self._predict = RandomDataset(32, 64)
+
+    def train_dataloader(self):
+        return DataLoader(
+            self._train, batch_size=self.batch_size, collate_fn=my_collate()
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self._val, batch_size=self.batch_size, collate_fn=my_collate()
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self._test, batch_size=self.batch_size, collate_fn=my_collate()
+        )
+
+    def predict_dataloader(self):
+        return DataLoader(
+            self._predict, batch_size=self.batch_size, collate_fn=my_collate()
+        )
+
+
+class BoringModel(pl.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.layer = torch.nn.Linear(32, 2)
+
+    def forward(self, x):
+        return self.layer(x)
+
+    def training_step(self, batch: Sample, batch_idx):
+        loss = self(batch.x).sum()
+        self.log("train_loss", loss)
+        return {"loss": loss}
+
+    def validation_step(self, batch: Sample, batch_idx):
+        loss = self(batch.x).sum()
+        self.log("valid_loss", loss)
+
+    def test_step(self, batch: Sample, batch_idx):
+        loss = self(batch.x).sum()
+        self.log("test_loss", loss)
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.layer.parameters(), lr=0.1)
+
+
+if __name__ == "__main__":
+    dm = MyDataModule()
+    dm.prepare_data()
+    dm.setup()
+    mnist_train = dm.train_dataloader()
+    mnist_val = dm.val_dataloader()
+
+    model = BoringModel()
+
+    trainer = Trainer(
+        default_root_dir=os.getcwd(),
+        limit_train_batches=1,
+        limit_val_batches=1,
+        limit_test_batches=1,
+        num_sanity_val_steps=0,
+        max_epochs=1,
+    )
+    trainer.fit(model, mnist_train, mnist_val)
+
+```
+
+### Expected behavior
+
+It would be really nice to be able to continue using frozen dataclasses to define samples. Indexing with `batch.x` is nicer (to me) than `batch[0]`. I also think that a sample _should_ be immutable to save from potential bugs.
+
+### Environment
+
+```
+* CUDA:
+        - GPU:
+        - available:         False
+        - version:           None
+* Packages:
+        - numpy:             1.21.4
+        - pyTorch_debug:     False
+        - pyTorch_version:   1.10.0
+        - pytorch-lightning: 1.5.4
+        - tqdm:              4.62.3
+* System:
+        - OS:                Darwin
+        - architecture:
+                - 64bit
+                - 
+        - processor:         i386
+        - python:            3.8.12
+        - version:           Darwin Kernel Version 21.1.0: Wed Oct 13 17:33:23 PDT 2021; root:xnu-8019.41.5~1/RELEASE_X86_64
+```
+### Additional context
+
+This might seem like a weird pattern, but if you've got a dataloader that can return 2 types of data, e.g. (x,y) pairs, and in some cases (x,z,y) triplets, where Z is some additional data, being able to use `isinstance` is a bit safer than checking some other attribute (e.g. len).
+
+
+cc @borda
+  </issue>
+  
+  <patch>
+  diff --git a/pytorch_lightning/utilities/apply_func.py b/pytorch_lightning/utilities/apply_func.py
+index aeefc048fe5f4..eff1e6a12b744 100644
+--- a/pytorch_lightning/utilities/apply_func.py
++++ b/pytorch_lightning/utilities/apply_func.py
+@@ -144,7 +144,10 @@ def apply_to_collection(
+                 )
+             if not field_init or (not include_none and v is None):  # retain old value
+                 v = getattr(data, field_name)
+-            setattr(result, field_name, v)
++            try:
++                setattr(result, field_name, v)
++            except Exception:
++                raise dataclasses.FrozenInstanceError("Cannot apply function to Frozen dataclass instance")
+         return result
+ 
+     # data is neither of dtype, nor a collection
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

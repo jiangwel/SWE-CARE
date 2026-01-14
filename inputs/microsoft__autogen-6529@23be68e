@@ -1,0 +1,412 @@
+  Task-ID: microsoft__autogen-6529@23be68e
+  Please checkout to this commit first: 6cadc7dc17b23eee31c275bd9c64c0d65dbf45bf
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  MCP Server is giving "The selected tool does not have a callable 'function'" when using via autogen
+### What happened?
+
+This is all running MCP server and I have also validated it via cloude desktop
+```
+from typing import Dict
+from mcp.server.fastmcp import FastMCP
+
+# Initialize the FastMCP server with a name
+mcp = FastMCP("simple_weather")
+
+# Weather data for different topics
+WEATHER_DATA = {
+    "rain": {
+        "description": "Rain is liquid water in droplets that falls from clouds",
+        "measurement": "Measured in millimeters or inches",
+        "effects": "Can cause flooding in heavy amounts",
+    },
+}
+
+
+# Define the weather info tool using the @mcp.tool decorator
+@mcp.tool()
+async def get_weather_info(topic: str) -> Dict[str, str]:
+    """
+    A tool to fetch weather-related information based on the topic.
+
+    Arguments:
+    - topic: The weather topic (rain, temperature, wind, etc.)
+
+    Returns:
+    - A dictionary containing the weather description, measurement, and effects
+    """
+    topic = topic.lower()  # Normalize topic to lowercase
+    if topic not in WEATHER_DATA:
+        return {
+            "error": f"Unknown weather topic '{topic}'",
+            "available_topics": list(WEATHER_DATA.keys()),
+        }
+    return WEATHER_DATA[topic]
+
+
+# Run the MCP server when the script is executed
+if __name__ == "__main__":
+    mcp.run()
+```
+Now, I want to use it via local client, these things I am doing
+
+running dummy server like : uv run dummy_server.py
+running this autogen client
+
+```
+import asyncio
+from autogen_ext.tools.mcp import McpWorkbench, StdioServerParams
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+
+
+async def run_chat_with_topic(topic: str):
+    server_params = StdioServerParams(
+        command="python",
+        args=["dummy_server.py"],
+        read_timeout_seconds=60,
+    )
+    workbench = McpWorkbench(server_params=server_params)
+
+    all_tools = await workbench.list_tools()
+
+    selected_tool = next(
+        (
+            tool
+            for tool in all_tools
+            if isinstance(tool, dict) and tool.get("name") == "get_weather_info"
+        ),
+        None,
+    )
+
+    if not selected_tool:
+        raise ValueError("Tool 'get_weather_info' not found on the MCP server.")
+
+    # Call the selected tool's function
+    # if "function" in selected_tool:
+    #     result = await selected_tool["function"](topic=topic)
+    # else:
+    #     raise ValueError("The selected tool does not have a callable 'function'.")
+    result = await workbench.call_tool(selected_tool["name"], {"topic": topic})
+
+    model_client = OpenAIChatCompletionClient(model="gpt-3.5-turbo")
+
+    from autogen_agentchat.agents import AssistantAgent
+    from autogen_agentchat.conditions import MaxMessageTermination
+    from autogen_agentchat.teams import RoundRobinGroupChat
+
+    assistant_1 = AssistantAgent(
+        name="Planner",
+        model_client=model_client,
+        system_message="You are an AI weather planner for India.",
+        tools=[selected_tool],
+        reflect_on_tool_use=True,
+        tool_call_summary_format="[Tool]{tool_name} result : {result}",
+    )
+
+    assistant_2 = AssistantAgent(
+        name="Researcher",
+        model_client=model_client,
+        system_message="You are an AI weather researcher for India.",
+        tools=[selected_tool],
+        reflect_on_tool_use=True,
+        tool_call_summary_format="[Tool]{tool_name} result : {result}",
+    )
+
+    agents = [assistant_1, assistant_2]
+
+    termination_condition = MaxMessageTermination(max_message_number=len(agents) + 1)
+
+    team = RoundRobinGroupChat(
+        agents=agents,
+        termination_condition=termination_condition,
+    )
+
+    return await team.run(
+        task=[{"role": "user", "content": f"Get weather info for '{topic}'"}]
+    )
+
+
+if __name__ == "__main__":
+    topic = "rain"
+
+    asyncio.run(run_chat_with_topic(topic))
+```
+but I am getting this error
+line 36, in run_chat_with_topic
+    raise ValueError("The selected tool does not have a callable 'function'.")
+ValueError: The selected tool does not have a callable 'function'.
+```
+
+this is tool definition but but its all running fine with cloude, cursor 
+```
+{'name': 'get_weather_info', 'description': '\n    A tool to fetch 
+weather-related information based on the topic.\n\n    
+Arguments:\n    - topic: The weather topic (rain, temperature, wind, etc.)
+\n\n    Returns:\n    - A dictionary containing the weather description, 
+measurement, and effects\n    ', 
+'parameters': {'type': 'object', 'properties': {'topic': 
+{'title': 'Topic', 'type': 'string'}}, 
+'required': ['topic'], 'additionalProperties': False}}
+```
+
+seems It don't have any definition of function like : 'function': get_weather_info_function, can you please help me here
+
+these are version I am using here
+
+requires-python = ">=3.11.7"
+dependencies = [
+    "autogen-agentchat>=0.5.5",
+    "autogen-ext[openai]>=0.5.5",
+    "httpx>=0.28.1",
+    "mcp[cli]>=1.7.1",
+]
+
+### Which packages was the bug in?
+
+Python AgentChat (autogen-agentchat>=0.4.0)
+
+### AutoGen library version.
+
+Python dev (main branch)
+
+### Other library version.
+
+    "autogen-agentchat>=0.5.5",     "autogen-ext[openai]>=0.5.5",     "httpx>=0.28.1",     "mcp[cli]>=1.7.1",
+
+### Model used
+
+all
+
+### Model provider
+
+OpenAI
+
+### Other model provider
+
+_No response_
+
+### Python version
+
+None
+
+### .NET version
+
+None
+
+### Operating system
+
+None
+  </issue>
+  
+  <patch>
+  diff --git a/python/packages/autogen-agentchat/src/autogen_agentchat/agents/_assistant_agent.py b/python/packages/autogen-agentchat/src/autogen_agentchat/agents/_assistant_agent.py
+index c189021a2e2c..feb0d1ab2f16 100644
+--- a/python/packages/autogen-agentchat/src/autogen_agentchat/agents/_assistant_agent.py
++++ b/python/packages/autogen-agentchat/src/autogen_agentchat/agents/_assistant_agent.py
+@@ -66,7 +66,7 @@ class AssistantAgentConfig(BaseModel):
+     name: str
+     model_client: ComponentModel
+     tools: List[ComponentModel] | None = None
+-    workbench: ComponentModel | None = None
++    workbenches: List[ComponentModel] | None = None
+     handoffs: List[HandoffBase | str] | None = None
+     model_context: ComponentModel | None = None
+     memory: List[ComponentModel] | None = None
+@@ -179,7 +179,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
+         name (str): The name of the agent.
+         model_client (ChatCompletionClient): The model client to use for inference.
+         tools (List[BaseTool[Any, Any]  | Callable[..., Any] | Callable[..., Awaitable[Any]]] | None, optional): The tools to register with the agent.
+-        workbench (Workbench | None, optional): The workbench to use for the agent.
++        workbench (Workbench | List[Workbench] | None, optional): The workbenches to use for the agent.
+             Tools cannot be used when workbench is set and vice versa.
+         handoffs (List[HandoffBase | str] | None, optional): The handoff configurations for the agent,
+             allowing it to transfer to other agents by responding with a :class:`HandoffMessage`.
+@@ -642,7 +642,7 @@ def __init__(
+         model_client: ChatCompletionClient,
+         *,
+         tools: List[BaseTool[Any, Any] | Callable[..., Any] | Callable[..., Awaitable[Any]]] | None = None,
+-        workbench: Workbench | None = None,
++        workbench: Workbench | List[Workbench] | None = None,
+         handoffs: List[HandoffBase | str] | None = None,
+         model_context: ChatCompletionContext | None = None,
+         description: str = "An agent that provides assistance with ability to use tools.",
+@@ -729,9 +729,12 @@ def __init__(
+         if workbench is not None:
+             if self._tools:
+                 raise ValueError("Tools cannot be used with a workbench.")
+-            self._workbench = workbench
++            if isinstance(workbench, list):
++                self._workbenches = workbench
++            else:
++                self._workbenches = [workbench]
+         else:
+-            self._workbench = StaticWorkbench(self._tools)
++            self._workbenches = [StaticWorkbench(self._tools)]
+ 
+         if model_context is not None:
+             self._model_context = model_context
+@@ -796,7 +799,7 @@ async def on_messages_stream(
+         model_context = self._model_context
+         memory = self._memory
+         system_messages = self._system_messages
+-        workbench = self._workbench
++        workbenches = self._workbenches
+         handoff_tools = self._handoff_tools
+         handoffs = self._handoffs
+         model_client = self._model_client
+@@ -829,7 +832,7 @@ async def on_messages_stream(
+             model_client_stream=model_client_stream,
+             system_messages=system_messages,
+             model_context=model_context,
+-            workbench=workbench,
++            workbench=workbenches,
+             handoff_tools=handoff_tools,
+             agent_name=agent_name,
+             cancellation_token=cancellation_token,
+@@ -866,7 +869,7 @@ async def on_messages_stream(
+             agent_name=agent_name,
+             system_messages=system_messages,
+             model_context=model_context,
+-            workbench=workbench,
++            workbenches=workbenches,
+             handoff_tools=handoff_tools,
+             handoffs=handoffs,
+             model_client=model_client,
+@@ -920,7 +923,7 @@ async def _call_llm(
+         model_client_stream: bool,
+         system_messages: List[SystemMessage],
+         model_context: ChatCompletionContext,
+-        workbench: Workbench,
++        workbenches: List[Workbench],
+         handoff_tools: List[BaseTool[Any, Any]],
+         agent_name: str,
+         cancellation_token: CancellationToken,
+@@ -932,7 +935,10 @@ async def _call_llm(
+         all_messages = await model_context.get_messages()
+         llm_messages = cls._get_compatible_context(model_client=model_client, messages=system_messages + all_messages)
+ 
+-        tools = (await workbench.list_tools()) + handoff_tools
++        tools = []
++        for wb in workbenches:
++            tools.extend(await wb.list_tools())
++        tools += handoff_tools
+ 
+         if model_client_stream:
+             model_result: Optional[CreateResult] = None
+@@ -969,7 +975,7 @@ async def _process_model_result(
+         agent_name: str,
+         system_messages: List[SystemMessage],
+         model_context: ChatCompletionContext,
+-        workbench: Workbench,
++        workbenches: List[Workbench],
+         handoff_tools: List[BaseTool[Any, Any]],
+         handoffs: Dict[str, HandoffBase],
+         model_client: ChatCompletionClient,
+@@ -1028,7 +1034,7 @@ async def _process_model_result(
+             *[
+                 cls._execute_tool_call(
+                     tool_call=call,
+-                    workbench=workbench,
++                    workbenches=workbenches,
+                     handoff_tools=handoff_tools,
+                     agent_name=agent_name,
+                     cancellation_token=cancellation_token,
+@@ -1260,7 +1266,7 @@ def _summarize_tool_use(
+     @staticmethod
+     async def _execute_tool_call(
+         tool_call: FunctionCall,
+-        workbench: Workbench,
++        workbenches: List[Workbench],
+         handoff_tools: List[BaseTool[Any, Any]],
+         agent_name: str,
+         cancellation_token: CancellationToken,
+@@ -1298,17 +1304,30 @@ async def _execute_tool_call(
+                 )
+ 
+         # Handle normal tool call using workbench.
+-        result = await workbench.call_tool(
+-            name=tool_call.name,
+-            arguments=arguments,
+-            cancellation_token=cancellation_token,
+-        )
++        for wb in workbenches:
++            tools = await wb.list_tools()
++            if any(t["name"] == tool_call.name for t in tools):
++                result = await wb.call_tool(
++                    name=tool_call.name,
++                    arguments=arguments,
++                    cancellation_token=cancellation_token,
++                )
++                return (
++                    tool_call,
++                    FunctionExecutionResult(
++                        content=result.to_text(),
++                        call_id=tool_call.id,
++                        is_error=result.is_error,
++                        name=tool_call.name,
++                    ),
++                )
++
+         return (
+             tool_call,
+             FunctionExecutionResult(
+-                content=result.to_text(),
++                content=f"Error: tool '{tool_call.name}' not found in any workbench",
+                 call_id=tool_call.id,
+-                is_error=result.is_error,
++                is_error=True,
+                 name=tool_call.name,
+             ),
+         )
+@@ -1343,7 +1362,7 @@ def _to_config(self) -> AssistantAgentConfig:
+             name=self.name,
+             model_client=self._model_client.dump_component(),
+             tools=None,  # versionchanged:: v0.5.5  Now tools are not serialized, Cause they are part of the workbench.
+-            workbench=self._workbench.dump_component() if self._workbench else None,
++            workbenches=[wb.dump_component() for wb in self._workbenches] if self._workbenches else None,
+             handoffs=list(self._handoffs.values()) if self._handoffs else None,
+             model_context=self._model_context.dump_component(),
+             memory=[memory.dump_component() for memory in self._memory] if self._memory else None,
+@@ -1375,7 +1394,7 @@ def _from_config(cls, config: AssistantAgentConfig) -> Self:
+         return cls(
+             name=config.name,
+             model_client=ChatCompletionClient.load_component(config.model_client),
+-            workbench=Workbench.load_component(config.workbench) if config.workbench else None,
++            workbench=[Workbench.load_component(wb) for wb in config.workbenches] if config.workbenches else None,
+             handoffs=config.handoffs,
+             model_context=ChatCompletionContext.load_component(config.model_context) if config.model_context else None,
+             tools=[BaseTool.load_component(tool) for tool in config.tools] if config.tools else None,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

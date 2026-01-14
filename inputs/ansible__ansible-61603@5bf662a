@@ -1,0 +1,654 @@
+  Task-ID: ansible__ansible-61603@5bf662a
+  Please checkout to this commit first: de6e2de0c461d0ed0d3d8c8cf93ea691f31376ce
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support creating LUKS2 container in luks_device module
+<!--- Verify first that your feature was not already discussed on GitHub -->
+<!--- Complete *all* sections as described, this form is processed automatically -->
+
+##### SUMMARY
+<!--- Describe the new feature/improvement briefly below -->
+Ansible by default only creates LUKS1 format devices. Considering LUKS2 extra features and age, I think it would be beneficial to allow users to create LUKS2 devices.
+
+##### ISSUE TYPE
+- Feature Idea
+
+##### COMPONENT NAME
+luks_device
+
+##### ADDITIONAL INFORMATION
+<!--- Describe how the feature would be used, why it is needed and what it would solve -->
+For reliability, one should use either disk UUID's or labels. UUID's are (in my opinion) a hassle when it comes to using them in Ansible.
+
+Enter labels. Labels can be the same across multiple hosts, and will be tied to the right disk/partition, even if sda1 suddenly becomes sdb1 after some hardware reconfiguration.
+
+Now, the LUKS1 format, which Ansible creates by default with the `luks_device` module, does not support labels... Support was added with LUKS2.
+
+It should be noted that, from what I can see, the module *does already support removing keys from LUKS2 format devices*.
+
+<!--- Paste example playbooks or commands between quotes below -->
+```yaml
+- name: create LUKS2 container
+  luks_device:
+    device: "/dev/loop0"
+    state: "present"
+    keyfile: "/vault/keyfile"
+    format: luks2
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/crypto/luks_device.py b/lib/ansible/modules/crypto/luks_device.py
+index ac948681f0ae1c..98292682b45813 100644
+--- a/lib/ansible/modules/crypto/luks_device.py
++++ b/lib/ansible/modules/crypto/luks_device.py
+@@ -100,11 +100,26 @@
+               the container can no longer be opened!"
+         type: bool
+         default: no
++    label:
++        description:
++            - "This option allow the user creates a LUKS2 format container with
++              label support, then late it could be used to identify container
++              instead of inform the device"
++        type: str
++        version_added: "2.9"
++    uuid:
++        description:
++            - "With this option user can inform the LUKS container by UUID
++              instead of pass the raw device"
++        type: str
++        version_added: "2.9"
++
+ 
+ requirements:
+     - "cryptsetup"
+     - "wipefs"
+     - "lsblk"
++    - "blkid"
+ 
+ author:
+     "Jan Pokorny (@japokorn)"
+@@ -158,6 +173,26 @@
+   luks_device:
+     device: "/dev/loop0"
+     state: "absent"
++
++- name: create a container with label
++  luks_device:
++    device: "/dev/loop0"
++    state: "present"
++    keyfile: "/vault/keyfile"
++    label: personalLabelName
++
++- name: open the LUKS container based on label or UUID without device; name it "mycrypt"
++  luks_device:
++    label: "personalLabelName"
++    state: "opened"
++    name: "mycrypt"
++    keyfile: "/vault/keyfile"
++
++- name: close container based on UUID or Label
++  luks_device:
++    uuid: 03ecd578-fad4-4e6c-9348-842e3e8fa340
++    state: "closed"
++    name: "mycrypt"
+ '''
+ 
+ RETURN = '''
+@@ -193,10 +228,41 @@ class Handler(object):
+     def __init__(self, module):
+         self._module = module
+         self._lsblk_bin = self._module.get_bin_path('lsblk', True)
++        self._blkid_bin = self._module.get_bin_path('blkid', True)
+ 
+     def _run_command(self, command):
+         return self._module.run_command(command)
+ 
++    def get_device_by_uuid(self, uuid):
++        ''' Returns the device that holds UUID passed by user
++        '''
++        uuid = self._module.params['uuid']
++        if uuid is None:
++            return None
++
++        query = "%s=%s" % ("UUID", uuid)
++        result = self._run_command([self._blkid_bin, '-l', '-t', query])
++
++        if result[RETURN_CODE] != 0:
++            return None
++
++        return result[STDOUT].split(':')[0]
++
++    def get_device_by_label(self, label):
++        ''' Returns the device that holds label passed by user
++        '''
++        label = self._module.params['label']
++        if label is None:
++            return None
++
++        query = "%s=%s" % ("LABEL", label)
++        result = self._run_command([self._blkid_bin, '-l', '-t', query])
++
++        if result[RETURN_CODE] != 0:
++            return None
++
++        return result[STDOUT].split(':')[0]
++
+     def generate_luks_name(self, device):
+         ''' Generate name for luks based on device UUID ('luks-<UUID>').
+             Raises ValueError when obtaining of UUID fails.
+@@ -256,9 +322,13 @@ def is_luks(self, device):
+ 
+     def run_luks_create(self, device, keyfile, keysize):
+         # create a new luks container; use batch mode to auto confirm
++        label = self._module.params.get('label')
+         options = []
+         if keysize is not None:
+             options.append('--key-size=' + str(keysize))
++        if label is not None:
++            # create luks container v2 with label
++            options.extend(['--type', 'luks2', '--label', label])
+         args = [self._cryptsetup_bin, 'luksFormat']
+         args.extend(options)
+         args.extend(['-q', device, keyfile])
+@@ -269,7 +339,7 @@ def run_luks_create(self, device, keyfile, keysize):
+ 
+     def run_luks_open(self, device, keyfile, name):
+         result = self._run_command([self._cryptsetup_bin, '--key-file', keyfile,
+-                                    'open', '--type', 'luks', device, name])
++                                    'open', device, name])
+         if result[RETURN_CODE] != 0:
+             raise ValueError('Error while opening LUKS container on %s: %s'
+                              % (device, result[STDERR]))
+@@ -346,14 +416,36 @@ class ConditionsHandler(Handler):
+     def __init__(self, module, crypthandler):
+         super(ConditionsHandler, self).__init__(module)
+         self._crypthandler = crypthandler
++        self.device = self.get_device_name()
++
++    def get_device_name(self):
++        device = self._module.params.get('device')
++        label = self._module.params.get('label')
++        uuid = self._module.params.get('uuid')
++        name = self._module.params.get('name')
++
++        if device is None and label is not None:
++            device = self.get_device_by_label(label)
++        elif device is None and uuid is not None:
++            device = self.get_device_by_uuid(uuid)
++        elif device is None and name is not None:
++            device = self._crypthandler.get_container_device_by_name(name)
++
++        if device is None:
++            error_msg = "Can't find the properly device based on label or " \
++                        "UUID, please review your playbook and check if the" \
++                        " label/UUID informed was correct on remote"
++            self._module.fail_json(msg=error_msg)
++
++        return device
+ 
+     def luks_create(self):
+-        return (self._module.params['device'] is not None and
++        return (self.device is not None and
+                 self._module.params['keyfile'] is not None and
+                 self._module.params['state'] in ('present',
+                                                  'opened',
+                                                  'closed') and
+-                not self._crypthandler.is_luks(self._module.params['device']))
++                not self._crypthandler.is_luks(self.device))
+ 
+     def opened_luks_name(self):
+         ''' If luks is already opened, return its name.
+@@ -365,8 +457,7 @@ def opened_luks_name(self):
+             return None
+ 
+         # try to obtain luks name - it may be already opened
+-        name = self._crypthandler.get_container_name_by_device(
+-            self._module.params['device'])
++        name = self._crypthandler.get_container_name_by_device(self.device)
+ 
+         if name is None:
+             # container is not open
+@@ -386,8 +477,8 @@ def opened_luks_name(self):
+         return name
+ 
+     def luks_open(self):
+-        if (self._module.params['device'] is None or
+-                self._module.params['keyfile'] is None or
++        if (self._module.params['keyfile'] is None or
++                self.device is None or
+                 self._module.params['state'] != 'opened'):
+             # conditions for open not fulfilled
+             return False
+@@ -399,28 +490,26 @@ def luks_open(self):
+         return False
+ 
+     def luks_close(self):
+-        if ((self._module.params['name'] is None and
+-                self._module.params['device'] is None) or
++        if ((self._module.params['name'] is None and self.device is None) or
+                 self._module.params['state'] != 'closed'):
+             # conditions for close not fulfilled
+             return False
+ 
+-        if self._module.params['device'] is not None:
+-            name = self._crypthandler.get_container_name_by_device(
+-                self._module.params['device'])
++        if self.device is not None:
++            name = self._crypthandler.get_container_name_by_device(self.device)
+             # successfully getting name based on device means that luks is open
+             luks_is_open = name is not None
+ 
+         if self._module.params['name'] is not None:
+-            device = self._crypthandler.get_container_device_by_name(
++            self.device = self._crypthandler.get_container_device_by_name(
+                 self._module.params['name'])
+             # successfully getting device based on name means that luks is open
+-            luks_is_open = device is not None
++            luks_is_open = self.device is not None
+ 
+         return luks_is_open
+ 
+     def luks_add_key(self):
+-        if (self._module.params['device'] is None or
++        if (self.device is None or
+                 self._module.params['keyfile'] is None or
+                 self._module.params['new_keyfile'] is None):
+             # conditions for adding a key not fulfilled
+@@ -433,7 +522,7 @@ def luks_add_key(self):
+         return True
+ 
+     def luks_remove_key(self):
+-        if (self._module.params['device'] is None or
++        if (self.device is None or
+                 self._module.params['remove_keyfile'] is None):
+             # conditions for removing a key not fulfilled
+             return False
+@@ -445,9 +534,9 @@ def luks_remove_key(self):
+         return True
+ 
+     def luks_remove(self):
+-        return (self._module.params['device'] is not None and
++        return (self.device is not None and
+                 self._module.params['state'] == 'absent' and
+-                self._crypthandler.is_luks(self._module.params['device']))
++                self._crypthandler.is_luks(self.device))
+ 
+ 
+ def run_module():
+@@ -461,6 +550,8 @@ def run_module():
+         remove_keyfile=dict(type='path'),
+         force_remove_last_key=dict(type='bool', default=False),
+         keysize=dict(type='int')
++        label=dict(type='str'),
++        uuid=dict(type='str'),
+     )
+ 
+     # seed the result dict in the object
+@@ -491,7 +582,7 @@ def run_module():
+     if conditions.luks_create():
+         if not module.check_mode:
+             try:
+-                crypt.run_luks_create(module.params['device'],
++                crypt.run_luks_create(conditions.device,
+                                       module.params['keyfile'],
+                                       module.params['keysize'])
+             except ValueError as e:
+@@ -510,12 +601,12 @@ def run_module():
+         name = module.params['name']
+         if name is None:
+             try:
+-                name = crypt.generate_luks_name(module.params['device'])
++                name = crypt.generate_luks_name(conditions.device)
+             except ValueError as e:
+                 module.fail_json(msg="luks_device error: %s" % e)
+         if not module.check_mode:
+             try:
+-                crypt.run_luks_open(module.params['device'],
++                crypt.run_luks_open(conditions.device,
+                                     module.params['keyfile'],
+                                     name)
+             except ValueError as e:
+@@ -527,10 +618,10 @@ def run_module():
+ 
+     # luks close
+     if conditions.luks_close():
+-        if module.params['device'] is not None:
++        if conditions.device is not None:
+             try:
+                 name = crypt.get_container_name_by_device(
+-                    module.params['device'])
++                    conditions.device)
+             except ValueError as e:
+                 module.fail_json(msg="luks_device error: %s" % e)
+         else:
+@@ -540,6 +631,7 @@ def run_module():
+                 crypt.run_luks_close(name)
+             except ValueError as e:
+                 module.fail_json(msg="luks_device error: %s" % e)
++        result['name'] = name
+         result['changed'] = True
+         if module.check_mode:
+             module.exit_json(**result)
+@@ -548,7 +640,7 @@ def run_module():
+     if conditions.luks_add_key():
+         if not module.check_mode:
+             try:
+-                crypt.run_luks_add_key(module.params['device'],
++                crypt.run_luks_add_key(conditions.device,
+                                        module.params['keyfile'],
+                                        module.params['new_keyfile'])
+             except ValueError as e:
+@@ -561,9 +653,10 @@ def run_module():
+     if conditions.luks_remove_key():
+         if not module.check_mode:
+             try:
+-                crypt.run_luks_remove_key(module.params['device'],
++                last_key = module.params['force_remove_last_key']
++                crypt.run_luks_remove_key(conditions.device,
+                                           module.params['remove_keyfile'],
+-                                          force_remove_last_key=module.params['force_remove_last_key'])
++                                          force_remove_last_key=last_key)
+             except ValueError as e:
+                 module.fail_json(msg="luks_device error: %s" % e)
+         result['changed'] = True
+@@ -574,7 +667,7 @@ def run_module():
+     if conditions.luks_remove():
+         if not module.check_mode:
+             try:
+-                crypt.run_luks_remove(module.params['device'])
++                crypt.run_luks_remove(conditions.device)
+             except ValueError as e:
+                 module.fail_json(msg="luks_device error: %s" % e)
+         result['changed'] = True
+diff --git a/test/units/modules/crypto/test_luks_device.py b/test/units/modules/crypto/test_luks_device.py
+index f090a75c2d04e9..04cca48d657b59 100644
+--- a/test/units/modules/crypto/test_luks_device.py
++++ b/test/units/modules/crypto/test_luks_device.py
+@@ -3,6 +3,8 @@
+ 
+ import pytest
+ from ansible.modules.crypto import luks_device
++from units.compat.mock import patch
++from ansible.module_utils import basic
+ 
+ 
+ class DummyModule(object):
+@@ -16,6 +18,15 @@ def fail_json(self, msg=""):
+     def get_bin_path(self, command, dummy):
+         return command
+ 
++    def run_command(self, cmd):
++        out = None
++        if len(cmd) > 0:
++            if cmd[0] == 'blkid':
++                out = '/dev/dummy:UUID="25e718ef-89d5-4089-8f1a-33896326b734"'\
++                      ' LABEL="labelName" TYPE="crypto_LUKS"'
++
++        return out
++
+ 
+ # ===== Handler & CryptHandler methods tests =====
+ 
+@@ -62,15 +73,16 @@ def run_command_check(self, command):
+ 
+ # ===== ConditionsHandler methods data and tests =====
+ 
+-# device, key, state, is_luks, expected
++# device, key, state, is_luks, label, expected
+ LUKS_CREATE_DATA = (
+-    ("dummy", "key", "present", False, True),
+-    (None, "key", "present", False, False),
+-    ("dummy", None, "present", False, False),
+-    ("dummy", "key", "absent", False, False),
+-    ("dummy", "key", "opened", True, False),
+-    ("dummy", "key", "closed", True, False),
+-    ("dummy", "key", "present", True, False))
++    ("dummy", "key", "present", False, None, True),
++    (None, "key", "present", False, None, False),
++    (None, "key", "present", False, "labelName", True),
++    ("dummy", None, "present", False, None, False),
++    ("dummy", "key", "absent", False, None, False),
++    ("dummy", "key", "opened", True, None, False),
++    ("dummy", "key", "closed", True, None, False),
++    ("dummy", "key", "present", True, None, False))
+ 
+ # device, state, is_luks, expected
+ LUKS_REMOVE_DATA = (
+@@ -85,52 +97,62 @@ def run_command_check(self, command):
+     ("dummy", "key", "absent", "name", None, False),
+     ("dummy", "key", "closed", "name", None, False),
+     ("dummy", "key", "opened", "name", None, True),
+-    (None, "key", "opened", "name", None, False),
++    (None, "key", "opened", "name", None, True),
+     ("dummy", None, "opened", "name", None, False),
+     ("dummy", "key", "opened", "name", "name", False),
+     ("dummy", "key", "opened", "beer", "name", "exception"))
+ 
+-# device, dev_by_name, name, name_by_dev, state, expected
++# device, dev_by_name, name, name_by_dev, state, label, expected
+ LUKS_CLOSE_DATA = (
+-    ("dummy", "dummy", "name", "name", "present", False),
+-    ("dummy", "dummy", "name", "name", "absent", False),
+-    ("dummy", "dummy", "name", "name", "opened", False),
+-    ("dummy", "dummy", "name", "name", "closed", True),
+-    (None, "dummy", "name", "name", "closed", True),
+-    ("dummy", "dummy", None, "name", "closed", True),
+-    (None, "dummy", None, "name", "closed", False))
+-
+-# device, key, new_key, state, expected
++    ("dummy", "dummy", "name", "name", "present", None, False),
++    ("dummy", "dummy", "name", "name", "absent", None, False),
++    ("dummy", "dummy", "name", "name", "opened", None, False),
++    ("dummy", "dummy", "name", "name", "closed", None, True),
++    (None, "dummy", "name", "name", "closed", None, True),
++    ("dummy", "dummy", None, "name", "closed", None, True),
++    (None, "dummy", None, "name", "closed", None, False))
++
++# device, key, new_key, state, label, expected
+ LUKS_ADD_KEY_DATA = (
+-    ("dummy", "key", "new_key", "present", True),
+-    (None, "key", "new_key", "present", False),
+-    ("dummy", None, "new_key", "present", False),
+-    ("dummy", "key", None, "present", False),
+-    ("dummy", "key", "new_key", "absent", "exception"))
+-
+-# device, remove_key, state, expected
++    ("dummy", "key", "new_key", "present", None, True),
++    (None, "key", "new_key", "present", "labelName", True),
++    (None, "key", "new_key", "present", None, False),
++    ("dummy", None, "new_key", "present", None, False),
++    ("dummy", "key", None, "present", None, False),
++    ("dummy", "key", "new_key", "absent", None, "exception"))
++
++# device, remove_key, state, label, expected
+ LUKS_REMOVE_KEY_DATA = (
+-    ("dummy", "key", "present", True),
+-    (None, "key", "present", False),
+-    ("dummy", None, "present", False),
+-    ("dummy", "key", "absent", "exception"))
++    ("dummy", "key", "present", None, True),
++    (None, "key", "present", None, False),
++    (None, "key", "present", "labelName", True),
++    ("dummy", None, "present", None, False),
++    ("dummy", "key", "absent", None, "exception"))
+ 
+ 
+-@pytest.mark.parametrize("device, keyfile, state, is_luks, expected",
+-                         ((d[0], d[1], d[2], d[3], d[4])
++@pytest.mark.parametrize("device, keyfile, state, is_luks, label, expected",
++                         ((d[0], d[1], d[2], d[3], d[4], d[5])
+                           for d in LUKS_CREATE_DATA))
+-def test_luks_create(device, keyfile, state, is_luks, expected, monkeypatch):
++def test_luks_create(device, keyfile, state, is_luks, label, expected,
++                     monkeypatch):
+     module = DummyModule()
+ 
+     module.params["device"] = device
+     module.params["keyfile"] = keyfile
+     module.params["state"] = state
++    module.params["label"] = label
+ 
+     monkeypatch.setattr(luks_device.CryptHandler, "is_luks",
+                         lambda x, y: is_luks)
+     crypt = luks_device.CryptHandler(module)
+-    conditions = luks_device.ConditionsHandler(module, crypt)
+-    assert conditions.luks_create() == expected
++    if device is None:
++        monkeypatch.setattr(luks_device.Handler, "get_device_by_label",
++                            lambda x, y: [0, "/dev/dummy", ""])
++    try:
++        conditions = luks_device.ConditionsHandler(module, crypt)
++        assert conditions.luks_create() == expected
++    except ValueError:
++        assert expected == "exception" or expected is False
+ 
+ 
+ @pytest.mark.parametrize("device, state, is_luks, expected",
+@@ -145,8 +167,11 @@ def test_luks_remove(device, state, is_luks, expected, monkeypatch):
+     monkeypatch.setattr(luks_device.CryptHandler, "is_luks",
+                         lambda x, y: is_luks)
+     crypt = luks_device.CryptHandler(module)
+-    conditions = luks_device.ConditionsHandler(module, crypt)
+-    assert conditions.luks_remove() == expected
++    try:
++        conditions = luks_device.ConditionsHandler(module, crypt)
++        assert conditions.luks_remove() == expected
++    except ValueError:
++        assert expected == "exception" or expected is False
+ 
+ 
+ @pytest.mark.parametrize("device, keyfile, state, name, "
+@@ -164,6 +189,11 @@ def test_luks_open(device, keyfile, state, name, name_by_dev,
+     monkeypatch.setattr(luks_device.CryptHandler,
+                         "get_container_name_by_device",
+                         lambda x, y: name_by_dev)
++    monkeypatch.setattr(luks_device.CryptHandler,
++                        "get_container_device_by_name",
++                        lambda x, y: "/dev/dummy")
++    monkeypatch.setattr(luks_device.Handler, "_run_command",
++                        lambda x, y: [0, device, ""])
+     crypt = luks_device.CryptHandler(module)
+     conditions = luks_device.ConditionsHandler(module, crypt)
+     try:
+@@ -173,15 +203,16 @@ def test_luks_open(device, keyfile, state, name, name_by_dev,
+ 
+ 
+ @pytest.mark.parametrize("device, dev_by_name, name, name_by_dev, "
+-                         "state, expected",
+-                         ((d[0], d[1], d[2], d[3], d[4], d[5])
++                         "state, label, expected",
++                         ((d[0], d[1], d[2], d[3], d[4], d[5], d[6])
+                           for d in LUKS_CLOSE_DATA))
+ def test_luks_close(device, dev_by_name, name, name_by_dev, state,
+-                    expected, monkeypatch):
++                    label, expected, monkeypatch):
+     module = DummyModule()
+     module.params["device"] = device
+     module.params["name"] = name
+     module.params["state"] = state
++    module.params["label"] = label
+ 
+     monkeypatch.setattr(luks_device.CryptHandler,
+                         "get_container_name_by_device",
+@@ -190,39 +221,53 @@ def test_luks_close(device, dev_by_name, name, name_by_dev, state,
+                         "get_container_device_by_name",
+                         lambda x, y: dev_by_name)
+     crypt = luks_device.CryptHandler(module)
+-    conditions = luks_device.ConditionsHandler(module, crypt)
+-    assert conditions.luks_close() == expected
++    try:
++        conditions = luks_device.ConditionsHandler(module, crypt)
++        assert conditions.luks_close() == expected
++    except ValueError:
++        assert expected == "exception" or expected is False
+ 
+ 
+-@pytest.mark.parametrize("device, keyfile, new_keyfile, state, expected",
+-                         ((d[0], d[1], d[2], d[3], d[4])
++@pytest.mark.parametrize("device, keyfile, new_keyfile, state, label, expected",
++                         ((d[0], d[1], d[2], d[3], d[4], d[5])
+                           for d in LUKS_ADD_KEY_DATA))
+-def test_luks_add_key(device, keyfile, new_keyfile, state, expected, monkeypatch):
++def test_luks_add_key(device, keyfile, new_keyfile, state, label, expected, monkeypatch):
+     module = DummyModule()
+     module.params["device"] = device
+     module.params["keyfile"] = keyfile
+     module.params["new_keyfile"] = new_keyfile
+     module.params["state"] = state
++    module.params["label"] = label
++
++    monkeypatch.setattr(luks_device.Handler, "get_device_by_label",
++                        lambda x, y: [0, "/dev/dummy", ""])
+ 
+-    conditions = luks_device.ConditionsHandler(module, module)
+     try:
++        conditions = luks_device.ConditionsHandler(module, module)
+         assert conditions.luks_add_key() == expected
+     except ValueError:
+-        assert expected == "exception"
++        assert expected == "exception" or expected is False
+ 
+ 
+-@pytest.mark.parametrize("device, remove_keyfile, state, expected",
+-                         ((d[0], d[1], d[2], d[3])
++@pytest.mark.parametrize("device, remove_keyfile, state, label, expected",
++                         ((d[0], d[1], d[2], d[3], d[4])
+                           for d in LUKS_REMOVE_KEY_DATA))
+-def test_luks_remove_key(device, remove_keyfile, state, expected, monkeypatch):
++def test_luks_remove_key(device, remove_keyfile, state, label, expected, monkeypatch):
+ 
+     module = DummyModule()
+     module.params["device"] = device
+     module.params["remove_keyfile"] = remove_keyfile
+     module.params["state"] = state
++    module.params["label"] = label
+ 
+-    conditions = luks_device.ConditionsHandler(module, module)
++    monkeypatch.setattr(luks_device.Handler, "get_device_by_label",
++                        lambda x, y: [0, "/dev/dummy", ""])
++    monkeypatch.setattr(luks_device.Handler, "_run_command",
++                        lambda x, y: [0, device, ""])
++
++    crypt = luks_device.CryptHandler(module)
+     try:
++        conditions = luks_device.ConditionsHandler(module, crypt)
+         assert conditions.luks_remove_key() == expected
+     except ValueError:
+-        assert expected == "exception"
++        assert expected == "exception" or expected is False
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,173 @@
+  Task-ID: tobymao__sqlglot-5284@3f57fcd
+  Please checkout to this commit first: 9a95af1c725cd70ffa8206f1d88452a7faab93b2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Use STRING_AGG insted of GROUP_CONCAT in databricks
+sqlglot==26.25.3
+
+`
+SELECT
+  test,
+  STRING_AGG(email, '') AS Email
+FROM organizations
+GROUP BY
+test
+`
+
+The above query gets converted to
+`
+SELECT
+  test,
+  GROUP_CONCAT(email, '') AS Email
+FROM organizations
+GROUP BY
+test
+`
+
+When passed through the below code,
+`
+expression_tree = parse_one(query, read='databricks')
+`
+
+But GROUP_CONCAT is not a valid DATABRICKS, but STRING_AGG is.
+
+Can this be fixed?
+  </issue>
+  
+  <patch>
+  diff --git a/sqlglot/dialects/databricks.py b/sqlglot/dialects/databricks.py
+index f13b4ca447..b93b0529ca 100644
+--- a/sqlglot/dialects/databricks.py
++++ b/sqlglot/dialects/databricks.py
+@@ -9,6 +9,7 @@
+     build_date_delta,
+     timestamptrunc_sql,
+     build_formatted_time,
++    groupconcat_sql,
+ )
+ from sqlglot.dialects.spark import Spark
+ from sqlglot.tokens import TokenType
+@@ -87,6 +88,7 @@ class Generator(Spark.Generator):
+                 e.this,
+             ),
+             exp.DatetimeTrunc: timestamptrunc_sql(),
++            exp.GroupConcat: lambda self, e: groupconcat_sql(self, e),
+             exp.Select: transforms.preprocess(
+                 [
+                     transforms.eliminate_distinct_on,
+diff --git a/tests/dialects/test_databricks.py b/tests/dialects/test_databricks.py
+index d99c518beb..e4e9842106 100644
+--- a/tests/dialects/test_databricks.py
++++ b/tests/dialects/test_databricks.py
+@@ -171,6 +171,9 @@ def test_databricks(self):
+                 self.validate_identity(
+                     f"CREATE TABLE t1 (foo BIGINT NOT NULL CONSTRAINT foo_c FOREIGN KEY REFERENCES t2{option})"
+                 )
++        self.validate_identity(
++            "SELECT test, LISTAGG(email, '') AS Email FROM organizations GROUP BY test",
++        )
+ 
+     # https://docs.databricks.com/sql/language-manual/functions/colonsign.html
+     def test_json(self):
+diff --git a/tests/dialects/test_mysql.py b/tests/dialects/test_mysql.py
+index 3fe14e56c4..1bd90bb988 100644
+--- a/tests/dialects/test_mysql.py
++++ b/tests/dialects/test_mysql.py
+@@ -933,6 +933,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(DISTINCT x ORDER BY y DESC SEPARATOR ',')",
+                 "sqlite": "GROUP_CONCAT(DISTINCT x)",
+                 "tsql": "STRING_AGG(x, ',') WITHIN GROUP (ORDER BY y DESC)",
++                "databricks": "LISTAGG(DISTINCT x, ',') WITHIN GROUP (ORDER BY y DESC)",
+                 "postgres": "STRING_AGG(DISTINCT x, ',' ORDER BY y DESC NULLS LAST)",
+             },
+         )
+@@ -942,6 +943,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(x ORDER BY y SEPARATOR z)",
+                 "sqlite": "GROUP_CONCAT(x, z)",
+                 "tsql": "STRING_AGG(x, z) WITHIN GROUP (ORDER BY y)",
++                "databricks": "LISTAGG(x, z) WITHIN GROUP (ORDER BY y)",
+                 "postgres": "STRING_AGG(x, z ORDER BY y NULLS FIRST)",
+             },
+         )
+@@ -951,6 +953,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(DISTINCT x ORDER BY y DESC SEPARATOR '')",
+                 "sqlite": "GROUP_CONCAT(DISTINCT x, '')",
+                 "tsql": "STRING_AGG(x, '') WITHIN GROUP (ORDER BY y DESC)",
++                "databricks": "LISTAGG(DISTINCT x, '') WITHIN GROUP (ORDER BY y DESC)",
+                 "postgres": "STRING_AGG(DISTINCT x, '' ORDER BY y DESC NULLS LAST)",
+             },
+         )
+@@ -961,6 +964,7 @@ def test_mysql(self):
+                 "sqlite": "GROUP_CONCAT(a || b || c, ',')",
+                 "tsql": "STRING_AGG(CONCAT(a, b, c), ',')",
+                 "postgres": "STRING_AGG(CONCAT(a, b, c), ',')",
++                "databricks": "LISTAGG(CONCAT(a, b, c), ',')",
+                 "presto": "ARRAY_JOIN(ARRAY_AGG(CONCAT(CAST(a AS VARCHAR), CAST(b AS VARCHAR), CAST(c AS VARCHAR))), ',')",
+             },
+         )
+@@ -970,6 +974,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(CONCAT(a, b, c) SEPARATOR '')",
+                 "sqlite": "GROUP_CONCAT(a || b || c, '')",
+                 "tsql": "STRING_AGG(CONCAT(a, b, c), '')",
++                "databricks": "LISTAGG(CONCAT(a, b, c), '')",
+                 "postgres": "STRING_AGG(CONCAT(a, b, c), '')",
+             },
+         )
+@@ -979,6 +984,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(DISTINCT CONCAT(a, b, c) SEPARATOR '')",
+                 "sqlite": "GROUP_CONCAT(DISTINCT a || b || c, '')",
+                 "tsql": "STRING_AGG(CONCAT(a, b, c), '')",
++                "databricks": "LISTAGG(DISTINCT CONCAT(a, b, c), '')",
+                 "postgres": "STRING_AGG(DISTINCT CONCAT(a, b, c), '')",
+             },
+         )
+@@ -988,6 +994,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(CONCAT(a, b, c) ORDER BY d SEPARATOR '')",
+                 "sqlite": "GROUP_CONCAT(a || b || c, '')",
+                 "tsql": "STRING_AGG(CONCAT(a, b, c), '') WITHIN GROUP (ORDER BY d)",
++                "databricks": "LISTAGG(CONCAT(a, b, c), '') WITHIN GROUP (ORDER BY d)",
+                 "postgres": "STRING_AGG(CONCAT(a, b, c), '' ORDER BY d NULLS FIRST)",
+             },
+         )
+@@ -997,6 +1004,7 @@ def test_mysql(self):
+                 "mysql": "GROUP_CONCAT(DISTINCT CONCAT(a, b, c) ORDER BY d SEPARATOR '')",
+                 "sqlite": "GROUP_CONCAT(DISTINCT a || b || c, '')",
+                 "tsql": "STRING_AGG(CONCAT(a, b, c), '') WITHIN GROUP (ORDER BY d)",
++                "databricks": "LISTAGG(DISTINCT CONCAT(a, b, c), '') WITHIN GROUP (ORDER BY d)",
+                 "postgres": "STRING_AGG(DISTINCT CONCAT(a, b, c), '' ORDER BY d NULLS FIRST)",
+             },
+         )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

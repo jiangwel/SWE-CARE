@@ -1,0 +1,136 @@
+  Task-ID: huggingface__diffusers-792@90385bb
+  Please checkout to this commit first: f3983d16eed57e46742d217363d8913bef7f748d
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BF16 doesn't work with dreambooth
+### Describe the bug
+
+Using bf16 with the dreambooth script throw an exception
+
+### Reproduction
+
+_No response_
+
+### Logs
+
+```shell
+RuntimeError: "upsample_nearest2d_out_frame" not implemented for 'BFloat16'
+```
+
+
+### System Info
+
+- `diffusers` version: 0.4.0.dev0
+- Platform: Linux-5.15.0-47-generic-x86_64-with-glibc2.35
+- Python version: 3.10.0
+- PyTorch version (GPU?): 1.12.1 (True)
+- Huggingface_hub version: 0.9.1
+- Transformers version: 4.22.2
+- Using GPU in script?: Yes (3090)
+- Using distributed or parallel set-up in script?:  Nope
+  </issue>
+  
+  <patch>
+  diff --git a/src/diffusers/models/resnet.py b/src/diffusers/models/resnet.py
+index b9718e67f279..5b1f88e5416e 100644
+--- a/src/diffusers/models/resnet.py
++++ b/src/diffusers/models/resnet.py
+@@ -40,6 +40,11 @@ def forward(self, hidden_states, output_size=None):
+         if self.use_conv_transpose:
+             return self.conv(hidden_states)
+ 
++        # Cast to float32 to as 'upsample_nearest2d_out_frame' op does not support bfloat16
++        dtype = hidden_states.dtype
++        if dtype == torch.bfloat16:
++            hidden_states = hidden_states.to(torch.float32)
++
+         # if `output_size` is passed we force the interpolation output
+         # size and do not make use of `scale_factor=2`
+         if output_size is None:
+@@ -47,6 +52,10 @@ def forward(self, hidden_states, output_size=None):
+         else:
+             hidden_states = F.interpolate(hidden_states, size=output_size, mode="nearest")
+ 
++        # If the input is bfloat16, we cast back to bfloat16
++        if dtype == torch.bfloat16:
++            hidden_states = hidden_states.to(dtype)
++
+         # TODO(Suraj, Patrick) - clean up after weight dicts are correctly renamed
+         if self.use_conv:
+             if self.name == "conv":
+diff --git a/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py b/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
+index 00e72de6551a..335d442437f9 100644
+--- a/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
++++ b/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
+@@ -327,7 +327,13 @@ def __call__(
+         image = self.vae.decode(latents).sample
+ 
+         image = (image / 2 + 0.5).clamp(0, 1)
+-        image = image.cpu().permute(0, 2, 3, 1).numpy()
++        image = image.cpu().permute(0, 2, 3, 1)
++
++        # cast to float32 to as numpy doesn't support bfloat16
++        if image.dtype == torch.bfloat16:
++            image = image.to(torch.float32).numpy()
++        else:
++            image = image.numpy()
+ 
+         safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
+         image, has_nsfw_concept = self.safety_checker(
+diff --git a/src/diffusers/pipelines/stable_diffusion/safety_checker.py b/src/diffusers/pipelines/stable_diffusion/safety_checker.py
+index 773a7d4b2107..68e4fef6bb6e 100644
+--- a/src/diffusers/pipelines/stable_diffusion/safety_checker.py
++++ b/src/diffusers/pipelines/stable_diffusion/safety_checker.py
+@@ -36,8 +36,16 @@ def forward(self, clip_input, images):
+         pooled_output = self.vision_model(clip_input)[1]  # pooled_output
+         image_embeds = self.visual_projection(pooled_output)
+ 
+-        special_cos_dist = cosine_distance(image_embeds, self.special_care_embeds).cpu().numpy()
+-        cos_dist = cosine_distance(image_embeds, self.concept_embeds).cpu().numpy()
++        special_cos_dist = cosine_distance(image_embeds, self.special_care_embeds).cpu()
++        cos_dist = cosine_distance(image_embeds, self.concept_embeds).cpu()
++
++        # cast to float32 to as numpy does not support bfloat16
++        if image_embeds.dtype == torch.bfloat16:
++            special_cos_dist = special_cos_dist.float().numpy()
++            cos_dist = cos_dist.float().numpy()
++        else:
++            special_cos_dist = special_cos_dist.numpy()
++            cos_dist = cos_dist.numpy()
+ 
+         result = []
+         batch_size = image_embeds.shape[0]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,402 @@
+  Task-ID: numba__numba-8308@3247855
+  Please checkout to this commit first: fb952f8f5959ce31583da612a91b204bca58da81
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  CUDA JIT errors when multiple signatures provided
+With Numba's CPU JIT, one is able to supply multiple signatures (e.g. single and double precision floating values) for a function. However when trying the same with Numba's CUDA JIT, this results in an error. Limiting the CUDA JIT to a single signature fixes the issue. Code snippet demonstrating this below.
+
+<details>
+<summary>Example:</summary>
+
+```python
+In [1]: from numba import jit
+
+In [2]: from numba.cuda import jit as cuda_jit
+
+In [3]: @jit(["f4(f4, f4)", "f8(f8, f8)"])
+   ...: def f(a, b):
+   ...:     return a + b
+   ...: 
+   ...: 
+
+In [4]: @cuda_jit(["f4(f4, f4)", "f8(f8, f8)"])
+   ...: def g(a, b):
+   ...:     return a + b
+   ...: 
+   ...: 
+---------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+<ipython-input-4-5a86fdfdf6d9> in <module>()
+----> 1 @cuda_jit(["f4(f4, f4)", "f8(f8, f8)"])
+      2 def g(a, b):
+      3     return a + b
+
+~/.conda/envs/numba/lib/python3.6/site-packages/numba/cuda/compiler.py in __call__(self, *args)
+    700         Specialize and invoke this kernel with *args*.
+    701         '''
+--> 702         kernel = self.specialize(*args)
+    703         cfg = kernel[self.griddim, self.blockdim, self.stream, self.sharedmem]
+    704         cfg(*args)
+
+~/.conda/envs/numba/lib/python3.6/site-packages/numba/cuda/compiler.py in specialize(self, *args)
+    710         '''
+    711         argtypes = tuple(
+--> 712             [self.typingctx.resolve_argument_type(a) for a in args])
+    713         kernel = self.compile(argtypes)
+    714         return kernel
+
+~/.conda/envs/numba/lib/python3.6/site-packages/numba/cuda/compiler.py in <listcomp>(.0)
+    710         '''
+    711         argtypes = tuple(
+--> 712             [self.typingctx.resolve_argument_type(a) for a in args])
+    713         kernel = self.compile(argtypes)
+    714         return kernel
+
+~/.conda/envs/numba/lib/python3.6/site-packages/numba/typing/context.py in resolve_argument_type(self, val)
+    288         ValueError is raised for unsupported types.
+    289         """
+--> 290         return typeof(val, Purpose.argument)
+    291 
+    292     def resolve_value_type(self, val):
+
+~/.conda/envs/numba/lib/python3.6/site-packages/numba/typing/typeof.py in typeof(val, purpose)
+     31         msg = errors.termcolor.errmsg(
+     32             "cannot determine Numba type of %r") % (type(val),)
+---> 33         raise ValueError(msg)
+     34     return ty
+     35 
+
+ValueError: cannot determine Numba type of <class 'function'>
+```
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/docs/source/reference/jit-compilation.rst b/docs/source/reference/jit-compilation.rst
+index ac67a593b14..06f7a787568 100644
+--- a/docs/source/reference/jit-compilation.rst
++++ b/docs/source/reference/jit-compilation.rst
+@@ -1,12 +1,11 @@
+ Just-in-Time compilation
+ ========================
+ 
++.. _jit-decorator:
+ 
+ JIT functions
+ -------------
+ 
+-.. _jit-decorator:
+-
+ .. decorator:: numba.jit(signature=None, nopython=False, nogil=False, cache=False, forceobj=False, parallel=False, error_model='python', fastmath=False, locals={}, boundscheck=False)
+ 
+    Compile the decorated function on-the-fly to produce efficient machine
+diff --git a/numba/cuda/decorators.py b/numba/cuda/decorators.py
+index 6703a6feacc..5a34df46918 100644
+--- a/numba/cuda/decorators.py
++++ b/numba/cuda/decorators.py
+@@ -14,21 +14,22 @@
+ def jit(func_or_sig=None, device=False, inline=False, link=[], debug=None,
+         opt=True, cache=False, **kws):
+     """
+-    JIT compile a python function conforming to the CUDA Python specification.
+-    If a signature is supplied, then a function is returned that takes a
+-    function to compile.
++    JIT compile a Python function for CUDA GPUs.
+ 
+-    :param func_or_sig: A function to JIT compile, or a signature of a function
+-       to compile. If a function is supplied, then a
+-       :class:`numba.cuda.compiler.AutoJitCUDAKernel` is returned. If a
+-       signature is supplied, then a function is returned. The returned
+-       function accepts another function, which it will compile and then return
+-       a :class:`numba.cuda.compiler.AutoJitCUDAKernel`.
++    :param func_or_sig: A function to JIT compile, or *signatures* of a
++       function to compile. If a function is supplied, then a
++       :class:`Dispatcher <numba.cuda.dispatcher.CUDADispatcher>` is returned.
++       Otherwise, ``func_or_sig`` may be a signature or a list of signatures,
++       and a function is returned. The returned function accepts another
++       function, which it will compile and then return a :class:`Dispatcher
++       <numba.cuda.dispatcher.CUDADispatcher>`. See :ref:`jit-decorator` for
++       more information about passing signatures.
+ 
+        .. note:: A kernel cannot have any return value.
+     :param device: Indicates whether this is a device function.
+     :type device: bool
+-    :param link: A list of files containing PTX source to link with the function
++    :param link: A list of files containing PTX or CUDA C/C++ source to link
++       with the function
+     :type link: list
+     :param debug: If True, check for exceptions thrown when executing the
+        kernel. Since this degrades performance, this should only be used for
+@@ -83,16 +84,20 @@ def jit(func_or_sig=None, device=False, inline=False, link=[], debug=None,
+         raise ValueError("link keyword invalid for device function")
+ 
+     if sigutils.is_signature(func_or_sig):
++        signatures = [func_or_sig]
++        specialized = True
++    elif isinstance(func_or_sig, list):
++        signatures = func_or_sig
++        specialized = False
++    else:
++        signatures = None
++
++    if signatures:
+         if config.ENABLE_CUDASIM:
+             def jitwrapper(func):
+                 return FakeCUDAKernel(func, device=device, fastmath=fastmath)
+             return jitwrapper
+ 
+-        argtypes, restype = sigutils.normalize_signature(func_or_sig)
+-
+-        if restype and not device and restype != types.void:
+-            raise TypeError("CUDA kernel must have void return type.")
+-
+         def _jit(func):
+             targetoptions = kws.copy()
+             targetoptions['debug'] = debug
+@@ -107,14 +112,20 @@ def _jit(func):
+             if cache:
+                 disp.enable_caching()
+ 
+-            if device:
+-                from numba.core import typeinfer
+-                with typeinfer.register_dispatcher(disp):
+-                    disp.compile_device(argtypes)
+-            else:
+-                disp.compile(argtypes)
++            for sig in signatures:
++                argtypes, restype = sigutils.normalize_signature(sig)
++
++                if restype and not device and restype != types.void:
++                    raise TypeError("CUDA kernel must have void return type.")
++
++                if device:
++                    from numba.core import typeinfer
++                    with typeinfer.register_dispatcher(disp):
++                        disp.compile_device(argtypes)
++                else:
++                    disp.compile(argtypes)
+ 
+-            disp._specialized = True
++            disp._specialized = specialized
+             disp.disable_compile()
+ 
+             return disp
+diff --git a/numba/cuda/tests/cudapy/test_dispatcher.py b/numba/cuda/tests/cudapy/test_dispatcher.py
+index efbe4291292..ee050131af3 100644
+--- a/numba/cuda/tests/cudapy/test_dispatcher.py
++++ b/numba/cuda/tests/cudapy/test_dispatcher.py
+@@ -2,6 +2,7 @@
+ import threading
+ 
+ from numba import cuda, float32, float64, int32, int64, void
++from numba.core.errors import TypingError
+ from numba.cuda.testing import skip_on_cudasim, unittest, CUDATestCase
+ import math
+ 
+@@ -213,6 +214,171 @@ def wrapper():
+             t.join()
+         self.assertFalse(errors)
+ 
++    def test_explicit_signatures(self):
++        sigs = ["(int64[::1], int64, int64)",
++                "(float64[::1], float64, float64)"]
++        f = cuda.jit(sigs)(add_kernel)
++
++        # Exact signature matches
++        r = np.zeros(1, dtype=np.int64)
++        f[1, 1](r, 1, 2)
++        self.assertPreciseEqual(r[0], 3)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, 1.5, 2.5)
++        self.assertPreciseEqual(r[0], 4.0)
++
++        # No conversion
++        with self.assertRaises(TypeError) as cm:
++            r = np.zeros(1, dtype=np.complex128)
++            f[1, 1](r, 1j, 1j)
++        self.assertIn("No matching definition", str(cm.exception))
++        self.assertEqual(len(f.overloads), 2, f.overloads)
++
++        # A more interesting one...
++        # (Note that the type of r is deliberately float64 in both cases so
++        # that dispatch is differentiated on the types of x and y only, to
++        # closely preserve the intent of the original test from
++        # numba.tests.test_dispatcher)
++        sigs = ["(float64[::1], float32, float32)",
++                "(float64[::1], float64, float64)"]
++        f = cuda.jit(sigs)(add_kernel)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, np.float32(1), np.float32(2**-25))
++        self.assertPreciseEqual(r[0], 1.0)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, 1, 2**-25)
++        self.assertPreciseEqual(r[0], 1.0000000298023224)
++
++        # Fail to resolve ambiguity between the two best overloads
++        # (Also deliberate float64[::1] for the first argument in all cases)
++        f = cuda.jit(["(float64[::1], float32,float64)",
++                      "(float64[::1], float64,float32)",
++                      "(float64[::1], int64,int64)"])(add_kernel)
++        with self.assertRaises(TypeError) as cm:
++            r = np.zeros(1, dtype=np.float64)
++            f[1, 1](r, 1.0, 2.0)
++
++        # The two best matches are output in the error message, as well
++        # as the actual argument types.
++        self.assertRegexpMatches(
++            str(cm.exception),
++            r"Ambiguous overloading for <function add_kernel [^>]*> "
++            r"\(array\(float64, 1d, C\), float64, float64\):\n"
++            r"\(array\(float64, 1d, C\), float32, float64\) -> none\n"
++            r"\(array\(float64, 1d, C\), float64, float32\) -> none"
++        )
++        # The integer signature is not part of the best matches
++        self.assertNotIn("int64", str(cm.exception))
++
++    @unittest.expectedFailure
++    def test_explicit_signatures_unsafe(self):
++        # These tests are from test_explicit_signatures, but have to be xfail
++        # at present because _prepare_args in the CUDA target cannot handle
++        # unsafe conversions of arguments.
++        f = cuda.jit("(int64[::1], int64,int64)")(add_kernel)
++        r = np.zeros(1, dtype=np.int64)
++
++        # Approximate match (unsafe conversion)
++        f[1, 1](r, 1.5, 2.5)
++        self.assertPreciseEqual(r[0], 3)
++        self.assertEqual(len(f.overloads), 1, f.overloads)
++
++        sigs = ["(int64[::1], int64,int64)", "(float64[::1], float64, float64)"]
++        f = cuda.jit(sigs)(add_kernel)
++        r = np.zeros(1, dtype=np.float64)
++        # Approximate match (int32 -> float64 is a safe conversion)
++        f[1, 1](r, np.int32(1), 2.5)
++        self.assertPreciseEqual(r[0], 3.5)
++
++    def add_device_usecase(self, sigs):
++        # Generate a kernel that calls the add device function compiled with a
++        # given set of signatures
++        add_device = cuda.jit(sigs, device=True)(add)
++
++        @cuda.jit
++        def f(r, x, y):
++            r[0] = add_device(x, y)
++
++        return f
++
++    def test_explicit_signatures_device(self):
++        # Tests similar to test_explicit_signatures, but on a device function
++        # instead of a kernel
++        sigs = ["(int64, int64)", "(float64, float64)"]
++        f = self.add_device_usecase(sigs)
++
++        # Exact signature matches
++        r = np.zeros(1, dtype=np.int64)
++        f[1, 1](r, 1, 2)
++        self.assertPreciseEqual(r[0], 3)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, 1.5, 2.5)
++        self.assertPreciseEqual(r[0], 4.0)
++
++        # No conversion
++        with self.assertRaises(TypingError) as cm:
++            r = np.zeros(1, dtype=np.complex128)
++            f[1, 1](r, 1j, 1j)
++
++        msg = str(cm.exception)
++        self.assertIn("Invalid use of type", msg)
++        self.assertIn("with parameters (complex128, complex128)", msg)
++        self.assertEqual(len(f.overloads), 2, f.overloads)
++
++        # A more interesting one...
++        # (Note that the type of r is deliberately float64 in both cases so
++        # that dispatch is differentiated on the types of x and y only, to
++        # closely preserve the intent of the original test from
++        # numba.tests.test_dispatcher)
++        sigs = ["(float32, float32)", "(float64, float64)"]
++        f = self.add_device_usecase(sigs)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, np.float32(1), np.float32(2**-25))
++        self.assertPreciseEqual(r[0], 1.0)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, 1, 2**-25)
++        self.assertPreciseEqual(r[0], 1.0000000298023224)
++
++        # Ambiguity between the two best overloads resolves. This is somewhat
++        # surprising given that ambiguity is not permitted for dispatching
++        # overloads when launching a kernel, but seems to be the general
++        # behaviour of Numba (See Issue #8307:
++        # https://github.com/numba/numba/issues/8307).
++        sigs = ["(float32,float64)", "(float64,float32)", "(int64,int64)"]
++        f = self.add_device_usecase(sigs)
++
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, 1.5, 2.5)
++        self.assertPreciseEqual(r[0], 4.0)
++
++    def test_explicit_signatures_device_unsafe(self):
++        # These tests are from test_explicit_signatures. The device function
++        # variant of these tests can succeed on CUDA because the compilation
++        # can handle unsafe casting (c.f. test_explicit_signatures_unsafe which
++        # has to xfail due to _prepare_args not supporting unsafe casting).
++        sigs = ["(int64, int64)"]
++        f = self.add_device_usecase(sigs)
++
++        # Approximate match (unsafe conversion)
++        r = np.zeros(1, dtype=np.int64)
++        f[1, 1](r, 1.5, 2.5)
++        self.assertPreciseEqual(r[0], 3)
++        self.assertEqual(len(f.overloads), 1, f.overloads)
++
++        sigs = ["(int64, int64)", "(float64, float64)"]
++        f = self.add_device_usecase(sigs)
++
++        # Approximate match (int32 -> float64 is a safe conversion)
++        r = np.zeros(1, dtype=np.float64)
++        f[1, 1](r, np.int32(1), 2.5)
++        self.assertPreciseEqual(r[0], 3.5)
++
+     def test_get_regs_per_thread_unspecialized(self):
+         # A kernel where the register usage per thread is likely to differ
+         # between different specializations
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

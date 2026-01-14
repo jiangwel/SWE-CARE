@@ -1,0 +1,622 @@
+  Task-ID: certbot__certbot-7270@65f464e
+  Please checkout to this commit first: e6bf3fe7f81ff7651b3e8be3d530be725090ed2c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Fix remaining broken tests on Windows
+When I started to port Certbot on Windows, a lot of unit tests or the logic tested by them were not working on this platform.
+
+In order to still have a working CI during the port, all failing tests where marked with a temporary decorator, `@broken_on_windows` to skip their execution. At this time, there is 40 units tests left in this state.
+
+This issue is done to track the complete removal of broken tests on Windows, either by fix the test or code logic, or by skipping definitively some of theses tests for a good reason with `@skip_on_windows`.
+  </issue>
+  
+  <patch>
+  diff --git a/.codecov.yml b/.codecov.yml
+index f4d4d1d6c19..8a1503da885 100644
+--- a/.codecov.yml
++++ b/.codecov.yml
+@@ -13,6 +13,6 @@ coverage:
+         flags: windows
+         # Fixed target instead of auto set by #7173, can
+         # be removed when flags in Codecov are added back.
+-        target: 97.2
++        target: 97.6
+         threshold: 0.1
+         base: auto
+diff --git a/certbot/compat/filesystem.py b/certbot/compat/filesystem.py
+index a38fbe76022..e2985b7ed9a 100644
+--- a/certbot/compat/filesystem.py
++++ b/certbot/compat/filesystem.py
+@@ -289,6 +289,35 @@ def realpath(file_path):
+     return os.path.abspath(file_path)
+ 
+ 
++def is_executable(path):
++    """
++    Is path an executable file?
++    :param str path: path to test
++    :returns: True if path is an executable file
++    :rtype: bool
++    """
++    if POSIX_MODE:
++        return os.path.isfile(path) and os.access(path, os.X_OK)
++
++    return _win_is_executable(path)
++
++
++def _win_is_executable(path):
++    if not os.path.isfile(path):
++        return False
++
++    security = win32security.GetFileSecurity(path, win32security.DACL_SECURITY_INFORMATION)
++    dacl = security.GetSecurityDescriptorDacl()
++
++    mode = dacl.GetEffectiveRightsFromAcl({
++        'TrusteeForm': win32security.TRUSTEE_IS_SID,
++        'TrusteeType': win32security.TRUSTEE_IS_USER,
++        'Identifier': _get_current_user(),
++    })
++
++    return mode & ntsecuritycon.FILE_GENERIC_EXECUTE == ntsecuritycon.FILE_GENERIC_EXECUTE
++
++
+ def _apply_win_mode(file_path, mode):
+     """
+     This function converts the given POSIX mode into a Windows ACL list, and applies it to the
+diff --git a/certbot/compat/misc.py b/certbot/compat/misc.py
+index 693fceefbc0..5151e715614 100644
+--- a/certbot/compat/misc.py
++++ b/certbot/compat/misc.py
+@@ -30,6 +30,10 @@
+     MASK_FOR_PRIVATE_KEY_PERMISSIONS = 0
+ 
+ 
++# For Linux: define OS specific standard binary directories
++STANDARD_BINARY_DIRS = ["/usr/sbin", "/usr/local/bin", "/usr/local/sbin"] if POSIX_MODE else []
++
++
+ def raise_for_non_administrative_windows_rights():
+     # type: () -> None
+     """
+diff --git a/certbot/constants.py b/certbot/constants.py
+index 5b268e1574c..10cd58ca1bf 100644
+--- a/certbot/constants.py
++++ b/certbot/constants.py
+@@ -169,9 +169,10 @@
+ """Directory where all accounts are saved."""
+ 
+ LE_REUSE_SERVERS = {
+-    'acme-v02.api.letsencrypt.org/directory': 'acme-v01.api.letsencrypt.org/directory',
+-    'acme-staging-v02.api.letsencrypt.org/directory':
+-        'acme-staging.api.letsencrypt.org/directory'
++    os.path.normpath('acme-v02.api.letsencrypt.org/directory'):
++        os.path.normpath('acme-v01.api.letsencrypt.org/directory'),
++    os.path.normpath('acme-staging-v02.api.letsencrypt.org/directory'):
++        os.path.normpath('acme-staging.api.letsencrypt.org/directory')
+ }
+ """Servers that can reuse accounts from other servers."""
+ 
+diff --git a/certbot/hooks.py b/certbot/hooks.py
+index 34e06e0a34c..1bb3a2eabb2 100644
+--- a/certbot/hooks.py
++++ b/certbot/hooks.py
+@@ -8,6 +8,7 @@
+ 
+ from certbot import errors
+ from certbot import util
++from certbot.compat import filesystem
+ from certbot.compat import os
+ from certbot.plugins import util as plug_util
+ 
+@@ -254,7 +255,7 @@ def execute(cmd_name, shell_cmd):
+                      cmd_name, shell_cmd, cmd.returncode)
+     if err:
+         logger.error('Error output from %s command %s:\n%s', cmd_name, base_cmd, err)
+-    return (err, out)
++    return err, out
+ 
+ 
+ def list_hooks(dir_path):
+@@ -267,5 +268,5 @@ def list_hooks(dir_path):
+ 
+     """
+     allpaths = (os.path.join(dir_path, f) for f in os.listdir(dir_path))
+-    hooks = [path for path in allpaths if util.is_exe(path) and not path.endswith('~')]
++    hooks = [path for path in allpaths if filesystem.is_executable(path) and not path.endswith('~')]
+     return sorted(hooks)
+diff --git a/certbot/plugins/util.py b/certbot/plugins/util.py
+index 61f81128026..87eb45fe9f8 100644
+--- a/certbot/plugins/util.py
++++ b/certbot/plugins/util.py
+@@ -3,9 +3,11 @@
+ 
+ from certbot import util
+ from certbot.compat import os
++from certbot.compat.misc import STANDARD_BINARY_DIRS
+ 
+ logger = logging.getLogger(__name__)
+ 
++
+ def get_prefixes(path):
+     """Retrieves all possible path prefixes of a path, in descending order
+     of length. For instance,
+@@ -26,6 +28,7 @@ def get_prefixes(path):
+             break
+     return prefixes
+ 
++
+ def path_surgery(cmd):
+     """Attempt to perform PATH surgery to find cmd
+ 
+@@ -35,10 +38,9 @@ def path_surgery(cmd):
+ 
+     :returns: True if the operation succeeded, False otherwise
+     """
+-    dirs = ("/usr/sbin", "/usr/local/bin", "/usr/local/sbin")
+     path = os.environ["PATH"]
+     added = []
+-    for d in dirs:
++    for d in STANDARD_BINARY_DIRS:
+         if d not in path:
+             path += os.pathsep + d
+             added.append(d)
+diff --git a/certbot/plugins/util_test.py b/certbot/plugins/util_test.py
+index 6ec6f62f461..c41e5522202 100644
+--- a/certbot/plugins/util_test.py
++++ b/certbot/plugins/util_test.py
+@@ -16,6 +16,7 @@ def test_get_prefix(self):
+         self.assertEqual(get_prefixes('/'), [os.path.normpath('/')])
+         self.assertEqual(get_prefixes('a'), ['a'])
+ 
++
+ class PathSurgeryTest(unittest.TestCase):
+     """Tests for certbot.plugins.path_surgery."""
+ 
+@@ -29,13 +30,15 @@ def test_path_surgery(self, mock_debug):
+                 self.assertEqual(path_surgery("eg"), True)
+                 self.assertEqual(mock_debug.call_count, 0)
+                 self.assertEqual(os.environ["PATH"], all_path["PATH"])
+-        no_path = {"PATH": "/tmp/"}
+-        with mock.patch.dict('os.environ', no_path):
+-            path_surgery("thingy")
+-            self.assertEqual(mock_debug.call_count, 2)
+-            self.assertTrue("Failed to find" in mock_debug.call_args[0][0])
+-            self.assertTrue("/usr/local/bin" in os.environ["PATH"])
+-            self.assertTrue("/tmp" in os.environ["PATH"])
++        if os.name != 'nt':
++            # This part is specific to Linux since on Windows no PATH surgery is ever done.
++            no_path = {"PATH": "/tmp/"}
++            with mock.patch.dict('os.environ', no_path):
++                path_surgery("thingy")
++                self.assertEqual(mock_debug.call_count, 2 if os.name != 'nt' else 1)
++                self.assertTrue("Failed to find" in mock_debug.call_args[0][0])
++                self.assertTrue("/usr/local/bin" in os.environ["PATH"])
++                self.assertTrue("/tmp" in os.environ["PATH"])
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/certbot/tests/account_test.py b/certbot/tests/account_test.py
+index 24a092cc888..c1450079873 100644
+--- a/certbot/tests/account_test.py
++++ b/certbot/tests/account_test.py
+@@ -2,7 +2,6 @@
+ import datetime
+ import json
+ import shutil
+-import stat
+ import unittest
+ 
+ import josepy as jose
+@@ -13,6 +12,7 @@
+ 
+ import certbot.tests.util as test_util
+ from certbot import errors
++from certbot.compat import filesystem
+ from certbot.compat import misc
+ from certbot.compat import os
+ 
+@@ -116,7 +116,6 @@ def test_init_creates_dir(self):
+         self.assertTrue(os.path.isdir(
+             misc.underscores_for_unsupported_characters_in_path(self.config.accounts_dir)))
+ 
+-    @test_util.broken_on_windows
+     def test_save_and_restore(self):
+         self.storage.save(self.acc, self.mock_client)
+         account_path = os.path.join(self.config.accounts_dir, self.acc.id)
+@@ -124,8 +123,8 @@ def test_save_and_restore(self):
+         for file_name in "regr.json", "meta.json", "private_key.json":
+             self.assertTrue(os.path.exists(
+                 os.path.join(account_path, file_name)))
+-        self.assertTrue(oct(os.stat(os.path.join(
+-            account_path, "private_key.json"))[stat.ST_MODE] & 0o777) in ("0400", "0o400"))
++        self.assertTrue(
++            filesystem.check_mode(os.path.join(account_path, "private_key.json"), 0o400))
+ 
+         # restore
+         loaded = self.storage.load(self.acc.id)
+@@ -219,14 +218,12 @@ def test_find_all_server_downgrade(self):
+         self._set_server('https://acme-staging.api.letsencrypt.org/directory')
+         self.assertEqual([], self.storage.find_all())
+ 
+-    @test_util.broken_on_windows
+     def test_upgrade_version_staging(self):
+         self._set_server('https://acme-staging.api.letsencrypt.org/directory')
+         self.storage.save(self.acc, self.mock_client)
+         self._set_server('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self.assertEqual([self.acc], self.storage.find_all())
+ 
+-    @test_util.broken_on_windows
+     def test_upgrade_version_production(self):
+         self._set_server('https://acme-v01.api.letsencrypt.org/directory')
+         self.storage.save(self.acc, self.mock_client)
+@@ -244,7 +241,6 @@ def test_corrupted_account(self, mock_rmdir):
+         self._set_server('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self.assertEqual([], self.storage.find_all())
+ 
+-    @test_util.broken_on_windows
+     def test_upgrade_load(self):
+         self._set_server('https://acme-staging.api.letsencrypt.org/directory')
+         self.storage.save(self.acc, self.mock_client)
+@@ -253,7 +249,6 @@ def test_upgrade_load(self):
+         account = self.storage.load(self.acc.id)
+         self.assertEqual(prev_account, account)
+ 
+-    @test_util.broken_on_windows
+     def test_upgrade_load_single_account(self):
+         self._set_server('https://acme-staging.api.letsencrypt.org/directory')
+         self.storage.save(self.acc, self.mock_client)
+@@ -278,7 +273,6 @@ def test_save_ioerrors(self):
+                 errors.AccountStorageError, self.storage.save,
+                     self.acc, self.mock_client)
+ 
+-    @test_util.broken_on_windows
+     def test_delete(self):
+         self.storage.save(self.acc, self.mock_client)
+         self.storage.delete(self.acc.id)
+@@ -313,12 +307,10 @@ def _test_delete_folders(self, server_url):
+         self._set_server('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self.assertRaises(errors.AccountNotFound, self.storage.load, self.acc.id)
+ 
+-    @test_util.broken_on_windows
+     def test_delete_folders_up(self):
+         self._test_delete_folders('https://acme-staging.api.letsencrypt.org/directory')
+         self._assert_symlinked_account_removed()
+ 
+-    @test_util.broken_on_windows
+     def test_delete_folders_down(self):
+         self._test_delete_folders('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self._assert_symlinked_account_removed()
+@@ -328,15 +320,14 @@ def _set_server_and_stop_symlink(self, server_path):
+         with open(os.path.join(self.config.accounts_dir, 'foo'), 'w') as f:
+             f.write('bar')
+ 
+-    @test_util.broken_on_windows
+     def test_delete_shared_account_up(self):
+         self._set_server_and_stop_symlink('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self._test_delete_folders('https://acme-staging.api.letsencrypt.org/directory')
+ 
+-    @test_util.broken_on_windows
+     def test_delete_shared_account_down(self):
+         self._set_server_and_stop_symlink('https://acme-staging-v02.api.letsencrypt.org/directory')
+         self._test_delete_folders('https://acme-staging-v02.api.letsencrypt.org/directory')
+ 
++
+ if __name__ == "__main__":
+     unittest.main()  # pragma: no cover
+diff --git a/certbot/tests/compat/filesystem_test.py b/certbot/tests/compat/filesystem_test.py
+index 90ecd13d7ab..c6ce0986ac1 100644
+--- a/certbot/tests/compat/filesystem_test.py
++++ b/certbot/tests/compat/filesystem_test.py
+@@ -1,4 +1,5 @@
+ """Tests for certbot.compat.filesystem"""
++import contextlib
+ import errno
+ import unittest
+ 
+@@ -411,6 +412,70 @@ def test_symlink_loop_mitigation(self):
+         self.assertTrue('link1 is a loop!' in str(error.exception))
+ 
+ 
++class NotExecutableTest(test_util.TempDirTestCase):
++    """Tests for is_executable method"""
++    def test_not_executable(self):
++        file_path = os.path.join(self.tempdir, "foo")
++
++        # On Windows a file created within Certbot will always have all permissions to the
++        # Administrators group set. Since the unit tests are typically executed under elevated
++        # privileges, it means that current user will always have effective execute rights on the
++        # hook script, and so the test will fail. To prevent that and represent a file created
++        # outside Certbot as typically a hook file is, we mock the _generate_dacl function in
++        # certbot.compat.filesystem to give rights only to the current user. This implies removing
++        # all ACEs except the first one from the DACL created by original _generate_dacl function.
++
++        from certbot.compat.filesystem import _generate_dacl
++
++        def _execute_mock(user_sid, mode):
++            dacl = _generate_dacl(user_sid, mode)
++            for _ in range(1, dacl.GetAceCount()):
++                dacl.DeleteAce(1)  # DeleteAce dynamically updates the internal index mapping.
++            return dacl
++
++        # create a non-executable file
++        with mock.patch("certbot.compat.filesystem._generate_dacl", side_effect=_execute_mock):
++            os.close(filesystem.open(file_path, os.O_CREAT | os.O_WRONLY, 0o666))
++
++        self.assertFalse(filesystem.is_executable(file_path))
++
++    @mock.patch("certbot.compat.filesystem.os.path.isfile")
++    @mock.patch("certbot.compat.filesystem.os.access")
++    def test_full_path(self, mock_access, mock_isfile):
++        with _fix_windows_runtime():
++            mock_access.return_value = True
++            mock_isfile.return_value = True
++            self.assertTrue(filesystem.is_executable("/path/to/exe"))
++
++    @mock.patch("certbot.compat.filesystem.os.path.isfile")
++    @mock.patch("certbot.compat.filesystem.os.access")
++    def test_rel_path(self, mock_access, mock_isfile):
++        with _fix_windows_runtime():
++            mock_access.return_value = True
++            mock_isfile.return_value = True
++            self.assertTrue(filesystem.is_executable("exe"))
++
++    @mock.patch("certbot.compat.filesystem.os.path.isfile")
++    @mock.patch("certbot.compat.filesystem.os.access")
++    def test_not_found(self, mock_access, mock_isfile):
++        with _fix_windows_runtime():
++            mock_access.return_value = True
++            mock_isfile.return_value = False
++            self.assertFalse(filesystem.is_executable("exe"))
++
++
++@contextlib.contextmanager
++def _fix_windows_runtime():
++    if os.name != 'nt':
++        yield
++    else:
++        with mock.patch('win32security.GetFileSecurity') as mock_get:
++            dacl_mock = mock_get.return_value.GetSecurityDescriptorDacl
++            mode_mock = dacl_mock.return_value.GetEffectiveRightsFromAcl
++            mode_mock.return_value = ntsecuritycon.FILE_GENERIC_EXECUTE
++            yield
++
++
+ def _get_security_dacl(target):
+     return win32security.GetFileSecurity(target, win32security.DACL_SECURITY_INFORMATION)
+ 
+diff --git a/certbot/tests/hook_test.py b/certbot/tests/hook_test.py
+index 079bc7f4cec..017edc56006 100644
+--- a/certbot/tests/hook_test.py
++++ b/certbot/tests/hook_test.py
+@@ -1,14 +1,14 @@
+ """Tests for certbot.hooks."""
+-import stat
+ import unittest
+ 
+ import mock
+ from acme.magic_typing import List  # pylint: disable=unused-import, no-name-in-module
+ 
+ from certbot import errors
++from certbot import util
+ from certbot.compat import os
+ from certbot.compat import filesystem
+-from certbot.tests import util
++from certbot.tests import util as test_util
+ 
+ 
+ class ValidateHooksTest(unittest.TestCase):
+@@ -30,7 +30,7 @@ def test_it(self, mock_validate_hook):
+         self.assertEqual("renew", types[-1])
+ 
+ 
+-class ValidateHookTest(util.TempDirTestCase):
++class ValidateHookTest(test_util.TempDirTestCase):
+     """Tests for certbot.hooks.validate_hook."""
+ 
+     @classmethod
+@@ -38,22 +38,20 @@ def _call(cls, *args, **kwargs):
+         from certbot.hooks import validate_hook
+         return validate_hook(*args, **kwargs)
+ 
+-    @util.broken_on_windows
+-    def test_not_executable(self):
+-        file_path = os.path.join(self.tempdir, "foo")
+-        # create a non-executable file
+-        os.close(filesystem.open(file_path, os.O_CREAT | os.O_WRONLY, 0o666))
++    def test_hook_not_executable(self):
+         # prevent unnecessary modifications to PATH
+         with mock.patch("certbot.hooks.plug_util.path_surgery"):
+-            self.assertRaises(errors.HookCommandNotFound,
+-                              self._call, file_path, "foo")
++            # We just mock out filesystem.is_executable since on Windows, it is difficult
++            # to get a fully working test around executable permissions. See
++            # certbot.tests.compat.filesystem::NotExecutableTest for more in-depth tests.
++            with mock.patch("certbot.hooks.filesystem.is_executable", return_value=False):
++                self.assertRaises(errors.HookCommandNotFound, self._call, 'dummy', "foo")
+ 
+     @mock.patch("certbot.hooks.util.exe_exists")
+     def test_not_found(self, mock_exe_exists):
+         mock_exe_exists.return_value = False
+         with mock.patch("certbot.hooks.plug_util.path_surgery") as mock_ps:
+-            self.assertRaises(errors.HookCommandNotFound,
+-                              self._call, "foo", "bar")
++            self.assertRaises(errors.HookCommandNotFound, self._call, "foo", "bar")
+         self.assertTrue(mock_ps.called)
+ 
+     @mock.patch("certbot.hooks._prog")
+@@ -62,7 +60,7 @@ def test_unset(self, mock_prog):
+         self.assertFalse(mock_prog.called)
+ 
+ 
+-class HookTest(util.ConfigTestCase):
++class HookTest(test_util.ConfigTestCase):
+     """Common base class for hook tests."""
+ 
+     @classmethod
+@@ -454,7 +452,7 @@ def _test_common(self, returncode, stdout, stderr):
+             self.assertTrue(mock_logger.error.called)
+ 
+ 
+-class ListHooksTest(util.TempDirTestCase):
++class ListHooksTest(test_util.TempDirTestCase):
+     """Tests for certbot.hooks.list_hooks."""
+ 
+     @classmethod
+@@ -494,8 +492,7 @@ def create_hook(file_path):
+     :param str file_path: path to create the file at
+ 
+     """
+-    open(file_path, "w").close()
+-    filesystem.chmod(file_path, os.stat(file_path).st_mode | stat.S_IXUSR)
++    util.safe_open(file_path, mode="w", chmod=0o744).close()
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/certbot/tests/util.py b/certbot/tests/util.py
+index 56fbd54583a..7ee215c668d 100644
+--- a/certbot/tests/util.py
++++ b/certbot/tests/util.py
+@@ -421,15 +421,6 @@ def wrapper(function):
+     return wrapper
+ 
+ 
+-def broken_on_windows(function):
+-    """Decorator to skip temporarily a broken test on Windows."""
+-    reason = 'Test is broken and ignored on windows but should be fixed.'
+-    return unittest.skipIf(
+-        sys.platform == 'win32'
+-        and os.environ.get('SKIP_BROKEN_TESTS_ON_WINDOWS', 'true') == 'true',
+-        reason)(function)
+-
+-
+ def temp_join(path):
+     """
+     Return the given path joined to the tempdir path for the current platform
+diff --git a/certbot/tests/util_test.py b/certbot/tests/util_test.py
+index e65de334920..65b6fa289f3 100644
+--- a/certbot/tests/util_test.py
++++ b/certbot/tests/util_test.py
+@@ -1,5 +1,6 @@
+ """Tests for certbot.util."""
+ import argparse
++import contextlib
+ import errno
+ import unittest
+ 
+@@ -52,26 +53,26 @@ def _call(cls, exe):
+         from certbot.util import exe_exists
+         return exe_exists(exe)
+ 
+-    @mock.patch("certbot.util.os.path.isfile")
+-    @mock.patch("certbot.util.os.access")
+-    def test_full_path(self, mock_access, mock_isfile):
+-        mock_access.return_value = True
+-        mock_isfile.return_value = True
+-        self.assertTrue(self._call("/path/to/exe"))
+-
+-    @mock.patch("certbot.util.os.path.isfile")
+-    @mock.patch("certbot.util.os.access")
+-    def test_on_path(self, mock_access, mock_isfile):
+-        mock_access.return_value = True
+-        mock_isfile.return_value = True
+-        self.assertTrue(self._call("exe"))
+-
+-    @mock.patch("certbot.util.os.path.isfile")
+-    @mock.patch("certbot.util.os.access")
+-    def test_not_found(self, mock_access, mock_isfile):
+-        mock_access.return_value = False
+-        mock_isfile.return_value = True
+-        self.assertFalse(self._call("exe"))
++    def test_exe_exists(self):
++        with mock.patch("certbot.util.filesystem.is_executable", return_value=True):
++            self.assertTrue(self._call("/path/to/exe"))
++
++    def test_exe_not_exists(self):
++        with mock.patch("certbot.util.filesystem.is_executable", return_value=False):
++            self.assertFalse(self._call("/path/to/exe"))
++
++
++@contextlib.contextmanager
++def _fix_windows_runtime():
++    if os.name != 'nt':
++        yield
++    else:
++        import ntsecuritycon  # pylint: disable=import-error
++        with mock.patch('win32security.GetFileSecurity') as mock_get:
++            dacl_mock = mock_get.return_value.GetSecurityDescriptorDacl
++            mode_mock = dacl_mock.return_value.GetEffectiveRightsFromAcl
++            mode_mock.return_value = ntsecuritycon.FILE_GENERIC_EXECUTE
++            yield
+ 
+ 
+ class LockDirUntilExit(test_util.TempDirTestCase):
+diff --git a/certbot/util.py b/certbot/util.py
+index 8f553e51a9f..d3297507e43 100644
+--- a/certbot/util.py
++++ b/certbot/util.py
+@@ -86,18 +86,6 @@ def run_script(params, log=logger.error):
+     return stdout, stderr
+ 
+ 
+-def is_exe(path):
+-    """Is path an executable file?
+-
+-    :param str path: path to test
+-
+-    :returns: True iff path is an executable file
+-    :rtype: bool
+-
+-    """
+-    return os.path.isfile(path) and os.access(path, os.X_OK)
+-
+-
+ def exe_exists(exe):
+     """Determine whether path/name refers to an executable.
+ 
+@@ -109,10 +97,10 @@ def exe_exists(exe):
+     """
+     path, _ = os.path.split(exe)
+     if path:
+-        return is_exe(exe)
++        return filesystem.is_executable(exe)
+     else:
+         for path in os.environ["PATH"].split(os.pathsep):
+-            if is_exe(os.path.join(path, exe)):
++            if filesystem.is_executable(os.path.join(path, exe)):
+                 return True
+ 
+     return False
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

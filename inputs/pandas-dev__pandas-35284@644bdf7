@@ -1,0 +1,273 @@
+  Task-ID: pandas-dev__pandas-35284@644bdf7
+  Please checkout to this commit first: b0468aa45f3912d6f8823d1cd418af34ffdcd2b1
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: to_latex positional argument
+#### Is your feature request related to a problem?
+
+I would like to have the possibility to specify the location of the table I'm saving, or instead of having 
+```
+\begin{table}
+...
+\end{table}
+```
+
+be able to have 
+```
+\begin{table}[h]
+...
+\end{table}
+```
+
+#### Describe the solution you'd like
+
+I guess the solution would be to add another argument in the `to_latex` API which could take values in `(None, 'h', 'H', 'h!'...)`
+
+#### Describe alternatives you've considered
+
+I'm saving my tables to `.tex` files and then use the `\input{path/to/tex}` command, I did not find the possibility to give the [h] argument with input...
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/core/generic.py b/pandas/core/generic.py
+index eb55369d83593..4fbc1d4b6965e 100644
+--- a/pandas/core/generic.py
++++ b/pandas/core/generic.py
+@@ -2840,6 +2840,7 @@ def to_latex(
+         multirow=None,
+         caption=None,
+         label=None,
++        position=None,
+     ):
+         r"""
+         Render object to a LaTeX tabular, longtable, or nested table/tabular.
+@@ -2925,6 +2926,9 @@ def to_latex(
+             This is used with ``\ref{}`` in the main ``.tex`` file.
+ 
+             .. versionadded:: 1.0.0
++        position : str, optional
++            The LaTeX positional argument for tables, to be placed after
++            ``\begin{}`` in the output.
+         %(returns)s
+         See Also
+         --------
+@@ -2986,6 +2990,7 @@ def to_latex(
+             multirow=multirow,
+             caption=caption,
+             label=label,
++            position=position,
+         )
+ 
+     def to_csv(
+diff --git a/pandas/io/formats/format.py b/pandas/io/formats/format.py
+index fe85eab4bfbf5..bdb61974b15b1 100644
+--- a/pandas/io/formats/format.py
++++ b/pandas/io/formats/format.py
+@@ -931,6 +931,7 @@ def to_latex(
+         multirow: bool = False,
+         caption: Optional[str] = None,
+         label: Optional[str] = None,
++        position: Optional[str] = None,
+     ) -> Optional[str]:
+         """
+         Render a DataFrame to a LaTeX tabular/longtable environment output.
+@@ -946,6 +947,7 @@ def to_latex(
+             multirow=multirow,
+             caption=caption,
+             label=label,
++            position=position,
+         ).get_result(buf=buf, encoding=encoding)
+ 
+     def _format_col(self, i: int) -> List[str]:
+diff --git a/pandas/io/formats/latex.py b/pandas/io/formats/latex.py
+index 3a3ca84642d51..819910fd2e81d 100644
+--- a/pandas/io/formats/latex.py
++++ b/pandas/io/formats/latex.py
+@@ -38,6 +38,7 @@ def __init__(
+         multirow: bool = False,
+         caption: Optional[str] = None,
+         label: Optional[str] = None,
++        position: Optional[str] = None,
+     ):
+         self.fmt = formatter
+         self.frame = self.fmt.frame
+@@ -50,6 +51,8 @@ def __init__(
+         self.caption = caption
+         self.label = label
+         self.escape = self.fmt.escape
++        self.position = position
++        self._table_float = any(p is not None for p in (caption, label, position))
+ 
+     def write_result(self, buf: IO[str]) -> None:
+         """
+@@ -284,7 +287,7 @@ def _write_tabular_begin(self, buf, column_format: str):
+             <https://en.wikibooks.org/wiki/LaTeX/Tables>`__ e.g 'rcl'
+             for 3 columns
+         """
+-        if self.caption is not None or self.label is not None:
++        if self._table_float:
+             # then write output in a nested table/tabular environment
+             if self.caption is None:
+                 caption_ = ""
+@@ -296,7 +299,12 @@ def _write_tabular_begin(self, buf, column_format: str):
+             else:
+                 label_ = f"\n\\label{{{self.label}}}"
+ 
+-            buf.write(f"\\begin{{table}}\n\\centering{caption_}{label_}\n")
++            if self.position is None:
++                position_ = ""
++            else:
++                position_ = f"[{self.position}]"
++
++            buf.write(f"\\begin{{table}}{position_}\n\\centering{caption_}{label_}\n")
+         else:
+             # then write output only in a tabular environment
+             pass
+@@ -317,7 +325,7 @@ def _write_tabular_end(self, buf):
+         """
+         buf.write("\\bottomrule\n")
+         buf.write("\\end{tabular}\n")
+-        if self.caption is not None or self.label is not None:
++        if self._table_float:
+             buf.write("\\end{table}\n")
+         else:
+             pass
+@@ -337,25 +345,32 @@ def _write_longtable_begin(self, buf, column_format: str):
+             <https://en.wikibooks.org/wiki/LaTeX/Tables>`__ e.g 'rcl'
+             for 3 columns
+         """
+-        buf.write(f"\\begin{{longtable}}{{{column_format}}}\n")
+-
+-        if self.caption is not None or self.label is not None:
+-            if self.caption is None:
+-                pass
+-            else:
+-                buf.write(f"\\caption{{{self.caption}}}")
++        if self.caption is None:
++            caption_ = ""
++        else:
++            caption_ = f"\\caption{{{self.caption}}}"
+ 
+-            if self.label is None:
+-                pass
+-            else:
+-                buf.write(f"\\label{{{self.label}}}")
++        if self.label is None:
++            label_ = ""
++        else:
++            label_ = f"\\label{{{self.label}}}"
+ 
++        if self.position is None:
++            position_ = ""
++        else:
++            position_ = f"[{self.position}]"
++        if self.position is None:
++            position_ = ""
++        else:
++            position_ = f"[{self.position}]"
++        buf.write(
++            f"\\begin{{longtable}}{position_}{{{column_format}}}\n{caption_}{label_}"
++        )
++        if self.caption is not None or self.label is not None:
+             # a double-backslash is required at the end of the line
+             # as discussed here:
+             # https://tex.stackexchange.com/questions/219138
+             buf.write("\\\\\n")
+-        else:
+-            pass
+ 
+     @staticmethod
+     def _write_longtable_end(buf):
+diff --git a/pandas/tests/io/formats/test_to_latex.py b/pandas/tests/io/formats/test_to_latex.py
+index 509e5bcb33304..93ad3739e59c7 100644
+--- a/pandas/tests/io/formats/test_to_latex.py
++++ b/pandas/tests/io/formats/test_to_latex.py
+@@ -573,6 +573,54 @@ def test_to_latex_longtable_caption_label(self):
+ """
+         assert result_cl == expected_cl
+ 
++    def test_to_latex_position(self):
++        the_position = "h"
++
++        df = DataFrame({"a": [1, 2], "b": ["b1", "b2"]})
++
++        # test when only the position is provided
++        result_p = df.to_latex(position=the_position)
++
++        expected_p = r"""\begin{table}[h]
++\centering
++\begin{tabular}{lrl}
++\toprule
++{} &  a &   b \\
++\midrule
++0 &  1 &  b1 \\
++1 &  2 &  b2 \\
++\bottomrule
++\end{tabular}
++\end{table}
++"""
++        assert result_p == expected_p
++
++    def test_to_latex_longtable_position(self):
++        the_position = "t"
++
++        df = DataFrame({"a": [1, 2], "b": ["b1", "b2"]})
++
++        # test when only the position is provided
++        result_p = df.to_latex(longtable=True, position=the_position)
++
++        expected_p = r"""\begin{longtable}[t]{lrl}
++\toprule
++{} &  a &   b \\
++\midrule
++\endhead
++\midrule
++\multicolumn{3}{r}{{Continued on next page}} \\
++\midrule
++\endfoot
++
++\bottomrule
++\endlastfoot
++0 &  1 &  b1 \\
++1 &  2 &  b2 \\
++\end{longtable}
++"""
++        assert result_p == expected_p
++
+     def test_to_latex_escape_special_chars(self):
+         special_characters = ["&", "%", "$", "#", "_", "{", "}", "~", "^", "\\"]
+         df = DataFrame(data=special_characters)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

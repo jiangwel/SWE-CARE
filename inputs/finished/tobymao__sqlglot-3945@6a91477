@@ -1,0 +1,123 @@
+  Task-ID: tobymao__sqlglot-3945@6a91477
+  Please checkout to this commit first: a84a21aaef0e65754e67ecebdfcbf7136c77acc7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Failed to parse a statement with desc partition
+**Before you file an issue**
+- Make sure you specify the "read" dialect eg. `parse_one(sql, read="spark")`
+- Make sure you specify the "write" dialect eg. `ast.sql(dialect="duckdb")`
+- Check if the issue still exists on main
+
+**Fully reproducible code snippet**
+Please include a fully reproducible code snippet or the input sql, dialect, and expected output.
+It fails to parse the simple statement below.
+```
+sqlglot.parse("desc schema.test partition (ds='2024-08-16')", read="spark")
+```
+**Official Documentation**
+Please include links to official SQL documentation related to your issue.
+  </issue>
+  
+  <patch>
+  diff --git a/sqlglot/expressions.py b/sqlglot/expressions.py
+index 54f75087f1..00a54a04d1 100644
+--- a/sqlglot/expressions.py
++++ b/sqlglot/expressions.py
+@@ -1437,7 +1437,13 @@ class Clone(Expression):
+ 
+ 
+ class Describe(Expression):
+-    arg_types = {"this": True, "style": False, "kind": False, "expressions": False}
++    arg_types = {
++        "this": True,
++        "style": False,
++        "kind": False,
++        "expressions": False,
++        "partition": False,
++    }
+ 
+ 
+ # https://duckdb.org/docs/guides/meta/summarize.html
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 5dcdf0e90b..2d08a3f77e 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -1117,7 +1117,11 @@ def clone_sql(self, expression: exp.Clone) -> str:
+     def describe_sql(self, expression: exp.Describe) -> str:
+         style = expression.args.get("style")
+         style = f" {style}" if style else ""
+-        return f"DESCRIBE{style} {self.sql(expression, 'this')}"
++        partition = expression.args.get("partition")
++        if partition:
++            return f"DESCRIBE{style} {self.sql(expression, 'this')} {self.sql(partition)}"
++        else:
++            return f"DESCRIBE{style} {self.sql(expression, 'this')}"
+ 
+     def heredoc_sql(self, expression: exp.Heredoc) -> str:
+         tag = self.sql(expression, "tag")
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+index 0c7dc035d1..d20c240679 100644
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -2495,8 +2495,14 @@ def _parse_describe(self) -> exp.Describe:
+         this = self._parse_table(schema=True)
+         properties = self._parse_properties()
+         expressions = properties.expressions if properties else None
++        partition = self._parse_partition()
+         return self.expression(
+-            exp.Describe, this=this, style=style, kind=kind, expressions=expressions
++            exp.Describe,
++            this=this,
++            style=style,
++            kind=kind,
++            expressions=expressions,
++            partition=partition,
+         )
+ 
+     def _parse_insert(self) -> exp.Insert:
+diff --git a/tests/dialects/test_spark.py b/tests/dialects/test_spark.py
+index 90738f150a..a2d87dff7b 100644
+--- a/tests/dialects/test_spark.py
++++ b/tests/dialects/test_spark.py
+@@ -708,6 +708,7 @@ def test_spark(self):
+                 "trino": "SELECT DATE_ADD('MONTH', 20, col)",
+             },
+         )
++        self.validate_identity("DESCRIBE schema.test PARTITION(ds = '2024-01-01')")
+ 
+     def test_bool_or(self):
+         self.validate_all(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

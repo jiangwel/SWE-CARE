@@ -1,0 +1,193 @@
+  Task-ID: ansible__ansible-42456@b29e00e
+  Please checkout to this commit first: 52fe9aaf04a132d5de4c6226af786e94ed62ec02
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ssl support for lookup consul_kv
+##### SUMMARY
+The lookup plugin consul_kv does not support to change the scheme to https not to send a cert with the request nor to skip cert verifiaction if that is desired
+
+##### ISSUE TYPE
+ - Feature Idea
+
+##### COMPONENT NAME
+lookup/consul_kv
+
+##### ANSIBLE VERSION
+```
+ansible 2.5.3 (stable-2.5 9d8d1de182) last updated 2018/05/22 09:25:46 (GMT +200)
+  config file = /mnt/c/Projekte/ansible/ansible.cfg
+  configured module search path = [u'/root/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /opt/ansible/lib/ansible
+  executable location = /opt/ansible/bin/ansible
+  python version = 2.7.12 (default, Dec  4 2017, 14:50:18) [GCC 5.4.0 20160609]
+```
+
+##### CONFIGURATION
+ANSIBLE_PIPELINING(/mnt/c/Projekte/ansible/ansible.cfg) = True
+ANSIBLE_SSH_ARGS(/mnt/c/Projekte/ansible/ansible.cfg) = -C -o ControlMaster=auto -o ControlPersist=60s -o UserKnownHostsFile=/dev/null
+DEFAULT_CALLBACK_WHITELIST(/mnt/c/Projekte/ansible/ansible.cfg) = ['timer', 'mail']
+DEFAULT_FORKS(/mnt/c/Projekte/ansible/ansible.cfg) = 20
+DEFAULT_GATHERING(/mnt/c/Projekte/ansible/ansible.cfg) = smart
+DEFAULT_LOG_PATH(/mnt/c/Projekte/ansible/ansible.cfg) = /var/log/ansible.log
+DEFAULT_PRIVATE_KEY_FILE(/mnt/c/Projekte/ansible/ansible.cfg) = /var/lib/rundeck/.ssh/ec2_user_id_rsa
+DEFAULT_REMOTE_USER(/mnt/c/Projekte/ansible/ansible.cfg) = ec2-user
+DEFAULT_SCP_IF_SSH(/mnt/c/Projekte/ansible/ansible.cfg) = smart
+DISPLAY_SKIPPED_HOSTS(/mnt/c/Projekte/ansible/ansible.cfg) = True
+HOST_KEY_CHECKING(/mnt/c/Projekte/ansible/ansible.cfg) = False
+RETRY_FILES_ENABLED(/mnt/c/Projekte/ansible/ansible.cfg) = False
+
+##### OS / ENVIRONMENT
+N/A
+
+##### STEPS TO REPRODUCE
+```yaml
+ tasks:
+    - name: "check for consul entry for module {{ item.name }}"
+      set_fact:
+        consul_entry: "{{ lookup('consul_kv',
+          'my/key/path',
+          host='myConsulHost', scheme='https', port=443, verify=False) }}"
+```
+##### EXPECTED RESULTS
+The key value returned
+
+##### ACTUAL RESULTS
+```
+TASK [check for consul entry for module someModule] *****************************************************************************************************************************************************************************************
+task path: /mnt/c/Projekte/ansible/test_johannes.yml:14
+fatal: [localhost]: FAILED! => {
+    "msg": "An unhandled exception occurred while running the lookup plugin 'consul_kv'. Error was a <class 'ansible.errors.AnsibleError'>, original message: Error locating 'my/key/path' in kv store. Error was ('Connection aborted.', BadStatusLine('\\x15\\x03\\x01\\x00\\x02\\x02\\n',))"
+}
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/plugins/lookup/consul_kv.py b/lib/ansible/plugins/lookup/consul_kv.py
+index 8d6edc234216a7..0652464e36927f 100644
+--- a/lib/ansible/plugins/lookup/consul_kv.py
++++ b/lib/ansible/plugins/lookup/consul_kv.py
+@@ -2,6 +2,7 @@
+ # (c) 2017 Ansible Project
+ # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
+ from __future__ import (absolute_import, division, print_function)
++
+ __metaclass__ = type
+ 
+ DOCUMENTATION = """
+@@ -33,9 +34,34 @@
+            - The target to connect to, must be a resolvable address.
+         env:
+           - name: ANSIBLE_CONSUL_URL
++        ini:
++          - section: lookup_consul
++            key: host
+       port:
+         description: The port of the target host to connect to.
+         default: 8500
++      scheme:
++        default: http
++        description: Whether to use http or https
++        version_added: '2.7'
++      validate_certs:
++        default: True
++        description: Whether to verify the ssl connection or not
++        env:
++          - name: ANSIBLE_CONSUL_VALIDATE_CERTS
++        ini:
++          - section: lookup_consul
++            key: validate_certs
++        version_added: '2.7'
++      client_cert:
++        default: None
++        description: The client cert to verify the ssl connection
++        env:
++          - name: ANSIBLE_CONSUL_CLIENT_CERT
++        ini:
++          - section: lookup_consul
++            key: client_cert
++        version_added: '2.7'
+ """
+ 
+ EXAMPLES = """
+@@ -62,7 +88,6 @@
+ """
+ 
+ import os
+-import sys
+ from ansible.module_utils.six.moves.urllib.parse import urlparse
+ from ansible.errors import AnsibleError, AnsibleAssertionError
+ from ansible.plugins.lookup import LookupBase
+@@ -74,6 +99,7 @@
+ 
+ try:
+     import consul
++
+     HAS_CONSUL = True
+ except ImportError as e:
+     HAS_CONSUL = False
+@@ -84,7 +110,8 @@ class LookupModule(LookupBase):
+     def run(self, terms, variables=None, **kwargs):
+ 
+         if not HAS_CONSUL:
+-            raise AnsibleError('python-consul is required for consul_kv lookup. see https://python-consul.readthedocs.io/en/latest/#installation')
++            raise AnsibleError(
++                'python-consul is required for consul_kv lookup. see http://python-consul.readthedocs.org/en/latest/#installation')
+ 
+         values = []
+         try:
+@@ -92,12 +119,19 @@ def run(self, terms, variables=None, **kwargs):
+                 params = self.parse_params(term)
+                 try:
+                     url = os.environ['ANSIBLE_CONSUL_URL']
++                    validate_certs = os.environ['ANSIBLE_CONSUL_VALIDATE_CERTS'] or True
++                    client_cert = os.environ['ANSIBLE_CONSUL_CLIENT_CERT']
+                     u = urlparse(url)
+-                    consul_api = consul.Consul(host=u.hostname, port=u.port, scheme=u.scheme)
++                    consul_api = consul.Consul(host=u.hostname, port=u.port, scheme=u.scheme, verify=validate_certs,
++                                               cert=client_cert)
+                 except KeyError:
+                     port = kwargs.get('port', '8500')
+                     host = kwargs.get('host', 'localhost')
+-                    consul_api = consul.Consul(host=host, port=port)
++                    scheme = kwargs.get('scheme', 'http')
++                    validate_certs = kwargs.get('validate_certs', True)
++                    client_cert = kwargs.get('client_cert', None)
++                    consul_api = consul.Consul(host=host, port=port, scheme=scheme, verify=validate_certs,
++                                               cert=client_cert)
+ 
+                 results = consul_api.kv.get(params['key'],
+                                             token=params['token'],
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

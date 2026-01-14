@@ -1,0 +1,154 @@
+  Task-ID: python__mypy-14225@fcf4909
+  Please checkout to this commit first: db440ab063c3f01819a29d45e3e2288562f39891
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  How to accept dicts with extra keys?
+A lot of times I pass data around using dictionaries. When I receive the data, for example as a function argument, what I want is a dict with that **contains** some specifics keys. I don't mind if the dict has more data.
+
+So, I tried typed dicts:
+
+```python
+Movie = TypedDict('Movie', {'name': str, 'year': int})
+```
+
+This works:
+
+```python
+movie = {'name': 'Blade Runner', 'year': 1982}  # type: Movie
+```
+
+But this throws the error `Extra key 'has_sequel' for TypedDict "Movie"`:
+
+```python
+movie = {'name': 'Blade Runner', 'year': 1982, 'has_sequel': True}  # type: Movie
+```
+
+I can understand that you can't replace for the first value, because the result of `keys` or `items` is different.
+
+But if I am only interested in having those keys, not iterating or other stuff, what are my options (if any)?
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/errorcodes.py b/mypy/errorcodes.py
+index 1c15407a955b..234b9bce40f7 100644
+--- a/mypy/errorcodes.py
++++ b/mypy/errorcodes.py
+@@ -67,6 +67,9 @@ def __str__(self) -> str:
+ TYPEDDICT_ITEM: Final = ErrorCode(
+     "typeddict-item", "Check items when constructing TypedDict", "General"
+ )
++TYPPEDICT_UNKNOWN_KEY: Final = ErrorCode(
++    "typeddict-unknown-key", "Check unknown keys when constructing TypedDict", "General"
++)
+ HAS_TYPE: Final = ErrorCode(
+     "has-type", "Check that type of reference can be determined", "General"
+ )
+diff --git a/mypy/messages.py b/mypy/messages.py
+index 85fa30512534..731884bb836e 100644
+--- a/mypy/messages.py
++++ b/mypy/messages.py
+@@ -1612,9 +1612,9 @@ def unexpected_typeddict_keys(
+         expected_set = set(expected_keys)
+         if not typ.is_anonymous():
+             # Generate simpler messages for some common special cases.
+-            if actual_set < expected_set:
+-                # Use list comprehension instead of set operations to preserve order.
+-                missing = [key for key in expected_keys if key not in actual_set]
++            # Use list comprehension instead of set operations to preserve order.
++            missing = [key for key in expected_keys if key not in actual_set]
++            if missing:
+                 self.fail(
+                     "Missing {} for TypedDict {}".format(
+                         format_key_list(missing, short=True), format_type(typ)
+@@ -1622,20 +1622,18 @@ def unexpected_typeddict_keys(
+                     context,
+                     code=codes.TYPEDDICT_ITEM,
+                 )
++            extra = [key for key in actual_keys if key not in expected_set]
++            if extra:
++                self.fail(
++                    "Extra {} for TypedDict {}".format(
++                        format_key_list(extra, short=True), format_type(typ)
++                    ),
++                    context,
++                    code=codes.TYPPEDICT_UNKNOWN_KEY,
++                )
++            if missing or extra:
++                # No need to check for further errors
+                 return
+-            else:
+-                extra = [key for key in actual_keys if key not in expected_set]
+-                if extra:
+-                    # If there are both extra and missing keys, only report extra ones for
+-                    # simplicity.
+-                    self.fail(
+-                        "Extra {} for TypedDict {}".format(
+-                            format_key_list(extra, short=True), format_type(typ)
+-                        ),
+-                        context,
+-                        code=codes.TYPEDDICT_ITEM,
+-                    )
+-                    return
+         found = format_key_list(actual_keys, short=True)
+         if not expected_keys:
+             self.fail(f"Unexpected TypedDict {found}", context)
+diff --git a/test-data/unit/check-errorcodes.test b/test-data/unit/check-errorcodes.test
+index 798c52629a35..80672fc10c7f 100644
+--- a/test-data/unit/check-errorcodes.test
++++ b/test-data/unit/check-errorcodes.test
+@@ -455,7 +455,7 @@ class E(TypedDict):
+     y: int
+ 
+ a: D = {'x': ''}  # E: Incompatible types (expression has type "str", TypedDict item "x" has type "int")  [typeddict-item]
+-b: D = {'y': ''}  # E: Extra key "y" for TypedDict "D"  [typeddict-item]
++b: D = {'y': ''}  # E: Missing key "x" for TypedDict "D"  [typeddict-item] # E: Extra key "y" for TypedDict "D"  [typeddict-unknown-key]
+ c = D(x=0) if int() else E(x=0, y=0)
+ c = {}  # E: Expected TypedDict key "x" but found no keys  [typeddict-item]
+ 
+diff --git a/test-data/unit/check-typeddict.test b/test-data/unit/check-typeddict.test
+index fbef6157087c..dff46e111573 100644
+--- a/test-data/unit/check-typeddict.test
++++ b/test-data/unit/check-typeddict.test
+@@ -2020,7 +2020,7 @@ v = {union: 2} # E: Expected TypedDict key to be string literal
+ num2: Literal['num']
+ v = {num2: 2}
+ bad2: Literal['bad']
+-v = {bad2: 2}  # E: Extra key "bad" for TypedDict "Value"
++v = {bad2: 2}  # E: Missing key "num" for TypedDict "Value" # E: Extra key "bad" for TypedDict "Value"
+ 
+ [builtins fixtures/dict.pyi]
+ [typing fixtures/typing-typeddict.pyi]
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

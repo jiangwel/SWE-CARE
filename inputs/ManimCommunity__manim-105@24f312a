@@ -1,0 +1,181 @@
+  Task-ID: ManimCommunity__manim-105@24f312a
+  Please checkout to this commit first: a29eabdf877442d3bee89a1d66bd0ff721484221
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Work on ArcBetweenPoints
+As some of you know I've been working with arcs. A lot. At some point I'd want to add ArcPolygons to this manim fork, but first I want to work on the Arc derived class I usually work with, ArcBetweenPoints.
+
+As per the tags there are 3 things to do here.
+
+The bug:
+ArcBetweenPoints, unlike all other classes I know that use points (Line, etc.), does not support points in the form `[x,y,z]`, instead they have to be passed as `np.array([x,y,z])`. First running into this problem myself wasted a lot of time because I wasn't accustomed to the error messages, and this will likely cause grief to the one or the other person as well. The issue is this line of code:
+```python
+self.put_start_and_end_on(start, end)
+```
+Or rather where it leads towards, in mobject.py, where arithmetic with points happens (Point1-Point2), and Python's List does not support that, while np.array does.
+In that place, line 553 is where I'd place the fix:
+```python
+target_vect = end - start
+```
+↓
+```python
+target_vect = np.array(end) - np.array(start)
+```
+If np.array gets a numpy array it's not going to change anything so all this does is make the code more robust and ArcBetweenPoints easier to use, like it's the case with other point driven classes already.
+
+The enhancement:
+Defining ArcBetweenPoints with a given angle is all nice and stuff, but sometimes (or in my case basically always) you'll want to define such an arc by its radius. The ArcBetweenPoints class should be able to take in a radius instead of an angle, and calculate the according angle itself. I've got the code for that already usable, waiting for a better implementation than an outside function.
+
+My issue here though is that this code needs math and cmath to work.
+Question 1:
+What is the correct way of making sure those are available in geometry.py? Sure they can just be imported at the top of the file but is that actually the right way to go around it?
+
+The documentation:
+I'd prefer it if all classes are equipped with some sort of in place usage examples. Something along the lines of:
+```python
+class ArcBetweenPoints(Arc):
+"""
+ArcBetweenPoints needs at least 2 points to draw the arc between.
+The curvature of the arc can be specified via angle or radius.
+When both are given, radius is used and angle is ignored.
+ArcBetweenPoints([x,y,z],[x2,y2,z2],angle=1) results in this...
+ArcBetweenPoints([x,y,z],[x2,y2,z2],radius=1) results in that...
+"""
+```
+Question 2:
+What is the exact format for such comments we should go with?
+  </issue>
+  
+  <patch>
+  diff --git a/manim/mobject/geometry.py b/manim/mobject/geometry.py
+index 5636219560..0b31cae2b6 100644
+--- a/manim/mobject/geometry.py
++++ b/manim/mobject/geometry.py
+@@ -1,5 +1,6 @@
+ import warnings
+ import numpy as np
++import math
+ 
+ from ..constants import *
+ from ..mobject.mobject import Mobject
+@@ -245,7 +246,7 @@ def set_pre_positioned_points(self):
+             anchors[1:],
+         )
+ 
+-    def get_arc_center(self):
++    def get_arc_center(self,warning=True):
+         """
+         Looks at the normals to the first two
+         anchors, and finds their intersection points
+@@ -258,13 +259,16 @@ def get_arc_center(self):
+         # Normals
+         n1 = rotate_vector(t1, TAU / 4)
+         n2 = rotate_vector(t2, TAU / 4)
++        self.failed_to_get_center=False
+         try:
+             return line_intersection(
+                 line1=(a1, a1 + n1),
+                 line2=(a2, a2 + n2),
+             )
+         except Exception:
+-            warnings.warn("Can't find Arc center, using ORIGIN instead")
++            if warning:
++                warnings.warn("Can't find Arc center, using ORIGIN instead")
++            self.failed_to_get_center=True
+             return np.array(ORIGIN)
+ 
+     def move_arc_center_to(self, point):
+@@ -278,7 +282,24 @@ def stop_angle(self):
+ 
+ 
+ class ArcBetweenPoints(Arc):
+-    def __init__(self, start, end, angle=TAU / 4, **kwargs):
++    """
++    Inherits from Arc and additionally takes 2 points between which the arc is spanned.
++    """
++    def __init__(self, start, end, angle=TAU / 4, radius=None, **kwargs):
++        if radius!=None:
++            self.radius=radius
++            if radius < 0:
++                sign=-2
++                radius*=(-1)
++            else:
++                sign=2
++            halfdist=np.linalg.norm(np.array(start) - np.array(end)) / 2
++            if radius < halfdist:
++                raise ValueError("""ArcBetweenPoints called with a radius that is
++                            smaller than half the distance between the points.""")
++            arc_height=radius - math.sqrt(radius ** 2 - halfdist ** 2)
++            angle=math.acos((radius - arc_height) / radius)*sign
++
+         Arc.__init__(
+             self,
+             angle=angle,
+@@ -287,6 +308,13 @@ def __init__(self, start, end, angle=TAU / 4, **kwargs):
+         if angle == 0:
+             self.set_points_as_corners([LEFT, RIGHT])
+         self.put_start_and_end_on(start, end)
++        
++        if radius==None:
++            center=self.get_arc_center(warning=False)
++            if not self.failed_to_get_center:
++                self.radius=np.linalg.norm(np.array(start) - np.array(center))
++            else:
++                self.radius=math.inf
+ 
+ 
+ class CurvedArrow(ArcBetweenPoints):
+@@ -847,4 +875,4 @@ class RoundedRectangle(Rectangle):
+ 
+     def __init__(self, **kwargs):
+         Rectangle.__init__(self, **kwargs)
+-        self.round_corners(self.corner_radius)
+\ No newline at end of file
++        self.round_corners(self.corner_radius)
+diff --git a/manim/mobject/mobject.py b/manim/mobject/mobject.py
+index edd22af14d..0fb3c41aa3 100644
+--- a/manim/mobject/mobject.py
++++ b/manim/mobject/mobject.py
+@@ -550,7 +550,7 @@ def put_start_and_end_on(self, start, end):
+         curr_vect = curr_end - curr_start
+         if np.all(curr_vect == 0):
+             raise Exception("Cannot position endpoints of closed loop")
+-        target_vect = end - start
++        target_vect = np.array(end) - np.array(start)
+         self.scale(
+             get_norm(target_vect) / get_norm(curr_vect),
+             about_point=curr_start,
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

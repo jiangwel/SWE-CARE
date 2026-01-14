@@ -1,0 +1,535 @@
+  Task-ID: zulip__zulip-25349@67de2a4
+  Please checkout to this commit first: 7425079814d674672b5e1208f0742f800ba470c7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Simplify message scheduling flow
+In the current scheduled message implementation, we have a somewhat awkward state of a time having been picked without a message being scheduled. 
+
+To simplify the experience, we should make selecting a time immediately schedule the message. As a result, we can:
+
+- Remove the "Cancel scheduling" option from the three-dot menu.
+- Never have the "Send" button be labeled as "Schedule".
+- Drop the "Scheduling this message..." compose banner.
+
+If the compose box is empty, clicking "Schedule message" should highlight it in red, just like trying to send an empty message. The scheduling modal should not open in this case.
+
+Note that the user can always drop an accidentally scheduled message from the scheduled messages overlay, which is linked from the confirmation banner. We may also want to add an "Undo" button to that banner.
+  </issue>
+  
+  <patch>
+  diff --git a/web/src/compose.js b/web/src/compose.js
+index 577ce1e58307d..55685f1126210 100644
+--- a/web/src/compose.js
++++ b/web/src/compose.js
+@@ -188,7 +188,7 @@ export function clear_compose_box() {
+     compose_banner.clear_errors();
+     compose_banner.clear_warnings();
+     compose_ui.hide_compose_spinner();
+-    reset_compose_scheduling_state();
++    popover_menus.reset_selected_schedule_time();
+ }
+ 
+ export function send_message_success(local_id, message_id, locally_echoed) {
+@@ -269,7 +269,6 @@ export function send_message(request = create_message_object()) {
+     }
+ 
+     transmit.send_message(request, success, error);
+-    scheduled_messages.delete_scheduled_message_if_sent_directly();
+     server_events.assert_get_events_running(
+         "Restarting get_events because it was not running during send",
+     );
+@@ -298,7 +297,7 @@ export function enter_with_preview_open(ctrl_pressed = false) {
+ // Common entrypoint for asking the server to send the message
+ // currently drafted in the compose box, including for scheduled
+ // messages.
+-export function finish() {
++export function finish(from_do_schedule_message = false) {
+     if (compose_ui.compose_spinner_visible) {
+         // Avoid sending a message twice in parallel in races where
+         // the user clicks the `Send` button very quickly twice or
+@@ -330,7 +329,7 @@ export function finish() {
+         return false;
+     }
+ 
+-    if (popover_menus.is_time_selected_for_schedule()) {
++    if (from_do_schedule_message) {
+         schedule_message_to_custom_date();
+     } else {
+         send_message();
+@@ -789,16 +788,6 @@ export function initialize() {
+     }
+ }
+ 
+-export function reset_compose_scheduling_state(reset_edit_state = true) {
+-    $("#compose-textarea").prop("disabled", false);
+-    $("#compose-schedule-confirm-button").hide();
+-    popover_menus.reset_selected_schedule_time();
+-    $("#compose-send-button").show();
+-    if (reset_edit_state) {
+-        $("#compose-textarea").removeAttr("data-scheduled-message-id");
+-    }
+-}
+-
+ function schedule_message_to_custom_date() {
+     const compose_message_object = create_message_object();
+ 
+@@ -823,12 +812,5 @@ function schedule_message_to_custom_date() {
+         scheduled_delivery_timestamp,
+     };
+ 
+-    // If this is an edit request `scheduled_message_id` will be defined.
+-    if ($("#compose-textarea").attr("data-scheduled-message-id")) {
+-        scheduled_message_data.scheduled_message_id = $("#compose-textarea").attr(
+-            "data-scheduled-message-id",
+-        );
+-    }
+-
+     scheduled_messages.send_request_to_schedule_message(scheduled_message_data, deliver_at);
+ }
+diff --git a/web/src/compose_actions.js b/web/src/compose_actions.js
+index e8a5c83501504..aacff10141bb2 100644
+--- a/web/src/compose_actions.js
++++ b/web/src/compose_actions.js
+@@ -78,7 +78,6 @@ function clear_box() {
+     compose_ui.autosize_textarea($("#compose-textarea"));
+     compose_banner.clear_errors();
+     compose_banner.clear_warnings();
+-    compose.reset_compose_scheduling_state();
+ }
+ 
+ export function autosize_message_content() {
+diff --git a/web/src/compose_ui.js b/web/src/compose_ui.js
+index cbfac1738f005..e4bfdfef2e5ea 100644
+--- a/web/src/compose_ui.js
++++ b/web/src/compose_ui.js
+@@ -535,10 +535,3 @@ export function get_compose_click_target(e) {
+     }
+     return e.target;
+ }
+-
+-export function get_submit_button() {
+-    if (popover_menus.is_time_selected_for_schedule()) {
+-        return $("#compose-schedule-confirm-button");
+-    }
+-    return $("#compose-send-button");
+-}
+diff --git a/web/src/composebox_typeahead.js b/web/src/composebox_typeahead.js
+index 8fc65a2fdf68c..0137b0979db27 100644
+--- a/web/src/composebox_typeahead.js
++++ b/web/src/composebox_typeahead.js
+@@ -221,7 +221,7 @@ function handle_keydown(e) {
+                     // could result in focus being moved to the "Send
+                     // button" after sending the message, preventing
+                     // typing a next message!
+-                    compose_ui.get_submit_button().trigger("focus");
++                    $("#compose-send-button").trigger("focus");
+ 
+                     e.preventDefault();
+                     e.stopPropagation();
+@@ -232,7 +232,7 @@ function handle_keydown(e) {
+                     e.preventDefault();
+                     if (
+                         compose_validate.validate_message_length() &&
+-                        !compose_ui.get_submit_button().prop("disabled")
++                        !$("#compose-send-button").prop("disabled")
+                     ) {
+                         compose.finish();
+                     }
+diff --git a/web/src/popover_menus.js b/web/src/popover_menus.js
+index a6899cfab6208..67d2203e9d62b 100644
+--- a/web/src/popover_menus.js
++++ b/web/src/popover_menus.js
+@@ -25,6 +25,7 @@ import * as channel from "./channel";
+ import * as common from "./common";
+ import * as compose from "./compose";
+ import * as compose_actions from "./compose_actions";
++import * as compose_validate from "./compose_validate";
+ import * as condense from "./condense";
+ import * as confirm_dialog from "./confirm_dialog";
+ import * as drafts from "./drafts";
+@@ -80,10 +81,6 @@ export function get_topic_menu_popover() {
+     return popover_instances.topics_menu;
+ }
+ 
+-export function is_time_selected_for_schedule() {
+-    return selected_send_later_time !== undefined;
+-}
+-
+ export function get_selected_send_later_time() {
+     if (!selected_send_later_time) {
+         return undefined;
+@@ -98,6 +95,10 @@ export function get_formatted_selected_send_later_time() {
+     return timerender.get_full_datetime(new Date(selected_send_later_time), "time");
+ }
+ 
++export function set_selected_schedule_time(scheduled_time) {
++    selected_send_later_time = scheduled_time;
++}
++
+ export function reset_selected_schedule_time() {
+     selected_send_later_time = undefined;
+ }
+@@ -229,11 +230,8 @@ export function toggle_message_actions_menu(message) {
+     return true;
+ }
+ 
+-export function show_schedule_confirm_button(send_at_time, not_from_flatpickr = false) {
+-    // If no time was selected by the user, we don't show the schedule button.
+-    if (!send_at_time) {
+-        return;
+-    }
++export function do_schedule_message(send_at_time, not_from_flatpickr = false) {
++    overlays.close_active_modal();
+ 
+     // flatpickr.show_flatpickr doesn't pass any value for not_from_flatpickr,
+     // making it false by default and we pass it as true in other cases.
+@@ -244,13 +242,7 @@ export function show_schedule_confirm_button(send_at_time, not_from_flatpickr =
+     }
+ 
+     selected_send_later_time = send_at_time;
+-    $("#compose-schedule-confirm-button").show();
+-    $("#compose-send-button").hide();
+-}
+-
+-function update_scheduled_date_from_modal(send_at_time, not_from_flatpickr = false) {
+-    overlays.close_active_modal();
+-    show_schedule_confirm_button(send_at_time, not_from_flatpickr);
++    compose.finish(true);
+ }
+ 
+ export function initialize() {
+@@ -799,13 +791,6 @@ export function initialize() {
+         },
+     });
+ 
+-    $("body").on("click", "#compose-schedule-confirm-button", (e) => {
+-        compose.finish();
+-
+-        e.preventDefault();
+-        e.stopPropagation();
+-    });
+-
+     const send_later_today = {
+         today_nine_am: {
+             text: $t({defaultMessage: "Today at 9:00 AM"}),
+@@ -880,6 +865,10 @@ export function initialize() {
+             const $popper = $(instance.popper);
+ 
+             $popper.one("click", ".open_send_later_modal", () => {
++                if (!compose_validate.validate()) {
++                    return;
++                }
++
+                 // Only show send later options that are possible today.
+                 const date = new Date();
+                 const hours = date.getHours();
+@@ -892,7 +881,7 @@ export function initialize() {
+                     possible_send_later_today = false;
+                 }
+ 
+-                const formatted_send_later_time = get_selected_send_later_time();
++                const formatted_send_later_time = get_formatted_selected_send_later_time();
+                 $("body").append(
+                     render_send_later_modal({
+                         possible_send_later_today,
+@@ -914,7 +903,7 @@ export function initialize() {
+                             const current_time = new Date();
+                             flatpickr.show_flatpickr(
+                                 $(".send_later_custom")[0],
+-                                update_scheduled_date_from_modal,
++                                do_schedule_message,
+                                 new Date(current_time.getTime() + 60 * 60 * 1000),
+                                 {minDate: new Date(current_time.getTime() + 5 * 60 * 1000)},
+                             );
+@@ -927,7 +916,18 @@ export function initialize() {
+                             (e) => {
+                                 const send_at_time = set_compose_box_schedule(e.currentTarget);
+                                 const not_from_flatpickr = true;
+-                                update_scheduled_date_from_modal(send_at_time, not_from_flatpickr);
++                                do_schedule_message(send_at_time, not_from_flatpickr);
++                                e.preventDefault();
++                                e.stopPropagation();
++                            },
++                        );
++                        $send_later_modal.one(
++                            "click",
++                            ".send_later_selected_send_later_time",
++                            (e) => {
++                                const send_at_time = get_selected_send_later_time();
++                                const not_from_flatpickr = true;
++                                do_schedule_message(send_at_time, not_from_flatpickr);
+                                 e.preventDefault();
+                                 e.stopPropagation();
+                             },
+@@ -935,13 +935,6 @@ export function initialize() {
+                     },
+                 });
+             });
+-            $popper.one("click", "#clear_compose_schedule_state", (e) => {
+-                compose.reset_compose_scheduling_state(false);
+-                // Close the popper instance when clearing scheduling:
+-                instance.hide();
+-                e.preventDefault();
+-                e.stopPropagation();
+-            });
+         },
+         onHidden(instance) {
+             instance.destroy();
+diff --git a/web/src/scheduled_messages.js b/web/src/scheduled_messages.js
+index 50ffc4652ea81..bed203f0c99cb 100644
+--- a/web/src/scheduled_messages.js
++++ b/web/src/scheduled_messages.js
+@@ -65,8 +65,7 @@ export function edit_scheduled_message(scheduled_msg_id) {
+     compose.clear_compose_box();
+     compose_actions.start(compose_args.type, compose_args);
+     compose_ui.autosize_textarea($("#compose-textarea"));
+-    $("#compose-textarea").attr("data-scheduled-message-id", scheduled_msg_id);
+-    popover_menus.show_schedule_confirm_button(scheduled_msg.formatted_send_at_time, true);
++    popover_menus.set_selected_schedule_time(scheduled_msg.formatted_send_at_time);
+ }
+ 
+ export function send_request_to_schedule_message(scheduled_message_data, deliver_at) {
+@@ -99,7 +98,7 @@ export function send_request_to_schedule_message(scheduled_message_data, deliver
+     });
+ }
+ 
+-export function delete_scheduled_message(scheduled_msg_id) {
++export function delete_scheduled_message(scheduled_msg_id, edit_if_delete_successs) {
+     channel.del({
+         url: "/json/scheduled_messages/" + scheduled_msg_id,
+         success() {
+@@ -109,25 +108,9 @@ export function delete_scheduled_message(scheduled_msg_id) {
+                     `#scheduled_messages_overlay .scheduled-message-row[data-message-id=${scheduled_msg_id}]`,
+                 ).remove();
+             }
+-            if ($("#compose-textarea").attr("data-scheduled-message-id")) {
+-                const compose_scheduled_msg_id = $("#compose-textarea").attr(
+-                    "data-scheduled-message-id",
+-                );
+-                // If user deleted the scheduled message which is being edited in compose, we clear
+-                // the scheduled message id from there which converts this editing state into a normal
+-                // schedule message state. So, clicking "Schedule" will now create a new scheduled message.
+-                if (compose_scheduled_msg_id === scheduled_msg_id) {
+-                    $("#compose-textarea").removeAttr("data-scheduled-message-id");
+-                }
++            if (edit_if_delete_successs) {
++                edit_scheduled_message(scheduled_msg_id);
+             }
+         },
+     });
+ }
+-
+-export function delete_scheduled_message_if_sent_directly() {
+-    // Delete old scheduled message if it was sent.
+-    if ($("#compose-textarea").attr("data-scheduled-message-id")) {
+-        delete_scheduled_message($("#compose-textarea").attr("data-scheduled-message-id"));
+-        $("#compose-textarea").removeAttr("data-scheduled-message-id");
+-    }
+-}
+diff --git a/web/src/scheduled_messages_overlay_ui.js b/web/src/scheduled_messages_overlay_ui.js
+index 1f666bcddc12e..dbdfb135d622f 100644
+--- a/web/src/scheduled_messages_overlay_ui.js
++++ b/web/src/scheduled_messages_overlay_ui.js
+@@ -64,19 +64,15 @@ export function launch() {
+         url: "/json/scheduled_messages",
+         success(data) {
+             hide_loading_indicator();
+-            if (data.scheduled_messages.length === 0) {
+-                $(".no-overlay-messages").show();
+-            } else {
+-                // Saving formatted data is helpful when user is trying to edit a scheduled message.
+-                scheduled_messages.override_scheduled_messages_data(
+-                    format(data.scheduled_messages),
+-                );
+-                const rendered_list = render_scheduled_message({
+-                    scheduled_messages_data: scheduled_messages.scheduled_messages_data,
+-                });
+-                const $messages_list = $("#scheduled_messages_overlay .overlay-messages-list");
+-                $messages_list.append(rendered_list);
+-            }
++            // Saving formatted data is helpful when user is trying to edit a scheduled message.
++            scheduled_messages.override_scheduled_messages_data(
++                format(data.scheduled_messages),
++            );
++            const rendered_list = render_scheduled_message({
++                scheduled_messages_data: scheduled_messages.scheduled_messages_data,
++            });
++            const $messages_list = $("#scheduled_messages_overlay .overlay-messages-list");
++            $messages_list.append(rendered_list);
+         },
+         error(xhr) {
+             hide_loading_indicator();
+@@ -91,7 +87,7 @@ export function initialize() {
+             .closest(".scheduled-message-row")
+             .attr("data-message-id");
+         scheduled_msg_id = Number.parseInt(scheduled_msg_id, 10);
+-        scheduled_messages.edit_scheduled_message(scheduled_msg_id);
++        scheduled_messages.delete_scheduled_message(scheduled_msg_id, true);
+ 
+         e.stopPropagation();
+         e.preventDefault();
+diff --git a/web/src/tippyjs.js b/web/src/tippyjs.js
+index 139b8c495ccf9..f2c1bd7dfc4f7 100644
+--- a/web/src/tippyjs.js
++++ b/web/src/tippyjs.js
+@@ -622,27 +622,6 @@ export function initialize() {
+         },
+     });
+ 
+-    delegate("body", {
+-        target: "#compose-schedule-confirm-button",
+-        onShow(instance) {
+-            if (popover_menus.get_scheduled_messages_popover()) {
+-                return false;
+-            }
+-
+-            const send_at_time = popover_menus.get_formatted_selected_send_later_time();
+-            instance.setContent(
+-                parse_html(
+-                    $t(
+-                        {defaultMessage: "Schedule message for <br/> {send_at_time}"},
+-                        {send_at_time},
+-                    ),
+-                ),
+-            );
+-            return true;
+-        },
+-        appendTo: () => document.body,
+-    });
+-
+     delegate("body", {
+         target: "#send_later",
+         delay: LONG_HOVER_DELAY,
+diff --git a/web/styles/compose.css b/web/styles/compose.css
+index f6501ab7e124f..1710eb2504107 100644
+--- a/web/styles/compose.css
++++ b/web/styles/compose.css
+@@ -525,7 +525,6 @@ input.recipient_box {
+     width: 100%;
+ }
+ 
+-#compose-schedule-confirm-button,
+ #compose-send-button {
+     padding: 3px 12px;
+     margin-bottom: 0;
+diff --git a/web/styles/scheduled_messages.css b/web/styles/scheduled_messages.css
+index 34f452375fca0..e2502e242bef7 100644
+--- a/web/styles/scheduled_messages.css
++++ b/web/styles/scheduled_messages.css
+@@ -12,5 +12,9 @@
+ 
+     .no-overlay-messages {
+         display: none;
++
++        &:only-child {
++            display: block;
++        }
+     }
+ }
+diff --git a/web/templates/compose.hbs b/web/templates/compose.hbs
+index 342a1bb7bcced..15442d82ce080 100644
+--- a/web/templates/compose.hbs
++++ b/web/templates/compose.hbs
+@@ -123,10 +123,6 @@
+                                             <img class="loader" alt="" src="" />
+                                             <span>{{t 'Send' }}</span>
+                                         </button>
+-                                        <button id="compose-schedule-confirm-button" class="button small compose-submit-button hide animated-purple-button" tabindex=0>
+-                                            <img class="loader" alt="" src="" />
+-                                            <span>{{t 'Schedule' }}</span>
+-                                        </button>
+                                         <button class="animated-purple-button message-control-button" id="send_later" tabindex=0 type="button" data-tippy-content="{{t 'Send later' }}">
+                                             <i class="zulip-icon zulip-icon-ellipsis-v-solid"></i>
+                                         </button>
+diff --git a/web/templates/scheduled_message.hbs b/web/templates/scheduled_message.hbs
+index 22296860a9158..4b2188dcebfd4 100644
+--- a/web/templates/scheduled_message.hbs
++++ b/web/templates/scheduled_message.hbs
+@@ -38,7 +38,7 @@
+                             <div class="overlay_message_controls">
+                                 <i class="fa fa-pencil fa-lg restore-overlay-message tippy-zulip-tooltip" aria-hidden="true" data-tooltip-template-id="restore-scheduled-message-tooltip-template"></i>
+                                 <template id="restore-scheduled-message-tooltip-template">
+-                                    {{t 'Edit or reschedule message' }}
++                                    {{t 'Edit and reschedule message' }}
+                                 </template>
+                                 <i class="fa fa-trash-o fa-lg delete-overlay-message tippy-zulip-tooltip" aria-hidden="true" data-tooltip-template-id="delete-scheduled-message-tooltip-template"></i>
+                                 <template id="delete-scheduled-message-tooltip-template">
+diff --git a/web/templates/scheduled_messages_overlay.hbs b/web/templates/scheduled_messages_overlay.hbs
+index 5a89635993104..27ab3093f617c 100644
+--- a/web/templates/scheduled_messages_overlay.hbs
++++ b/web/templates/scheduled_messages_overlay.hbs
+@@ -8,7 +8,7 @@
+                 </div>
+                 <div class="removed-drafts">
+                     {{#tr}}
+-                        Click on the pencil (<z-pencil-icon></z-pencil-icon>) icon to reschedule a message.
++                        Click on the pencil (<z-pencil-icon></z-pencil-icon>) icon to edit and reschedule a message.
+                         {{#*inline "z-pencil-icon"}}<i class="fa fa-pencil"></i>{{/inline}}
+                     {{/tr}}
+                 </div>
+diff --git a/web/templates/send_later_modal.hbs b/web/templates/send_later_modal.hbs
+index f1e275cdb7b72..c87128a6b0076 100644
+--- a/web/templates/send_later_modal.hbs
++++ b/web/templates/send_later_modal.hbs
+@@ -22,6 +22,11 @@
+                                 <a id="{{@key}}" class="send_later_tomorrow" tabindex="0">{{this.text}}</a>
+                             </li>
+                         {{/each}}
++                        {{#if formatted_send_later_time}}
++                            <li>
++                                <a class="send_later_selected_send_later_time" tabindex="0">{{formatted_send_later_time}}</a>
++                            </li>
++                        {{/if}}
+                         <li>
+                             <a class="send_later_custom" tabindex="0">{{t 'Custom time'}}</a>
+                         </li>
+diff --git a/web/templates/send_later_popover.hbs b/web/templates/send_later_popover.hbs
+index d5f4a8ea862c3..c17e603a1046a 100644
+--- a/web/templates/send_later_popover.hbs
++++ b/web/templates/send_later_popover.hbs
+@@ -2,11 +2,6 @@
+     <li>
+         <a class="open_send_later_modal" tabindex="0">{{t "Schedule message" }}</a>
+     </li>
+-    {{#if formatted_send_later_time }}
+-    <li>
+-        <a id="clear_compose_schedule_state" tabindex="0">{{t "Cancel scheduling" }}</a>
+-    </li>
+-    {{/if}}
+     <hr />
+     <li>
+         <a href="#scheduled" tabindex="0">{{t "View scheduled messages" }}</a>
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

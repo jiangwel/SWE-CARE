@@ -1,0 +1,339 @@
+  Task-ID: RasaHQ__rasa-5341@d8b1c24
+  Please checkout to this commit first: 58e546be1c353e459f0480abd35fa5e3b0ab50c3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Display warning about missing component/policy in config whenever possible
+**Description of Problem**:
+In most instances, it is straightforward to infer from the domain file or the training data that the user is trying to use a feature that is conditional on a component/policy being included in the `config.yml` file.
+
+Identifying these situations while training and displaying preemptive warnings could potentially save the user effort/time by avoiding unnecessary retraining in that case.
+
+**Overview of the Solution**:
+Display appropriate warnings during the respective parsing steps by comparing it against the config file. It could be something along the lines of `"Found usage of triggers in domain file, but could not find MappingPolicy in config.yml that is needed for it to work"`.
+
+**Examples** (if relevant):
+The example that brought me here was triggers. An intent in the domain file that looks like this:
+`- request_human: {"triggers": "action_human_handoff"}` without `MappingPolicy` being included in `config.yml`. But there are many more examples.
+
+**Blockers** (if relevant):
+<!-- Is this feature blocked by anything or anyone?
+Or might there be any potential blockers on the way? -->
+
+**Definition of Done**:
+- [x] Perform checking for policies
+- [ ] Perform checking for NLU pipeline features
+  </issue>
+  
+  <patch>
+  diff --git a/data/test_config/config_crf_no_pattern_feature.yml b/data/test_config/config_crf_no_pattern_feature.yml
+new file mode 100644
+index 000000000000..cac2cf1a96a2
+--- /dev/null
++++ b/data/test_config/config_crf_no_pattern_feature.yml
+@@ -0,0 +1,7 @@
++language: en
++pipeline:
++  - name: "WhitespaceTokenizer"
++  - name: "RegexFeaturizer"
++  - name: "CRFEntityExtractor"
++    features: [['low', 'title', 'upper'],['bias', 'low', 'digit'],['low', 'title', 'upper']]
++  - name: "EntitySynonymMapper"
+\ No newline at end of file
+diff --git a/data/test_config/config_crf_no_regex.yml b/data/test_config/config_crf_no_regex.yml
+new file mode 100644
+index 000000000000..3d916ede50d2
+--- /dev/null
++++ b/data/test_config/config_crf_no_regex.yml
+@@ -0,0 +1,5 @@
++language: en
++pipeline:
++  - name: "WhitespaceTokenizer"
++  - name: "CRFEntityExtractor"
++  - name: "EntitySynonymMapper"
+\ No newline at end of file
+diff --git a/data/test_config/config_crf_no_synonyms.yml b/data/test_config/config_crf_no_synonyms.yml
+new file mode 100644
+index 000000000000..543bc85a966c
+--- /dev/null
++++ b/data/test_config/config_crf_no_synonyms.yml
+@@ -0,0 +1,4 @@
++language: en
++pipeline:
++  - name: "WhitespaceTokenizer"
++  - name: "CRFEntityExtractor"
+\ No newline at end of file
+diff --git a/data/test_config/config_spacy_entity_extractor.yml b/data/test_config/config_spacy_entity_extractor.yml
+new file mode 100644
+index 000000000000..26b4fc84922d
+--- /dev/null
++++ b/data/test_config/config_spacy_entity_extractor.yml
+@@ -0,0 +1,8 @@
++language: en
++pipeline:
++    - name: "SpacyNLP"
++    - name: "SpacyTokenizer"
++    - name: "SpacyFeaturizer"
++    - name: "RegexFeaturizer"
++    - name: "SpacyEntityExtractor"
++    - name: "EntitySynonymMapper"
+\ No newline at end of file
+diff --git a/rasa/nlu/components.py b/rasa/nlu/components.py
+index 52dc535c546e..e2d083b7e11f 100644
+--- a/rasa/nlu/components.py
++++ b/rasa/nlu/components.py
+@@ -1,8 +1,10 @@
++import itertools
+ import logging
+ import typing
+-from typing import Any, Dict, Hashable, List, Optional, Set, Text, Tuple, Type
++from typing import Any, Dict, Hashable, List, Optional, Set, Text, Tuple, Type, Iterable
+ 
+ from rasa.constants import DOCS_URL_MIGRATION_GUIDE
++from rasa.nlu.constants import TRAINABLE_EXTRACTORS
+ from rasa.nlu.config import RasaNLUModelConfig, override_defaults, InvalidConfigError
+ from rasa.nlu.training_data import Message, TrainingData
+ from rasa.utils.common import raise_warning
+@@ -179,28 +181,102 @@ def validate_pipeline(pipeline: List["Component"]) -> None:
+     validate_required_components(pipeline)
+ 
+ 
++def any_components_in_pipeline(components: Iterable[Text], pipeline: List["Component"]):
++    """Check if any of the provided components are listed in the pipeline.
++
++    Args:
++        components: A list of :class:`rasa.nlu.components.Component`s to check.
++        pipeline: A list of :class:`rasa.nlu.components.Component`s.
++
++    Returns:
++        `True` if any of the `components` are in the `pipeline`, else `False`.
++
++    """
++    return any(any([component.name == c for component in pipeline]) for c in components)
++
++
+ def validate_required_components_from_data(
+     pipeline: List["Component"], data: TrainingData
+ ) -> None:
+     """Validates that all components are present in the pipeline based on data.
+ 
+     Args:
+-        pipeline: The list of the :class:`rasa.nlu.components.Component`.
++        pipeline: The list of the :class:`rasa.nlu.components.Component`s.
+         data: The :class:`rasa.nlu.training_data.training_data.TrainingData`.
+     """
+ 
+-    from rasa.nlu.selectors.response_selector import ResponseSelector
++    if data.response_examples and not any_components_in_pipeline(
++        ["ResponseSelector"], pipeline
++    ):
++        raise_warning(
++            "You have defined training data with examples for training a response selector, but "
++            "your NLU pipeline does not include a response selector component. To train a "
++            "model on your response selector data, add a 'ResponseSelector' to your pipeline."
++        )
++
++    if data.entity_examples and not any_components_in_pipeline(
++        TRAINABLE_EXTRACTORS, pipeline
++    ):
++        raise_warning(
++            "You have defined training data consisting of entity examples, but "
++            "your NLU pipeline does not include an entity extractor trained on "
++            "your training data. To extract non-pretrained entities, add one of "
++            f"{TRAINABLE_EXTRACTORS} to your pipeline."
++        )
+ 
+-    response_selector_exists = False
+-    for component in pipeline:
+-        # check if a response selector is part of NLU pipeline
+-        if isinstance(component, ResponseSelector):
+-            response_selector_exists = True
++    if data.regex_features and not any_components_in_pipeline(
++        ["RegexFeaturizer"], pipeline
++    ):
++        raise_warning(
++            "You have defined training data with regexes, but "
++            "your NLU pipeline does not include a 'RegexFeaturizer'. "
++            "To featurize regexes, include a 'RegexFeaturizer' in your pipeline."
++        )
+ 
+-    if len(data.response_examples) and not response_selector_exists:
++    if data.lookup_tables and not any_components_in_pipeline(
++        ["RegexFeaturizer"], pipeline
++    ):
++        raise_warning(
++            "You have defined training data consisting of lookup tables, but "
++            "your NLU pipeline does not include a 'RegexFeaturizer'. "
++            "To featurize lookup tables, add a 'RegexFeaturizer' to your pipeline."
++        )
++
++    if data.lookup_tables:
++        if not any_components_in_pipeline(
++            ["CRFEntityExtractor", "DIETClassifier"], pipeline
++        ):
++            raise_warning(
++                "You have defined training data consisting of lookup tables, but "
++                "your NLU pipeline does not include any components that use these features. "
++                "To featurize lookup tables, add a 'DIETClassifier' or a 'CRFEntityExtractor' with "
++                "the 'pattern' feature to your pipeline."
++            )
++        elif any_components_in_pipeline(["CRFEntityExtractor"], pipeline):
++            crf_components = [c for c in pipeline if c.name == "CRFEntityExtractor"]
++            # check to see if any of the possible CRFEntityExtractors will featurize `pattern`
++            has_pattern_feature = False
++            for crf in crf_components:
++                crf_features = crf.component_config.get("features")
++                # iterate through [[before],[word],[after]] features
++                if "pattern" in itertools.chain(*crf_features):
++                    has_pattern_feature = True
++
++            if not has_pattern_feature:
++                raise_warning(
++                    "You have defined training data consisting of lookup tables, but "
++                    "your NLU pipeline's 'CRFEntityExtractor' does not include the 'pattern' feature. "
++                    "To featurize lookup tables, add the 'pattern' feature to the 'CRFEntityExtractor' in "
++                    "your pipeline."
++                )
++
++    if data.entity_synonyms and not any_components_in_pipeline(
++        ["EntitySynonymMapper"], pipeline
++    ):
+         raise_warning(
+-            "Training data consists examples for training a response selector but "
+-            "no response selector component specified inside NLU pipeline."
++            "You have defined synonyms in your training data, but "
++            "your NLU pipeline does not include an 'EntitySynonymMapper'. "
++            "To map synonyms, add an 'EntitySynonymMapper' to your pipeline."
+         )
+ 
+ 
+diff --git a/rasa/nlu/constants.py b/rasa/nlu/constants.py
+index bc2334aa7fc1..0b406412f1cf 100644
+--- a/rasa/nlu/constants.py
++++ b/rasa/nlu/constants.py
+@@ -13,6 +13,7 @@
+ EXTRACTOR = "extractor"
+ 
+ PRETRAINED_EXTRACTORS = {"DucklingHTTPExtractor", "SpacyEntityExtractor"}
++TRAINABLE_EXTRACTORS = {"MitieEntityExtractor", "CRFEntityExtractor", "DIETClassifier"}
+ 
+ CLS_TOKEN = "__CLS__"
+ 
+diff --git a/tests/nlu/test_config.py b/tests/nlu/test_config.py
+index 8895ea61855d..d67bde38206a 100644
+--- a/tests/nlu/test_config.py
++++ b/tests/nlu/test_config.py
+@@ -1,14 +1,16 @@
+ import json
+ import tempfile
+ import os
+-from typing import Text
++from typing import Text, List
+ 
+ import pytest
+ 
+ import rasa.utils.io as io_utils
+ from rasa.nlu.config import RasaNLUModelConfig
+-from rasa.nlu import config
++from rasa.nlu import config, load_data
++from rasa.nlu import components
+ from rasa.nlu.components import ComponentBuilder
++from rasa.nlu.constants import TRAINABLE_EXTRACTORS
+ from rasa.nlu.registry import registered_pipeline_templates
+ from rasa.nlu.model import Trainer
+ from tests.nlu.utilities import write_file_config
+@@ -180,3 +182,61 @@ def test_train_docker_and_docs_configs(config_file: Text):
+ 
+     assert len(loaded_config.component_names) > 1
+     assert loaded_config.language == content["language"]
++
++
++@pytest.mark.parametrize(
++    "config_path, data_path, expected_warning_excerpts",
++    [
++        (
++            "data/test_config/config_supervised_embeddings.yml",
++            "data/examples/rasa",
++            ["add a 'ResponseSelector'"],
++        ),
++        (
++            "data/test_config/config_spacy_entity_extractor.yml",
++            "data/test/md_converted_to_json.json",
++            [f"add one of {TRAINABLE_EXTRACTORS}"],
++        ),
++        (
++            "data/test_config/config_crf_no_regex.yml",
++            "data/test/duplicate_intents_markdown/demo-rasa-intents-2.md",
++            ["training data with regexes", "include a 'RegexFeaturizer'"],
++        ),
++        (
++            "data/test_config/config_crf_no_regex.yml",
++            "data/test/lookup_tables/lookup_table.json",
++            ["training data consisting of lookup tables", "add a 'RegexFeaturizer'"],
++        ),
++        (
++            "data/test_config/config_spacy_entity_extractor.yml",
++            "data/test/lookup_tables/lookup_table.json",
++            [
++                "add a 'DIETClassifier' or a 'CRFEntityExtractor' with the 'pattern' feature"
++            ],
++        ),
++        (
++            "data/test_config/config_crf_no_pattern_feature.yml",
++            "data/test/lookup_tables/lookup_table.md",
++            "your NLU pipeline's 'CRFEntityExtractor' does not include the 'pattern' feature",
++        ),
++        (
++            "data/test_config/config_crf_no_synonyms.yml",
++            "data/test/markdown_single_sections/synonyms_only.md",
++            ["add an 'EntitySynonymMapper'"],
++        ),
++    ],
++)
++def test_validate_required_components_from_data(
++    config_path: Text, data_path: Text, expected_warning_excerpts: List[Text]
++):
++    loaded_config = config.load(config_path)
++    trainer = Trainer(loaded_config)
++    training_data = load_data(data_path)
++    with pytest.warns(UserWarning) as record:
++        components.validate_required_components_from_data(
++            trainer.pipeline, training_data
++        )
++    assert len(record) == 1
++    assert all(
++        [excerpt in record[0].message.args[0]] for excerpt in expected_warning_excerpts
++    )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,239 @@
+  Task-ID: psf__black-2942@a6b21b9
+  Please checkout to this commit first: 5379d4f3f460ec9b7063dd1cc10f437b0edf9ae3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Avoid magic-trailing-comma newline in `tuple[int,]`, like tuple literal `(1,)`
+Black exempts single-element tuple literals from the usual handling of magic trailing commas: `(1,)` will *not* have a newline added (as would happen for lists, sets, etc.).  
+
+I'd like to be able to write type annotations for a tuple-of-one-element in the same way, so that I can write either `tuple[int,]` or `tuple[int, ...]` without looking quite so much like `list[int]`.  However, Black's current add-a-newline code style makes this pattern unattractive, so I'm unlikely to write a linter for this pattern unless the code style changes.
+
+**Examples in the current _Black_ style**
+
+```python
+shape: tuple[
+    int,
+] 
+shape = (1,)
+```
+
+**Desired style**
+
+```python
+shape: tuple[int,]
+shape = (1,)
+```
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGES.md b/CHANGES.md
+index bb3ccb9ed9f..7da42223e7d 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -14,6 +14,8 @@
+ 
+ <!-- Changes that affect Black's preview style -->
+ 
++- Avoid magic-trailing-comma in single tuple type (#2942)
++
+ ### _Blackd_
+ 
+ <!-- Changes to blackd -->
+diff --git a/src/black/lines.py b/src/black/lines.py
+index f35665c8e0c..ee6af46b364 100644
+--- a/src/black/lines.py
++++ b/src/black/lines.py
+@@ -17,12 +17,17 @@
+ from blib2to3.pgen2 import token
+ 
+ from black.brackets import BracketTracker, DOT_PRIORITY
+-from black.mode import Mode
++from black.mode import Mode, Preview
+ from black.nodes import STANDALONE_COMMENT, TEST_DESCENDANTS
+ from black.nodes import BRACKETS, OPENING_BRACKETS, CLOSING_BRACKETS
+ from black.nodes import syms, whitespace, replace_child, child_towards
+-from black.nodes import is_multiline_string, is_import, is_type_comment
+-from black.nodes import is_one_tuple_between
++from black.nodes import (
++    is_multiline_string,
++    is_import,
++    is_type_comment,
++    is_within_annotation,
++    is_one_tuple_between,
++)
+ 
+ # types
+ T = TypeVar("T")
+@@ -253,7 +258,7 @@ def has_magic_trailing_comma(
+     ) -> bool:
+         """Return True if we have a magic trailing comma, that is when:
+         - there's a trailing comma here
+-        - it's not a one-tuple
++        - it's not a one-tuple (or the equivalent type hint)
+         Additionally, if ensure_removable:
+         - it's not from square bracket indexing
+         """
+@@ -268,6 +273,20 @@ def has_magic_trailing_comma(
+             return True
+ 
+         if closing.type == token.RSQB:
++            if (
++                Preview.one_tuple_type in self.mode
++                and is_within_annotation(closing)
++                and closing.opening_bracket
++                and is_one_tuple_between(closing.opening_bracket, closing, self.leaves)
++                and closing.parent
++                and closing.parent.prev_sibling
++                and (
++                    list(closing.parent.prev_sibling.leaves())[-1].value
++                    in ("tuple", "Tuple")
++                )
++            ):
++                return False
++
+             if not ensure_removable:
+                 return True
+             comma = self.leaves[-1]
+diff --git a/src/black/mode.py b/src/black/mode.py
+index 35a072c23e0..787935b59db 100644
+--- a/src/black/mode.py
++++ b/src/black/mode.py
+@@ -127,6 +127,7 @@ class Preview(Enum):
+     """Individual preview style features."""
+ 
+     string_processing = auto()
++    one_tuple_type = auto()
+ 
+ 
+ class Deprecated(UserWarning):
+@@ -162,9 +163,7 @@ def __contains__(self, feature: Preview) -> bool:
+         """
+         if feature is Preview.string_processing:
+             return self.preview or self.experimental_string_processing
+-        # TODO: Remove type ignore comment once preview contains more features
+-        #  than just ESP
+-        return self.preview  # type: ignore
++        return self.preview
+ 
+     def get_cache_key(self) -> str:
+         if self.target_versions:
+diff --git a/src/black/nodes.py b/src/black/nodes.py
+index f130bff990e..484c06c722e 100644
+--- a/src/black/nodes.py
++++ b/src/black/nodes.py
+@@ -561,7 +561,10 @@ def is_one_tuple(node: LN) -> bool:
+ 
+ def is_one_tuple_between(opening: Leaf, closing: Leaf, leaves: List[Leaf]) -> bool:
+     """Return True if content between `opening` and `closing` looks like a one-tuple."""
+-    if opening.type != token.LPAR and closing.type != token.RPAR:
++    if not (
++        (opening.type == token.LPAR and closing.type == token.RPAR)
++        or (opening.type == token.LSQB and closing.type == token.RSQB)
++    ):
+         return False
+ 
+     depth = closing.bracket_depth + 1
+@@ -597,6 +600,18 @@ def is_walrus_assignment(node: LN) -> bool:
+     return inner is not None and inner.type == syms.namedexpr_test
+ 
+ 
++def is_within_annotation(node: LN) -> bool:
++    """Return True iff `node` is either `annassign` or child of `annassign`"""
++    found_annassign = False
++    current_node = node
++    while current_node.parent:
++        if current_node.type == syms.annassign:
++            found_annassign = True
++            break
++        current_node = current_node.parent
++    return found_annassign
++
++
+ def is_simple_decorator_trailer(node: LN, last: bool = False) -> bool:
+     """Return True iff `node` is a trailer valid in a simple decorator"""
+     return node.type == syms.trailer and (
+diff --git a/tests/data/one_tuple_annotation.py b/tests/data/one_tuple_annotation.py
+new file mode 100644
+index 00000000000..b05a1efd4a1
+--- /dev/null
++++ b/tests/data/one_tuple_annotation.py
+@@ -0,0 +1,34 @@
++import typing
++from typing import List, Tuple
++
++# We should not treat the trailing comma
++# in a single-element tuple type as a magic comma.
++a: tuple[int,]
++b: Tuple[int,]
++c: typing.Tuple[int,]
++
++# The magic comma still applies to non tuple types.
++d: list[int,]
++e: List[int,]
++f: typing.List[int,]
++
++# output
++import typing
++from typing import List, Tuple
++
++# We should not treat the trailing comma
++# in a single-element tuple type as a magic comma.
++a: tuple[int,]
++b: Tuple[int,]
++c: typing.Tuple[int,]
++
++# The magic comma still applies to non tuple types.
++d: list[
++    int,
++]
++e: List[
++    int,
++]
++f: typing.List[
++    int,
++]
+diff --git a/tests/test_format.py b/tests/test_format.py
+index 269bbacd249..ac818a658e0 100644
+--- a/tests/test_format.py
++++ b/tests/test_format.py
+@@ -79,6 +79,7 @@
+     "long_strings__edge_case",
+     "long_strings__regression",
+     "percent_precedence",
++    "one_tuple_annotation",
+ ]
+ 
+ SOURCES: List[str] = [
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

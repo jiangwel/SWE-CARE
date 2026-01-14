@@ -1,0 +1,190 @@
+  Task-ID: mlflow__mlflow-16009@a2d00a3
+  Please checkout to this commit first: 0e0fe9e665aece995c0a9a54ca400961568fa05a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Remove `dev/check-notebooks.sh` and use `clint` instead
+`clint` is a custom linter used in this repository to check python scripts/notebooks. We should use it to check notebooks instead of the `dev/check-notebooks.sh` script.
+
+Instructions:
+
+1. Add a new rule in `dev/clint/src/clint/rules.py`.
+2. Update `_lint_cell` in `dev/clint/src/clint/linter.py` to use the new rule.
+3. Remove the `check-notebooks` hook in `.pre-commit-config.yaml`.
+4. Remove `dev/check-notebooks.sh`.
+
+Testing:
+
+Create a dummy notebook that violates the new rule, and ensure `clint` catches it.
+  </issue>
+  
+  <patch>
+  diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+index 9442f05520350..45aa0f372631e 100644
+--- a/.pre-commit-config.yaml
++++ b/.pre-commit-config.yaml
+@@ -49,14 +49,6 @@ repos:
+         stages: [pre-commit]
+         require_serial: true
+ 
+-      - id: check-notebooks
+-        name: check-notebooks
+-        entry: dev/check-notebooks.sh
+-        language: system
+-        files: '\.ipynb$'
+-        stages: [pre-commit]
+-        require_serial: true
+-
+       - id: clint
+         name: clint
+         entry: clint
+diff --git a/dev/check-notebooks.sh b/dev/check-notebooks.sh
+deleted file mode 100755
+index 89fc4c959cdc3..0000000000000
+--- a/dev/check-notebooks.sh
++++ /dev/null
+@@ -1,13 +0,0 @@
+-#!/usr/bin/env bash
+-
+-TRACE_UI_SRC="static-files/lib/notebook-trace-renderer/index.html"
+-
+-# If offending files are found, list them and throw an exception
+-if grep -In $TRACE_UI_SRC --include="*.ipynb" "$@"; then
+-    echo -e "\nError: Found the MLflow Trace UI iframe in the above notebooks."
+-    echo "The trace UI in cell outputs will not render correctly in previews or the website"
+-    echo "Please run \`mlflow.tracing.disable_notebook_display()\` and rerun the cell to remove the iframe."
+-    exit 1
+-else
+-  exit 0
+-fi
+diff --git a/dev/clint/src/clint/linter.py b/dev/clint/src/clint/linter.py
+index 65c5cd6cb6d2e..8ff002f5a42f0 100644
+--- a/dev/clint/src/clint/linter.py
++++ b/dev/clint/src/clint/linter.py
+@@ -674,21 +674,55 @@ def post_visit(self) -> None:
+                     self._check(loc, rules.LazyModule())
+ 
+ 
++def _has_trace_ui_content(output: dict[str, Any]) -> bool:
++    """Check if an output contains MLflow trace UI content."""
++    data = output.get("data")
++    if not data:
++        return False
++
++    for content_type, content in data.items():
++        if not isinstance(content, (str, list)):
++            continue
++
++        content_str = "".join(content) if isinstance(content, list) else content
++        if "static-files/lib/notebook-trace-renderer/index.html" in content_str:
++            return True
++
++    return False
++
++
+ def _lint_cell(path: Path, config: Config, cell: dict[str, Any], index: int) -> list[Violation]:
++    violations = []
+     type_ = cell.get("cell_type")
++
++    # Check for forbidden trace UI iframe in cell outputs
++    outputs = cell.get("outputs")
++    if outputs:
++        for output in outputs:
++            if _has_trace_ui_content(output):
++                violations.append(
++                    Violation(
++                        rules.ForbiddenTraceUIInNotebook(),
++                        path,
++                        Location(0, 0),
++                        cell=index,
++                    )
++                )
++                break
++
+     if type_ != "code":
+-        return []
++        return violations
+ 
+     src = "\n".join(cell.get("source", []))
+     try:
+         tree = ast.parse(src)
+     except SyntaxError:
+         # Ignore non-python cells such as `!pip install ...`
+-        return []
++        return violations
+ 
+     linter = Linter(path=path, config=config, ignore=ignore_map(src), cell=index)
+     linter.visit(tree)
+-    violations = linter.violations
++    violations.extend(linter.violations)
+ 
+     if not src.strip():
+         violations.append(
+@@ -705,11 +739,11 @@ def _lint_cell(path: Path, config: Config, cell: dict[str, Any], index: int) ->
+ def lint_file(path: Path, config: Config) -> list[Violation]:
+     code = path.read_text()
+     if path.suffix == ".ipynb":
++        violations = []
+         if cells := json.loads(code).get("cells"):
+-            violations = []
+             for idx, cell in enumerate(cells, start=1):
+                 violations.extend(_lint_cell(path, config, cell, idx))
+-            return violations
++        return violations
+     elif path.suffix in {".rst", ".md", ".mdx"}:
+         violations = []
+         code_blocks = (
+diff --git a/dev/clint/src/clint/rules.py b/dev/clint/src/clint/rules.py
+index b4fa3248e70a5..fefb22d1d4e20 100644
+--- a/dev/clint/src/clint/rules.py
++++ b/dev/clint/src/clint/rules.py
+@@ -351,3 +351,16 @@ def _message(self) -> str:
+         return (
+             "Usage of `set_active_model` is not allowed in mlflow, use `_set_active_model` instead."
+         )
++
++
++class ForbiddenTraceUIInNotebook(Rule):
++    def _id(self) -> str:
++        return "MLF0022"
++
++    def _message(self) -> str:
++        return (
++            "Found the MLflow Trace UI iframe in the notebook. "
++            "The trace UI in cell outputs will not render correctly in previews or the website. "
++            "Please run `mlflow.tracing.disable_notebook_display()` and rerun the cell "
++            "to remove the iframe."
++        )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

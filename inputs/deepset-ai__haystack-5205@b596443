@@ -1,0 +1,1193 @@
+  Task-ID: deepset-ai__haystack-5205@b596443
+  Please checkout to this commit first: eb2255c0dd756d95a64b389bc984ebffa2c2fa8c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  MPT models from SageMaker
+I've been trying to use the new MPT models via the newly merged SageMaker invocation layer. However, I get an error because there are some differences in what the MPT models expect in the payload in comparison to e.g.: falcon (which I believe is what was used to test the SageMaker invocation layer).
+For example, in the payload MPT models expect `text_inputs` not `inputs`, they do not expect `parameters`, rather all parameters at the same level, and so on. You can find these out in the Jumpstart notebooks
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/nodes/prompt/invocation_layer/__init__.py b/haystack/nodes/prompt/invocation_layer/__init__.py
+index 535cd9264c..72df2edfda 100644
+--- a/haystack/nodes/prompt/invocation_layer/__init__.py
++++ b/haystack/nodes/prompt/invocation_layer/__init__.py
+@@ -8,4 +8,5 @@
+ from haystack.nodes.prompt.invocation_layer.open_ai import OpenAIInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.anthropic_claude import AnthropicClaudeInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.cohere import CohereInvocationLayer
++from haystack.nodes.prompt.invocation_layer.sagemaker_hf_infer import SageMakerHFInferenceInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.sagemaker_hf_text_gen import SageMakerHFTextGenerationInvocationLayer
+diff --git a/haystack/nodes/prompt/invocation_layer/sagemaker_base.py b/haystack/nodes/prompt/invocation_layer/sagemaker_base.py
+new file mode 100644
+index 0000000000..5abbc44a52
+--- /dev/null
++++ b/haystack/nodes/prompt/invocation_layer/sagemaker_base.py
+@@ -0,0 +1,176 @@
++import json
++import logging
++from abc import abstractmethod, ABC
++from typing import Optional, Dict, Union, List, Any
++
++
++from haystack.errors import SageMakerConfigurationError
++from haystack.lazy_imports import LazyImport
++from haystack.nodes.prompt.invocation_layer import PromptModelInvocationLayer
++
++logger = logging.getLogger(__name__)
++
++
++with LazyImport(message="Run 'pip install farm-haystack[aws]'") as boto3_import:
++    import boto3
++    from botocore.exceptions import ClientError, BotoCoreError
++
++
++class SageMakerBaseInvocationLayer(PromptModelInvocationLayer, ABC):
++    """
++    Base class for SageMaker based invocation layers.
++    """
++
++    @classmethod
++    @abstractmethod
++    def get_test_payload(cls) -> Dict[str, Any]:
++        """
++        Return test payload for the model.
++        """
++
++    def _ensure_token_limit(self, prompt: Union[str, List[Dict[str, str]]]) -> Union[str, List[Dict[str, str]]]:
++        # the prompt for this model will be of the type str
++        resize_info = self.prompt_handler(prompt)  # type: ignore
++        if resize_info["prompt_length"] != resize_info["new_prompt_length"]:
++            logger.warning(
++                "The prompt has been truncated from %s tokens to %s tokens so that the prompt length and "
++                "answer length (%s tokens) fit within the max token limit (%s tokens). "
++                "Shorten the prompt to prevent it from being cut off.",
++                resize_info["prompt_length"],
++                max(0, resize_info["model_max_length"] - resize_info["max_length"]),  # type: ignore
++                resize_info["max_length"],
++                resize_info["model_max_length"],
++            )
++        return str(resize_info["resized_prompt"])
++
++    @classmethod
++    def supports(cls, model_name_or_path: str, **kwargs) -> bool:
++        """
++        Checks whether a model_name_or_path passed down (e.g. via PromptNode) is supported by this class.
++
++        :param model_name_or_path: The model_name_or_path to check.
++        """
++        aws_configuration_keys = [
++            "aws_access_key_id",
++            "aws_secret_access_key",
++            "aws_session_token",
++            "aws_region_name",
++            "aws_profile_name",
++        ]
++        aws_config_provided = any(key in kwargs for key in aws_configuration_keys)
++        if aws_config_provided:
++            boto3_import.check()
++            # attempt to create a session with the provided credentials
++            session = cls.check_aws_connect(aws_configuration_keys, kwargs)
++            # is endpoint in service?
++            cls.check_endpoint_in_service(session, model_name_or_path)
++
++            test_payload = cls.get_test_payload()
++            # send test payload to endpoint to see if it's supported
++            supported = cls.check_model_input_format(session, model_name_or_path, test_payload)
++            return supported
++        return False
++
++    @classmethod
++    def check_aws_connect(cls, aws_configuration_keys: List[str], kwargs):
++        """
++        Checks if the provided AWS credentials are valid and can be used to connect to SageMaker.
++        :param aws_configuration_keys: The AWS configuration keys to check.
++        :param kwargs: The kwargs passed down to the SageMakerClient.
++        :return: The boto3 session.
++        """
++        boto3_import.check()
++        try:
++            session = cls.create_session(**kwargs)
++        except BotoCoreError as e:
++            provided_aws_config = {k: v for k, v in kwargs.items() if k in aws_configuration_keys}
++            raise SageMakerConfigurationError(
++                f"Failed to initialize the session or client with provided AWS credentials {provided_aws_config}."
++                f"The root cause is: {e}"
++            )
++        return session
++
++    @classmethod
++    def check_endpoint_in_service(cls, session: "boto3.Session", endpoint: str):
++        """
++        Checks if the SageMaker endpoint exists and is in service.
++        :param session: The boto3 session.
++        :param endpoint: The endpoint to check.
++        """
++        boto3_import.check()
++        client = None
++        try:
++            client = session.client("sagemaker")
++            response = client.describe_endpoint(EndpointName=endpoint)
++            endpoint_status = response["EndpointStatus"] if "EndpointStatus" in response else None
++            if endpoint_status and endpoint_status.strip() != "InService":
++                raise SageMakerConfigurationError(
++                    f"SageMaker endpoint {endpoint} exists but is not in service. "
++                    f"Please make sure that the endpoint is in state 'InService'."
++                )
++        except ClientError as e:
++            raise SageMakerConfigurationError(
++                f"Could not connect to {endpoint} Sagemaker endpoint. "
++                f"Please make sure that the endpoint exists and is accessible."
++                f"The root cause is: {e}"
++            )
++        finally:
++            if client:
++                client.close()
++
++    @classmethod
++    def check_model_input_format(cls, session: "boto3.Session", endpoint: str, test_payload: Dict[str, str]):
++        """
++        Checks if the SageMaker endpoint supports the test_payload model input format.
++        :param session: The boto3 session.
++        :param endpoint: The endpoint to hit
++        :param test_payload: The payload to send to the endpoint
++        :return: True if the endpoint supports the test_payload model input format, False otherwise.
++        """
++        boto3_import.check()
++        client = None
++        try:
++            client = session.client("sagemaker-runtime")
++            client.invoke_endpoint(
++                EndpointName=endpoint,
++                Body=json.dumps(test_payload),
++                ContentType="application/json",
++                Accept="application/json",
++            )
++        except ClientError:
++            # raised if the endpoint doesn't support the test_payload model input format
++            return False
++        finally:
++            if client:
++                client.close()
++        return True
++
++    @classmethod
++    def create_session(
++        cls,
++        aws_access_key_id: Optional[str] = None,
++        aws_secret_access_key: Optional[str] = None,
++        aws_session_token: Optional[str] = None,
++        aws_region_name: Optional[str] = None,
++        aws_profile_name: Optional[str] = None,
++        **kwargs,
++    ):
++        """
++        Creates an AWS Session with the given parameters.
++
++        :param aws_access_key_id: AWS access key ID.
++        :param aws_secret_access_key: AWS secret access key.
++        :param aws_session_token: AWS session token.
++        :param aws_region_name: AWS region name.
++        :param aws_profile_name: AWS profile name.
++        :raise NoCredentialsError: If the AWS credentials are not provided or invalid.
++        :return: The created AWS Session.
++        """
++        boto3_import.check()
++        return boto3.Session(
++            aws_access_key_id=aws_access_key_id,
++            aws_secret_access_key=aws_secret_access_key,
++            aws_session_token=aws_session_token,
++            region_name=aws_region_name,
++            profile_name=aws_profile_name,
++        )
+diff --git a/haystack/nodes/prompt/invocation_layer/sagemaker_hf_infer.py b/haystack/nodes/prompt/invocation_layer/sagemaker_hf_infer.py
+new file mode 100644
+index 0000000000..518d44b95b
+--- /dev/null
++++ b/haystack/nodes/prompt/invocation_layer/sagemaker_hf_infer.py
+@@ -0,0 +1,284 @@
++import json
++import logging
++from typing import Optional, Dict, List, Any
++
++import requests
++
++from haystack.errors import SageMakerInferenceError, SageMakerConfigurationError, SageMakerModelNotReadyError
++from haystack.nodes.prompt.invocation_layer.handlers import DefaultPromptHandler
++from haystack.nodes.prompt.invocation_layer.sagemaker_base import SageMakerBaseInvocationLayer
++
++logger = logging.getLogger(__name__)
++
++
++class SageMakerHFInferenceInvocationLayer(SageMakerBaseInvocationLayer):
++    """
++    SageMaker HuggingFace Inference Invocation Layer
++
++    SageMakerHFInferenceInvocationLayer enables the use of Large Language Models (LLMs) hosted on a SageMaker Inference
++    Endpoint via PromptNode. It supports text-generation and text2text-generation models from HuggingFace, which are
++    running on the SageMaker Inference Endpoint.
++
++    As of June 23, this layer has been confirmed to support the following SageMaker deployed models:
++    - MPT
++    - Dolly V2
++    - Flan-U2
++    - Flan-T5
++    - RedPajama
++    - Open Llama
++    - GPT-J-6B
++    - GPT NEO
++    - BloomZ
++
++    For guidance on how to deploy such a model to SageMaker, refer to
++    the [SageMaker JumpStart foundation models documentation](https://docs.aws.amazon.com/sagemaker/latest/dg/jumpstart-foundation-models-use.html)
++    and follow the instructions provided there.
++
++    Technical Note:
++
++    This layer is designed for models that anticipate an input format composed of the following keys/values:
++    {'text_inputs': 'prompt_text', **(params or {})}
++    The text_inputs key represents the prompt text, with all additional parameters for the model being added at
++    the same dictionary level as text_inputs.
++
++
++    **Example**
++
++     ```python
++    from haystack.nodes import PromptNode
++
++    # Pass sagemaker endpoint name and authentication details
++    pn = PromptNode(model_name_or_path="jumpstart-dft-hf-textgeneration-dolly-v2-3b-bf16",
++    model_kwargs={"aws_profile_name": "my_aws_profile_name", "aws_region_name": "eu-central-1"})
++    res = pn("what is the meaning of life?")
++    print(res)
++    ```
++
++    **Example using AWS env variables**
++    ```python
++    import os
++    from haystack.nodes import PromptNode
++
++    # We can also configure Sagemaker via AWS environment variables without AWS profile name
++    pn = PromptNode(model_name_or_path="jumpstart-dft-hf-textgeneration-dolly-v2-3b-bf16", max_length=128,
++                    model_kwargs={"aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
++                                "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
++                                "aws_session_token": os.getenv("AWS_SESSION_TOKEN"),
++                                "aws_region_name": "us-east-1"})
++
++    response = pn("Tell me more about Berlin, be elaborate")
++    print(response)
++    ```
++
++    Of course, in both examples your endpoints, region names and other settings will be different.
++    You can find it in the SageMaker AWS console.
++    """
++
++    def __init__(
++        self,
++        model_name_or_path: str,
++        max_length: int = 100,
++        aws_access_key_id: Optional[str] = None,
++        aws_secret_access_key: Optional[str] = None,
++        aws_session_token: Optional[str] = None,
++        aws_region_name: Optional[str] = None,
++        aws_profile_name: Optional[str] = None,
++        **kwargs,
++    ):
++        """
++        Instantiates the session with SageMaker using IAM based authentication via boto3.
++
++        :param model_name_or_path: The name for SageMaker Model Endpoint.
++        :param max_length: The maximum length of the output text.
++        :param aws_access_key_id: AWS access key ID.
++        :param aws_secret_access_key: AWS secret access key.
++        :param aws_session_token: AWS session token.
++        :param aws_region_name: AWS region name.
++        :param aws_profile_name: AWS profile name.
++        """
++        super().__init__(model_name_or_path)
++        try:
++            session = SageMakerHFInferenceInvocationLayer.create_session(
++                aws_access_key_id=aws_access_key_id,
++                aws_secret_access_key=aws_secret_access_key,
++                aws_session_token=aws_session_token,
++                aws_region_name=aws_region_name,
++                aws_profile_name=aws_profile_name,
++            )
++            self.client = session.client("sagemaker-runtime")
++        except Exception as e:
++            raise SageMakerInferenceError(
++                f"Could not connect to SageMaker Inference Endpoint {model_name_or_path}."
++                f"Make sure the Endpoint exists and AWS environment is configured. {e}"
++            )
++        self.max_length = max_length
++
++        # for a list of supported parameters
++        # see https://huggingface.co/blog/sagemaker-huggingface-llm#4-run-inference-and-chat-with-our-model
++        self.model_input_kwargs = {
++            key: kwargs[key]
++            for key in [
++                "max_length",
++                "max_time",
++                "num_return_sequences",
++                "num_beams",
++                "no_repeat_ngram_size",
++                "temperature",
++                "early_stopping",
++                "do_sample",
++                "top_k",
++                "top_p",
++                "seed",
++                "return_full_text",
++            ]
++            if key in kwargs
++        }
++
++        # As of June 23, SageMaker does not support streaming responses.
++        # However, even though it's not provided, users may attempt to use streaming responses.
++        # Use stream and stream_handler for warning and future use
++        self.stream_handler = kwargs.get("stream_handler", None)
++        self.stream = kwargs.get("stream", False)
++
++        # We pop the model_max_length as it is not sent to the model
++        # but used to truncate the prompt if needed
++        model_max_length = kwargs.get("model_max_length", 1024)
++
++        # Truncate prompt if prompt tokens > model_max_length-max_length
++        # (max_length is the length of the generated text)
++        # It is hard to determine which tokenizer to use for the SageMaker model
++        # so we use GPT2 tokenizer which will likely provide good token count approximation
++        self.prompt_handler = DefaultPromptHandler(
++            model_name_or_path="gpt2", model_max_length=model_max_length, max_length=self.max_length or 100
++        )
++
++    def invoke(self, *args, **kwargs) -> List[str]:
++        """
++        Sends the prompt to the remote model and returns the generated response(s).
++        You can pass all parameters supported by the SageMaker model
++        here via **kwargs (e.g. "temperature", "do_sample" ...).
++
++        :return: The generated responses from the model as a list of strings.
++        """
++
++        prompt = kwargs.get("prompt")
++        if not prompt:
++            raise ValueError(
++                f"No prompt provided. Model {self.model_name_or_path} requires prompt."
++                f"Make sure to provide prompt in kwargs."
++            )
++
++        stream = kwargs.get("stream", self.stream)
++        stream_handler = kwargs.get("stream_handler", self.stream_handler)
++        streaming_requested = stream or stream_handler is not None
++        if streaming_requested:
++            raise SageMakerConfigurationError("SageMaker model response streaming is not supported yet")
++
++        stop_words = kwargs.pop("stop_words", None)  # doesn't tolerate empty list
++        kwargs_with_defaults = self.model_input_kwargs
++        kwargs_with_defaults.update(kwargs)
++
++        # these parameters were valid in June 23, make sure to check the Sagemaker docs for updates
++        default_params = {
++            "max_length": self.max_length,
++            "max_time": None,
++            "num_return_sequences": None,
++            "num_beams": None,
++            "no_repeat_ngram_size": None,
++            "temperature": None,
++            "early_stopping": None,
++            "do_sample": None,
++            "top_k": None,
++            "top_p": None,
++            "seed": None,
++            "stopping_criteria": stop_words,
++            "return_full_text": None,  # not used by all models (e.g. MPT, Flan)
++        }
++
++        # put the param in the params if it's in kwargs and not None (e.g. it is actually defined)
++        # endpoint doesn't tolerate None values, send only the params that are defined
++        params = {
++            param: kwargs_with_defaults.get(param, default)
++            for param, default in default_params.items()
++            if param in kwargs_with_defaults or default is not None
++        }
++        generated_texts = self._post(prompt=prompt, params=params)
++        return generated_texts
++
++    def _post(self, prompt: str, params: Optional[Dict[str, Any]] = None) -> List[str]:
++        """
++        Post data to the SageMaker inference model. It takes in a prompt and returns a list of responses using model invocation.
++        :param prompt: The prompt text to be sent to the model.
++        :param params: The parameters to be sent to the Hugging Face model (see https://huggingface.co/docs/api-inference/detailed_parameters#text-generation-task)
++        :return: The generated responses as a list of strings.
++        """
++
++        try:
++            body = {"text_inputs": prompt, **(params or {})}
++            response = self.client.invoke_endpoint(
++                EndpointName=self.model_name_or_path,
++                Body=json.dumps(body),
++                ContentType="application/json",
++                Accept="application/json",
++            )
++            response_json = response.get("Body").read().decode("utf-8")
++            output = json.loads(response_json)
++            return self._extract_response(output)
++        except requests.HTTPError as err:
++            res = err.response
++            if res.status_code == 429:
++                raise SageMakerModelNotReadyError(f"Model not ready: {res.text}")
++            raise SageMakerInferenceError(
++                f"SageMaker Inference returned an error.\nStatus code: {res.status_code}\nResponse body: {res.text}",
++                status_code=res.status_code,
++            )
++
++    def _extract_response(self, json_response: Any) -> List[str]:
++        """
++        Extracts generated list of texts from the JSON response.
++        :param json_response: The JSON response to process.
++        :return: A list of generated texts.
++        """
++        generated_texts = []
++        for response in self._unwrap_response(json_response):
++            for key in ["generated_texts", "generated_text"]:
++                raw_response = response.get(key)
++                if raw_response:
++                    if isinstance(raw_response, list):
++                        generated_texts.extend(raw_response)
++                    else:
++                        generated_texts.append(raw_response)
++        return generated_texts
++
++    def _unwrap_response(self, response: Any):
++        """
++        Recursively unwrap the JSON response to get to the dictionary level where the generated text is.
++
++        If the response is a list, it recursively calls this method for each sublist.
++        If the response is a dict and contains either "generated_text" or "generated_texts" key,
++        it yields the dictionary.
++
++        :param response: The response to process.
++        :yield: dictionary containing either "generated_text" or "generated_texts" key with a
++        string or list of strings as value.
++        """
++        if isinstance(response, list):
++            for sublist in response:
++                yield from self._unwrap_response(sublist)
++        elif isinstance(response, dict):
++            if "generated_text" in response or "generated_texts" in response:
++                yield response
++
++    @classmethod
++    def get_test_payload(cls) -> Dict[str, str]:
++        """
++        Returns a payload used for testing if the current endpoint supports the JSON payload format used by
++        this class.
++
++        As of June 23, Sagemaker endpoints support the format where the payload is a JSON object with:
++        "text_inputs" used as the key and the prompt as the value. All other parameters are passed as key/value
++        pairs on the same level. See _post method for more details.
++
++        :return: A payload used for testing if the current endpoint is working.
++        """
++        return {"text_inputs": "Hello world!"}
+diff --git a/haystack/nodes/prompt/invocation_layer/sagemaker_hf_text_gen.py b/haystack/nodes/prompt/invocation_layer/sagemaker_hf_text_gen.py
+index ae1a43466c..f64d9fe70e 100644
+--- a/haystack/nodes/prompt/invocation_layer/sagemaker_hf_text_gen.py
++++ b/haystack/nodes/prompt/invocation_layer/sagemaker_hf_text_gen.py
+@@ -1,31 +1,37 @@
+ import json
+ import logging
+-from typing import Optional, Dict, Union, List, Any
++from typing import Optional, Dict, List, Any
+ 
+ import requests
+ 
+ from haystack.errors import SageMakerModelNotReadyError, SageMakerInferenceError, SageMakerConfigurationError
+-from haystack.lazy_imports import LazyImport
+-from haystack.nodes.prompt.invocation_layer import PromptModelInvocationLayer
+ from haystack.nodes.prompt.invocation_layer.handlers import DefaultPromptHandler
++from haystack.nodes.prompt.invocation_layer.sagemaker_base import SageMakerBaseInvocationLayer
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+-with LazyImport(message="Run 'pip install farm-haystack[aws]'") as boto3_import:
+-    import boto3
+-    from botocore.exceptions import ClientError, BotoCoreError
++class SageMakerHFTextGenerationInvocationLayer(SageMakerBaseInvocationLayer):
++    """
++    SageMaker HuggingFace TextGeneration Invocation Layer
+ 
+ 
+-class SageMakerHFTextGenerationInvocationLayer(PromptModelInvocationLayer):
+-    """
+-    SageMaker Invocation Layer
++    SageMakerHFTextGenerationInvocationLayer enables the use of Large Language Models (LLMs) hosted on a SageMaker
++    Inference Endpoint via PromptNode. It supports text-generation from HuggingFace, which are running on the
++    SageMaker Inference Endpoint.
++
++    For guidance on how to deploy such a model to SageMaker, refer to
++    the [SageMaker JumpStart foundation models documentation](https://docs.aws.amazon.com/sagemaker/latest/dg/jumpstart-foundation-models-use.html)
++    and follow the instructions provided there.
++
++    As of June 23, this layer has been confirmed to support the following SageMaker deployed models:
++    - Falcon models
++
++    Technical Note:
++    This layer is designed for models that anticipate an input format composed of the following keys/values:
++    {'inputs': 'prompt_text', 'parameters': params} where 'inputs' represents the prompt and 'parameters' the
++    parameters for the model.
+ 
+-    Lets you use an LLM hosted via a SageMaker Inference Endpoint PromptNode.
+-    It's expecting a Huggingface Model running at the SageMaker Inference Endpoint (e.g. Falcon, Flan-T5).
+-    See https://www.philschmid.de/sagemaker-falcon-llm for instructions on how to deploy such a model to SageMaker
+-    and https://docs.aws.amazon.com/sagemaker/latest/dg/jumpstart-foundation-models-use.html for an even simpler
+-    workflow via SageMaker JumpStart.
+ 
+     **Example**
+ 
+@@ -81,7 +87,6 @@ def __init__(
+         :param aws_region_name: AWS region name.
+         :param aws_profile_name: AWS profile name.
+         """
+-        boto3_import.check()
+         super().__init__(model_name_or_path)
+         try:
+             session = SageMakerHFTextGenerationInvocationLayer.create_session(
+@@ -144,7 +149,6 @@ def invoke(self, *args, **kwargs) -> List[str]:
+         Sends the prompt to the remote model and returns the generated response(s).
+         You can pass all parameters supported by the Huggingface Transformers `generate` method
+         here via **kwargs (e.g. "temperature", "stop" ...).
+-        For a full list see: https://huggingface.co/docs/api-inference/detailed_parameters#text-generation-task
+ 
+         :return: The generated responses from the model as a list of strings.
+         """
+@@ -216,88 +220,17 @@ def _post(self, prompt: str, params: Optional[Dict[str, Any]] = None) -> List[st
+                 status_code=res.status_code,
+             )
+ 
+-    def _ensure_token_limit(self, prompt: Union[str, List[Dict[str, str]]]) -> Union[str, List[Dict[str, str]]]:
+-        # the prompt for this model will be of the type str
+-        resize_info = self.prompt_handler(prompt)  # type: ignore
+-        if resize_info["prompt_length"] != resize_info["new_prompt_length"]:
+-            logger.warning(
+-                "The prompt has been truncated from %s tokens to %s tokens so that the prompt length and "
+-                "answer length (%s tokens) fit within the max token limit (%s tokens). "
+-                "Shorten the prompt to prevent it from being cut off.",
+-                resize_info["prompt_length"],
+-                max(0, resize_info["model_max_length"] - resize_info["max_length"]),  # type: ignore
+-                resize_info["max_length"],
+-                resize_info["model_max_length"],
+-            )
+-        return str(resize_info["resized_prompt"])
+-
+     @classmethod
+-    def supports(cls, model_name_or_path: str, **kwargs) -> bool:
+-        """
+-        Checks whether a model_name_or_path passed down (e.g. via PromptNode) is supported by this class.
+-
+-        :param model_name_or_path: The model_name_or_path to check.
++    def get_test_payload(cls) -> Dict[str, Any]:
+         """
+-        aws_configuration_keys = [
+-            "aws_access_key_id",
+-            "aws_secret_access_key",
+-            "aws_session_token",
+-            "aws_region_name",
+-            "aws_profile_name",
+-        ]
+-        aws_config_provided = any(key in kwargs for key in aws_configuration_keys)
+-        if aws_config_provided:
+-            boto3_import.check()
+-            try:
+-                session = cls.create_session(**kwargs)
+-                client = session.client("sagemaker")
+-            except BotoCoreError as e:
+-                provided_aws_config = {k: v for k, v in kwargs.items() if k in aws_configuration_keys}
+-                raise SageMakerConfigurationError(
+-                    f"Failed to initialize the session or client with provided AWS credentials {provided_aws_config}."
+-                    f"The root cause is: {e}"
+-                )
+-
+-            try:
+-                client.describe_endpoint(EndpointName=model_name_or_path)
+-            except ClientError as e:
+-                raise SageMakerConfigurationError(
+-                    f"Could not connect to {model_name_or_path} Sagemaker endpoint. "
+-                    f"Please make sure that the endpoint exists and is accessible."
+-                    f"The root cause is: {e}"
+-                )
+-            finally:
+-                if client:
+-                    client.close()
+-            return True
+-        return False
++        Returns a payload used for testing if the current endpoint supports the JSON payload format used by
++        this class.
+ 
+-    @classmethod
+-    def create_session(
+-        cls,
+-        aws_access_key_id: Optional[str] = None,
+-        aws_secret_access_key: Optional[str] = None,
+-        aws_session_token: Optional[str] = None,
+-        aws_region_name: Optional[str] = None,
+-        aws_profile_name: Optional[str] = None,
+-        **kwargs,
+-    ):
+-        """
+-        Creates an AWS Session with the given parameters.
++        As of June 23, Sagemaker endpoints support the JSON payload format from the
++        https://github.com/huggingface/text-generation-inference project. At the time of writing this docstring,
++        only Falcon models were deployed using this format. See pyton client implementation from the
++        https://github.com/huggingface/text-generation-inference for more details.
+ 
+-        :param aws_access_key_id: AWS access key ID.
+-        :param aws_secret_access_key: AWS secret access key.
+-        :param aws_session_token: AWS session token.
+-        :param aws_region_name: AWS region name.
+-        :param aws_profile_name: AWS profile name.
+-        :raise NoCredentialsError: If the AWS credentials are not provided or invalid.
+-        :return: The created AWS Session.
++        :return: A payload used for testing if the current endpoint is working.
+         """
+-        boto3_import.check()
+-        return boto3.Session(
+-            aws_access_key_id=aws_access_key_id,
+-            aws_secret_access_key=aws_secret_access_key,
+-            aws_session_token=aws_session_token,
+-            region_name=aws_region_name,
+-            profile_name=aws_profile_name,
+-        )
++        return {"inputs": "Hello world", "parameters": {}}
+diff --git a/haystack/nodes/prompt/prompt_model.py b/haystack/nodes/prompt/prompt_model.py
+index 7c750e1432..af322068a6 100644
+--- a/haystack/nodes/prompt/prompt_model.py
++++ b/haystack/nodes/prompt/prompt_model.py
+@@ -1,3 +1,4 @@
++import inspect
+ import logging
+ import re
+ from typing import Any, Dict, List, Optional, Tuple, Type, Union, overload
+@@ -95,6 +96,8 @@ def create_invocation_layer(
+         # search all invocation layer classes candidates and find the first one that supports the model,
+         # then create an instance of that invocation layer
+         for invocation_layer in potential_invocation_layer:
++            if inspect.isabstract(invocation_layer):
++                continue
+             if invocation_layer.supports(self.model_name_or_path, **all_kwargs):
+                 return invocation_layer(
+                     model_name_or_path=self.model_name_or_path, max_length=self.max_length, **all_kwargs
+diff --git a/test/prompt/invocation_layer/test_sagemaker_hf_infer.py b/test/prompt/invocation_layer/test_sagemaker_hf_infer.py
+new file mode 100644
+index 0000000000..5d4fd272e0
+--- /dev/null
++++ b/test/prompt/invocation_layer/test_sagemaker_hf_infer.py
+@@ -0,0 +1,409 @@
++import os
++from unittest.mock import patch, MagicMock, Mock
++
++import pytest
++
++from haystack.lazy_imports import LazyImport
++
++from haystack.errors import SageMakerConfigurationError
++from haystack.nodes.prompt.invocation_layer import SageMakerHFInferenceInvocationLayer
++
++with LazyImport() as boto3_import:
++    from botocore.exceptions import BotoCoreError
++
++
++# create a fixture with mocked boto3 client and session
++@pytest.fixture
++def mock_boto3_session():
++    with patch("boto3.Session") as mock_client:
++        yield mock_client
++
++
++@pytest.fixture
++def mock_prompt_handler():
++    with patch("haystack.nodes.prompt.invocation_layer.handlers.DefaultPromptHandler") as mock_prompt_handler:
++        yield mock_prompt_handler
++
++
++@pytest.mark.unit
++def test_default_constructor(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test that the default constructor sets the correct values
++    """
++
++    layer = SageMakerHFInferenceInvocationLayer(
++        model_name_or_path="some_fake_model",
++        max_length=99,
++        aws_access_key_id="some_fake_id",
++        aws_secret_access_key="some_fake_key",
++        aws_session_token="some_fake_token",
++        aws_profile_name="some_fake_profile",
++        aws_region_name="fake_region",
++    )
++
++    assert layer.max_length == 99
++    assert layer.model_name_or_path == "some_fake_model"
++
++    # assert mocked boto3 client called exactly once
++    mock_boto3_session.assert_called_once()
++
++    # assert mocked boto3 client was called with the correct parameters
++    mock_boto3_session.assert_called_with(
++        aws_access_key_id="some_fake_id",
++        aws_secret_access_key="some_fake_key",
++        aws_session_token="some_fake_token",
++        profile_name="some_fake_profile",
++        region_name="fake_region",
++    )
++
++
++@pytest.mark.unit
++def test_constructor_with_model_kwargs(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test that model_kwargs are correctly set in the constructor
++    and that model_kwargs_rejected are correctly filtered out
++    """
++    model_kwargs = {"temperature": 0.7, "do_sample": True, "stream": True}
++    model_kwargs_rejected = {"fake_param": 0.7, "another_fake_param": 1}
++
++    layer = SageMakerHFInferenceInvocationLayer(
++        model_name_or_path="some_fake_model", **model_kwargs, **model_kwargs_rejected
++    )
++    assert "temperature" in layer.model_input_kwargs
++    assert "do_sample" in layer.model_input_kwargs
++    assert "fake_param" not in layer.model_input_kwargs
++    assert "another_fake_param" not in layer.model_input_kwargs
++
++
++@pytest.mark.unit
++def test_invoke_with_no_kwargs(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test that invoke raises an error if no prompt is provided
++    """
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="some_fake_model")
++    with pytest.raises(ValueError) as e:
++        layer.invoke()
++        assert e.match("No prompt provided.")
++
++
++@pytest.mark.unit
++def test_invoke_with_stop_words(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test stop words are correctly passed to HTTP POST request
++    """
++    stop_words = ["but", "not", "bye"]
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="some_model", api_key="fake_key")
++    with patch("haystack.nodes.prompt.invocation_layer.SageMakerHFInferenceInvocationLayer._post") as mock_post:
++        # Mock the response, need to return a list of dicts
++        mock_post.return_value = MagicMock(text='[{"generated_text": "Hello"}]')
++
++        layer.invoke(prompt="Tell me hello", stop_words=stop_words)
++
++    assert mock_post.called
++
++
++@pytest.mark.unit
++def test_short_prompt_is_not_truncated(mock_boto3_session):
++    # prompt of length 5 + max_length of 3 = 8, which is less than model_max_length of 10, so no resize
++    mock_tokens = ["I", "am", "a", "tokenized", "prompt"]
++    mock_prompt = "I am a tokenized prompt"
++
++    mock_tokenizer = Mock()
++    mock_tokenizer.tokenize.return_value = mock_tokens
++
++    with patch("transformers.AutoTokenizer.from_pretrained", return_value=mock_tokenizer):
++        layer = SageMakerHFInferenceInvocationLayer("some_fake_endpoint", max_length=3, model_max_length=10)
++        result = layer._ensure_token_limit(mock_prompt)
++
++    assert result == mock_prompt
++
++
++@pytest.mark.unit
++def test_long_prompt_is_truncated(mock_boto3_session):
++    # prompt of length 8 + max_length of 3 = 11, which is more than model_max_length of 10, so we resize to 7
++    mock_tokens = ["I", "am", "a", "tokenized", "prompt", "of", "length", "eight"]
++    correct_result = "I am a tokenized prompt of length"
++
++    mock_tokenizer = Mock()
++    mock_tokenizer.tokenize.return_value = mock_tokens
++    mock_tokenizer.convert_tokens_to_string.return_value = correct_result
++
++    with patch("transformers.AutoTokenizer.from_pretrained", return_value=mock_tokenizer):
++        layer = SageMakerHFInferenceInvocationLayer("some_fake_endpoint", max_length=3, model_max_length=10)
++        result = layer._ensure_token_limit("I am a tokenized prompt of length eight")
++
++    assert result == correct_result
++
++
++@pytest.mark.unit
++def test_empty_model_name():
++    with pytest.raises(ValueError, match="cannot be None or empty string"):
++        SageMakerHFInferenceInvocationLayer(model_name_or_path="")
++
++
++@pytest.mark.unit
++def test_streaming_init_kwarg(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test stream parameter passed as init kwarg is correctly logged as not supported
++    """
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant", stream=True)
++
++    with pytest.raises(SageMakerConfigurationError, match="SageMaker model response streaming is not supported yet"):
++        layer.invoke(prompt="Tell me hello")
++
++
++@pytest.mark.unit
++def test_streaming_invoke_kwarg(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test stream parameter passed as invoke kwarg is correctly logged as not supported
++    """
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++
++    with pytest.raises(SageMakerConfigurationError, match="SageMaker model response streaming is not supported yet"):
++        layer.invoke(prompt="Tell me hello", stream=True)
++
++
++@pytest.mark.unit
++def test_streaming_handler_init_kwarg(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test stream_handler parameter passed as init kwarg is correctly logged as not supported
++    """
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant", stream_handler=Mock())
++
++    with pytest.raises(SageMakerConfigurationError, match="SageMaker model response streaming is not supported yet"):
++        layer.invoke(prompt="Tell me hello")
++
++
++@pytest.mark.unit
++def test_streaming_handler_invoke_kwarg(mock_auto_tokenizer, mock_boto3_session):
++    """
++    Test stream_handler parameter passed as invoke kwarg is correctly logged as not supported
++    """
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++
++    with pytest.raises(SageMakerConfigurationError, match="SageMaker model response streaming is not supported yet"):
++        layer.invoke(prompt="Tell me hello", stream_handler=Mock())
++
++
++@pytest.mark.unit
++def test_supports_for_valid_aws_configuration():
++    """
++    Test that the SageMakerHFInferenceInvocationLayer identifies a valid SageMaker Inference endpoint
++    via the supports() method
++    """
++    mock_client = MagicMock()
++    mock_client.describe_endpoint.return_value = {"EndpointStatus": "InService"}
++
++    mock_session = MagicMock()
++    mock_session.client.return_value = mock_client
++
++    # Patch the class method to return the mock session
++    with patch(
++        "haystack.nodes.prompt.invocation_layer.sagemaker_base.SageMakerBaseInvocationLayer.create_session",
++        return_value=mock_session,
++    ):
++        supported = SageMakerHFInferenceInvocationLayer.supports(
++            model_name_or_path="some_sagemaker_deployed_model", aws_profile_name="some_real_profile"
++        )
++    args, kwargs = mock_client.describe_endpoint.call_args
++    assert kwargs["EndpointName"] == "some_sagemaker_deployed_model"
++
++    args, kwargs = mock_session.client.call_args
++    assert args[0] == "sagemaker-runtime"
++    assert supported
++
++
++@pytest.mark.unit
++def test_supports_not_on_invalid_aws_profile_name():
++    """
++    Test that the SageMakerHFInferenceInvocationLayer raises SageMakerConfigurationError when the profile name is invalid
++    """
++
++    with patch("boto3.Session") as mock_boto3_session:
++        mock_boto3_session.side_effect = BotoCoreError()
++        with pytest.raises(SageMakerConfigurationError) as exc_info:
++            supported = SageMakerHFInferenceInvocationLayer.supports(
++                model_name_or_path="some_fake_model", aws_profile_name="some_fake_profile"
++            )
++            assert "Failed to initialize the session" in exc_info.value
++            assert not supported
++
++
++@pytest.mark.skipif(
++    not os.environ.get("TEST_SAGEMAKER_MODEL_ENDPOINT", None), reason="Skipping because SageMaker not configured"
++)
++@pytest.mark.integration
++def test_supports_triggered_for_valid_sagemaker_endpoint():
++    """
++    Test that the SageMakerHFInferenceInvocationLayer identifies a valid SageMaker Inference endpoint via the supports() method
++    """
++    model_name_or_path = os.environ.get("TEST_SAGEMAKER_MODEL_ENDPOINT")
++    assert SageMakerHFInferenceInvocationLayer.supports(model_name_or_path=model_name_or_path)
++
++
++@pytest.mark.skipif(
++    not os.environ.get("TEST_SAGEMAKER_MODEL_ENDPOINT", None), reason="Skipping because SageMaker not configured"
++)
++@pytest.mark.integration
++def test_supports_not_triggered_for_invalid_iam_profile():
++    """
++    Test that the SageMakerHFInferenceInvocationLayer identifies an invalid SageMaker Inference endpoint
++    (in this case because of an invalid IAM AWS Profile via the supports() method)
++    """
++    assert not SageMakerHFInferenceInvocationLayer.supports(model_name_or_path="fake_endpoint")
++    assert not SageMakerHFInferenceInvocationLayer.supports(
++        model_name_or_path="fake_endpoint", aws_profile_name="invalid-profile"
++    )
++
++
++@pytest.mark.unit
++def test_dolly_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is dolly json response
++    response = {"generated_texts": ["Berlin"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_dolly_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is dolly json response
++    response = {"generated_texts": ["Berlin", "More elaborate Berlin"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "More elaborate Berlin"]
++
++
++@pytest.mark.unit
++def test_flan_t5_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is flan t5 json response
++    response = {"generated_texts": ["berlin"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["berlin"]
++
++
++@pytest.mark.unit
++def test_gpt_j_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is gpt-j json response
++    response = [[{"generated_text": "Berlin"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_gpt_j_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is gpt-j json response
++    response = [[{"generated_text": "Berlin"}, {"generated_text": "Berlin 2"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_mpt_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is mpt json response
++    response = [[{"generated_text": "Berlin"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_mpt_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is mpt json response
++    response = [[{"generated_text": "Berlin"}, {"generated_text": "Berlin 2"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_open_llama_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is open-llama json response
++    response = {"generated_texts": ["Berlin"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_open_llama_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is open-llama json response
++    response = {"generated_texts": ["Berlin", "Berlin 2"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_pajama_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is pajama json response
++    response = [[{"generated_text": ["Berlin"]}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_pajama_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is pajama json response
++    response = [[{"generated_text": "Berlin"}, {"generated_text": "Berlin 2"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_flan_ul2_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is flan-ul2 json response
++    response = {"generated_texts": ["Berlin"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_flan_ul2_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is flan-ul2 json response
++    response = {"generated_texts": ["Berlin", "Berlin 2"]}
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_gpt_neo_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is gpt neo json response
++    response = [[{"generated_text": "Berlin"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_gpt_neo_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is gpt neo json response
++    response = [[{"generated_text": "Berlin"}, {"generated_text": "Berlin 2"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
++
++
++@pytest.mark.unit
++def test_bloomz_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is bloomz json response
++    response = [[{"generated_text": "Berlin"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin"]
++
++
++@pytest.mark.unit
++def test_bloomz_multiple_response_parsing(mock_auto_tokenizer, mock_boto3_session):
++    # this is bloomz json response
++    response = [[{"generated_text": "Berlin"}, {"generated_text": "Berlin 2"}]]
++
++    layer = SageMakerHFInferenceInvocationLayer(model_name_or_path="irrelevant")
++    assert layer._extract_response(response) == ["Berlin", "Berlin 2"]
+diff --git a/test/prompt/invocation_layer/test_sagemaker_hf_text_gen.py b/test/prompt/invocation_layer/test_sagemaker_hf_text_gen.py
+index 8236a9bb5a..d1c938fb29 100644
+--- a/test/prompt/invocation_layer/test_sagemaker_hf_text_gen.py
++++ b/test/prompt/invocation_layer/test_sagemaker_hf_text_gen.py
+@@ -188,23 +188,34 @@ def test_streaming_handler_invoke_kwarg(mock_auto_tokenizer, mock_boto3_session)
+ @pytest.mark.unit
+ def test_supports_for_valid_aws_configuration():
+     """
+-    Test that the SageMakerInvocationLayer identifies a valid SageMaker Inference endpoint via the supports() method
++    Test that the SageMakerHFTextGenerationInvocationLayer identifies a valid SageMaker Inference endpoint via the supports() method
+     """
+-    with patch("boto3.Session") as mock_boto3_session:
+-        mock_boto3_session.return_value.client.return_value.invoke_endpoint.return_value = True
++    mock_client = MagicMock()
++    mock_client.describe_endpoint.return_value = {"EndpointStatus": "InService"}
++
++    mock_session = MagicMock()
++    mock_session.client.return_value = mock_client
++
++    # Patch the class method to return the mock session
++    with patch(
++        "haystack.nodes.prompt.invocation_layer.sagemaker_base.SageMakerBaseInvocationLayer.create_session",
++        return_value=mock_session,
++    ):
+         supported = SageMakerHFTextGenerationInvocationLayer.supports(
+             model_name_or_path="some_sagemaker_deployed_model", aws_profile_name="some_real_profile"
+         )
++    args, kwargs = mock_client.describe_endpoint.call_args
++    assert kwargs["EndpointName"] == "some_sagemaker_deployed_model"
++
++    args, kwargs = mock_session.client.call_args
++    assert args[0] == "sagemaker-runtime"
+     assert supported
+-    assert mock_boto3_session.called
+-    _, called_kwargs = mock_boto3_session.call_args
+-    assert called_kwargs["profile_name"] == "some_real_profile"
+ 
+ 
+ @pytest.mark.unit
+ def test_supports_not_on_invalid_aws_profile_name():
+     """
+-    Test that the SageMakerInvocationLayer raises SageMakerConfigurationError when the profile name is invalid
++    Test that the SageMakerHFTextGenerationInvocationLayer raises SageMakerConfigurationError when the profile name is invalid
+     """
+ 
+     with patch("boto3.Session") as mock_boto3_session:
+@@ -223,7 +234,7 @@ def test_supports_not_on_invalid_aws_profile_name():
+ @pytest.mark.integration
+ def test_supports_triggered_for_valid_sagemaker_endpoint():
+     """
+-    Test that the SageMakerInvocationLayer identifies a valid SageMaker Inference endpoint via the supports() method
++    Test that the SageMakerHFTextGenerationInvocationLayer identifies a valid SageMaker Inference endpoint via the supports() method
+     """
+     model_name_or_path = os.environ.get("TEST_SAGEMAKER_MODEL_ENDPOINT")
+     assert SageMakerHFTextGenerationInvocationLayer.supports(model_name_or_path=model_name_or_path)
+@@ -235,7 +246,7 @@ def test_supports_triggered_for_valid_sagemaker_endpoint():
+ @pytest.mark.integration
+ def test_supports_not_triggered_for_invalid_iam_profile():
+     """
+-    Test that the SageMakerInvocationLayer identifies an invalid SageMaker Inference endpoint
++    Test that the SageMakerHFTextGenerationInvocationLayer identifies an invalid SageMaker Inference endpoint
+     (in this case because of an invalid IAM AWS Profile via the supports() method)
+     """
+     assert not SageMakerHFTextGenerationInvocationLayer.supports(model_name_or_path="fake_endpoint")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

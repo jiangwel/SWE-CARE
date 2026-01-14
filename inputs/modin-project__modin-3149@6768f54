@@ -1,0 +1,526 @@
+  Task-ID: modin-project__modin-3149@6768f54
+  Please checkout to this commit first: f9c99c3817d35f7bf0d91df9aa9644545ea27517
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [OmniSci] concat requiring join is not supported yet
+Reproducer for `NotImplementedError: concat requiring join is not supported yet` error:
+```python
+
+from time import time
+
+import numpy as np
+from modin.pandas import DataFrame
+
+df1 = DataFrame(np.random.randint(10, size=(5000, 5000)), columns=[f"col{x}" for x in range(5000)])
+df2 = DataFrame(np.random.randint(10, size=(5000, 5000)), columns=[f"col{x}" for x in range(5000)])
+
+start = time()
+df1.merge(df2, left_index=True, right_index=True, how="left", sort=False)._query_compiler._modin_frame._execute()
+print(f"merge time: {time()-start}")
+
+```
+  </issue>
+  
+  <patch>
+  diff --git a/modin/experimental/backends/omnisci/query_compiler.py b/modin/experimental/backends/omnisci/query_compiler.py
+index a0bf0fe0bdd..7ff24cd29f1 100644
+--- a/modin/experimental/backends/omnisci/query_compiler.py
++++ b/modin/experimental/backends/omnisci/query_compiler.py
+@@ -142,7 +142,10 @@ def merge(self, right, **kwargs):
+         left_index = kwargs.get("left_index", False)
+         right_index = kwargs.get("right_index", False)
+         """Only non-index joins with explicit 'on' are supported"""
+-        if left_index is False and right_index is False and on is not None:
++        if left_index is False and right_index is False:
++            if on is None:
++                on = [c for c in self.columns if c in right.columns]
++
+             how = kwargs.get("how", "inner")
+             sort = kwargs.get("sort", False)
+             suffixes = kwargs.get("suffixes", None)
+diff --git a/modin/experimental/engines/omnisci_on_ray/frame/calcite_builder.py b/modin/experimental/engines/omnisci_on_ray/frame/calcite_builder.py
+index 5a64d3df583..349514bea93 100644
+--- a/modin/experimental/engines/omnisci_on_ray/frame/calcite_builder.py
++++ b/modin/experimental/engines/omnisci_on_ray/frame/calcite_builder.py
+@@ -14,7 +14,6 @@
+ from .expr import (
+     InputRefExpr,
+     LiteralExpr,
+-    OpExpr,
+     AggregateExpr,
+     build_if_then_else,
+     build_row_idx_filter_expr,
+@@ -467,63 +466,19 @@ def _process_transform(self, op):
+         self._push(CalciteProjectionNode(fields, exprs))
+ 
+     def _process_join(self, op):
+-        left = op.input[0]
+-        right = op.input[1]
+-
+-        assert (
+-            op.on is not None
+-        ), "Merge with unspecified 'on' parameter is not supported in the engine"
+-
+-        for col in op.on:
+-            assert (
+-                col in left._table_cols and col in right._table_cols
+-            ), f"Column '{col}'' is missing in one of merge operands"
+-
+-        """ Join, only equal-join supported """
+-        cmps = [self._ref(left, c).eq(self._ref(right, c)) for c in op.on]
+-        if len(cmps) > 1:
+-            condition = OpExpr("AND", cmps, get_dtype(bool))
+-        else:
+-            condition = cmps[0]
+         node = CalciteJoinNode(
+             left_id=self._input_node(0).id,
+             right_id=self._input_node(1).id,
+             how=op.how,
+-            condition=condition,
++            condition=self._translate(op.condition),
+         )
+         self._push(node)
+ 
+-        """Projection for both frames"""
+-        fields = []
+-        exprs = []
+-        conflicting_cols = set(left.columns) & set(right.columns) - set(op.on)
+-        """First goes 'on' column then all left columns(+suffix for conflicting names)
+-        but 'on' then all right columns(+suffix for conflicting names) but 'on'"""
+-        on_idx = [-1] * len(op.on)
+-        for c in left.columns:
+-            if c in op.on:
+-                on_idx[op.on.index(c)] = len(fields)
+-            suffix = op.suffixes[0] if c in conflicting_cols else ""
+-            fields.append(c + suffix)
+-            exprs.append(self._ref(left, c))
+-
+-        for c in right.columns:
+-            if c not in op.on:
+-                suffix = op.suffixes[1] if c in conflicting_cols else ""
+-                fields.append(c + suffix)
+-                exprs.append(self._ref(right, c))
+-
+-        self._push(CalciteProjectionNode(fields, exprs))
+-
+-        # TODO: current input translation system doesn't work here
+-        # because there is no frame to reference for index computation.
+-        # We should build calcite tree to keep references to input
+-        # nodes and keep scheme in calcite nodes. For now just use
+-        # known index on_idx.
+-        if op.sort is True:
+-            """Sort by key column"""
+-            collation = [CalciteCollation(CalciteInputIdxExpr(x)) for x in on_idx]
+-            self._push(CalciteSortNode(collation))
++        self._push(
++            CalciteProjectionNode(
++                op.exprs.keys(), [self._translate(val) for val in op.exprs.values()]
++            )
++        )
+ 
+     def _process_union(self, op):
+         self._push(CalciteUnionNode(self._input_ids(), True))
+diff --git a/modin/experimental/engines/omnisci_on_ray/frame/data.py b/modin/experimental/engines/omnisci_on_ray/frame/data.py
+index a6d4267b26d..cfe470bb692 100644
+--- a/modin/experimental/engines/omnisci_on_ray/frame/data.py
++++ b/modin/experimental/engines/omnisci_on_ray/frame/data.py
+@@ -551,35 +551,51 @@ def join(self, other, how="inner", on=None, sort=False, suffixes=("_x", "_y")):
+ 
+         new_columns = []
+         new_dtypes = []
++        exprs = OrderedDict()
+ 
+         conflicting_cols = set(self.columns) & set(other.columns) - set(on)
+         for c in self.columns:
+             suffix = suffixes[0] if c in conflicting_cols else ""
+             new_columns.append(c + suffix)
+             new_dtypes.append(self._dtypes[c])
++            exprs[c + suffix] = self.ref(c)
+         for c in other.columns:
+             if c not in on:
+                 suffix = suffixes[1] if c in conflicting_cols else ""
+                 new_columns.append(c + suffix)
+                 new_dtypes.append(other._dtypes[c])
++                exprs[c + suffix] = other.ref(c)
++
++        condition = [self.ref(col).eq(other.ref(col)) for col in on]
++        condition = (
++            condition[0]
++            if len(condition) == 1
++            else OpExpr("AND", condition, get_dtype(bool))
++        )
+ 
+         op = JoinNode(
+             self,
+             other,
+             how=how,
+-            on=on,
+-            sort=sort,
+-            suffixes=suffixes,
++            exprs=exprs,
++            condition=condition,
+         )
+ 
+         new_columns = Index.__new__(Index, data=new_columns, dtype=self.columns.dtype)
+-        return self.__constructor__(
++        res = self.__constructor__(
+             dtypes=new_dtypes,
+             columns=new_columns,
+             op=op,
+             force_execution_mode=self._force_execution_mode,
+         )
+ 
++        if sort:
++            res = res.sort_rows(
++                on, ascending=True, ignore_index=True, na_position="last"
++            )
++
++        return res
++
+     def _index_width(self):
+         if self._index_cols is None:
+             return 1
+@@ -673,6 +689,84 @@ def _union_all(
+ 
+         return new_frame
+ 
++    def _join_by_index(self, other_modin_frames, how, sort, ignore_index):
++        if how == "outer":
++            raise NotImplementedError("outer join is not supported in OmniSci engine")
++
++        lhs = self._maybe_materialize_rowid()
++        reset_index_names = False
++        for rhs in other_modin_frames:
++            rhs = rhs._maybe_materialize_rowid()
++            if len(lhs._index_cols) != len(rhs._index_cols):
++                raise NotImplementedError(
++                    "join by indexes with different sizes is not supported"
++                )
++
++            reset_index_names = reset_index_names or lhs._index_cols != rhs._index_cols
++
++            condition = [
++                lhs.ref(lhs_col).eq(rhs.ref(rhs_col))
++                for lhs_col, rhs_col in zip(lhs._index_cols, rhs._index_cols)
++            ]
++            condition = (
++                condition[0]
++                if len(condition) == 1
++                else OpExpr("AND", condition, get_dtype(bool))
++            )
++
++            exprs = lhs._index_exprs()
++            new_columns = lhs.columns.to_list()
++            for col in lhs.columns:
++                exprs[col] = lhs.ref(col)
++            for col in rhs.columns:
++                # Handle duplicating column names here. When user specifies
++                # suffixes to make a join, actual renaming is done in front-end.
++                new_col_name = col
++                rename_idx = 0
++                while new_col_name in exprs:
++                    new_col_name = f"{col}{rename_idx}"
++                    rename_idx += 1
++                exprs[new_col_name] = rhs.ref(col)
++                new_columns.append(new_col_name)
++
++            op = JoinNode(
++                lhs,
++                rhs,
++                how=how,
++                exprs=exprs,
++                condition=condition,
++            )
++
++            new_columns = Index.__new__(
++                Index, data=new_columns, dtype=self.columns.dtype
++            )
++            lhs = lhs.__constructor__(
++                dtypes=lhs._dtypes_for_exprs(exprs),
++                columns=new_columns,
++                index_cols=lhs._index_cols,
++                op=op,
++                force_execution_mode=self._force_execution_mode,
++            )
++
++        if sort:
++            lhs = lhs.sort_rows(
++                lhs._index_cols,
++                ascending=True,
++                ignore_index=False,
++                na_position="last",
++            )
++
++        if reset_index_names:
++            lhs = lhs._reset_index_names()
++
++        if ignore_index:
++            new_columns = Index.__new__(
++                Index, data=[i for i in range(len(lhs.columns))], dtype="O"
++            )
++            lhs = lhs._set_columns(new_columns)
++
++        return lhs
++
+     def concat(
+         self, axis, other_modin_frames, join="outer", sort=False, ignore_index=False
+     ):
+@@ -686,7 +780,9 @@ def concat(
+         for frame in other_modin_frames:
+             base = base._find_common_projections_base(frame)
+             if base is None:
+-                raise NotImplementedError("concat requiring join is not supported yet")
++                return self._join_by_index(
++                    other_modin_frames, how=join, sort=sort, ignore_index=ignore_index
++                )
+ 
+         exprs = self._index_exprs()
+         new_columns = self.columns.tolist()
+@@ -978,6 +1074,11 @@ def filter(self, key):
+             force_execution_mode=self._force_execution_mode,
+         )
+ 
++    def _maybe_materialize_rowid(self):
++        if self._index_cols is None:
++            return self._materialize_rowid()
++        return self
++
+     def _materialize_rowid(self):
+         exprs = OrderedDict()
+         exprs["__index__"] = self.ref("__rowid__")
+@@ -1245,6 +1346,11 @@ def reset_index(self, drop):
+                 force_execution_mode=self._force_execution_mode,
+             )
+ 
++    def _reset_index_names(self):
++        if self.has_multiindex():
++            return self.set_index_names([None] * len(self._index_cols))
++        return self.set_index_name(None)
++
+     def _set_columns(self, new_columns):
+         exprs = self._index_exprs()
+         for old, new in zip(self.columns, new_columns):
+@@ -1381,7 +1487,7 @@ def _find_index_or_col(self, col):
+ 
+         if self._index_cols is not None:
+             for idx_col in self._index_cols:
+-                if re.match(f"__index__\\d+_{col}", idx_col):
++                if col == idx_col or re.match(f"__index__\\d+_{col}", idx_col):
+                     return idx_col
+ 
+         raise ValueError(f"Unknown column '{col}'")
+diff --git a/modin/experimental/engines/omnisci_on_ray/frame/df_algebra.py b/modin/experimental/engines/omnisci_on_ray/frame/df_algebra.py
+index 84afdf0a58b..eb0706b1dee 100644
+--- a/modin/experimental/engines/omnisci_on_ray/frame/df_algebra.py
++++ b/modin/experimental/engines/omnisci_on_ray/frame/df_algebra.py
+@@ -229,30 +229,38 @@ def _prints(self, prefix):
+ 
+ class JoinNode(DFAlgNode):
+     def __init__(
+-        self, left, right, how="inner", on=None, sort=False, suffixes=("_x", "_y")
++        self,
++        left,
++        right,
++        how="inner",
++        exprs=None,
++        condition=None,
+     ):
+         self.input = [left, right]
+         self.how = how
+-        self.on = on
+-        self.sort = sort
+-        self.suffixes = suffixes
++        self.exprs = exprs
++        self.condition = condition
+ 
+     def copy(self):
+         return JoinNode(
+             self.input[0],
+             self.input[1],
+             self.how,
+-            self.on,
+-            self.sort,
++            self.exprs,
++            self.condition,
+         )
+ 
+     def _prints(self, prefix):
++        exprs_str = ""
++        for k, v in self.exprs.items():
++            exprs_str += f"{prefix}    {k}: {v}\n"
+         return (
+             f"{prefix}JoinNode:\n"
+-            f"{prefix}  How: {self.how}\n"
+-            f"{prefix}  On: {self.on}\n"
+-            f"{prefix}  Sorting: {self.sort}\n"
+-            f"{prefix}  Suffixes: {self.suffixes}\n" + self._prints_input(prefix + "  ")
++            f"{prefix}  Fields:\n"
++            + exprs_str
++            + f"{prefix}  How: {self.how}\n"
++            + f"{prefix}  Condition: {self.condition}\n"
++            + self._prints_input(prefix + "  ")
+         )
+ 
+ 
+diff --git a/modin/experimental/engines/omnisci_on_ray/test/test_dataframe.py b/modin/experimental/engines/omnisci_on_ray/test/test_dataframe.py
+index 5b35801e1d4..2a50dec45fa 100644
+--- a/modin/experimental/engines/omnisci_on_ray/test/test_dataframe.py
++++ b/modin/experimental/engines/omnisci_on_ray/test/test_dataframe.py
+@@ -520,6 +520,11 @@ class TestConcat:
+         "b": [40, 50, 60],
+         "f": [444, 555, 666],
+     }
++    data3 = {
++        "f": [2, 3, 4],
++        "g": [400, 500, 600],
++        "h": [20, 30, 40],
++    }
+ 
+     @pytest.mark.parametrize("join", ["inner", "outer"])
+     @pytest.mark.parametrize("sort", bool_arg_values)
+@@ -635,6 +640,58 @@ def concat(lib, df):
+             data=self.data,
+         )
+ 
++    @pytest.mark.parametrize("join", ["inner"])
++    @pytest.mark.parametrize("sort", bool_arg_values)
++    @pytest.mark.parametrize("ignore_index", bool_arg_values)
++    def test_concat_join(self, join, sort, ignore_index):
++        def concat(lib, df1, df2, join, sort, ignore_index, **kwargs):
++            return lib.concat(
++                [df1, df2], axis=1, join=join, sort=sort, ignore_index=ignore_index
++            )
++
++        run_and_compare(
++            concat,
++            data=self.data,
++            data2=self.data3,
++            join=join,
++            sort=sort,
++            ignore_index=ignore_index,
++        )
++
++    def test_concat_index_name(self):
++        df1 = pandas.DataFrame(self.data)
++        df1 = df1.set_index("a")
++        df2 = pandas.DataFrame(self.data3)
++        df2 = df2.set_index("f")
++
++        ref = pandas.concat([df1, df2], axis=1, join="inner")
++        exp = pd.concat([df1, df2], axis=1, join="inner")
++
++        df_equals(ref, exp)
++
++        df2.index.name = "a"
++        ref = pandas.concat([df1, df2], axis=1, join="inner")
++        exp = pd.concat([df1, df2], axis=1, join="inner")
++
++        df_equals(ref, exp)
++
++    def test_concat_index_names(self):
++        df1 = pandas.DataFrame(self.data)
++        df1 = df1.set_index(["a", "b"])
++        df2 = pandas.DataFrame(self.data3)
++        df2 = df2.set_index(["f", "h"])
++
++        ref = pandas.concat([df1, df2], axis=1, join="inner")
++        exp = pd.concat([df1, df2], axis=1, join="inner")
++
++        df_equals(ref, exp)
++
++        df2.index.names = ["a", "b"]
++        ref = pandas.concat([df1, df2], axis=1, join="inner")
++        exp = pd.concat([df1, df2], axis=1, join="inner")
++
++        df_equals(ref, exp)
++
+ 
+ class TestGroupby:
+     data = {
+@@ -1030,32 +1087,38 @@ def value_counts(df, cols, dropna, sort, ascending, **kwargs):
+ 
+ class TestMerge:
+     data = {
+-        "a": [1, 2, 3],
+-        "b": [10, 20, 30],
+-        "e": [11, 22, 33],
++        "a": [1, 2, 3, 6, 5, 4],
++        "b": [10, 20, 30, 60, 50, 40],
++        "e": [11, 22, 33, 66, 55, 44],
+     }
+     data2 = {
+-        "a": [4, 2, 3],
+-        "b": [40, 20, 30],
+-        "d": [4000, 2000, 3000],
++        "a": [4, 2, 3, 7, 1, 5],
++        "b": [40, 20, 30, 70, 10, 50],
++        "d": [4000, 2000, 3000, 7000, 1000, 5000],
+     }
+     on_values = ["a", ["a"], ["a", "b"], ["b", "a"]]
+     how_values = ["inner", "left"]
+ 
+     @pytest.mark.parametrize("on", on_values)
+     @pytest.mark.parametrize("how", how_values)
+-    def test_merge(self, on, how):
+-        def merge(lib, df1, df2, on, how):
+-            return df1.merge(df2, on=on, how=how)
++    @pytest.mark.parametrize("sort", [True, False])
++    def test_merge(self, on, how, sort):
++        def merge(lib, df1, df2, on, how, sort, **kwargs):
++            return df1.merge(df2, on=on, how=how, sort=sort)
+ 
+-        run_and_compare(merge, data=self.data, data2=self.data2, on=on, how=how)
++        run_and_compare(
++            merge, data=self.data, data2=self.data2, on=on, how=how, sort=sort
++        )
+ 
+     @pytest.mark.parametrize("how", how_values)
+-    def test_default_merge(self, how):
+-        def default_merge(lib, df1, df2, how):
+-            return df1.merge(df2, how=how)
++    @pytest.mark.parametrize("sort", [True, False])
++    def test_default_merge(self, how, sort):
++        def default_merge(lib, df1, df2, how, sort, **kwargs):
++            return df1.merge(df2, how=how, sort=sort)
+ 
+-        run_and_compare(default_merge, data=self.data, data2=self.data2, how=how)
++        run_and_compare(
++            default_merge, data=self.data, data2=self.data2, how=how, sort=sort
++        )
+ 
+     h2o_data = {
+         "id1": ["id1", "id10", "id100", "id1000"],
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

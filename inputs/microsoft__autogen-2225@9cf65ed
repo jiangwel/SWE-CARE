@@ -1,0 +1,746 @@
+  Task-ID: microsoft__autogen-2225@9cf65ed
+  Please checkout to this commit first: e878be55a3663b7864bc0ef8b9526e2f0be2f88f
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Issue]: Warning from the def _num_token_from_messages is verbose and hard to silence
+### Describe the issue
+
+Here is an example output: 
+[I 2024-04-27 00:02:01,357.357 autogen.token_count_utils] gpt-4 may update over time. Returning num tokens assuming gpt-4-0613.
+
+However, this is very verbose and frustrating to see printed.  Can we either dynamically retrieve the number of tokens from the model count or toggle this output?  I can work around it but it seems like a fixable bit of code.
+
+### Steps to reproduce
+Initialize a compressible agent or series of compressible agents
+
+### Screenshots and logs
+
+Screenshots in comment
+
+### Additional Information
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/contrib-tests.yml b/.github/workflows/contrib-tests.yml
+index d36a9d52e692..f8dd1d461865 100644
+--- a/.github/workflows/contrib-tests.yml
++++ b/.github/workflows/contrib-tests.yml
+@@ -400,7 +400,7 @@ jobs:
+           pip install pytest-cov>=5
+       - name: Install packages and dependencies for Transform Messages
+         run: |
+-          pip install -e .
++          pip install -e '.[long-context]'
+       - name: Set AUTOGEN_USE_DOCKER based on OS
+         shell: bash
+         run: |
+diff --git a/autogen/agentchat/contrib/capabilities/text_compressors.py b/autogen/agentchat/contrib/capabilities/text_compressors.py
+new file mode 100644
+index 000000000000..996a8d242eba
+--- /dev/null
++++ b/autogen/agentchat/contrib/capabilities/text_compressors.py
+@@ -0,0 +1,68 @@
++from typing import Any, Dict, Optional, Protocol
++
++IMPORT_ERROR: Optional[Exception] = None
++try:
++    import llmlingua
++except ImportError:
++    IMPORT_ERROR = ImportError(
++        "LLMLingua is not installed. Please install it with `pip install pyautogen[long-context]`"
++    )
++    PromptCompressor = object
++else:
++    from llmlingua import PromptCompressor
++
++
++class TextCompressor(Protocol):
++    """Defines a protocol for text compression to optimize agent interactions."""
++
++    def compress_text(self, text: str, **compression_args) -> Dict[str, Any]:
++        """This method takes a string as input and returns a dictionary containing the compressed text and other
++        relevant information. The compressed text should be stored under the 'compressed_text' key in the dictionary.
++        To calculate the number of saved tokens, the dictionary should include 'origin_tokens' and 'compressed_tokens' keys.
++        """
++        ...
++
++
++class LLMLingua:
++    """Compresses text messages using LLMLingua for improved efficiency in processing and response generation.
++
++    NOTE: The effectiveness of compression and the resultant token savings can vary based on the content of the messages
++    and the specific configurations used for the PromptCompressor.
++    """
++
++    def __init__(
++        self,
++        prompt_compressor_kwargs: Dict = dict(
++            model_name="microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
++            use_llmlingua2=True,
++            device_map="cpu",
++        ),
++        structured_compression: bool = False,
++    ) -> None:
++        """
++        Args:
++            prompt_compressor_kwargs (dict): A dictionary of keyword arguments for the PromptCompressor. Defaults to a
++                dictionary with model_name set to "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
++                use_llmlingua2 set to True, and device_map set to "cpu".
++            structured_compression (bool): A flag indicating whether to use structured compression. If True, the
++                structured_compress_prompt method of the PromptCompressor is used. Otherwise, the compress_prompt method
++                is used. Defaults to False.
++                dictionary.
++
++        Raises:
++            ImportError: If the llmlingua library is not installed.
++        """
++        if IMPORT_ERROR:
++            raise IMPORT_ERROR
++
++        self._prompt_compressor = PromptCompressor(**prompt_compressor_kwargs)
++
++        assert isinstance(self._prompt_compressor, llmlingua.PromptCompressor)
++        self._compression_method = (
++            self._prompt_compressor.structured_compress_prompt
++            if structured_compression
++            else self._prompt_compressor.compress_prompt
++        )
++
++    def compress_text(self, text: str, **compression_args) -> Dict[str, Any]:
++        return self._compression_method([text], **compression_args)
+diff --git a/autogen/agentchat/contrib/capabilities/transforms.py b/autogen/agentchat/contrib/capabilities/transforms.py
+index 279faed8c9d6..7ad943aedac5 100644
+--- a/autogen/agentchat/contrib/capabilities/transforms.py
++++ b/autogen/agentchat/contrib/capabilities/transforms.py
+@@ -1,4 +1,5 @@
+ import copy
++import json
+ import sys
+ from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+ 
+@@ -6,6 +7,9 @@
+ from termcolor import colored
+ 
+ from autogen import token_count_utils
++from autogen.cache import AbstractCache, Cache
++
++from .text_compressors import LLMLingua, TextCompressor
+ 
+ 
+ class MessageTransform(Protocol):
+@@ -156,7 +160,7 @@ def apply_transform(self, messages: List[Dict]) -> List[Dict]:
+         assert self._min_tokens is not None
+ 
+         # if the total number of tokens in the messages is less than the min_tokens, return the messages as is
+-        if not self._are_min_tokens_reached(messages):
++        if not _min_tokens_reached(messages, self._min_tokens):
+             return messages
+ 
+         temp_messages = copy.deepcopy(messages)
+@@ -205,19 +209,6 @@ def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages:
+             return logs_str, True
+         return "No tokens were truncated.", False
+ 
+-    def _are_min_tokens_reached(self, messages: List[Dict]) -> bool:
+-        """
+-        Returns True if no minimum tokens restrictions are applied.
+-
+-        Either if the total number of tokens in the messages is greater than or equal to the `min_theshold_tokens`,
+-        or no minimum tokens threshold is set.
+-        """
+-        if not self._min_tokens:
+-            return True
+-
+-        messages_tokens = sum(_count_tokens(msg["content"]) for msg in messages if "content" in msg)
+-        return messages_tokens >= self._min_tokens
+-
+     def _truncate_str_to_tokens(self, contents: Union[str, List], n_tokens: int) -> Union[str, List]:
+         if isinstance(contents, str):
+             return self._truncate_tokens(contents, n_tokens)
+@@ -268,7 +259,7 @@ def _validate_max_tokens(self, max_tokens: Optional[int] = None) -> Optional[int
+ 
+         return max_tokens if max_tokens is not None else sys.maxsize
+ 
+-    def _validate_min_tokens(self, min_tokens: int, max_tokens: int) -> int:
++    def _validate_min_tokens(self, min_tokens: Optional[int], max_tokens: Optional[int]) -> int:
+         if min_tokens is None:
+             return 0
+         if min_tokens < 0:
+@@ -278,6 +269,150 @@ def _validate_min_tokens(self, min_tokens: int, max_tokens: int) -> int:
+         return min_tokens
+ 
+ 
++class TextMessageCompressor:
++    """A transform for compressing text messages in a conversation history.
++
++    It uses a specified text compression method to reduce the token count of messages, which can lead to more efficient
++    processing and response generation by downstream models.
++    """
++
++    def __init__(
++        self,
++        text_compressor: Optional[TextCompressor] = None,
++        min_tokens: Optional[int] = None,
++        compression_args: Dict = dict(),
++        cache: Optional[AbstractCache] = Cache.disk(),
++    ):
++        """
++        Args:
++            text_compressor (TextCompressor or None): An instance of a class that implements the TextCompressor
++                protocol. If None, it defaults to LLMLingua.
++            min_tokens (int or None): Minimum number of tokens in messages to apply the transformation. Must be greater
++                than or equal to 0 if not None. If None, no threshold-based compression is applied.
++            compression_args (dict): A dictionary of arguments for the compression method. Defaults to an empty
++                dictionary.
++            cache (None or AbstractCache): The cache client to use to store and retrieve previously compressed messages.
++                If None, no caching will be used.
++        """
++
++        if text_compressor is None:
++            text_compressor = LLMLingua()
++
++        self._validate_min_tokens(min_tokens)
++
++        self._text_compressor = text_compressor
++        self._min_tokens = min_tokens
++        self._compression_args = compression_args
++        self._cache = cache
++
++        # Optimizing savings calculations to optimize log generation
++        self._recent_tokens_savings = 0
++
++    def apply_transform(self, messages: List[Dict]) -> List[Dict]:
++        """Applies compression to messages in a conversation history based on the specified configuration.
++
++        The function processes each message according to the `compression_args` and `min_tokens` settings, applying
++        the specified compression configuration and returning a new list of messages with reduced token counts
++        where possible.
++
++        Args:
++            messages (List[Dict]): A list of message dictionaries to be compressed.
++
++        Returns:
++            List[Dict]: A list of dictionaries with the message content compressed according to the configured
++                method and scope.
++        """
++        # Make sure there is at least one message
++        if not messages:
++            return messages
++
++        # if the total number of tokens in the messages is less than the min_tokens, return the messages as is
++        if not _min_tokens_reached(messages, self._min_tokens):
++            return messages
++
++        total_savings = 0
++        processed_messages = messages.copy()
++        for message in processed_messages:
++            # Some messages may not have content.
++            if not isinstance(message.get("content"), (str, list)):
++                continue
++
++            cached_content = self._cache_get(message["content"])
++            if cached_content is not None:
++                savings, compressed_content = cached_content
++            else:
++                savings, compressed_content = self._compress(message["content"])
++
++            self._cache_set(message["content"], compressed_content, savings)
++
++            message["content"] = compressed_content
++            total_savings += savings
++
++        self._recent_tokens_savings = total_savings
++        return processed_messages
++
++    def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages: List[Dict]) -> Tuple[str, bool]:
++        if self._recent_tokens_savings > 0:
++            return f"{self._recent_tokens_savings} tokens saved with text compression.", True
++        else:
++            return "No tokens saved with text compression.", False
++
++    def _compress(self, content: Union[str, List[Dict]]) -> Tuple[int, Union[str, List[Dict]]]:
++        """Compresses the given text or multimodal content using the specified compression method."""
++        if isinstance(content, str):
++            return self._compress_text(content)
++        elif isinstance(content, list):
++            return self._compress_multimodal(content)
++        else:
++            return 0, content
++
++    def _compress_multimodal(self, content: List[Dict]) -> Tuple[int, List[Dict]]:
++        tokens_saved = 0
++        for msg in content:
++            if "text" in msg:
++                savings, msg["text"] = self._compress_text(msg["text"])
++                tokens_saved += savings
++        return tokens_saved, content
++
++    def _compress_text(self, text: str) -> Tuple[int, str]:
++        """Compresses the given text using the specified compression method."""
++        compressed_text = self._text_compressor.compress_text(text, **self._compression_args)
++
++        savings = 0
++        if "origin_tokens" in compressed_text and "compressed_tokens" in compressed_text:
++            savings = compressed_text["origin_tokens"] - compressed_text["compressed_tokens"]
++
++        return savings, compressed_text["compressed_prompt"]
++
++    def _cache_get(self, content: Union[str, List[Dict]]) -> Optional[Tuple[int, Union[str, List[Dict]]]]:
++        if self._cache:
++            key = f"{json.dumps(content)}_{self._min_tokens}"
++            cached_value = self._cache.get(key)
++            if cached_value:
++                return cached_value
++
++    def _cache_set(
++        self, content: Union[str, List[Dict]], compressed_content: Union[str, List[Dict]], tokens_saved: int
++    ):
++        if self._cache:
++            key = json.dumps(content)
++            value = (tokens_saved, json.dumps(compressed_content))
++            self._cache.set(key, value)
++
++    def _validate_min_tokens(self, min_tokens: Optional[int]):
++        if min_tokens is not None and min_tokens <= 0:
++            raise ValueError("min_tokens must be greater than 0 or None")
++
++
++def _min_tokens_reached(messages: List[Dict], min_tokens: Optional[int]) -> bool:
++    """Returns True if the total number of tokens in the messages is greater than or equal to the specified value."""
++    if not min_tokens:
++        return True
++
++    messages_tokens = sum(_count_tokens(msg["content"]) for msg in messages if "content" in msg)
++    return messages_tokens >= min_tokens
++
++
+ def _count_tokens(content: Union[str, List[Dict[str, Any]]]) -> int:
+     token_count = 0
+     if isinstance(content, str):
+diff --git a/setup.py b/setup.py
+index a5481c90dfb4..a4fa4f63aa5a 100644
+--- a/setup.py
++++ b/setup.py
+@@ -79,6 +79,7 @@
+     "websockets": ["websockets>=12.0,<13"],
+     "jupyter-executor": jupyter_executor,
+     "types": ["mypy==1.9.0", "pytest>=6.1.1,<8"] + jupyter_executor,
++    "long-context": ["llmlingua<0.3"],
+ }
+ 
+ setuptools.setup(
+diff --git a/test/agentchat/contrib/capabilities/test_transforms.py b/test/agentchat/contrib/capabilities/test_transforms.py
+index 6d9441d53e6a..c5ffc08f112b 100644
+--- a/test/agentchat/contrib/capabilities/test_transforms.py
++++ b/test/agentchat/contrib/capabilities/test_transforms.py
+@@ -1,5 +1,6 @@
+ import copy
+ from typing import Dict, List
++from unittest.mock import MagicMock, patch
+ 
+ import pytest
+ 
+@@ -118,13 +119,82 @@ def test_message_token_limiter_get_logs(message_token_limiter, messages, expecte
+     assert logs_str == expected_logs
+ 
+ 
++def test_text_compression():
++    """Test the TextMessageCompressor transform."""
++    try:
++        from autogen.agentchat.contrib.capabilities.transforms import TextMessageCompressor
++
++        text_compressor = TextMessageCompressor()
++    except ImportError:
++        pytest.skip("LLM Lingua is not installed.")
++
++    text = "Run this test with a long string. "
++    messages = [
++        {
++            "role": "assistant",
++            "content": [{"type": "text", "text": "".join([text] * 3)}],
++        },
++        {
++            "role": "assistant",
++            "content": [{"type": "text", "text": "".join([text] * 3)}],
++        },
++        {
++            "role": "assistant",
++            "content": [{"type": "text", "text": "".join([text] * 3)}],
++        },
++    ]
++
++    transformed_messages = text_compressor.apply_transform([{"content": text}])
++
++    assert len(transformed_messages[0]["content"]) < len(text)
++
++    # Test compressing all messages
++    text_compressor = TextMessageCompressor()
++    transformed_messages = text_compressor.apply_transform(copy.deepcopy(messages))
++    for message in transformed_messages:
++        assert len(message["content"][0]["text"]) < len(messages[0]["content"][0]["text"])
++
++
++def test_text_compression_cache():
++    try:
++        from autogen.agentchat.contrib.capabilities.transforms import TextMessageCompressor
++
++    except ImportError:
++        pytest.skip("LLM Lingua is not installed.")
++
++    messages = get_long_messages()
++    mock_compressed_content = (1, {"content": "mock"})
++
++    with patch(
++        "autogen.agentchat.contrib.capabilities.transforms.TextMessageCompressor._cache_get",
++        MagicMock(return_value=(1, {"content": "mock"})),
++    ) as mocked_get, patch(
++        "autogen.agentchat.contrib.capabilities.transforms.TextMessageCompressor._cache_set", MagicMock()
++    ) as mocked_set:
++        text_compressor = TextMessageCompressor()
++
++        text_compressor.apply_transform(messages)
++        text_compressor.apply_transform(messages)
++
++        assert mocked_get.call_count == len(messages)
++        assert mocked_set.call_count == len(messages)
++
++    # We already populated the cache with the mock content
++    # We need to test if we retrieve the correct content
++    text_compressor = TextMessageCompressor()
++    compressed_messages = text_compressor.apply_transform(messages)
++
++    for message in compressed_messages:
++        assert message["content"] == mock_compressed_content[1]
++
++
+ if __name__ == "__main__":
+     long_messages = get_long_messages()
+     short_messages = get_short_messages()
+     no_content_messages = get_no_content_messages()
+-    message_history_limiter = MessageHistoryLimiter(max_messages=3)
+-    message_token_limiter = MessageTokenLimiter(max_tokens_per_message=3)
+-    message_token_limiter_with_threshold = MessageTokenLimiter(max_tokens_per_message=1, min_tokens=10)
++    msg_history_limiter = MessageHistoryLimiter(max_messages=3)
++    msg_token_limiter = MessageTokenLimiter(max_tokens_per_message=3)
++    msg_token_limiter_with_threshold = MessageTokenLimiter(max_tokens_per_message=1, min_tokens=10)
+ 
+     # Test Parameters
+     message_history_limiter_apply_transform_parameters = {
+@@ -170,14 +240,14 @@ def test_message_token_limiter_get_logs(message_token_limiter, messages, expecte
+         message_history_limiter_apply_transform_parameters["messages"],
+         message_history_limiter_apply_transform_parameters["expected_messages_len"],
+     ):
+-        test_message_history_limiter_apply_transform(message_history_limiter, messages, expected_messages_len)
++        test_message_history_limiter_apply_transform(msg_history_limiter, messages, expected_messages_len)
+ 
+     for messages, expected_logs, expected_effect in zip(
+         message_history_limiter_get_logs_parameters["messages"],
+         message_history_limiter_get_logs_parameters["expected_logs"],
+         message_history_limiter_get_logs_parameters["expected_effect"],
+     ):
+-        test_message_history_limiter_get_logs(message_history_limiter, messages, expected_logs, expected_effect)
++        test_message_history_limiter_get_logs(msg_history_limiter, messages, expected_logs, expected_effect)
+ 
+     # Call the MessageTokenLimiter tests
+ 
+@@ -187,7 +257,7 @@ def test_message_token_limiter_get_logs(message_token_limiter, messages, expecte
+         message_token_limiter_apply_transform_parameters["expected_messages_len"],
+     ):
+         test_message_token_limiter_apply_transform(
+-            message_token_limiter, messages, expected_token_count, expected_messages_len
++            msg_token_limiter, messages, expected_token_count, expected_messages_len
+         )
+ 
+     for messages, expected_token_count, expected_messages_len in zip(
+@@ -196,7 +266,7 @@ def test_message_token_limiter_get_logs(message_token_limiter, messages, expecte
+         message_token_limiter_with_threshold_apply_transform_parameters["expected_messages_len"],
+     ):
+         test_message_token_limiter_with_threshold_apply_transform(
+-            message_token_limiter_with_threshold, messages, expected_token_count, expected_messages_len
++            msg_token_limiter_with_threshold, messages, expected_token_count, expected_messages_len
+         )
+ 
+     for messages, expected_logs, expected_effect in zip(
+@@ -204,4 +274,4 @@ def test_message_token_limiter_get_logs(message_token_limiter, messages, expecte
+         message_token_limiter_get_logs_parameters["expected_logs"],
+         message_token_limiter_get_logs_parameters["expected_effect"],
+     ):
+-        test_message_token_limiter_get_logs(message_token_limiter, messages, expected_logs, expected_effect)
++        test_message_token_limiter_get_logs(msg_token_limiter, messages, expected_logs, expected_effect)
+diff --git a/website/docs/FAQ.mdx b/website/docs/FAQ.mdx
+index ee5331f4594b..0296f0c692f4 100644
+--- a/website/docs/FAQ.mdx
++++ b/website/docs/FAQ.mdx
+@@ -267,4 +267,4 @@ Migrating enhances flexibility, modularity, and customization in handling chat m
+ 
+ ### How to migrate?
+ 
+-To ensure a smooth migration process, simply follow the detailed guide provided in [Handling Long Context Conversations with Transform Messages](/docs/topics/long_contexts.md).
++To ensure a smooth migration process, simply follow the detailed guide provided in [Introduction to TransfromMessages](/docs/topics/handling_long_contexts/intro_to_transform_messages.md).
+diff --git a/website/docs/installation/Optional-Dependencies.md b/website/docs/installation/Optional-Dependencies.md
+index 617a90aabaee..f0176ba8fdc6 100644
+--- a/website/docs/installation/Optional-Dependencies.md
++++ b/website/docs/installation/Optional-Dependencies.md
+@@ -85,7 +85,7 @@ To use Teachability, please install AutoGen with the [teachable] option.
+ pip install "pyautogen[teachable]"
+ ```
+ 
+-Example notebook:  [Chatting with a teachable agent](https://github.com/microsoft/autogen/blob/main/notebook/agentchat_teachability.ipynb)
++Example notebook: [Chatting with a teachable agent](https://github.com/microsoft/autogen/blob/main/notebook/agentchat_teachability.ipynb)
+ 
+ ## Large Multimodal Model (LMM) Agents
+ 
+@@ -115,9 +115,16 @@ Example notebooks:
+ 
+ To use a graph in `GroupChat`, particularly for graph visualization, please install AutoGen with the [graph] option.
+ 
+-
+ ```bash
+ pip install "pyautogen[graph]"
+ ```
+ 
+-Example notebook:  [Graph Modeling Language with using select_speaker](https://github.com/microsoft/autogen/blob/main/notebook/agentchat_graph_modelling_language_using_select_speaker.ipynb)
++Example notebook: [Graph Modeling Language with using select_speaker](https://github.com/microsoft/autogen/blob/main/notebook/agentchat_graph_modelling_language_using_select_speaker.ipynb)
++
++## Long Context Handling
++
++AutoGen includes support for handling long textual contexts by leveraging the LLMLingua library for text compression. To enable this functionality, please install AutoGen with the `[long-context]` option:
++
++```bash
++pip install "pyautogen[long-context]"
++```
+diff --git a/website/docs/topics/handling_long_contexts/_category_.json b/website/docs/topics/handling_long_contexts/_category_.json
+new file mode 100644
+index 000000000000..04c54583298c
+--- /dev/null
++++ b/website/docs/topics/handling_long_contexts/_category_.json
+@@ -0,0 +1,4 @@
++{
++  "label": "Handling Long Contexts",
++  "collapsible": true
++}
+diff --git a/website/docs/topics/handling_long_contexts/compressing_text_w_llmligua.md b/website/docs/topics/handling_long_contexts/compressing_text_w_llmligua.md
+new file mode 100644
+index 000000000000..c7c14027b5fd
+--- /dev/null
++++ b/website/docs/topics/handling_long_contexts/compressing_text_w_llmligua.md
+@@ -0,0 +1,135 @@
++# Compressing Text with LLMLingua
++
++Text compression is crucial for optimizing interactions with LLMs, especially when dealing with long prompts that can lead to higher costs and slower response times. LLMLingua is a tool designed to compress prompts effectively, enhancing the efficiency and cost-effectiveness of LLM operations.
++
++This guide introduces LLMLingua's integration with AutoGen, demonstrating how to use this tool to compress text, thereby optimizing the usage of LLMs for various applications.
++
++:::info Requirements
++Install `pyautogen[long-context]` and `PyMuPDF`:
++
++```bash
++pip install "pyautogen[long-context]" PyMuPDF
++```
++
++For more information, please refer to the [installation guide](/docs/installation/).
++:::
++
++## Example 1: Compressing AutoGen Research Paper using LLMLingua
++
++We will look at how we can use `TextMessageCompressor` to compress an AutoGen research paper using `LLMLingua`. Here's how you can initialize `TextMessageCompressor` with LLMLingua, a text compressor that adheres to the `TextCompressor` protocol.
++
++```python
++import tempfile
++
++import fitz  # PyMuPDF
++import requests
++
++from autogen.agentchat.contrib.capabilities.text_compressors import LLMLingua
++from autogen.agentchat.contrib.capabilities.transforms import TextMessageCompressor
++
++AUTOGEN_PAPER = "https://arxiv.org/pdf/2308.08155"
++
++
++def extract_text_from_pdf():
++    # Download the PDF
++    response = requests.get(AUTOGEN_PAPER)
++    response.raise_for_status()  # Ensure the download was successful
++
++    text = ""
++    # Save the PDF to a temporary file
++    with tempfile.TemporaryDirectory() as temp_dir:
++        with open(temp_dir + "temp.pdf", "wb") as f:
++            f.write(response.content)
++
++        # Open the PDF
++        with fitz.open(temp_dir + "temp.pdf") as doc:
++            # Read and extract text from each page
++            for page in doc:
++                text += page.get_text()
++
++    return text
++
++
++# Example usage
++pdf_text = extract_text_from_pdf()
++
++text_compressor = TextMessageCompressor(text_compressor=LLMLingua())
++compressed_text = text_compressor.apply_transform([{"content": pdf_text}])
++
++print(text_compressor.get_logs([], []))
++```
++
++```console
++('19765 tokens saved with text compression.', True)
++```
++
++## Example 2: Integrating LLMLingua with `ConversableAgent`
++
++Now, let's integrate `LLMLingua` into a conversational agent within AutoGen. This allows dynamic compression of prompts before they are sent to the LLM.
++
++```python
++import os
++import copy
++
++import autogen
++from autogen.agentchat.contrib.capabilities import transform_messages
++from typing import Dict, List
++
++config_list = [{"model": "gpt-3.5-turbo", "api_key": os.getenv("OPENAI_API_KEY")}]
++
++# Define your agent; the user proxy and an assistant
++assistant = autogen.AssistantAgent(
++    "assistant",
++    llm_config={"config_list": config_list},
++    max_consecutive_auto_reply=1,
++)
++user_proxy = autogen.UserProxyAgent(
++    "user_proxy",
++    human_input_mode="NEVER",
++    is_termination_msg=lambda x: "TERMINATE" in x.get("content", ""),
++    max_consecutive_auto_reply=1,
++)
++```
++
++:::tip
++Learn more about configuring LLMs for agents [here](/docs/topics/llm_configuration).
++:::
++
++```python
++context_handling = transform_messages.TransformMessages(transforms=[text_compressor])
++context_handling.add_to_agent(assistant)
++
++message = "Explain to me what's happening in this research paper.\n" + pdf_text
++result = user_proxy.initiate_chat(recipient=assistant, clear_history=True, message=message, silent=True)
++
++print(result.chat_history[1]["content"])
++```
++
++```console
++The research paper you mentioned, titled "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation," authored by Qingyun Wu and colleagues, provides a comprehensive discussion on AutoGen, a distinctive framework for building large-language-model (LLM) applications through multi-agent conversations.
++
++Here's a summary of the key points in the research paper:
++
++### 1. **Overview of AutoGen Framework**
++   AutoGen is a multi-agent conversational framework designed to facilitate the development of applications utilizing LLMs (Large Language Models) like GPT-4. It provides tools for agent customization, allowing interactions in dynamic and context-aware conversation patterns that can adapt based on user inputs and other environmental considerations.
++
++### 2. **Multi-Agent Conversations**
++   The framework supports complex communication patterns between multiple agents, each capable of performing distinct roles within a conversation. This architecture allows AutoGen to decompose complex tasks into smaller, manageable chunks handled by specialized agents, leading to more efficient problem solving.
++
++### 3. **Customizable and Conversable Agents**
++   Agents within AutoGen are both customizable and conversable, meaning they can be tailored to meet specific application needs and can engage intelligently in dialogue. This adaptability makes it possible to use the same framework across various domains by altering agent configurations without redesigning the entire system.
++
++### 4. **Hierarchical and Flexible Conversation Structures**
++   The paper emphasizes the hierarchical nature of conversations, where some agents may control or guide the flow of interaction, while others execute specific tasks. This setup helps in managing the complexity of conversations and ensuring coherence across the contributions of different agents.
++
++### 5. **Application Areas**
++   AutoGen is shown to be applicable in diverse fields ranging from mathematics and coding problem-solving to more sophisticated decision-making and operational research. These applications demonstrate the framework's robustness and flexibility, capable of handling both structured and semi-structured tasks.
++
++### 6. **Open-source and Community Contribution**
++   The AutoGen framework is open-source, inviting contributions from developers worldwide. This approach helps in refining the framework, extending its capabilities, and adapting it to new challenges and scenarios.
++
++### 7. **Empirical Studies and Evaluations**
++   The paper mentions empirical studies that assess the effectiveness of the AutoGen framework across various applications. These studies typically compare AutoGen's performance against standard baselines or existing solutions to highlight its advantages in terms of flexibility, efficiency, and adaptability.
++
++This paper not only advances the field by introducing a scalable and versatile framework but also opens up several avenues for further research and development in the area of multi-agent systems and LLM applications. If you need to execute any specific actions or require more detailed explanations on any part of the paper, let me know!
++```
+diff --git a/website/docs/topics/long_contexts.md b/website/docs/topics/handling_long_contexts/intro_to_transform_messages.md
+similarity index 98%
+rename from website/docs/topics/long_contexts.md
+rename to website/docs/topics/handling_long_contexts/intro_to_transform_messages.md
+index 51648c5c549a..d0a53702c48b 100644
+--- a/website/docs/topics/long_contexts.md
++++ b/website/docs/topics/handling_long_contexts/intro_to_transform_messages.md
+@@ -1,4 +1,4 @@
+-# Handling Long Context Conversations with Transform Messages
++# Introduction to Transform Messages
+ 
+ Why do we need to handle long contexts? The problem arises from several constraints and requirements:
+ 
+@@ -14,6 +14,7 @@ The `TransformMessages` capability is designed to modify incoming messages befor
+ 
+ :::info Requirements
+ Install `pyautogen`:
++
+ ```bash
+ pip install pyautogen
+ ```
+@@ -99,9 +100,9 @@ pprint.pprint(processed_short_messages)
+ ```console
+ [{'content': 'hello there, how are you?', 'role': 'user'},
+  {'content': [{'text': 'hello', 'type': 'text'}], 'role': 'assistant'}]
+- ```
++```
+ 
+- We can see that no transformation was applied, because the threshold of 10 total tokens was not reached.
++We can see that no transformation was applied, because the threshold of 10 total tokens was not reached.
+ 
+ ### Apply Transformations Using Agents
+ 
+@@ -318,7 +319,7 @@ result = user_proxy.initiate_chat(
+ 
+ ```
+ 
+-````console
++```console
+ user_proxy (to assistant):
+ 
+ What are the two API keys that I just provided
+@@ -340,4 +341,4 @@ user_proxy (to assistant):
+ 
+ --------------------------------------------------------------------------------
+ Redacted 2 OpenAI API keys.
+-````
++```
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

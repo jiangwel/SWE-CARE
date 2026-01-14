@@ -55,7 +55,11 @@ def extract_defects_from_review(
 
     for defect_content in defect_matches:
         # Extract file_path, line, and suggestion from defect content
-        file_path_match = re.search(r"file_path:\s*(.+)", defect_content)
+        file_path_match = re.search(
+            r"file_path:\s*(.*?)\s+(?:line:|suggestion:)", defect_content
+        )
+        if not file_path_match:
+            file_path_match = re.search(r"file_path:\s*(.+)", defect_content)
         line_match = re.search(r"line:\s*(\d+)", defect_content)
         suggestion_match = re.search(r"suggestion:\s*(.+)", defect_content, re.DOTALL)
 

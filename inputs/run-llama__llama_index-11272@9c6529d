@@ -1,0 +1,208 @@
+  Task-ID: run-llama__llama_index-11272@9c6529d
+  Please checkout to this commit first: 39779bfbfa7ab6e314307d2c67fcfcf859ce5873
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Not able to use LLama Packs [Bug]: 
+### Bug Description
+
+I always get this error for any pack i download
+FileNotFoundError: [Errno 2] No such file or directory: '/content/chain_of_table_pack/llama_index/packs/tables/base.py'
+
+### Version
+
+0.10.5
+
+### Steps to Reproduce
+
+
+download_llama_pack(
+    "ChainOfTablePack",
+    "./chain_of_table_pack",
+    )
+
+### Relevant Logs/Tracbacks
+
+```shell
+FileNotFoundError                         Traceback (most recent call last)
+<ipython-input-6-da45d7f3ade5> in <cell line: 3>()
+      1 from llama_index.core.llama_pack import download_llama_pack
+      2 
+----> 3 download_llama_pack(
+      4     "ChainOfTablePack",
+      5     "./chain_of_table_pack",
+
+4 frames
+/usr/local/lib/python3.10/dist-packages/llama_index/core/llama_pack/download.py in download_llama_pack(llama_pack_class, download_dir, llama_pack_url, refresh_cache)
+     54         )
+     55     else:
+---> 56         pack_cls = download_llama_pack_template(
+     57             new_install_parent=new_install_parent,
+     58             llama_pack_class=llama_pack_class,
+
+/usr/local/lib/python3.10/dist-packages/llama_index/core/download/pack.py in download_llama_pack_template(new_install_parent, llama_pack_class, llama_pack_url, llama_pack_source_files_dir_path, refresh_cache, custom_dir, custom_path, base_file_name)
+    124 
+    125     module = util.module_from_spec(spec)
+--> 126     spec.loader.exec_module(module)  # type: ignore
+    127 
+    128     return getattr(module, llama_pack_class)
+
+/usr/lib/python3.10/importlib/_bootstrap_external.py in exec_module(self, module)
+
+/usr/lib/python3.10/importlib/_bootstrap_external.py in get_code(self, fullname)
+
+/usr/lib/python3.10/importlib/_bootstrap_external.py in get_data(self, path)
+
+FileNotFoundError: [Errno 2] No such file or directory:
+```
+  </issue>
+  
+  <patch>
+  diff --git a/llama-index-core/llama_index/core/download/pack.py b/llama-index-core/llama_index/core/download/pack.py
+index bcf7430470..f32d43ab05 100644
+--- a/llama-index-core/llama_index/core/download/pack.py
++++ b/llama-index-core/llama_index/core/download/pack.py
+@@ -13,17 +13,15 @@
+ from llama_index.core.download.utils import (
+     ChangeDirectory,
+     get_file_content,
+-    get_source_files_list,
+     initialize_directory,
++    get_source_files_recursive,
+ )
+ 
+-BRANCH = "nerdai/migration-v0_10_0"
+-REPO = "nerdai"
+ LLAMA_PACKS_CONTENTS_URL = (
+-    f"https://raw.githubusercontent.com/{REPO}/llama_index/{BRANCH}/llama-index-packs"
++    f"https://raw.githubusercontent.com/run-llama/llama_index/main/llama-index-packs"
+ )
+ LLAMA_PACKS_SOURCE_FILES_GITHUB_TREE_URL = (
+-    f"https://github.com/{REPO}/llama_index/tree/{BRANCH}/llama-index-packs"
++    f"https://github.com/run-llama/llama_index/tree/main"
+ )
+ PY_NAMESPACE = "llama_index/packs"
+ 
+@@ -51,17 +49,24 @@ def download_module_and_reqs(
+         os.makedirs(module_path, exist_ok=True)
+ 
+         # download all source files
+-        source_files = get_source_files_list(
++        source_files = get_source_files_recursive(
+             str(remote_source_dir_path),
+-            f"/{package}/{PY_NAMESPACE}/{sub_module}",
++            f"/llama-index-packs/{package}/{PY_NAMESPACE}/{sub_module}",
+         )
+ 
+         for source_file in source_files:
+             source_file_raw_content, _ = get_file_content(
+                 str(remote_dir_path),
+-                f"/{package}/{PY_NAMESPACE}/{sub_module}/{source_file}",
++                f"{source_file}",
+             )
+-            with open(f"{module_path}/{source_file}", "w") as f:
++            local_source_file_path = (
++                f"{local_dir_path}/{'/'.join(source_file.split('/')[2:])}"
++            )
++            # ensure parent dir of file exists
++            Path(local_source_file_path).parent.absolute().mkdir(
++                parents=True, exist_ok=True
++            )
++            with open(local_source_file_path, "w") as f:
+                 f.write(source_file_raw_content)
+ 
+     # pyproject.toml and README
+@@ -99,7 +104,7 @@ def download_llama_pack_template(
+     refresh_cache: bool = False,
+     custom_dir: Optional[str] = None,
+     custom_path: Optional[str] = None,
+-    base_file_name: str = "base.py",
++    base_file_name: str = "__init__.py",
+ ) -> Any:
+     # create directory / get path
+     dirpath = initialize_directory(custom_path=custom_path, custom_dir=custom_dir)
+diff --git a/llama-index-core/llama_index/core/download/utils.py b/llama-index-core/llama_index/core/download/utils.py
+index 933e2ebd18..e8dd91c284 100644
+--- a/llama-index-core/llama_index/core/download/utils.py
++++ b/llama-index-core/llama_index/core/download/utils.py
+@@ -95,6 +95,47 @@ def get_source_files_list(source_tree_url: str, path: str) -> List[str]:
+     return [item["name"] for item in payload["tree"]["items"]]
+ 
+ 
++def recursive_tree_traverse(
++    tree_urls: List[Tuple[str, str]], acc: List[str], source_tree_url: str
++):
++    """Recursively traversge Github trees to get all file paths in a folder."""
++    if not tree_urls:
++        return acc
++    else:
++        url = tree_urls[0]
++
++        try:
++            res = requests.get(url)
++            tree_elements = res.json()["payload"]["tree"]["items"]
++        except Exception:
++            raise ValueError("Failed to traverse github tree source.")
++
++        new_trees = [
++            source_tree_url + "/" + el["path"]
++            for el in tree_elements
++            if el["contentType"] == "directory"
++        ]
++
++        acc += [
++            el["path"].replace("llama-index-packs/", "/")
++            for el in tree_elements
++            if el["contentType"] == "file"
++        ]
++
++        return recursive_tree_traverse(
++            tree_urls=tree_urls[1:] + new_trees,
++            acc=acc,
++            source_tree_url=source_tree_url,
++        )
++
++
++def get_source_files_recursive(source_tree_url: str, path: str) -> List[str]:
++    """Get source files of a Github folder recursively."""
++    initial_url = source_tree_url + path + "?recursive=1"
++    initial_tree_urls = [initial_url]
++    return recursive_tree_traverse(initial_tree_urls, [], source_tree_url)
++
++
+ class ChangeDirectory:
+     """Context manager for changing the current working directory."""
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

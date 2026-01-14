@@ -1,0 +1,268 @@
+  Task-ID: scipy__scipy-21336@fb4df3e
+  Please checkout to this commit first: 76bf366486b0583dca789823878b80d610eb571b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  ENH: Add a Python level lapack wrapper for DSYTRS
+### Is your feature request related to a problem? Please describe.
+
+I've been prototyping a global RBF solver that can scale to hundreds of thousands or even millions of input points  and as part of that I'm using DSYTRF to perform LDL^T factorisation of the augemented kernel matrix (as I need to account for positive semi-definite matrices, which rules out LL^T), which there's a Python level wrapper for (thanks!). 
+However, I found that the triangular solver that can use this factorisation and pivot information (DSYTRS) doesn't have a Python level wrapper. 
+
+### Describe the solution you'd like.
+
+A Python level wrapper for DSYTRS in scipy.linalg.lapack
+
+### Describe alternatives you've considered.
+
+I found that DSYTRS did have a Cython wrapper, though (again, thanks!) so I was able to work around it by creating my own Cython function and a convenience Python function to call it, but it'd certainly be nicer to have a built in Python level wrapper to call.
+
+### Additional context (e.g. screenshots, GIFs)
+
+My Cython wrapper was:
+```
+# cython: wraparound = False
+# cython: boundscheck = False
+
+from scipy.linalg.cython_lapack cimport dsytrs
+
+cpdef lapack_dsytrs(
+    char* UPLO,
+    int N,
+    int NRHS,
+    double[::1] A,
+    int LDA,
+    int[::1] IPIV,
+    double[::1] B,
+    int LDB,
+):
+    cdef int INFO
+    dsytrs(UPLO, &N, &NRHS, &A[0], &LDA, &IPIV[0], &B[0], &LDB, &INFO)
+
+    return INFO
+```
+
+And my Python wrapper for this:
+```
+    def dsytrs(A: np.ndarray, IPIV: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Convenience function for Scipy's Lapack dsytrs wrapper.
+
+    DSYTRS solves a system of linear equations A*X = B with a real
+    symmetric matrix A using the factorization A = U*D*U**T or
+    A = L*D*L**T computed by DSYTRF.
+
+    Can handle symmetric semi-definite matrices.
+
+    Parameters
+    ----------
+    L : np.ndarray
+        Lower triangle matrix as factorised by Lapack's dsytrf.
+    IPIV : np.ndarray
+        Integer array as output by dsytrf.
+    B : np.ndarray
+        RHS vector.
+
+    Returns
+    -------
+    X : np.ndarray
+        Solution to the linear system.
+
+    """
+    UPLO = b"L"
+
+    N = A.shape[0]
+
+    LDA = A.shape[1]
+
+    LDB = B.shape[0]
+
+    NRHS = 1
+
+    # Flatten A into a Fortran column-major array
+    A = A.flatten("F")
+
+    B = B.flatten("F")
+
+    # Ensure B is writable
+    B = np.ascontiguousarray(B)
+    B.flags.writeable 
+
+    info = lapack_dsytrs(
+        UPLO,
+        N,
+        NRHS,
+        A,
+        LDA,
+        IPIV,
+        B,
+        LDB,
+    )
+
+    if not info == 0:
+        ValueError('Error solving system.')
+
+    return B
+```
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/linalg/flapack_sym_herm.pyf.src b/scipy/linalg/flapack_sym_herm.pyf.src
+index 42a2ae217d8a..99d7cdbf82f8 100644
+--- a/scipy/linalg/flapack_sym_herm.pyf.src
++++ b/scipy/linalg/flapack_sym_herm.pyf.src
+@@ -302,6 +302,46 @@ end subroutine <prefix2c>heevd_lwork
+    end subroutine <prefix>sytrf_lwork
+ 
+ 
++   subroutine <prefix>sytrs(n,nrhs,a,lda,ipiv,b,ldb,info,lower)
++   
++   ! Solve A * X = B for symmetric A matrix after calling ?sytrf
++   
++     callstatement (*f2py_func)((lower?"L":"U"),&n,&nrhs,a,&lda,ipiv,b,&ldb,&info)
++     callprotoargument char*,F_INT*,F_INT*,<ctype>*,F_INT*,F_INT*,<ctype>*,F_INT*,F_INT*
++     
++     <ftype> intent(in), dimension(lda, n), check((lda >= n) && (n >= 0)) :: a
++     <ftype> intent(in,out,copy,out=x),dimension(ldb, nrhs) :: b
++     integer optional,intent(in),check(lower==0||lower==1) :: lower = 0
++     integer intent(in),dimension(n),depend(n) :: ipiv
++     integer intent(hide), depend(a),check(n >= 0) :: n = shape(a, 1)
++     integer intent(hide), depend(b) :: nrhs = shape(b, 1)
++     integer intent(hide), depend(a) :: lda = MAX(1, shape(a, 0))
++     integer intent(hide), depend(b,n),check(ldb >= n) :: ldb = MAX(1, shape(b, 0))
++     integer intent(out):: info
++
++   end subroutine <prefix>sytrs
++
++
++   subroutine <prefix2c>hetrs(n,nrhs,a,lda,ipiv,b,ldb,info,lower)
++   
++   ! Solve A * X = B for hermitian A matrix after calling ?hetrf
++   
++     callstatement (*f2py_func)((lower?"L":"U"),&n,&nrhs,a,&lda,ipiv,b,&ldb,&info)
++     callprotoargument char*,F_INT*,F_INT*,<ctype2c>*,F_INT*,F_INT*,<ctype2c>*,F_INT*,F_INT*
++     
++     <ftype2c> intent(in), dimension(lda, n), check((lda >= n) && (n >= 0)) :: a
++     <ftype2c> intent(in,out,copy,out=x),dimension(ldb, nrhs) :: b
++     integer optional,intent(in),check(lower==0||lower==1) :: lower = 0
++     integer intent(in),dimension(n),depend(n) :: ipiv
++     integer intent(hide), depend(a),check(n >= 0) :: n = shape(a, 1)
++     integer intent(hide), depend(b) :: nrhs = shape(b, 1)
++     integer intent(hide), depend(a) :: lda = MAX(1, shape(a, 0))
++     integer intent(hide), depend(b,n),check(ldb >= n) :: ldb = MAX(1, shape(b, 0))
++     integer intent(out):: info
++
++   end subroutine <prefix2c>hetrs
++   
++   
+    subroutine <prefix>sysv(n,nrhs,a,lda,ipiv,b,ldb,work,lwork,info,lower)
+ 
+    ! Solve A * X = B for symmetric A matrix
+diff --git a/scipy/linalg/lapack.py b/scipy/linalg/lapack.py
+index 22a4d3f007cb..6843454217c4 100644
+--- a/scipy/linalg/lapack.py
++++ b/scipy/linalg/lapack.py
+@@ -345,6 +345,9 @@
+    chetrf_lwork
+    zhetrf_lwork
+ 
++   chetrs
++   zhetrs
++
+    chfrk
+    zhfrk
+ 
+@@ -660,6 +663,11 @@
+    csytrf_lwork
+    zsytrf_lwork
+ 
++   ssytrs
++   dsytrs
++   csytrs
++   zsytrs
++
+    stbtrs
+    dtbtrs
+    ctbtrs
+diff --git a/scipy/linalg/tests/test_lapack.py b/scipy/linalg/tests/test_lapack.py
+index bbe73f03dc05..ddb32e81afd7 100644
+--- a/scipy/linalg/tests/test_lapack.py
++++ b/scipy/linalg/tests/test_lapack.py
+@@ -3413,3 +3413,45 @@ def test_tgsyl(dtype, trans, ijob):
+                         err_msg='lhs1 and rhs1 do not match')
+         assert_allclose(lhs2, rhs2, atol=atol, rtol=0.,
+                         err_msg='lhs2 and rhs2 do not match')
++
++
++@pytest.mark.parametrize('dtype', DTYPES)
++@pytest.mark.parametrize('lower', (0, 1))
++def test_sytrs(dtype, lower):
++    rng = np.random.default_rng(1723059677121834)
++    n, nrhs = 20, 5
++    if dtype in COMPLEX_DTYPES:
++        A = (rng.uniform(size=(n, n)) + rng.uniform(size=(n, n))*1j).astype(dtype)
++    else:
++        A = rng.uniform(size=(n, n)).astype(dtype)
++
++    A = A + A.T
++    b = rng.uniform(size=(n, nrhs)).astype(dtype)
++    sytrf, sytrf_lwork, sytrs = get_lapack_funcs(['sytrf', 'sytrf_lwork', 'sytrs'],
++                                                 dtype=dtype)
++    lwork = sytrf_lwork(n, lower=lower)
++    ldu, ipiv, info = sytrf(A, lwork=lwork)
++    assert info == 0
++    x, info = sytrs(a=ldu, ipiv=ipiv, b=b)
++    assert info == 0
++    eps = np.finfo(dtype).eps
++    assert_allclose(A@x, b, atol=100*n*eps)
++
++
++@pytest.mark.parametrize('dtype', COMPLEX_DTYPES)
++@pytest.mark.parametrize('lower', (0, 1))
++def test_hetrs(dtype, lower):
++    rng = np.random.default_rng(1723059677121834)
++    n, nrhs = 20, 5
++    A = (rng.uniform(size=(n, n)) + rng.uniform(size=(n, n))*1j).astype(dtype)
++    A = A + A.conj().T
++    b = np.random.rand(n, nrhs).astype(dtype)
++    hetrf, hetrf_lwork, hetrs = get_lapack_funcs(['hetrf', 'hetrf_lwork', 'hetrs'],
++                                                 dtype=dtype)
++    lwork = hetrf_lwork(n, lower=lower)
++    ldu, ipiv, info = hetrf(A, lwork=lwork)
++    assert info == 0
++    x, info = hetrs(a=ldu, ipiv=ipiv, b=b)
++    assert info == 0
++    eps = np.finfo(dtype).eps
++    assert_allclose(A @ x, b, atol=100*n*eps)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,247 @@
+  Task-ID: huggingface__datasets-3129@3d35ada
+  Please checkout to this commit first: ed1b4921a126ce007e6d2bb859730eb6a0fedbb8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Support Audio feature for TAR archives in sequential access
+Currently, Audio feature accesses each audio file by their file path.
+
+However, streamed TAR archive files do not allow random access to their archived files.
+
+Therefore, we should enhance the Audio feature to support TAR archived files in sequential access.
+  </issue>
+  
+  <patch>
+  diff --git a/src/datasets/features/audio.py b/src/datasets/features/audio.py
+index c2261b40344..1bac3f33ac1 100644
+--- a/src/datasets/features/audio.py
++++ b/src/datasets/features/audio.py
+@@ -1,5 +1,6 @@
+ from collections import defaultdict
+ from dataclasses import dataclass, field
++from io import BytesIO
+ from typing import Any, ClassVar, Optional
+ 
+ import pyarrow as pa
+@@ -9,9 +10,18 @@
+ class Audio:
+     """Audio Feature to extract audio data from an audio file.
+ 
++    Input: The Audio feature accepts as input:
++    - A :obj:`str`: Absolute path to the audio file (i.e. random access is allowed).
++    - A :obj:`dict` with the keys:
++
++        - path: String with relative path of the audio file to the archive file.
++        - bytes: Bytes of the audio file.
++      This is useful for archived files with sequential access.
++
+     Args:
+         sampling_rate (:obj:`int`, optional): Target sampling rate. If `None`, the native sampling rate is used.
+-        mono (:obj:`bool`, default ```True``): Whether to convert the audio signal to mono by averaging samples across channels.
++        mono (:obj:`bool`, default ``True``): Whether to convert the audio signal to mono by averaging samples across
++            channels.
+     """
+ 
+     sampling_rate: Optional[int] = None
+@@ -23,24 +33,51 @@ class Audio:
+     _type: str = field(default="Audio", init=False, repr=False)
+ 
+     def __call__(self):
+-        return pa.string()
++        return pa.struct({"path": pa.string(), "bytes": pa.binary()})
++
++    def encode_example(self, value):
++        """Encode example into a format for Arrow.
++
++        Args:
++            value (:obj:`str` or :obj:`dict`): Data passed as input to Audio feature.
++
++        Returns:
++            :obj:`dict`
++        """
++        if isinstance(value, str):
++            return {"path": value}
++        return value
+ 
+     def decode_example(self, value):
+         """Decode example audio file into audio data.
+ 
+         Args:
+-            value: Audio file path.
++            value (obj:`str` or :obj:`dict`): Either a string with the absolute audio file path or a dictionary with
++                keys:
++
++                - path: String with absolute or relative audio file path.
++                - bytes: Optionally, the bytes of the audio file.
+ 
+         Returns:
+             dict
+         """
+-        # TODO: backard compatibility for users without audio dependencies
+-        array, sampling_rate = (
+-            self._decode_example_with_torchaudio(value)
+-            if value.endswith(".mp3")
+-            else self._decode_example_with_librosa(value)
+-        )
+-        return {"path": value, "array": array, "sampling_rate": sampling_rate}
++        if isinstance(value, str):
++            value = {"path": value, "bytes": None}
++        if value["bytes"]:
++            path, file = value["path"], BytesIO(value["bytes"])
++            array, sampling_rate = (
++                self._decode_example_with_torchaudio(file)
++                if path.endswith(".mp3")
++                else self._decode_example_with_soundfile(file)
++            )
++        else:
++            path = value["path"]
++            array, sampling_rate = (
++                self._decode_example_with_torchaudio(path)
++                if path.endswith(".mp3")
++                else self._decode_example_with_librosa(path)
++            )
++        return {"path": path, "array": array, "sampling_rate": sampling_rate}
+ 
+     def _decode_example_with_librosa(self, value):
+         try:
+@@ -52,6 +89,22 @@ def _decode_example_with_librosa(self, value):
+             array, sampling_rate = librosa.load(f, sr=self.sampling_rate, mono=self.mono)
+         return array, sampling_rate
+ 
++    def _decode_example_with_soundfile(self, file):
++        try:
++            import librosa
++            import soundfile as sf
++        except ImportError as err:
++            raise ImportError("To support decoding audio files, please install 'librosa'.") from err
++
++        array, sampling_rate = sf.read(file)
++        array = array.T
++        if self.mono:
++            array = librosa.to_mono(array)
++        if self.sampling_rate and self.sampling_rate != sampling_rate:
++            array = librosa.resample(array, sampling_rate, self.sampling_rate, res_type="kaiser_best")
++            sampling_rate = self.sampling_rate
++        return array, sampling_rate
++
+     def _decode_example_with_torchaudio(self, value):
+         try:
+             import torchaudio
+diff --git a/src/datasets/features/features.py b/src/datasets/features/features.py
+index 3d33f558b9b..89c913bd44a 100644
+--- a/src/datasets/features/features.py
++++ b/src/datasets/features/features.py
+@@ -851,7 +851,7 @@ def encode_nested_example(schema, obj):
+             return list(obj)
+     # Object with special encoding:
+     # ClassLabel will convert from string to int, TranslationVariableLanguages does some checks
+-    elif isinstance(schema, (ClassLabel, TranslationVariableLanguages, Value, _ArrayXD)):
++    elif isinstance(schema, (Audio, ClassLabel, TranslationVariableLanguages, Value, _ArrayXD)):
+         return schema.encode_example(obj)
+     # Other object should be directly convertible to a native Arrow type (like Translation and Translation)
+     return obj
+diff --git a/tests/features/test_audio.py b/tests/features/test_audio.py
+index 293b7cd50b4..b11884baf98 100644
+--- a/tests/features/test_audio.py
++++ b/tests/features/test_audio.py
+@@ -1,4 +1,6 @@
++import os
+ import sys
++import tarfile
+ from ctypes.util import find_library
+ from importlib.util import find_spec
+ 
+@@ -26,6 +28,23 @@
+ require_torchaudio = pytest.mark.skipif(find_spec("torchaudio") is None, reason="Test requires 'torchaudio'")
+ 
+ 
++@pytest.fixture()
++def tar_wav_path(shared_datadir, tmp_path_factory):
++    audio_path = str(shared_datadir / "test_audio_44100.wav")
++    path = tmp_path_factory.mktemp("data") / "audio_data.wav.tar"
++    with tarfile.TarFile(path, "w") as f:
++        f.add(audio_path, arcname=os.path.basename(audio_path))
++    return path
++
++
++def iter_archive(archive_path):
++    with tarfile.open(archive_path) as tar:
++        for tarinfo in tar:
++            file_path = tarinfo.name
++            file_obj = tar.extractfile(tarinfo)
++            yield file_path, file_obj
++
++
+ def test_audio_instantiation():
+     audio = Audio()
+     assert audio.id is None
+@@ -95,6 +114,36 @@ def test_dataset_with_audio_feature(shared_datadir):
+     assert column[0]["sampling_rate"] == 44100
+ 
+ 
++@require_sndfile
++def test_dataset_with_audio_feature_tar(tar_wav_path):
++    audio_filename = "test_audio_44100.wav"
++    data = {"audio": []}
++    for file_path, file_obj in iter_archive(tar_wav_path):
++        data["audio"].append({"path": file_path, "bytes": file_obj.read()})
++        break
++    features = Features({"audio": Audio()})
++    dset = Dataset.from_dict(data, features=features)
++    item = dset[0]
++    assert item.keys() == {"audio"}
++    assert item["audio"].keys() == {"path", "array", "sampling_rate"}
++    assert item["audio"]["path"] == audio_filename
++    assert item["audio"]["array"].shape == (202311,)
++    assert item["audio"]["sampling_rate"] == 44100
++    batch = dset[:1]
++    assert batch.keys() == {"audio"}
++    assert len(batch["audio"]) == 1
++    assert batch["audio"][0].keys() == {"path", "array", "sampling_rate"}
++    assert batch["audio"][0]["path"] == audio_filename
++    assert batch["audio"][0]["array"].shape == (202311,)
++    assert batch["audio"][0]["sampling_rate"] == 44100
++    column = dset["audio"]
++    assert len(column) == 1
++    assert column[0].keys() == {"path", "array", "sampling_rate"}
++    assert column[0]["path"] == audio_filename
++    assert column[0]["array"].shape == (202311,)
++    assert column[0]["sampling_rate"] == 44100
++
++
+ @require_sndfile
+ def test_resampling_at_loading_dataset_with_audio_feature(shared_datadir):
+     audio_path = str(shared_datadir / "test_audio_44100.wav")
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

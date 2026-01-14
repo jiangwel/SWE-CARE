@@ -1,0 +1,502 @@
+  Task-ID: intel__ipex-llm-2470@a39469b
+  Please checkout to this commit first: bf610b35ff824534ce5e0225f976ae828d7087bc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Python ImageFrame needs to have a way to add labels
+After a user creates ImageFrame from image files, there is no suitable way to add labels to the image frame.    Maybe we can expose rdd/array API to get rdd/array of ImageFeature, and provide set label API to set label for image feature.
+  </issue>
+  
+  <patch>
+  diff --git a/pyspark/bigdl/examples/imageframe/README.md b/pyspark/bigdl/examples/imageframe/README.md
+new file mode 100644
+index 00000000000..6c8a2f610f9
+--- /dev/null
++++ b/pyspark/bigdl/examples/imageframe/README.md
+@@ -0,0 +1,47 @@
++## Overview
++ImageFrame provides rich deep learning APIs for scalable image processing. This example illustrates how to do model validation with Python APIs using inception-v1 model
++
++## Run Model validation
++
++### Preparation
++
++In order to run the validation application, you should prepare the validation dataset and inception-v1 model
++
++1) Prepare dataset
++
++This excample load ImageNet validation dataset directly from hadoop sequence file, for how to prepare the sequence file, please check [here](../../../models/inception#prepare-the-data)
++
++2) Download pre-trained inception model
++
++BigDL provides a rich set of pre-trained models, please check [BigDL Models](https://github.com/intel-analytics/analytics-zoo/tree/master/models) for details
++
++Downloade inception-v1 model bi running
++
++wget https://s3-ap-southeast-1.amazonaws.com/bigdl-models/imageclassification/imagenet/bigdl_inception-v1_imagenet_0.4.0.model
++
++### Run validation program
++
++Run the program as a spark application with below command
++
++```shell
++master=spark://xxx.xxx.xxx.xxx:xxxx # please set your own spark master
++imageFolder=hdfs://...
++pathToModel=... #set path to your downloaded model
++batchsize=... #total batch size
++PYTHON_API_ZIP_PATH=dist/lib/bigdl-VERSION-python-api.zip
++BigDL_JAR_PATH=dist/lib/bigdl-VERSION-jar-with-dependencies.jar
++PYTHONPATH=${PYTHON_API_ZIP_PATH}:$PYTHONPATH
++${SPARK_HOME}/bin/spark-submit \
++        --master $master \
++        --driver-cores 10  \
++        --driver-memory 5g  \
++        --total-executor-cores 20  \
++        --executor-cores 20  \
++        --executor-memory 20g \
++        --py-files ${PYTHON_API_ZIP_PATH},inception_validation.py  \
++        --properties-file dist/conf/spark-bigdl.conf \
++        --jars ${BigDL_JAR_PATH} \
++        --conf spark.driver.extraClassPath=${BigDL_JAR_PATH} \
++        --conf spark.executor.extraClassPath=dist/lib/bigdl-VERSION-jar-with-dependencies.jar \
++        inception_validation.py ${imageFolder} ${pathToModel} ${batchsize}
++```
+diff --git a/pyspark/bigdl/examples/imageframe/__init__.py b/pyspark/bigdl/examples/imageframe/__init__.py
+new file mode 100644
+index 00000000000..1b268b4efd1
+--- /dev/null
++++ b/pyspark/bigdl/examples/imageframe/__init__.py
+@@ -0,0 +1,15 @@
++#
++# Copyright 2016 The BigDL Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
+\ No newline at end of file
+diff --git a/pyspark/bigdl/examples/imageframe/inception_validation.py b/pyspark/bigdl/examples/imageframe/inception_validation.py
+new file mode 100644
+index 00000000000..bcafa980988
+--- /dev/null
++++ b/pyspark/bigdl/examples/imageframe/inception_validation.py
+@@ -0,0 +1,60 @@
++#
++# Copyright 2016 The BigDL Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++from bigdl.util.common import *
++
++from bigdl.transform.vision.image import *
++
++from bigdl.optim.optimizer import *
++
++from pyspark import SparkContext
++
++from bigdl.nn.layer import *
++
++from optparse import OptionParser
++
++import sys
++
++parser = OptionParser()
++parser.add_option("-f", "--folder", type=str, dest="folder", default="",
++                  help="url of hdfs folder store the hadoop sequence files")
++parser.add_option("--model", type=str, dest="model", default="", help="model path")
++parser.add_option("-b", "--batchSize", type=int, dest="batchSize", default=0, help="total batch size")
++def get_data(url, sc=None, data_type="val"):
++    path = os.path.join(url, data_type)
++    return SeqFileFolder.files_to_image_frame(url=path, sc=sc, class_num=1000)
++
++def run(image_path, model_path, batch_size):
++    sparkConf = create_spark_conf().setAppName("test_validation")
++    sc = get_spark_context(sparkConf)
++    init_engine()
++    transformer = Pipeline([PixelBytesToMat(), Resize(256, 256), CenterCrop(224, 224),
++                            ChannelNormalize(123.0, 117.0, 104.0),
++                            MatToTensor(), ImageFrameToSample(input_keys=["imageTensor"],
++                                target_keys=["label"])])
++    raw_image_frame = get_data(image_path, sc)
++    transformed = transformer(raw_image_frame)
++    model = Model.loadModel(model_path)
++    result = model.evaluate(transformed, int(batch_size), [Top1Accuracy()])
++    print "top1 accuray", result[0]
++
++if __name__ == "__main__":
++    if len(sys.argv) != 3:
++        print "parameters needed : <imagePath> <modelPath> <batchSize>"
++    image_path = sys.argv[1]
++    model_path = sys.argv[2]
++    batch_size = sys.argv[3]
++    run(image_path, model_path, batch_size)
+diff --git a/pyspark/bigdl/transform/vision/image.py b/pyspark/bigdl/transform/vision/image.py
+index 8a95b3864c4..6b8e0addf28 100644
+--- a/pyspark/bigdl/transform/vision/image.py
++++ b/pyspark/bigdl/transform/vision/image.py
+@@ -184,6 +184,18 @@ def get_sample(self):
+         """
+         return self.image_frame.get_sample()
+ 
++    def get_uri(self):
++        """
++        get uri from imageframe
++        """
++        return self.image_frame.get_uri()
++
++    def set_label(self, label, bigdl_type="float"):
++        """
++        set label for imageframe
++        """
++        return callBigDlFunc(bigdl_type,
++                             "setLabel", label, self.value)
+ 
+ class LocalImageFrame(ImageFrame):
+     """
+@@ -227,6 +239,9 @@ def get_predict(self, key="predict"):
+     def get_sample(self,  key="sample"):
+         return callBigDlFunc(self.bigdl_type, "localImageFrameToSample", self.value, key)
+ 
++    def get_uri(self, key = "uri"):
++        return callBigDlFunc(self.bigdl_type, "localImageFrameToUri", self.value, key)
++
+ class DistributedImageFrame(ImageFrame):
+     """
+     DistributedImageFrame wraps an RDD of ImageFeature
+@@ -266,9 +281,13 @@ def get_predict(self, key="predict"):
+         """
+         predicts = callBigDlFunc(self.bigdl_type, "distributedImageFrameToPredict", self.value, key)
+         return predicts.map(lambda predict: (predict[0], predict[1].to_ndarray()) if predict[1] else (predict[0], None))
++
+     def get_sample(self,  key="sample"):
+         return callBigDlFunc(self.bigdl_type, "distributedImageFrameToSample", self.value, key)
+ 
++    def get_uri(self, key = "uri"):
++        return callBigDlFunc(self.bigdl_type, "distributedImageFrameToUri", self.value, key)
++
+ class HFlip(FeatureTransformer):
+     """
+     Flip the image horizontally
+diff --git a/pyspark/test/bigdl/transform/test_image.py b/pyspark/test/bigdl/transform/test_image.py
+index ef105426b44..09b72f8e5a7 100644
+--- a/pyspark/test/bigdl/transform/test_image.py
++++ b/pyspark/test/bigdl/transform/test_image.py
+@@ -205,6 +205,15 @@ def test_read_write_parquet(self):
+         ImageFrame.write_parquet(resource_path, temp, self.sc, 1)
+         read_image_frame = ImageFrame.read_parquet(temp, self.sc)
+ 
++    def test_set_label(self):
++        resource_path = os.path.join(os.path.split(__file__)[0], "../resources/pascal")
++        imageFrame = ImageFrame.read(resource_path, self.sc)
++        uris = imageFrame.get_uri().collect()
++        label = {}
++        for uri in uris:
++            label[uri] = 10
++        imageFrame.set_label(label)
++
+ 
+ if __name__ == "__main__":
+     pytest.main([__file__])
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/InceptionValidation.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/InceptionValidation.scala
+new file mode 100644
+index 00000000000..c49ba30249d
+--- /dev/null
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/InceptionValidation.scala
+@@ -0,0 +1,73 @@
++/*
++ * Copyright 2016 The BigDL Authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.intel.analytics.bigdl.example.imageclassification.imageFrame
++
++import com.intel.analytics.bigdl.dataset.DataSet.SeqFileFolder
++import com.intel.analytics.bigdl.example.loadmodel.ModelValidator.{TestLocalParams, logger, testLocalParser}
++import com.intel.analytics.bigdl.nn.Module
++import com.intel.analytics.bigdl.optim.{Top1Accuracy, Top5Accuracy}
++import com.intel.analytics.bigdl.transform.vision.image.{ImageFrame, ImageFrameToSample, MatToTensor, PixelBytesToMat}
++import com.intel.analytics.bigdl.transform.vision.image.augmentation.{CenterCrop, ChannelNormalize, Resize}
++import com.intel.analytics.bigdl.utils.Engine
++import org.apache.spark.SparkContext
++import scopt.OptionParser
++
++object InceptionValidation {
++  case class ValidationParam(imageFolder: String = "",
++                             modelPath: String = "",
++                             batchSize: Int = 32)
++
++  val parser = new OptionParser[ValidationParam]("Inception validation") {
++    head("Inception validatio")
++    opt[String]('f', "folder")
++      .text("where you put the demo image data")
++      .action((x, c) => c.copy(imageFolder = x))
++      .required()
++    opt[String]("modelPath")
++      .text("BigDL model")
++      .action((x, c) => c.copy(modelPath = x))
++      .required()
++    opt[Int]('b', "batchSize")
++      .text("batch size")
++      .action((x, c) => c.copy(batchSize = x))
++  }
++
++  def main(args: Array[String]): Unit = {
++    parser.parse(args, ValidationParam()).foreach(param => {
++      val conf = Engine.createSparkConf()
++      conf.setAppName("BigDL ImageFrame API Example")
++      val sc = new SparkContext(conf)
++      Engine.init
++      val imageFrame = SeqFileFolder.filesToImageFrame(param.imageFolder, sc, 1000)
++      val model = Module.loadModule[Float](param.modelPath)
++      val transformer = PixelBytesToMat() -> Resize(256, 256) ->
++        CenterCrop(224, 224) -> ChannelNormalize(123, 117, 104) ->
++        MatToTensor[Float]() ->
++        ImageFrameToSample[Float](inputKeys = Array("imageTensor"),
++          targetKeys = Array("label"))
++      imageFrame -> transformer
++      val result = model.evaluateImage(
++        imageFrame,
++        Array(new Top1Accuracy[Float](), new Top5Accuracy[Float]()),
++        Some(param.batchSize))
++      result.foreach(r => {
++        logger.info(s"${ r._2 } is ${ r._1 }")
++      })
++      sc.stop()
++    })
++  }
++}
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/README.md b/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/README.md
+new file mode 100644
+index 00000000000..d0214170366
+--- /dev/null
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/example/imageclassification/imageFrame/README.md
+@@ -0,0 +1,38 @@
++## Overview
++ImageFrame provides rich deep learning APIs for scalable image processing. This example illustrates how to do model validation on top of these high level APIs using inception-v1 model
++
++## Run Model validation
++
++### Preparation
++
++In order to run the validation application, you should prepare the validation dataset and inception-v1 model
++
++1) Prepare dataset
++
++This excample load ImageNet validation dataset directly from hadoop sequence file, for how to prepare the sequence file, please check [here](../../../models/inception#prepare-the-data)
++
++2) Download pre-trained inception model
++
++BigDL provides a rich set of pre-trained models, please check [BigDL Models](https://github.com/intel-analytics/analytics-zoo/tree/master/models) for details
++
++Downloade inception-v1 model bi running
++
++wget https://s3-ap-southeast-1.amazonaws.com/bigdl-models/imageclassification/imagenet/bigdl_inception-v1_imagenet_0.4.0.model
++
++### Run validation program
++
++Run the program as a spark application with below command
++
++```shell
++  master=spark://xxx.xxx.xxx.xxx:xxxx # please set your own spark master
++  imageFolder=hdfs://...
++  pathToModel=... #set path to your downloaded model
++  batchSize=448
++  spark-submit --driver-memory 20g --master $master --executor-memory 100g                 \
++               --executor-cores 28                                                         \
++               --total-executor-cores 112                                                  \
++               --driver-class-path dist/lib/bigdl-VERSION-jar-with-dependencies.jar \
++               --class com.intel.analytics.bigdl.example.imageclassification.imageFrame.InceptionValidation          \
++                       dist/lib/bigdl-VERSION-jar-with-dependencies.jar             \
++              -f imageFolder --modelPath $pathToModel -b $batchSize
++```
+\ No newline at end of file
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/python/api/PythonBigDL.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/python/api/PythonBigDL.scala
+index ae72fd26e84..63d774d4531 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/python/api/PythonBigDL.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/python/api/PythonBigDL.scala
+@@ -2864,6 +2864,10 @@ class PythonBigDL[T: ClassTag](implicit ev: TensorNumeric[T]) extends Serializab
+     imageFrame.transform(transformer)
+   }
+ 
++  def setLabel(labelMap: JMap[String, Float], imageFrame: ImageFrame): Unit = {
++    imageFrame.setLabel(labelMap.asScala)
++  }
++
+   def createDistributedImageFrame(imageRdd: JavaRDD[JTensor], labelRdd: JavaRDD[JTensor])
+   : DistributedImageFrame = {
+     require(null != imageRdd, "imageRdd cannot be null")
+@@ -2955,6 +2959,27 @@ class PythonBigDL[T: ClassTag](implicit ev: TensorNumeric[T]) extends Serializab
+     })
+   }
+ 
++  def distributedImageFrameToUri(imageFrame: DistributedImageFrame, key: String):
++    JavaRDD[String] = {
++    imageFrame.rdd.map(x => {
++      if (x.contains(key)) {
++        x[String](key)
++      } else {
++        null
++      }
++    })
++  }
++
++  def localImageFrameToUri(imageFrame: LocalImageFrame, key: String): JList[String] = {
++    imageFrame.array.map(x => {
++      if (x.contains(key)) {
++        x[String](key)
++      } else {
++        null
++      }
++    }).toList.asJava
++  }
++
+   def localImageFrameToSample(imageFrame: LocalImageFrame, key: String): JList[Sample] = {
+     imageFrame.array.map(x => {
+       if (x.isValid && x.contains(key)) {
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFeature.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFeature.scala
+index 73cbebca9d8..06ee4bfb2b0 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFeature.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFeature.scala
+@@ -321,6 +321,17 @@ class ImageFeature extends Serializable {
+     }
+     image
+   }
++
++  /**
++   * set label for imagefeature from label map
++   */
++
++  def setLabel(labelMap: mutable.Map[String, Float]): Unit = {
++    val uri = this.uri
++    if (labelMap.contains(uri)) {
++      this(ImageFeature.label) = Tensor[Float](T(labelMap(uri)))
++    }
++  }
+ }
+ 
+ object ImageFeature {
+diff --git a/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFrame.scala b/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFrame.scala
+index 081d9c7792c..8b9dc6c71d0 100644
+--- a/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFrame.scala
++++ b/spark/dl/src/main/scala/com/intel/analytics/bigdl/transform/vision/image/ImageFrame.scala
+@@ -18,6 +18,8 @@ package com.intel.analytics.bigdl.transform.vision.image
+ 
+ import java.io.{File, FilenameFilter}
+ 
++import com.intel.analytics.bigdl.tensor.Tensor
++import com.intel.analytics.bigdl.utils.T
+ import org.apache.commons.io.FileUtils
+ import org.apache.commons.io.filefilter.WildcardFileFilter
+ import org.apache.log4j.Logger
+@@ -25,6 +27,7 @@ import org.apache.spark.SparkContext
+ import org.apache.spark.rdd.RDD
+ import org.apache.spark.sql.SQLContext
+ 
++import scala.collection.mutable
+ import scala.collection.mutable.ArrayBuffer
+ 
+ /**
+@@ -64,6 +67,14 @@ trait ImageFrame extends Serializable {
+    * return DistributedImageFrame
+    */
+   def toDistributed(): DistributedImageFrame = this.asInstanceOf[DistributedImageFrame]
++
++  /**
++   * set label for ImageFrame
++   * @param labelMap label map : uri to label mapping
++   */
++
++  def setLabel(labelMap: mutable.Map[String, Float]): Unit
++
+ }
+ 
+ object ImageFrame {
+@@ -185,6 +196,13 @@ class LocalImageFrame(var array: Array[ImageFeature]) extends ImageFrame {
+   override def isLocal(): Boolean = true
+ 
+   override def isDistributed(): Boolean = false
++
++  override def setLabel(labelMap: mutable.Map[String, Float]): Unit = {
++    array = array.map(imageFeature => {
++      imageFeature.setLabel(labelMap)
++      imageFeature
++    })
++  }
+ }
+ 
+ /**
+@@ -201,4 +219,11 @@ class DistributedImageFrame(var rdd: RDD[ImageFeature]) extends ImageFrame {
+   override def isLocal(): Boolean = false
+ 
+   override def isDistributed(): Boolean = true
++
++  override def setLabel(labelMap: mutable.Map[String, Float]): Unit = {
++    rdd = rdd.map(imageFeature => {
++      imageFeature.setLabel(labelMap)
++      imageFeature
++    })
++  }
+ }
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

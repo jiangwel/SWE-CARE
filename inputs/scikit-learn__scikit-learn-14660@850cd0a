@@ -1,0 +1,112 @@
+  Task-ID: scikit-learn__scikit-learn-14660@850cd0a
+  Please checkout to this commit first: 538a2f51ab9c445cc6a8dc714f814c2783d4e0c7
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  `_pairwise_callable` function doesn't work with pairwise metrics functions from sklearn itself
+#### Description
+
+`metrics.pairwise` functions (`rbf_kernel` for instance) throw error due to unexpected 1-D array instead of 2-D array when called from _pairwise_callable.
+
+I discovered the bug when I have been using `sklearn.kernel_approximation.Nystroem` with `sklearn.metrics.pairwise.rbf_kernel`. When Nystroem wants to compute the pairwise metric between the examples it asks for `_pairwise_callable` to do it and inside this function there is this thing:
+
+```python
+out = np.zeros((X.shape[0], Y.shape[0]), dtype='float')
+        iterator = itertools.combinations(range(X.shape[0]), 2)
+        for i, j in iterator:
+            out[i, j] = metric(X[i], Y[j], **kwds)
+```
+
+if `metric` is a metric from `sklearn.metrics.pairwise` (I mean, the function, not the string) then it crashes because `X[i] `and `Y[j]` are both of shape `(d,)` instead of `(1, d)` and those metrics check if the input is 2D array.
+
+So there is a problem. But it may be multiple fold:
+
+  - I think my use case should work and for that, we only need to change the above code to the following:
+
+```python
+out = np.zeros((X.shape[0], Y.shape[0]), dtype='float')
+        iterator = itertools.combinations(range(X.shape[0]), 2)
+        for i, j in iterator:
+            x_i = np.reshape(X[i], (1, -1))
+            y_j = np.reshape(Y[j], (1, -1))
+            out[i, j] = metric(x_i, y_j, **kwds)
+```
+  - One could say that to address my problem, I should use the string definition of kernel instead of the function directly. The problem is that the documentation of the `sklearn.metrics.pariwise.pairwise_kernels` function is contradictory because it says that valid values for metric are `['rbf', 'sigmoid', 'polynomial', 'poly', 'linear', 'cosine']` AND  "If metric is a string, it must be one of the metrics in `pairwise.PAIRWISE_KERNEL_FUNCTIONS`" which are defined at `sklearn.metrics.pairwise.kernel_metrics` and contains other metrics than above ('chi2' for instance). Anyway, if I must not use `_pairwise_callable` with pairwise metrics from within `sklearn` itself, then It should be said in the documentation.
+
+What do you think?
+
+#### Steps/Code to Reproduce
+
+Example:
+```python
+import numpy as np
+from sklearn.metrics.pairwise import rbf_kernel
+
+subsample = np.random.rand(8, 10)
+nys = Nystroem(kernel=rbf_kernel, gamma=1., n_components=subsample.shape[0])
+nys.fit(subsample)
+```
+
+#### Versions
+```
+Linux-4.13.0-37-generic-x86_64-with-debian-stretch-sid
+Python 3.5.4 |Anaconda, Inc.| (default, Nov 20 2017, 18:44:38) 
+[GCC 7.2.0]
+NumPy 1.14.2
+SciPy 1.0.0
+Scikit-Learn 0.19.1
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sklearn/metrics/pairwise.py b/sklearn/metrics/pairwise.py
+index b25c428da9e43..bb499192fd373 100644
+--- a/sklearn/metrics/pairwise.py
++++ b/sklearn/metrics/pairwise.py
+@@ -1678,8 +1678,11 @@ def pairwise_kernels(X, Y=None, metric="linear", filter_params=False,
+         If metric is "precomputed", X is assumed to be a kernel matrix.
+         Alternatively, if metric is a callable function, it is called on each
+         pair of instances (rows) and the resulting value recorded. The callable
+-        should take two arrays from X as input and return a value indicating
+-        the distance between them.
++        should take two rows from X as input and return a value indicating
++        the distance between them. This means that callables from
++        ``sklearn.metrics.pairwise`` are not allowed, as they operate on
++        matrices, not single samples. Use the string identifying this metric
++        instead.
+ 
+     filter_params : boolean
+         Whether to filter invalid parameters or not.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

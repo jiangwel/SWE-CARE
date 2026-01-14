@@ -1,0 +1,167 @@
+  Task-ID: python__mypy-18018@aebeb8f
+  Please checkout to this commit first: 06a566b81993a711470aa9e80b9d86d1e666b029
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  mypy incorrectly marks a @staticmethod definition of an attribute A to be incompatible with A's signature in a parent class.
+**Bug Report**
+When a class **C** defines an attribute **a** to be a union type with `Callable` as one of its types (`a: Callable | ...`), **mypy** incorrectly marks a `@staticmethod` definition of **a** in a child class that inherits from **C** to be incompatible with **a**'s signature in **C**.
+
+Worth noting that the following code produces no errors:
+```python
+from typing import Callable
+
+
+class Parent:
+    foo: Callable[[str], str]
+
+class Child2(Parent):
+    @staticmethod
+    def foo(x: str) -> str:
+        return x.lower()
+```
+
+but the following code does
+
+```python
+from typing import Callable
+
+
+class Parent:
+    foo: Callable[[str], str] | str 
+
+
+class Child1(Parent):
+    foo = "bar"  # OK
+
+
+class Child2(Parent):
+    @staticmethod
+    def foo(x: str) -> str:  # Signature of "foo" incompatible with supertype "Parent"
+        return x.lower()
+```
+
+**Expected Behavior**
+No errors.
+
+
+
+**Actual Behavior**
+```shell
+example.py: note: In class "Child2":
+example.py:14: error: Signature of "foo" incompatible with supertype "Parent"  [override]
+Found 1 error in 1 file (checked 1 source file)
+```
+**Environment**
+
+<!-- Include as many relevant details about the environment you experienced the bug in -->
+
+- Mypy version used: `0.941`
+- Mypy command-line flags: `--strict`, `--show-error-codes`,  `--show-error-context`
+- Mypy configuration options from `mypy.ini` (and other config files):
+- Python version used: `3.10.3`
+- Operating system and version: MacOS 12.3
+  </issue>
+  
+  <patch>
+  diff --git a/mypy/checker.py b/mypy/checker.py
+index 4b3d6c3298b4..99d212dc1d57 100644
+--- a/mypy/checker.py
++++ b/mypy/checker.py
+@@ -2154,6 +2154,11 @@ def check_method_override_for_base_with_name(
+                     override_class_or_static,
+                     context,
+                 )
++            elif isinstance(original_type, UnionType) and any(
++                is_subtype(orig_typ, typ, ignore_pos_arg_names=True)
++                for orig_typ in original_type.items
++            ):
++                pass
+             elif is_equivalent(original_type, typ):
+                 # Assume invariance for a non-callable attribute here. Note
+                 # that this doesn't affect read-only properties which can have
+diff --git a/test-data/unit/check-classes.test b/test-data/unit/check-classes.test
+index 82208d27df41..86974acffeac 100644
+--- a/test-data/unit/check-classes.test
++++ b/test-data/unit/check-classes.test
+@@ -147,6 +147,47 @@ class Base:
+ class Derived(Base):
+     __hash__ = 1  # E: Incompatible types in assignment (expression has type "int", base class "Base" defined the type as "Callable[[Base], int]")
+ 
++[case testOverrideCallableAttributeWithMethod]
++from typing import Callable
++
++class Base:
++    func1: Callable[[str], str]
++    func2: Callable[[str], str]
++    func3: Callable[[str], str]
++
++class Derived(Base):
++    def func1(self, x: str) -> str:
++        pass
++
++    @classmethod
++    def func2(cls, x: str) -> str:
++        pass
++
++    @staticmethod
++    def func3(x: str) -> str:
++        pass
++[builtins fixtures/classmethod.pyi]
++
++[case testOverrideCallableUnionAttributeWithMethod]
++from typing import Callable, Union
++
++class Base:
++    func1: Union[Callable[[str], str], str]
++    func2: Union[Callable[[str], str], str]
++    func3: Union[Callable[[str], str], str]
++
++class Derived(Base):
++    def func1(self, x: str) -> str:
++        pass
++
++    @classmethod
++    def func2(cls, x: str) -> str:
++        pass
++
++    @staticmethod
++    def func3(x: str) -> str:
++        pass
++[builtins fixtures/classmethod.pyi]
+ 
+ [case testOverridePartialAttributeWithMethod]
+ # This was crashing: https://github.com/python/mypy/issues/11686.
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

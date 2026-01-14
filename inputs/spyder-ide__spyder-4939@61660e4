@@ -1,0 +1,162 @@
+  Task-ID: spyder-ide__spyder-4939@61660e4
+  Please checkout to this commit first: 65ac43613afef5c42b10b537e1f7861081a112c2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  File explorer enhancements
+# Description
+
+I have some suggestions on how to enhance the spyder file explorer panel:
+
+At the moment if a file-type/content is supported by the spyder editor, it has an context action "Edit", otherwise it has the somewhat ubiquitous entry "Open" which delegates to the OS. This also results in folders having an "Open" command that opens the OS file explorer at that position.
+
+I came up with these ideas, after trying to delete multiple files at once from within spyder. Which apparently is not possible because a) there is no multiselection+delete b) I could not easily switch to the OS file explorer and delete them there.
+# Todo
+
+I would propose
+- [ ] an dedicated context menu entry for "open in OS file explorer" common to both files and folders.
+- [ ] a "open via OS" action, i.e. allow the OS to determine what program to use to open the file.
+- [ ] remove "Open" on folders ~~(or change its function to actually opening it in the spyder file 
+  explorer, i.e. same as double-click action)~~
+- [ ] Add multiselection (i.e. Ctrl/Shift+Click) and enable the (appropriate?) context menu actions to work on that selection. 
+- [ ] remove "global" options from context menu. Move them to panel options menu instead.
+  </issue>
+  
+  <patch>
+  diff --git a/spyder/widgets/explorer.py b/spyder/widgets/explorer.py
+index 752f6cccca1..065b888d15a 100644
+--- a/spyder/widgets/explorer.py
++++ b/spyder/widgets/explorer.py
+@@ -45,15 +45,15 @@
+ except:
+     nbexporter = None    # analysis:ignore
+ 
++
+ def open_file_in_external_explorer(filename):
+     if sys.platform == "darwin":
+         subprocess.call(["open", "-R", filename])
++    if os.name == 'nt':
++        subprocess.call(["explorer", "/select,", filename])
+     else:
+         filename=os.path.dirname(filename)
+-        if os.name == 'nt':
+-            os.startfile(filename)
+-        else:
+-            subprocess.call(["xdg-open", filename])
++        subprocess.call(["xdg-open", filename])
+ 
+ def show_in_external_file_explorer(fnames=None):
+     """Show files in external file explorer
+@@ -180,6 +180,7 @@ def __init__(self, parent=None):
+         self.fsmodel = None
+         self.setup_fs_model()
+         self._scrollbar_positions = None
++        self.setSelectionMode(self.ExtendedSelection)
+                 
+     #---- Model
+     def setup_fs_model(self):
+@@ -231,7 +232,8 @@ def get_index(self, filename):
+     def get_selected_filenames(self):
+         """Return selected filenames"""
+         if self.selectionMode() == self.ExtendedSelection:
+-            return [self.get_filename(idx) for idx in self.selectedIndexes()]
++            return [self.get_filename(idx) for idx in 
++                    self.selectionModel().selectedRows()]
+         else:
+             return [self.get_filename(self.currentIndex())]
+             
+@@ -343,7 +345,8 @@ def create_file_manage_actions(self, fnames):
+         rename_action = create_action(self, _("Rename..."),
+                                       icon=ima.icon('rename'),
+                                       triggered=self.rename)
+-        open_action = create_action(self, _("Open"), triggered=self.open)
++        open_external_action = create_action(self, _("Open With OS"), 
++                                             triggered=self.open_external)
+         ipynb_convert_action = create_action(self, _("Convert to Python script"),
+                                              icon=ima.icon('python'),
+                                              triggered=self.convert_notebooks)
+@@ -353,20 +356,22 @@ def create_file_manage_actions(self, fnames):
+             actions.append(run_action)
+         if only_valid and only_files:
+             actions.append(edit_action)
+-        else:
+-            actions.append(open_action)
++        
+         if sys.platform == 'darwin':
+             text=_("Show in Finder")
+         else:
+-            text=_("Show in external file explorer")
++            text=_("Show in Folder")
+         external_fileexp_action = create_action(self, text, 
+                                 triggered=self.show_in_external_file_explorer)        
+-        actions.append(external_fileexp_action)
+         actions += [delete_action, rename_action]
+         basedir = fixpath(osp.dirname(fnames[0]))
+         if all([fixpath(osp.dirname(_fn)) == basedir for _fn in fnames]):
+             actions.append(move_action)
+         actions += [None]
++        if only_files:
++            actions.append(open_external_action)
++        actions.append(external_fileexp_action)
++        actions.append([None])
+         if only_notebooks and nbexporter is not None:
+             actions.append(ipynb_convert_action)
+ 
+@@ -437,9 +442,6 @@ def create_context_menu_actions(self):
+             actions.append(None)
+         if fnames and all([osp.isdir(_fn) for _fn in fnames]):
+             actions += self.create_folder_manage_actions(fnames)
+-        if actions:
+-            actions.append(None)
+-        actions += self.common_actions
+         return actions
+ 
+     def update_menu(self):
+@@ -533,6 +535,14 @@ def open(self, fnames=None):
+                 self.parent_widget.sig_open_file.emit(fname)
+             else:
+                 self.open_outside_spyder([fname])
++                
++    @Slot()
++    def open_external(self, fnames=None):
++        """Open files with default application"""
++        if fnames is None:
++            fnames = self.get_selected_filenames()
++        for fname in fnames:
++            self.open_outside_spyder([fname])
+         
+     def open_outside_spyder(self, fnames):
+         """Open file outside Spyder with the appropriate application
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

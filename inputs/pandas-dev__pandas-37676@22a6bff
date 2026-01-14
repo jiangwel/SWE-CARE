@@ -1,0 +1,134 @@
+  Task-ID: pandas-dev__pandas-37676@22a6bff
+  Please checkout to this commit first: f34fe6244e941c8701f9c0d243277ff075c58f05
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: setitem with boolean mask and series as value is broken for Series with EA type
+Consider the following example (on master, 0.25.0dev) where the value being assigned to `s[boolean_mask] = value` is a Series itself (of the correct length + matching index):
+
+```
+In [1]: df = pd.DataFrame({'a': [0, 0, np.nan, np.nan], 'b': pd.array(range(4), dtype='Int64')})
+
+In [2]: s = df['b'].copy()
+
+In [3]: s[df['a'].isna()] = df.loc[df['a'].isna(), 'b']         
+---------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+<ipython-input-3-04e8761e7ad9> in <module>
+----> 1 s[df['a'].isna()] = df.loc[df['a'].isna(), 'b']
+
+~/scipy/pandas/pandas/core/series.py in __setitem__(self, key, value)
+   1055         # do the setitem
+   1056         cacher_needs_updating = self._check_is_chained_assignment_possible()
+-> 1057         setitem(key, value)
+   1058         if cacher_needs_updating:
+   1059             self._maybe_update_cacher()
+
+~/scipy/pandas/pandas/core/series.py in setitem(key, value)
+   1046                 key = check_bool_indexer(self.index, key)
+   1047                 try:
+-> 1048                     self._where(~key, value, inplace=True)
+   1049                     return
+   1050                 except InvalidIndexError:
+
+~/scipy/pandas/pandas/core/generic.py in _where(self, cond, other, inplace, axis, level, errors, try_cast)
+   8819             new_data = self._data.putmask(mask=cond, new=other, align=align,
+   8820                                           inplace=True, axis=block_axis,
+-> 8821                                           transpose=self._AXIS_REVERSED)
+   8822             self._update_inplace(new_data)
+   8823 
+
+~/scipy/pandas/pandas/core/internals/managers.py in putmask(self, **kwargs)
+    511 
+    512     def putmask(self, **kwargs):
+--> 513         return self.apply('putmask', **kwargs)
+    514 
+    515     def diff(self, **kwargs):
+
+~/scipy/pandas/pandas/core/internals/managers.py in apply(self, f, axes, filter, do_integrity_check, consolidate, **kwargs)
+    393                                             copy=align_copy)
+    394 
+--> 395             applied = getattr(b, f)(**kwargs)
+    396             result_blocks = _extend_blocks(applied, result_blocks)
+    397 
+
+~/scipy/pandas/pandas/core/internals/blocks.py in putmask(self, mask, new, align, inplace, axis, transpose)
+   1593         mask = _safe_reshape(mask, new_values.shape)
+   1594 
+-> 1595         new_values[mask] = new
+   1596         new_values = self._try_coerce_result(new_values)
+   1597         return [self.make_block(values=new_values)]
+
+~/scipy/pandas/pandas/core/arrays/integer.py in __setitem__(self, key, value)
+    399             mask = mask[0]
+    400 
+--> 401         self._data[key] = value
+    402         self._mask[key] = mask
+    403 
+
+ValueError: NumPy boolean array indexing assignment cannot assign 4 input values to the 2 output values where the mask is true
+```
+
+The reason this fails is because under the hood, the assigned value is aligned with the Series, turning it into a 4-len series, and then trying to assign this to an array with a boolean mask for 2 values.
+  </issue>
+  
+  <patch>
+  diff --git a/pandas/tests/series/indexing/test_setitem.py b/pandas/tests/series/indexing/test_setitem.py
+index 7e25e5200d610..1dbfedcb7a2b9 100644
+--- a/pandas/tests/series/indexing/test_setitem.py
++++ b/pandas/tests/series/indexing/test_setitem.py
+@@ -9,6 +9,7 @@
+     NaT,
+     Series,
+     Timestamp,
++    array,
+     date_range,
+     period_range,
+ )
+@@ -126,6 +127,13 @@ def test_setitem_boolean_different_order(self, string_series):
+ 
+         tm.assert_series_equal(copy, expected)
+ 
++    def test_setitem_boolean_ea_type(self):
++        # GH: 26468
++        s = Series(array([5, 6, 7, 8], dtype="Int64"))
++        s[s > 6] = Series(range(4), dtype="Int64")
++        expected = Series([5, 6, 2, 3], dtype="Int64")
++        tm.assert_series_equal(s, expected)
++
+ 
+ class TestSetitemViewCopySemantics:
+     def test_setitem_invalidates_datetime_index_freq(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

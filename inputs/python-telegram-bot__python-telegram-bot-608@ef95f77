@@ -1,0 +1,170 @@
+  Task-ID: python-telegram-bot__python-telegram-bot-608@ef95f77
+  Please checkout to this commit first: 9a2d5e041089a0525895b9aa6ce09f8f9e57b3e8
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  add ability to handle only edited messages updates
+Actually if you want to develop a bot where when a user edits his message it replies "you edited this message" or a bot that in groups kicks users that edit their messages (let's imagine a strange rule), there is not a handler to handle only edited messages.
+
+messagehandler just handles any messages and not only those edited. So a handler or a filter to handle only edited messages is needed. Thanks
+  </issue>
+  
+  <patch>
+  diff --git a/telegram/ext/messagehandler.py b/telegram/ext/messagehandler.py
+index f19778da4b7..944d3e16c07 100644
+--- a/telegram/ext/messagehandler.py
++++ b/telegram/ext/messagehandler.py
+@@ -37,8 +37,6 @@ class MessageHandler(Handler):
+         callback (function): A function that takes ``bot, update`` as
+             positional arguments. It will be called when the ``check_update``
+             has determined that an update should be processed by this handler.
+-        allow_edited (Optional[bool]): If the handler should also accept edited messages.
+-            Default is ``False``
+         pass_update_queue (optional[bool]): If the handler should be passed the
+             update queue as a keyword argument called ``update_queue``. It can
+             be used to insert updates. Default is ``False``
+@@ -52,8 +50,12 @@ class MessageHandler(Handler):
+             For each update in the same chat, it will be the same ``dict``. Default is ``False``.
+         message_updates (Optional[bool]): Should "normal" message updates be handled? Default is
+             ``True``.
++        allow_edited (Optional[bool]): If the handler should also accept edited messages.
++            Default is ``False`` - Deprecated. use edited updates instead.
+         channel_post_updates (Optional[bool]): Should channel posts updates be handled? Default is
+             ``True``.
++        edited_updates (Optional[bool]): Should "edited" message updates be handled? Default is
++            ``False``.
+ 
+     """
+ 
+@@ -66,9 +68,13 @@ def __init__(self,
+                  pass_user_data=False,
+                  pass_chat_data=False,
+                  message_updates=True,
+-                 channel_post_updates=True):
+-        if not message_updates and not channel_post_updates:
+-            raise ValueError('Both message_updates & channel_post_updates are False')
++                 channel_post_updates=True,
++                 edited_updates=False):
++        if not message_updates and not channel_post_updates and not edited_updates:
++            raise ValueError(
++                'message_updates, channel_post_updates and edited_updates are all False')
++        if allow_edited:
++            warnings.warn('allow_edited is getting deprecated, please use edited_updates instead')
+ 
+         super(MessageHandler, self).__init__(
+             callback,
+@@ -80,6 +86,7 @@ def __init__(self,
+         self.allow_edited = allow_edited
+         self.message_updates = message_updates
+         self.channel_post_updates = channel_post_updates
++        self.edited_updates = edited_updates
+ 
+         # We put this up here instead of with the rest of checking code
+         # in check_update since we don't wanna spam a ton
+@@ -88,17 +95,14 @@ def __init__(self,
+                           'deprecated, please use bitwise operators (& and |) '
+                           'instead. More info: https://git.io/vPTbc.')
+ 
+-    def _is_allowed_message(self, update):
+-        return (self.message_updates
+-                and (update.message or (update.edited_message and self.allow_edited)))
+-
+-    def _is_allowed_channel_post(self, update):
+-        return (self.channel_post_updates
+-                and (update.channel_post or (update.edited_channel_post and self.allow_edited)))
++    def _is_allowed_update(self, update):
++        return any([(self.message_updates and update.message),
++                    (self.allow_edited and update.edited_message),
++                    (self.edited_updates and update.edited_message),
++                    (self.channel_post_updates and update.channel_post)])
+ 
+     def check_update(self, update):
+-        if (isinstance(update, Update)
+-                and (self._is_allowed_message(update) or self._is_allowed_channel_post(update))):
++        if isinstance(update, Update) and self._is_allowed_update(update):
+ 
+             if not self.filters:
+                 res = True
+diff --git a/tests/test_updater.py b/tests/test_updater.py
+index 25e2eb06229..3939b0250f6 100644
+--- a/tests/test_updater.py
++++ b/tests/test_updater.py
+@@ -108,7 +108,7 @@ def telegramHandlerTest(self, bot, update):
+         self.message_count += 1
+ 
+     def telegramHandlerEditedTest(self, bot, update):
+-        self.received_message = update.edited_message.text
++        self.received_message = update.effective_message.text
+         self.message_count += 1
+ 
+     def telegramInlineHandlerTest(self, bot, update):
+@@ -188,22 +188,31 @@ def test_editedMessageHandler(self):
+         self._setup_updater('Test', edited=True)
+         d = self.updater.dispatcher
+         from telegram.ext import Filters
+-        handler = MessageHandler(Filters.text, self.telegramHandlerEditedTest, allow_edited=True)
++        handler = MessageHandler(Filters.text, self.telegramHandlerEditedTest, edited_updates=True)
+         d.add_handler(handler)
+         self.updater.start_polling(0.01)
+         sleep(.1)
+         self.assertEqual(self.received_message, 'Test')
+ 
+-        # Remove handler
++        self.reset()
+         d.remove_handler(handler)
+-        handler = MessageHandler(Filters.text, self.telegramHandlerEditedTest, allow_edited=False)
++        handler = MessageHandler(
++            Filters.text,
++            self.telegramHandlerEditedTest,
++            edited_updates=False,
++            message_updates=False)
+         d.add_handler(handler)
+-        self.reset()
+-
+         self.updater.bot.send_messages = 1
+         sleep(.1)
+         self.assertTrue(None is self.received_message)
+ 
++        handler = MessageHandler(Filters.text, self.telegramHandlerEditedTest, allow_edited=True)
++        d.add_handler(handler)
++        self.reset()
++        self.updater.bot.send_messages = 1
++        sleep(.1)
++        self.assertEqual(self.received_message, 'Test')
++
+     def test_addTelegramMessageHandlerMultipleMessages(self):
+         self._setup_updater('Multiple', 100)
+         self.updater.dispatcher.add_handler(MessageHandler(Filters.all, self.telegramHandlerTest))
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

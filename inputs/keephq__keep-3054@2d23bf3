@@ -1,0 +1,821 @@
+  Task-ID: keephq__keep-3054@2d23bf3
+  Please checkout to this commit first: 4fd693764357c3afb00818317d9344e932414a1c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [➕ Feature]: add more e2e tests
+**Is your feature request related to a problem? Please describe.**
+A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+
+**Describe the solution you'd like**
+A clear and concise description of what you want to happen.
+
+**Describe alternatives you've considered**
+A clear and concise description of any alternative solutions or features you've considered.
+
+**Additional context**
+Add any other context or screenshots about the feature request here.
+  </issue>
+  
+  <patch>
+  diff --git a/.github/workflows/test-pr-e2e.yml b/.github/workflows/test-pr-e2e.yml
+index 2a8dfb696c..917e953a7e 100644
+--- a/.github/workflows/test-pr-e2e.yml
++++ b/.github/workflows/test-pr-e2e.yml
+@@ -92,17 +92,34 @@ jobs:
+       - name: Wait for database to be ready
+         run: |
+           # Add commands to wait for the database to be ready
++          echo "Waiting for Database to be ready..."
+           if [ "${{ matrix.db_type }}" == "mysql" ]; then
+-            until docker exec $(docker ps -qf "name=keep-database") mysqladmin ping -h "localhost" --silent; do
++            until docker exec $(docker ps -qf "name=keep-database-1") mysqladmin ping -h "localhost" --silent; do
+               echo "Waiting for MySQL to be ready..."
+               sleep 2
+             done
+           elif [ "${{ matrix.db_type }}" == "postgres" ]; then
+-            until docker exec $(docker ps -qf "name=keep-database") pg_isready -h localhost -U keepuser; do
++            until docker exec $(docker ps -qf "name=keep-database-1") pg_isready -h localhost -U keepuser; do
+               echo "Waiting for Postgres to be ready..."
+               sleep 2
+             done
+           fi
++          echo "Database is ready!"
++          
++          echo "Waiting for Database (DB AUTH) to be ready..."
++          if [ "${{ matrix.db_type }}" == "mysql" ]; then
++            until docker exec $(docker ps -qf "name=keep-database-db-auth-1") mysqladmin ping -h "localhost" --silent; do
++              echo "Waiting for MySQL (DB AUTH) to be ready..."
++              sleep 2
++            done
++          elif [ "${{ matrix.db_type }}" == "postgres" ]; then
++            until docker exec $(docker ps -qf "name=keep-database-db-auth-1") pg_isready -h localhost -U keepuser; do
++              echo "Waiting for Postgres (DB AUTH) to be ready..."
++              sleep 2
++            done
++          fi      
++          echo "Database (DB AUTH) is ready!"
++          
+ 
+           # wait to keep backend on port 8080
+           echo "Waiting for Keep backend to be ready..."
+@@ -118,9 +135,27 @@ jobs:
+             attempt=$((attempt+1))
+             sleep 2
+           done
+-
+           echo "Keep backend is ready!"
++          
++          attempt2=0
++          max_attempts2=10
++          echo "Hello world: $(attempt2)"
++          echo "MAX_ATTEMPTS: $(max_attempts2)"
++          echo $(curl http://localhost:8081/healthcheck)
++          echo "Waiting for Keep backend (DB AUTH) to be ready..."
++          until $(curl --output /dev/null --silent --fail http://localhost:8081/healthcheck); do
++            if [ "$attempt2" -ge "$max_attempts2" ]; then
++              echo "Max attempts reached, exiting... Sometimes Keep can't start because of double-headed migrations, use: 'alembic -c keep/alembic.ini history' to investigate, or check artifacts."
++              exit 1
++            fi
++            echo "Waiting for Keep backend (DB AUTH) to be ready... (Attempt: $((attempt+1)))"
++            attempt2=$((attempt2+1))
++            sleep 2
++          done
++          echo "Keep backend (DB AUTH) is ready!"
+           # wait to the backend
++          
++          
+           echo "Waiting for Keep frontend to be ready..."
+           attempt=0
+           max_attempts=10
+@@ -134,6 +169,36 @@ jobs:
+             attempt=$((attempt+1))
+             sleep 2
+           done
++          echo "Keep frontend is ready"
++          
++          echo "Waiting for Keep frontend (DB AUTH) to be ready..."
++          attempt=0
++          max_attempts=10
++          until $(curl --output /dev/null --silent --fail http://localhost:3001/); do
++            if [ "$attempt" -ge "$max_attempts" ]; then
++              echo "Max attempts reached, exiting..."
++              exit 1
++            fi
++            echo "Waiting for Keep frontend (DB AUTH) to be ready... (Attempt: $((attempt+1)))"
++            attempt=$((attempt+1))
++            sleep 2
++          done
++          echo "Keep frontend (DB AUTH) is ready"
++          
++          
++          echo "Waiting for Grafana to be ready..."
++          attempt=0
++          max_attempts=10
++          until $(curl --output /dev/null --silent --fail http://localhost:3002/api/health); do
++            if [ "$attempt" -ge "$max_attempts" ]; then
++              echo "Max attempts reached, exiting... "
++              exit 1
++            fi
++            echo "Waiting for Grafana to be ready... (Attempt: $((attempt+1)))"
++            attempt=$((attempt+1))
++            sleep 2
++          done
++          echo "Grafana is ready..."
+ 
+           # create the state directory
+           # mkdir -p ./state && chown -R root:root ./state && chmod -R 777 ./state
+@@ -157,6 +222,8 @@ jobs:
+         run: |
+           docker compose --project-directory . -f tests/e2e_tests/docker-compose-e2e-${{ matrix.db_type }}.yml logs keep-backend > backend_logs-${{ matrix.db_type }}.txt
+           docker compose --project-directory . -f tests/e2e_tests/docker-compose-e2e-${{ matrix.db_type }}.yml logs keep-frontend > frontend_logs-${{ matrix.db_type }}.txt
++          docker compose --project-directory . -f tests/e2e_tests/docker-compose-e2e-${{ matrix.db_type }}.yml logs keep-backend-db-auth > backend_logs-${{ matrix.db_type }}-db-auth.txt
++          docker compose --project-directory . -f tests/e2e_tests/docker-compose-e2e-${{ matrix.db_type }}.yml logs keep-frontend-db-auth > frontend_logs-${{ matrix.db_type }}-db-auth.txt
+         continue-on-error: true
+ 
+       - name: Upload test artifacts on failure
+@@ -169,6 +236,8 @@ jobs:
+             playwright_dump_*.png
+             backend_logs-${{ matrix.db_type }}.txt
+             frontend_logs-${{ matrix.db_type }}.txt
++            backend_logs-${{ matrix.db_type }}-db-auth.txt
++            frontend_logs-${{ matrix.db_type }}-db-auth.txt
+         continue-on-error: true
+ 
+       - name: Tear down environment
+diff --git a/tests/e2e_tests/docker-compose-e2e-mysql.yml b/tests/e2e_tests/docker-compose-e2e-mysql.yml
+index 52d7fc1014..bdefca7c38 100644
+--- a/tests/e2e_tests/docker-compose-e2e-mysql.yml
++++ b/tests/e2e_tests/docker-compose-e2e-mysql.yml
+@@ -1,4 +1,6 @@
+ services:
++  ## Keep Services with NO_AUTH
++  # Database Service
+   keep-database:
+     image: mysql:latest
+     environment:
+@@ -14,6 +16,7 @@ services:
+       timeout: 5s
+       retries: 5
+ 
++  # Frontend Services
+   keep-frontend:
+     extends:
+       file: docker-compose.common.yml
+@@ -28,6 +31,7 @@ services:
+       - FRIGADE_DISABLED=true
+       - SENTRY_DISABLED=true
+ 
++  # Backend Services
+   keep-backend:
+     extends:
+       file: docker-compose.common.yml
+@@ -46,6 +50,81 @@ services:
+       keep-database:
+         condition: service_healthy
+ 
++
++  ## Keep Services with DB
++  # Database Service (5433)
++  keep-database-db-auth:
++    image: mysql:latest
++    environment:
++      - MYSQL_ROOT_PASSWORD=keep
++      - MYSQL_DATABASE=keep
++    volumes:
++      - mysql-data:/var/lib/mysql-auth-db
++    ports:
++      - "3307:3306"
++    healthcheck:
++      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++
++  # Frontend Services (3001)
++  keep-frontend-db-auth:
++    build:
++      context: ./keep-ui/
++      dockerfile: ../docker/Dockerfile.ui
++    ports:
++      - "3001:3000"
++    environment:
++      - NEXTAUTH_SECRET=secret
++      - NEXTAUTH_URL=http://localhost:3001
++      - NEXT_PUBLIC_API_URL=http://localhost:8081
++      - POSTHOG_KEY=phc_muk9qE3TfZsX3SZ9XxX52kCGJBclrjhkP9JxAQcm1PZ
++      - POSTHOG_HOST=https://ingest.keephq.dev
++      - NEXT_PUBLIC_SENTRY_DSN=https://0d4d59e3105ffe8afa27dcb95a222009@o4505515398922240.ingest.us.sentry.io/4508258058764288
++      - PUSHER_HOST=localhost
++      - PUSHER_PORT=6001
++      - PUSHER_APP_KEY=keepappkey
++      - NEXT_PUBLIC_KEEP_VERSION=0.2.9
++      - AUTH_TYPE=DB
++      - API_URL=http://keep-backend-db-auth:8080
++      - POSTHOG_DISABLED=true
++      - FRIGADE_DISABLED=true
++      - SENTRY_DISABLED=true
++
++  # Backend Services (8081)
++  keep-backend-db-auth:
++    build:
++      context: .
++      dockerfile: docker/Dockerfile.api
++    ports:
++      - "8081:8080"
++    environment:
++      - PORT=8080
++      - SECRET_MANAGER_TYPE=FILE
++      - SECRET_MANAGER_DIRECTORY=/state
++      - OPENAI_API_KEY=$OPENAI_API_KEY
++      - PUSHER_APP_ID=1
++      - PUSHER_APP_KEY=keepappkey
++      - PUSHER_APP_SECRET=keepappsecret
++      - PUSHER_HOST=keep-websocket-server
++      - PUSHER_PORT=6001
++      - USE_NGROK=false
++      - AUTH_TYPE=DB
++      - DATABASE_CONNECTION_STRING=mysql+pymysql://root:keep@keep-database-db-auth:3306/keep
++      - POSTHOG_DISABLED=true
++      - FRIGADE_DISABLED=true
++      - SECRET_MANAGER_DIRECTORY=/app
++      - SQLALCHEMY_WARN_20=1
++      - KEEP_JWT_SECRET=verysecretkey
++      - KEEP_DEFAULT_USERNAME=keep
++      - KEEP_DEFAULT_PASSWORD=keep
++    depends_on:
++      keep-database-db-auth:
++        condition: service_healthy
++
++
++  # Other Services (Common)
+   keep-websocket-server:
+     extends:
+       file: docker-compose.common.yml
+@@ -59,5 +138,20 @@ services:
+     ports:
+       - "9090:9090"
+ 
++  grafana:
++    image: grafana/grafana-enterprise:10.4.0
++    user: "472" # Grafana's default user ID
++    ports:
++      - "3002:3000"
++    volumes:
++      - ./keep/providers/grafana_provider/grafana/provisioning:/etc/grafana/provisioning:ro
++      - ./keep/providers/grafana_provider/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
++      - grafana-storage:/var/lib/grafana
++    environment:
++      - GF_SECURITY_ADMIN_PASSWORD=admin
++    depends_on:
++      - prometheus-server-for-test-target
++
+ volumes:
+   mysql-data:
++  grafana-storage: {}
+diff --git a/tests/e2e_tests/docker-compose-e2e-postgres.yml b/tests/e2e_tests/docker-compose-e2e-postgres.yml
+index cd07a9e023..e52e838380 100644
+--- a/tests/e2e_tests/docker-compose-e2e-postgres.yml
++++ b/tests/e2e_tests/docker-compose-e2e-postgres.yml
+@@ -1,4 +1,6 @@
+ services:
++  ## Keep Services with NO_AUTH
++  # Database Service
+   keep-database:
+     image: postgres:13
+     environment:
+@@ -12,6 +14,7 @@ services:
+       - ./postgres-custom.conf:/etc/postgresql/conf.d/custom.conf
+       - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+ 
++  # Frontend Services
+   keep-frontend:
+     extends:
+       file: docker-compose.common.yml
+@@ -26,6 +29,7 @@ services:
+       - FRIGADE_DISABLED=true
+       - SENTRY_DISABLED=true
+ 
++  # Backend Services
+   keep-backend:
+     extends:
+       file: docker-compose.common.yml
+@@ -43,6 +47,73 @@ services:
+     depends_on:
+       - keep-database
+ 
++
++  ## Keep Services with DB
++  # Database Service (5433)
++  keep-database-db-auth:
++    image: postgres:13
++    environment:
++      POSTGRES_USER: keepuser
++      POSTGRES_PASSWORD: keeppassword
++      POSTGRES_DB: keepdb
++    ports:
++      - "5433:5432"
++    volumes:
++      - postgres-data:/var/lib/postgresql-auth-db/data
++      - ./postgres-custom.conf:/etc/postgresql-auth-db/conf.d/custom.conf
++      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
++
++  # Frontend Services (3001)
++  keep-frontend-db-auth:
++    build:
++      context: ./keep-ui/
++      dockerfile: ../docker/Dockerfile.ui
++    ports:
++      - "3001:3000"
++    environment:
++      - NEXTAUTH_SECRET=secret
++      - NEXTAUTH_URL=http://localhost:3001
++      - NEXT_PUBLIC_API_URL=http://localhost:8081
++      - POSTHOG_KEY=phc_muk9qE3TfZsX3SZ9XxX52kCGJBclrjhkP9JxAQcm1PZ
++      - POSTHOG_HOST=https://ingest.keephq.dev
++      - AUTH_TYPE=DB
++      - API_URL=http://keep-backend-db-auth:8080
++      - POSTHOG_DISABLED=true
++      - FRIGADE_DISABLED=true
++      - SENTRY_DISABLED=true
++
++  # Backend Services (8081)
++  keep-backend-db-auth:
++    build:
++      context: .
++      dockerfile: docker/Dockerfile.api
++    ports:
++      - "8081:8080"
++    environment:
++      - PORT=8080
++      - SECRET_MANAGER_TYPE=FILE
++      - SECRET_MANAGER_DIRECTORY=/state
++      - OPENAI_API_KEY=$OPENAI_API_KEY
++      - PUSHER_APP_ID=1
++      - PUSHER_APP_KEY=keepappkey
++      - PUSHER_APP_SECRET=keepappsecret
++      - PUSHER_HOST=keep-websocket-server
++      - PUSHER_PORT=6001
++      - USE_NGROK=false
++      - AUTH_TYPE=DB
++      - DATABASE_CONNECTION_STRING=postgresql+psycopg2://keepuser:keeppassword@keep-database-db-auth:5432/keepdb
++      - POSTHOG_DISABLED=true
++      - FRIGADE_DISABLED=true
++      - SECRET_MANAGER_DIRECTORY=/app
++      - SQLALCHEMY_WARN_20=1
++      - KEEP_JWT_SECRET=verysecretkey
++      - KEEP_DEFAULT_USERNAME=keep
++      - KEEP_DEFAULT_PASSWORD=keep
++    depends_on:
++      - keep-database-db-auth
++
++
++  # Other Services (Common)
+   keep-websocket-server:
+     extends:
+       file: docker-compose.common.yml
+@@ -56,5 +127,20 @@ services:
+     ports:
+       - "9090:9090"
+ 
++  grafana:
++    image: grafana/grafana-enterprise:10.4.0
++    user: "472" # Grafana's default user ID
++    ports:
++      - "3002:3000"
++    volumes:
++      - ./keep/providers/grafana_provider/grafana/provisioning:/etc/grafana/provisioning:ro
++      - ./keep/providers/grafana_provider/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
++      - grafana-storage:/var/lib/grafana
++    environment:
++      - GF_SECURITY_ADMIN_PASSWORD=admin
++    depends_on:
++      - prometheus-server-for-test-target
++
+ volumes:
+   postgres-data:
++  grafana-storage: {}
+diff --git a/tests/e2e_tests/test_end_to_end.py b/tests/e2e_tests/test_end_to_end.py
+index 34530172fa..ea64a72d19 100644
+--- a/tests/e2e_tests/test_end_to_end.py
++++ b/tests/e2e_tests/test_end_to_end.py
+@@ -24,6 +24,7 @@
+ 
+ import os
+ import random
++
+ # Adding a new test:
+ # 1. Manually:
+ #    - Create a new test function.
+@@ -36,6 +37,8 @@
+ import sys
+ import re
+ from datetime import datetime
++import requests
++from tests.e2e_tests.utils import trigger_alert
+ 
+ from playwright.sync_api import expect
+ 
+@@ -130,6 +133,7 @@ def test_insert_new_alert(browser):  # browser is actually a page object
+         save_failure_artifacts(browser, log_entries)
+         raise
+ 
++
+ def test_providers_page_is_accessible(browser):
+     """
+     Test to check if the providers page is accessible
+@@ -191,7 +195,7 @@ def test_provider_validation(browser):
+         expect(error_msg).to_have_count(1)
+         host_input.fill("http://localhost")
+         expect(error_msg).to_be_hidden()
+-        host_input.fill( "https://keep.kb.us-central1.gcp.cloud.es.io")
++        host_input.fill("https://keep.kb.us-central1.gcp.cloud.es.io")
+         expect(error_msg).to_be_hidden()
+         # test `port` field validation
+         port_input = browser.get_by_placeholder("Enter kibana_port")
+@@ -284,6 +288,7 @@ def test_provider_validation(browser):
+         save_failure_artifacts(browser, log_entries)
+         raise
+ 
++
+ def test_add_workflow(browser):
+     """
+     Test to add a workflow node
+@@ -300,7 +305,9 @@ def test_add_workflow(browser):
+         page.get_by_placeholder("Set the name").press("ControlOrMeta+a")
+         page.get_by_placeholder("Set the name").fill("Example Console Workflow")
+         page.get_by_placeholder("Set the name").press("Tab")
+-        page.get_by_placeholder("Set the description").fill("Example workflow description")
++        page.get_by_placeholder("Set the description").fill(
++            "Example workflow description"
++        )
+         page.get_by_test_id("wf-add-trigger-button").first.click()
+         page.get_by_text("Manual").click()
+         page.get_by_test_id("wf-add-step-button").first.click()
+@@ -313,8 +320,58 @@ def test_add_workflow(browser):
+         page.get_by_placeholder("message").fill("Hello world!")
+         page.get_by_role("button", name="Save & Deploy").click()
+         page.wait_for_url(re.compile("http://localhost:3000/workflows/.*"))
+-        expect(page.get_by_test_id("wf-name")).to_contain_text("Example Console Workflow")
+-        expect(page.get_by_test_id("wf-description")).to_contain_text("Example workflow description")
++        expect(page.get_by_test_id("wf-name")).to_contain_text(
++            "Example Console Workflow"
++        )
++        expect(page.get_by_test_id("wf-description")).to_contain_text(
++            "Example workflow description"
++        )
+     except Exception:
+         save_failure_artifacts(page, log_entries)
+         raise
++
++
++def test_add_upload_workflow_with_alert_trigger(browser):
++    log_entries = []
++    setup_console_listener(browser, log_entries)
++    try:
++        browser.goto("http://localhost:3000/signin")
++        browser.get_by_role("link", name="Workflows").hover()
++        browser.get_by_role("link", name="Workflows").click()
++        browser.get_by_role("button", name="Upload Workflows").click()
++        browser.wait_for_timeout(5000)
++        file_input = browser.locator("#workflowFile")
++        file_input.set_input_files(
++            "./tests/e2e_tests/workflow-sample.yaml"
++        )
++        browser.get_by_role("button", name="Upload")
++        browser.wait_for_timeout(10000)
++        trigger_alert("prometheus")
++        browser.wait_for_timeout(3000)
++        browser.reload()
++        browser.wait_for_timeout(3000)
++        workflow_card = browser.locator(
++            "[data-sentry-component='WorkflowTile']",
++            has_text="9b3664f4-b248-4eda-8cc7-e69bc5a8bd92",
++        )
++        expect(workflow_card).not_to_contain_text("No data available")
++    except Exception:
++        save_failure_artifacts(browser, log_entries)
++        raise
++
++
++def test_start_with_keep_db(browser):
++    log_entries = []
++    setup_console_listener(browser, log_entries)
++    try:
++        browser.goto("http://localhost:3001/signin")
++        browser.wait_for_timeout(3000)
++        browser.get_by_placeholder("Enter your username").fill("keep")
++        browser.get_by_placeholder("Enter your password").fill("keep")
++        browser.wait_for_timeout(3000)
++        browser.get_by_role("button", name="Sign in").click()
++        browser.wait_for_timeout(5000)
++        expect(browser).to_have_url("http://localhost:3001/incidents")
++    except Exception:
++        save_failure_artifacts(browser, log_entries)
++        raise
+diff --git a/tests/e2e_tests/test_grafana_provider.py b/tests/e2e_tests/test_grafana_provider.py
+new file mode 100644
+index 0000000000..7c0da2a5d4
+--- /dev/null
++++ b/tests/e2e_tests/test_grafana_provider.py
+@@ -0,0 +1,189 @@
++import os
++import re
++import sys
++import time
++from datetime import datetime
++
++import requests
++from playwright.sync_api import expect
++
++from tests.e2e_tests.utils import trigger_alert
++
++
++os.environ["PLAYWRIGHT_HEADLESS"] = "false"
++
++GRAFANA_HOST = "http://grafana:3000"
++GRAFANA_HOST_LOCAL = "http://localhost:3002"
++KEEP_UI_URL = "http://localhost:3000"
++
++
++def get_grafana_access_token(role: str):
++    headers = {
++        "Content-Type": "application/json",
++    }
++    json_data_service_account = {
++        "name": f'test-{role}-{datetime.now().strftime("%Y%m%d%H%M%S")}',
++        "role": role,
++    }
++    auth = ("admin", "admin")
++    service_account = requests.post(
++        f"{GRAFANA_HOST_LOCAL}/api/serviceaccounts",
++        headers=headers,
++        json=json_data_service_account,
++        auth=auth,
++    )
++    service_account = service_account.json()
++
++    json_data__token = {
++        "name": f'test-token-{datetime.now().strftime("%Y%m%d%H%M%S")}',
++    }
++
++    token_response = requests.post(
++        f'{GRAFANA_HOST_LOCAL}/api/serviceaccounts/{service_account["id"]}/tokens',
++        headers=headers,
++        json=json_data__token,
++        auth=("admin", "admin"),
++    )
++    return token_response.json()["key"]
++
++
++def open_grafana_card(browser):
++    browser.get_by_placeholder("Filter providers...").click()
++    browser.get_by_placeholder("Filter providers...").clear()
++    browser.get_by_placeholder("Filter providers...").fill("Grafana")
++    browser.get_by_placeholder("Filter providers...").press("Enter")
++    browser.get_by_text("Available Providers").hover()
++    grafana_tile = browser.locator(
++        "button:has-text('Grafana'):has-text('alert'):not(:has-text('Linked'))"
++    )
++    grafana_tile.first.hover()
++    grafana_tile.first.click()
++
++
++def test_grafana_provider(browser):
++    try:
++        provider_name = "playwright_test_" + datetime.now().strftime("%Y%m%d%H%M%S")
++        provider_name_invalid = provider_name + "-invalid"
++        provider_name_readonly = provider_name + "-read-only"
++        provider_name_success = provider_name + "-success"
++
++        browser.goto(f"{KEEP_UI_URL}/signin")
++        browser.get_by_role("link", name="Providers").hover()
++        browser.get_by_role("link", name="Providers").click()
++
++        browser.wait_for_timeout(10000)
++        # First trying to install with invalid token, provider installation should fail
++        open_grafana_card(browser)
++        browser.get_by_placeholder("Enter provider name").fill(provider_name_invalid)
++        browser.get_by_placeholder("Enter token").fill("random_token_UwU")
++        browser.get_by_placeholder("Enter host").fill(GRAFANA_HOST)
++        browser.get_by_role("button", name="Connect", exact=True).click()
++        expect(
++            browser.locator("span.tremor-Badge-text:has-text('Missing Scope')")
++        ).to_have_count(3)
++        browser.get_by_role("button", name="Cancel", exact=True).click()
++
++        # Then trying to install with read scope, webhook installation should fail
++        open_grafana_card(browser)
++        browser.get_by_placeholder("Enter provider name").fill(provider_name_readonly)
++        browser.get_by_placeholder("Enter token").fill(
++            get_grafana_access_token("Viewer")
++        )
++        browser.get_by_placeholder("Enter host").fill(GRAFANA_HOST)
++        browser.get_by_role("button", name="Connect", exact=True).click()
++        browser.wait_for_timeout(5000)
++        # browser.reload()
++        browser.locator(
++            f"button:has-text('Grafana'):has-text('Connected'):has-text('{provider_name_readonly}')"
++        ).click()
++        expect(
++            browser.locator("span.tremor-Badge-text:has-text('Missing Scope')")
++        ).to_have_count(2)
++        expect(
++            browser.locator("span.tremor-Badge-text:has-text('Valid')")
++        ).to_have_count(1)
++        browser.get_by_role("button", name="Cancel", exact=True).click()
++
++        # Then trying to install with admin scope, webhook installation should pass
++        open_grafana_card(browser)
++        browser.get_by_placeholder("Enter provider name").fill(provider_name_success)
++        browser.get_by_placeholder("Enter token").fill(
++            get_grafana_access_token("Admin")
++        )
++        browser.get_by_placeholder("Enter host").fill(GRAFANA_HOST)
++        browser.get_by_role("button", name="Connect", exact=True).click()
++
++        browser.locator(
++            f"button:has-text('Grafana'):has-text('Connected'):has-text('{provider_name_success}')"
++        ).click()
++        toast_div = browser.locator("div.Toastify")
++        browser.get_by_role("button", name="Install/Update Webhook", exact=True).click()
++        expect(toast_div).to_contain_text("grafana webhook installed", timeout=10000)
++        expect(
++            browser.locator("span.tremor-Badge-text:has-text('Valid')")
++        ).to_have_count(3)
++        browser.get_by_role("button", name="Cancel", exact=True).click()
++
++        trigger_alert("grafana")
++        browser.get_by_role("link", name="Feed").hover()
++        browser.get_by_role("link", name="Feed").click()
++
++        max_attemps = 5
++
++        for attempt in range(max_attemps):
++            print(f"Attempt {attempt + 1} to load alerts...")
++            browser.get_by_role("link", name="Feed").click()
++
++            try:
++                # Wait for an element that indicates alerts have loaded
++                try:
++                    browser.wait_for_selector(
++                        "text=HighMemoryConsumption", timeout=5000
++                    )
++                    print("Alerts loaded successfully.")
++                    break
++                except Exception:
++                    browser.wait_for_selector("text=NetworkLatencyIsHigh", timeout=5000)
++                    print("Alerts loaded successfully.")
++                    break
++            except Exception:
++                if attempt < max_attemps - 1:
++                    print("Alerts not loaded yet. Retrying...")
++                    browser.reload()
++                else:
++                    print("Failed to load alerts after maximum attempts.")
++                    raise Exception("Failed to load alerts after maximum attempts.")
++
++        browser.get_by_role("link", name="Providers").hover()
++        browser.get_by_role("link", name="Providers").click()
++        providers_to_delete = [provider_name_readonly, provider_name_success]
++
++        for provider_to_delete in providers_to_delete:
++            # Perform actions on each matching element
++            browser.locator(
++                f"button:has-text('Grafana'):has-text('Connected'):has-text('{provider_to_delete}')"
++            ).click()
++            browser.once("dialog", lambda dialog: dialog.accept())
++            browser.get_by_role("button", name="Delete").click()
++
++            # Assert provider was deleted
++            expect(
++                browser.locator(
++                    f"button:has-text('Grafana'):has-text('Connected'):has-text('{provider_to_delete}')"
++                )
++            ).to_have_count(0)
++
++    except Exception:
++        # Current file + test name for unique html and png dump.
++        current_test_name = (
++            "playwright_dump_"
++            + os.path.basename(__file__)[:-3]
++            + "_"
++            + sys._getframe().f_code.co_name
++        )
++
++        browser.screenshot(path=current_test_name + ".png")
++        with open(current_test_name + ".html", "w") as f:
++            f.write(browser.content())
++
++        raise
+diff --git a/tests/e2e_tests/test_pushing_prometheus_alerts.py b/tests/e2e_tests/test_pushing_prometheus_alerts.py
+index 63a14f7cb4..f2caa5b4e0 100644
+--- a/tests/e2e_tests/test_pushing_prometheus_alerts.py
++++ b/tests/e2e_tests/test_pushing_prometheus_alerts.py
+@@ -90,18 +90,17 @@ def test_pulling_prometheus_alerts_to_provider(browser):
+ 
+         # Delete provider
+         browser.get_by_role("link", name="Providers").click()
+-        browser.locator("button").filter(
+-            has_text=re.compile(re.escape(provider_name))
+-        ).first.hover()
+-        browser.locator(".tile-basis").first.click()
++        browser.locator(
++            f"button:has-text('Prometheus'):has-text('Connected'):has-text('{provider_name}')"
++        ).click()
+         browser.once("dialog", lambda dialog: dialog.accept())
+         browser.get_by_role("button", name="Delete").click()
+ 
+         # Assert provider was deleted
+         expect(
+-            browser.locator("button")
+-            .filter(has_text=re.compile(re.escape(provider_name)))
+-            .first
++            browser.locator(
++                f"button:has-text('Prometheus'):has-text('Connected'):has-text('{provider_name}')"
++            )
+         ).not_to_be_visible()
+     except Exception:
+         # Current file + test name for unique html and png dump.
+diff --git a/tests/e2e_tests/utils.py b/tests/e2e_tests/utils.py
+new file mode 100644
+index 0000000000..5deb6eba84
+--- /dev/null
++++ b/tests/e2e_tests/utils.py
+@@ -0,0 +1,15 @@
++from keep.providers.providers_factory import ProvidersFactory
++import requests
++
++
++def trigger_alert(provider_name):
++    provider = ProvidersFactory.get_provider_class(provider_name)
++    requests.post(
++        f"http://localhost:8080/alerts/event/{provider_name}",
++        headers={
++            "Content-Type": "application/json",
++            "Accept": "application/json",
++            "X-API-KEY": "really_random_secret",
++        },
++        json=provider.simulate_alert(),
++    )
+diff --git a/tests/e2e_tests/workflow-sample.yaml b/tests/e2e_tests/workflow-sample.yaml
+new file mode 100644
+index 0000000000..d2a1471916
+--- /dev/null
++++ b/tests/e2e_tests/workflow-sample.yaml
+@@ -0,0 +1,22 @@
++workflow:
++  actions:
++    - name: echo
++      provider:
++        config: "{{ providers.default-console }}"
++        type: console
++        with:
++          logger: true
++          message: "{{alert.payload.summary}}"
++  consts: {}
++  description: playwright_test_add_upload_workflow_with_alert_trigger
++  disabled: false
++  id: 9b3664f4-b248-4eda-8cc7-e69bc5a8bd92
++  name: 9b3664f4-b248-4eda-8cc7-e69bc5a8bd92
++  owners: []
++  services: []
++  steps: []
++  triggers:
++    - filters:
++        - key: source
++          value: prometheus
++      type: alert
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

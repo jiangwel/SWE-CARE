@@ -1,0 +1,638 @@
+  Task-ID: localstack__localstack-9749@e7d1fa1
+  Please checkout to this commit first: 731873d7256d5ca6e76d1a79cb9e07a3a76385a9
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  bug: SFN - `States.StringSplit` errors when the same value in AWS succeeds
+### Is there an existing issue for this?
+
+- [X] I have searched the existing issues
+
+### Current Behavior
+
+When using the `States.StringSplit` intrinsic function for AWS Step Functions, I get the following error:
+
+```
+│ Error: creating Step Functions State Machine (repro): InvalidDefinition: Error=ValueError Args=["Expected 2 arguments for function type '<class 'localstack.services.stepfunctions.asl.component.intrinsic.function.statesfunction.string_operations.string_split.StringSplit'>', but got: '(FunctionArgumentList| {'arg_list': [], 'size': 0}'."] in definition '{
+│   "Comment": "States.StringSplit error",
+│   "StartAt": "WillStatesStringSplitError",
+│   "States": {
+│     "WillStatesStringSplitError": {
+│       "Type": "Task",
+│       "Resource": "arn:aws:states:::lambda:invoke",
+│       "End": true,
+│       "Parameters": {
+│         "FunctionName": "SomeFunction",
+│         "Payload": {
+│           "inputArray.$": "States.StringSplit($$.Execution.Input.csv, ',')"
+│         }
+│       }
+│     }
+│   }
+│ }
+│ '.
+│ 
+│   with module.step_function.aws_sfn_state_machine.this[0],
+│   on .terraform/modules/step_function/main.tf line 15, in resource "aws_sfn_state_machine" "this":
+│   15: resource "aws_sfn_state_machine" "this" {
+```
+
+See repro for state machine definition that produces this error. The same repro works in AWS.
+
+### Expected Behavior
+
+I expect the step function to behave as intended and to split the CSV into an array.
+
+### How are you starting LocalStack?
+
+With a docker-compose file
+
+### Steps To Reproduce
+
+I'm using docker-compose with the following step function definition:
+
+```json
+{
+  "Comment": "States.StringSplit error",
+  "StartAt": "WillStatesStringSplitError",
+  "States": {
+    "WillStatesStringSplitError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "End": true,
+      "Parameters": {
+        "FunctionName": "SomeFunction",
+        "Payload": {
+          "inputArray.$": "States.StringSplit($$.Execution.Input.csv, ',')"
+        }
+      }
+    }
+  }
+}
+```
+
+### Environment
+
+```markdown
+- OS: MacOS Ventura
+- LocalStack: latest
+```
+
+
+### Anything else?
+
+Thank you for all your hard work!
+  </issue>
+  
+  <patch>
+  diff --git a/localstack/services/stepfunctions/asl/component/intrinsic/function/statesfunction/string_operations/string_split.py b/localstack/services/stepfunctions/asl/component/intrinsic/function/statesfunction/string_operations/string_split.py
+index 961bae889a6fe..ad649995142b3 100644
+--- a/localstack/services/stepfunctions/asl/component/intrinsic/function/statesfunction/string_operations/string_split.py
++++ b/localstack/services/stepfunctions/asl/component/intrinsic/function/statesfunction/string_operations/string_split.py
+@@ -67,4 +67,5 @@ def _eval_body(self, env: Environment) -> None:
+         pattern = "|".join(patterns)
+ 
+         parts = re.split(pattern, string)
+-        env.stack.append(parts)
++        parts_clean = list(filter(lambda sub: bool(sub), parts))
++        env.stack.append(parts_clean)
+diff --git a/tests/aws/services/stepfunctions/templates/intrinsicfunctions/intrinsic_functions_templates.py b/tests/aws/services/stepfunctions/templates/intrinsicfunctions/intrinsic_functions_templates.py
+index ede3db7d3e76b..47d2aa8931fe9 100644
+--- a/tests/aws/services/stepfunctions/templates/intrinsicfunctions/intrinsic_functions_templates.py
++++ b/tests/aws/services/stepfunctions/templates/intrinsicfunctions/intrinsic_functions_templates.py
+@@ -42,6 +42,9 @@ class IntrinsicFunctionTemplate(TemplateLoader):
+     STRING_SPLIT: Final[str] = os.path.join(
+         _THIS_FOLDER, "statemachines/string_operations/string_split.json5"
+     )
++    STRING_SPLIT_CONTEXT_OBJECT: Final[str] = os.path.join(
++        _THIS_FOLDER, "statemachines/string_operations/string_split_context_object.json5"
++    )
+ 
+     # Encode and Decode.
+     BASE_64_ENCODE: Final[str] = os.path.join(
+diff --git a/tests/aws/services/stepfunctions/templates/intrinsicfunctions/statemachines/string_operations/string_split_context_object.json5 b/tests/aws/services/stepfunctions/templates/intrinsicfunctions/statemachines/string_operations/string_split_context_object.json5
+new file mode 100644
+index 0000000000000..2e444ab913b12
+--- /dev/null
++++ b/tests/aws/services/stepfunctions/templates/intrinsicfunctions/statemachines/string_operations/string_split_context_object.json5
+@@ -0,0 +1,13 @@
++{
++  "Comment": "STRING_SPLIT_CONTEXT_OBJECT",
++  "StartAt": "State_0",
++  "States": {
++    "State_0": {
++      "Type": "Pass",
++      "End": true,
++      "Parameters": {
++        "FunctionResult.$": "States.StringSplit($$.Execution.Input.FunctionInput, ',')"
++      }
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py b/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py
+index 6c5c0ccc9de67..8940fe7ca6280 100644
+--- a/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py
++++ b/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py
+@@ -14,6 +14,10 @@ def test_string_split(
+         self, create_iam_role_for_sfn, create_state_machine, sfn_snapshot, aws_client
+     ):
+         input_values = [
++            {"fst": " ", "snd": ","},
++            {"fst": " , ", "snd": ","},
++            {"fst": ", , ,", "snd": ","},
++            {"fst": ",,,,", "snd": ","},
+             {"fst": "1,2,3,4,5", "snd": ","},
+             {"fst": "This.is+a,test=string", "snd": ".+,="},
+         ]
+@@ -25,3 +29,26 @@ def test_string_split(
+             IFT.STRING_SPLIT,
+             input_values,
+         )
++
++    @markers.aws.validated
++    def test_string_split_context_object(
++        self, create_iam_role_for_sfn, create_state_machine, sfn_snapshot, aws_client
++    ):
++        input_values = [
++            (
++                "Value1,Value2,Value3\n"
++                "Value4,Value5,Value6\n"
++                ",,,\n"
++                "true,1,'HelloWorld'\n"
++                "Null,None,\n"
++                "   \n"
++            )
++        ]
++        create_and_test_on_inputs(
++            aws_client.stepfunctions,
++            create_iam_role_for_sfn,
++            create_state_machine,
++            sfn_snapshot,
++            IFT.STRING_SPLIT_CONTEXT_OBJECT,
++            input_values,
++        )
+diff --git a/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.snapshot.json b/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.snapshot.json
+index 803e3ba684b05..d5a6dbed35829 100644
+--- a/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.snapshot.json
++++ b/tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.snapshot.json
+@@ -1,8 +1,316 @@
+ {
+   "tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py::TestStringOperations::test_string_split": {
+-    "recorded-date": "09-02-2023, 10:36:01",
++    "recorded-date": "28-11-2023, 10:19:26",
+     "recorded-content": {
+       "exec_hist_resp_0": {
++        "events": [
++          {
++            "executionStartedEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": " ",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "roleArn": "snf_role_arn"
++            },
++            "id": 1,
++            "previousEventId": 0,
++            "timestamp": "timestamp",
++            "type": "ExecutionStarted"
++          },
++          {
++            "id": 2,
++            "previousEventId": 0,
++            "stateEnteredEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": " ",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "name": "State_0"
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateEntered"
++          },
++          {
++            "id": 3,
++            "previousEventId": 2,
++            "stateExitedEventDetails": {
++              "name": "State_0",
++              "output": {
++                "FunctionResult": [
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateExited"
++          },
++          {
++            "executionSucceededEventDetails": {
++              "output": {
++                "FunctionResult": [
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "id": 4,
++            "previousEventId": 3,
++            "timestamp": "timestamp",
++            "type": "ExecutionSucceeded"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "exec_hist_resp_1": {
++        "events": [
++          {
++            "executionStartedEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": " , ",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "roleArn": "snf_role_arn"
++            },
++            "id": 1,
++            "previousEventId": 0,
++            "timestamp": "timestamp",
++            "type": "ExecutionStarted"
++          },
++          {
++            "id": 2,
++            "previousEventId": 0,
++            "stateEnteredEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": " , ",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "name": "State_0"
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateEntered"
++          },
++          {
++            "id": 3,
++            "previousEventId": 2,
++            "stateExitedEventDetails": {
++              "name": "State_0",
++              "output": {
++                "FunctionResult": [
++                  " ",
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateExited"
++          },
++          {
++            "executionSucceededEventDetails": {
++              "output": {
++                "FunctionResult": [
++                  " ",
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "id": 4,
++            "previousEventId": 3,
++            "timestamp": "timestamp",
++            "type": "ExecutionSucceeded"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "exec_hist_resp_2": {
++        "events": [
++          {
++            "executionStartedEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": ", , ,",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "roleArn": "snf_role_arn"
++            },
++            "id": 1,
++            "previousEventId": 0,
++            "timestamp": "timestamp",
++            "type": "ExecutionStarted"
++          },
++          {
++            "id": 2,
++            "previousEventId": 0,
++            "stateEnteredEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": ", , ,",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "name": "State_0"
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateEntered"
++          },
++          {
++            "id": 3,
++            "previousEventId": 2,
++            "stateExitedEventDetails": {
++              "name": "State_0",
++              "output": {
++                "FunctionResult": [
++                  " ",
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateExited"
++          },
++          {
++            "executionSucceededEventDetails": {
++              "output": {
++                "FunctionResult": [
++                  " ",
++                  " "
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "id": 4,
++            "previousEventId": 3,
++            "timestamp": "timestamp",
++            "type": "ExecutionSucceeded"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "exec_hist_resp_3": {
++        "events": [
++          {
++            "executionStartedEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": ",,,,",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "roleArn": "snf_role_arn"
++            },
++            "id": 1,
++            "previousEventId": 0,
++            "timestamp": "timestamp",
++            "type": "ExecutionStarted"
++          },
++          {
++            "id": 2,
++            "previousEventId": 0,
++            "stateEnteredEventDetails": {
++              "input": {
++                "FunctionInput": {
++                  "fst": ",,,,",
++                  "snd": ","
++                }
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "name": "State_0"
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateEntered"
++          },
++          {
++            "id": 3,
++            "previousEventId": 2,
++            "stateExitedEventDetails": {
++              "name": "State_0",
++              "output": {
++                "FunctionResult": []
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateExited"
++          },
++          {
++            "executionSucceededEventDetails": {
++              "output": {
++                "FunctionResult": []
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "id": 4,
++            "previousEventId": 3,
++            "timestamp": "timestamp",
++            "type": "ExecutionSucceeded"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      },
++      "exec_hist_resp_4": {
+         "events": [
+           {
+             "executionStartedEventDetails": {
+@@ -87,7 +395,7 @@
+           "HTTPStatusCode": 200
+         }
+       },
+-      "exec_hist_resp_1": {
++      "exec_hist_resp_5": {
+         "events": [
+           {
+             "executionStartedEventDetails": {
+@@ -173,5 +481,99 @@
+         }
+       }
+     }
++  },
++  "tests/aws/services/stepfunctions/v2/intrinsic_functions/test_string_operations.py::TestStringOperations::test_string_split_context_object": {
++    "recorded-date": "28-11-2023, 10:25:42",
++    "recorded-content": {
++      "exec_hist_resp_0": {
++        "events": [
++          {
++            "executionStartedEventDetails": {
++              "input": {
++                "FunctionInput": "Value1,Value2,Value3\nValue4,Value5,Value6\n,,,\ntrue,1,'HelloWorld'\nNull,None,\n   \n"
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "roleArn": "snf_role_arn"
++            },
++            "id": 1,
++            "previousEventId": 0,
++            "timestamp": "timestamp",
++            "type": "ExecutionStarted"
++          },
++          {
++            "id": 2,
++            "previousEventId": 0,
++            "stateEnteredEventDetails": {
++              "input": {
++                "FunctionInput": "Value1,Value2,Value3\nValue4,Value5,Value6\n,,,\ntrue,1,'HelloWorld'\nNull,None,\n   \n"
++              },
++              "inputDetails": {
++                "truncated": false
++              },
++              "name": "State_0"
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateEntered"
++          },
++          {
++            "id": 3,
++            "previousEventId": 2,
++            "stateExitedEventDetails": {
++              "name": "State_0",
++              "output": {
++                "FunctionResult": [
++                  "Value1",
++                  "Value2",
++                  "Value3\nValue4",
++                  "Value5",
++                  "Value6\n",
++                  "\ntrue",
++                  "1",
++                  "'HelloWorld'\nNull",
++                  "None",
++                  "\n   \n"
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "timestamp": "timestamp",
++            "type": "PassStateExited"
++          },
++          {
++            "executionSucceededEventDetails": {
++              "output": {
++                "FunctionResult": [
++                  "Value1",
++                  "Value2",
++                  "Value3\nValue4",
++                  "Value5",
++                  "Value6\n",
++                  "\ntrue",
++                  "1",
++                  "'HelloWorld'\nNull",
++                  "None",
++                  "\n   \n"
++                ]
++              },
++              "outputDetails": {
++                "truncated": false
++              }
++            },
++            "id": 4,
++            "previousEventId": 3,
++            "timestamp": "timestamp",
++            "type": "ExecutionSucceeded"
++          }
++        ],
++        "ResponseMetadata": {
++          "HTTPHeaders": {},
++          "HTTPStatusCode": 200
++        }
++      }
++    }
+   }
+ }
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

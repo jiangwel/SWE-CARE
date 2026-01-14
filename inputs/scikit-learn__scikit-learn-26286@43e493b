@@ -1,0 +1,210 @@
+  Task-ID: scikit-learn__scikit-learn-26286@43e493b
+  Please checkout to this commit first: e5c65906ee7fdab81c2950fab0fe4d04ed7ad522
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  confusing fit failure when using set_config(transform_output="pandas")
+### Describe the bug
+
+Using `set_config(transform_output="pandas")` in combination with `ColumnTransformer` may result in a failed fit, since indices do not align as expected. The error will not be especially helpful: "ValueError: Found input variables with inconsistent numbers of samples: [705, 527]" (Error appears to be related to merging DataFrames with non-aligned indices, as evident by NaNs and change in shape).
+
+### Steps/Code to Reproduce
+
+```
+import pandas as pd
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import TruncatedSVD
+from sklearn import set_config
+from sklearn.feature_extraction.text import CountVectorizer
+
+set_config(transform_output="pandas")
+
+d = pd.DataFrame({
+    'txt': ['cat eats milk', 'tree says hi', 'bone eats dog'],
+}, index=[8, 5, 3])
+d
+
+
+Pipeline([('cv', CountVectorizer()), ('tsvd', TruncatedSVD(n_components=1))]).fit_transform(d.txt)
+
+
+```
+
+### Expected Results
+
+expected index: [8, 5, 3]
+
+expected behavior: works with ColumnTransformer
+
+### Actual Results
+
+actual index: [0, 1, 2]
+
+actual behavior: doesn't work with ColumnTransformer if other transformers maintain aligned indices
+
+### Versions
+
+```shell
+System:
+    python: 3.8.16 | packaged by conda-forge | (default, Feb  1 2023, 16:01:55)  [GCC 11.3.0]
+executable: /opt/conda/envs/py38/bin/python3.8
+   machine: Linux-4.19.0-23-cloud-amd64-x86_64-with-glibc2.10
+
+Python dependencies:
+      sklearn: 1.2.2
+          pip: 23.0.1
+   setuptools: 67.6.1
+        numpy: 1.23.5
+        scipy: 1.10.1
+       Cython: None
+       pandas: 1.5.3
+   matplotlib: 3.7.1
+       joblib: 1.2.0
+threadpoolctl: 3.1.0
+
+Built with OpenMP: True
+
+threadpoolctl info:
+       user_api: blas
+   internal_api: openblas
+         prefix: libopenblas
+       filepath: /opt/conda/envs/py38/lib/python3.8/site-packages/numpy.libs/libopenblas64_p-r0-742d56dc.3.20.so
+        version: 0.3.20
+threading_layer: pthreads
+   architecture: Haswell
+    num_threads: 4
+
+       user_api: openmp
+   internal_api: openmp
+         prefix: libgomp
+       filepath: /opt/conda/envs/py38/lib/python3.8/site-packages/scikit_learn.libs/libgomp-a34b3233.so.1.0.0
+        version: None
+    num_threads: 4
+
+       user_api: blas
+   internal_api: openblas
+         prefix: libopenblas
+       filepath: /opt/conda/envs/py38/lib/python3.8/site-packages/scipy.libs/libopenblasp-r0-41284840.3.18.so
+        version: 0.3.18
+threading_layer: pthreads
+   architecture: Haswell
+    num_threads: 4
+```
+  </issue>
+  
+  <patch>
+  diff --git a/doc/whats_new/v1.3.rst b/doc/whats_new/v1.3.rst
+index bb245aa466152..739ced82f9ec9 100644
+--- a/doc/whats_new/v1.3.rst
++++ b/doc/whats_new/v1.3.rst
+@@ -184,6 +184,13 @@ Changelog
+   :user:`Jérémie du Boisberranger <jeremiedbb>`,
+   :user:`Guillaume Lemaitre <glemaitre>`.
+ 
++:mod:`sklearn.compose`
++......................
++
++- |Fix| `compose.ColumnTransformer` raises an informative error when the individual transformers of `ColumnTransformer`
++  output pandas dataframes with indexes that are not consistent with each other and the output is configured
++  to be pandas. :pr:`26286` by `Thomas Fan`_.
++
+ :mod:`sklearn.covariance`
+ .........................
+ 
+diff --git a/sklearn/compose/_column_transformer.py b/sklearn/compose/_column_transformer.py
+index 90718d86d2d89..4eddd12b1baea 100644
+--- a/sklearn/compose/_column_transformer.py
++++ b/sklearn/compose/_column_transformer.py
+@@ -25,6 +25,7 @@
+ from ..utils import check_pandas_support
+ from ..utils.metaestimators import _BaseComposition
+ from ..utils.validation import check_array, check_is_fitted, _check_feature_names_in
++from ..utils.validation import _num_samples
+ from ..utils.parallel import delayed, Parallel
+ 
+ 
+@@ -854,6 +855,14 @@ def _hstack(self, Xs):
+                 pd = check_pandas_support("transform")
+                 output = pd.concat(Xs, axis=1)
+ 
++                output_samples = output.shape[0]
++                if any(_num_samples(X) != output_samples for X in Xs):
++                    raise ValueError(
++                        "Concatenating DataFrames from the transformer's output lead to"
++                        " an inconsistent number of samples. The output may have Pandas"
++                        " Indexes that do not match."
++                    )
++
+                 # If all transformers define `get_feature_names_out`, then transform
+                 # will adjust the column names to be consistent with
+                 # verbose_feature_names_out. Here we prefix the feature names if
+diff --git a/sklearn/compose/tests/test_column_transformer.py b/sklearn/compose/tests/test_column_transformer.py
+index a2d1cef0412ba..6d1822b387d88 100644
+--- a/sklearn/compose/tests/test_column_transformer.py
++++ b/sklearn/compose/tests/test_column_transformer.py
+@@ -2157,3 +2157,31 @@ def test_empty_selection_pandas_output(empty_selection):
+     ct.set_params(verbose_feature_names_out=False)
+     X_out = ct.fit_transform(X)
+     assert_array_equal(X_out.columns, ["a", "b"])
++
++
++def test_raise_error_if_index_not_aligned():
++    """Check column transformer raises error if indeices are not aligned.
++
++    Non-regression test for gh-26210.
++    """
++    pd = pytest.importorskip("pandas")
++
++    X = pd.DataFrame([[1.0, 2.2], [3.0, 1.0]], columns=["a", "b"], index=[8, 3])
++    reset_index_transformer = FunctionTransformer(
++        lambda x: x.reset_index(drop=True), feature_names_out="one-to-one"
++    )
++
++    ct = ColumnTransformer(
++        [
++            ("num1", "passthrough", ["a"]),
++            ("num2", reset_index_transformer, ["b"]),
++        ],
++    )
++    ct.set_output(transform="pandas")
++    msg = (
++        "Concatenating DataFrames from the transformer's output lead to"
++        " an inconsistent number of samples. The output may have Pandas"
++        " Indexes that do not match."
++    )
++    with pytest.raises(ValueError, match=msg):
++        ct.fit_transform(X)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

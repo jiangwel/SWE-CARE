@@ -1,0 +1,171 @@
+  Task-ID: deepset-ai__haystack-1937@a6b1c9e
+  Please checkout to this commit first: 39573cf0a94b00464cb2b9f063b574fb0c50de2c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  TypeError: Object of type IndexFlat is not JSON serializable
+**Describe the bug**
+Index fail to be saved after retrieval training and embedding update, getting `TypeError: Object of type IndexFlat is not JSON serializable`. This also corrupt the existing index json configuration file which is more severe in case not backed-up.
+Behaviour is same also if loading the trained model and updating the index and saving.
+
+This issue seems to be related to whether FAISSDocumentStore is loaded with `faiss_index: Optional["faiss.swigfaiss.Index"]`, which then added to the `pipeline_config["params"]` and throws the error while this dictionary is attempted to be dumped to the index json configuration. 
+
+**Error message**
+```
+Traceback (most recent call last):
+  File "/data/home/alon_nlp/event-search/src/train/train_dpr_retriever.py", line 82, in <module>
+    train()
+  File "/data/home/alon_nlp/event-search/src/train/train_dpr_retriever.py", line 34, in train
+    run(query_model, passage_model, doc_dir, train_filename, dev_filename,
+  File "/data/home/alon_nlp/event-search/src/train/train_dpr_retriever.py", line 67, in run
+    document_store.save(faiss_index_path)
+  File "/data/home/alon_nlp/haystack/haystack/document_stores/faiss.py", line 533, in save
+    json.dump(self.pipeline_config["params"], ipp)
+  File "/home/alon_nlp/miniconda3/envs/wec-es/lib/python3.9/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/alon_nlp/miniconda3/envs/wec-es/lib/python3.9/json/encoder.py", line 431, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/alon_nlp/miniconda3/envs/wec-es/lib/python3.9/json/encoder.py", line 405, in _iterencode_dict
+    yield from chunks
+  File "/home/alon_nlp/miniconda3/envs/wec-es/lib/python3.9/json/encoder.py", line 438, in _iterencode
+    o = _default(o)
+  File "/home/alon_nlp/miniconda3/envs/wec-es/lib/python3.9/json/encoder.py", line 179, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type IndexFlat is not JSON serializable
+```
+
+**Expected behavior**
+No error, json is not corrupted 
+
+**Additional context**
+Index json before save attempt:
+```
+{
+  "sql_url": "sqlite:///weces_index_for_bert_dpr/weces_dev.db",
+  "vector_dim": 768,
+  "faiss_index_factory_str": "Flat",
+  "return_embedding": false,
+  "duplicate_documents": "overwrite",
+  "index": "document",
+  "similarity": "dot_product",
+  "embedding_field": "embedding",
+  "progress_bar": true
+}
+```
+Index json after failed save attempt:
+```
+{"sql_url": "sqlite:///weces_index_for_bert_dpr/weces_dev.db", "vector_dim": 768, "faiss_index_factory_str": "Flat", "faiss_index": 
+```
+
+**To Reproduce**
+```
+document_store = FAISSDocumentStore.load(index_path=faiss_index_path,
+                                             config_path=faiss_config_path)
+
+retriever = DensePassageRetriever(document_store=document_store,
+                                      query_embedding_model=query_model,
+                                      passage_embedding_model=passage_model,
+                                      infer_tokenizer_classes=True,
+                                      max_seq_len_query=64,
+                                      max_seq_len_passage=180
+                                      )
+
+retriever.train(data_dir=doc_dir,
+                    train_filename=train_filename,
+                    dev_filename=dev_filename,
+                    test_filename=dev_filename,
+                    n_epochs=n_epochs,
+                    batch_size=16,
+                    grad_acc_steps=8,
+                    save_dir=save_dir,
+                    evaluate_every=20,
+                    embed_title=False,
+                    num_positives=1,
+                    num_hard_negatives=1
+                    )
+
+document_store.update_embeddings(retriever=retriever)
+document_store.save(faiss_index_path)
+```
+
+**System:**
+ - OS: 16.04.1-Ubuntu
+ - GPU/CPU: TITAN Xp / Intel(R) Xeon(R) CPU E5-2699A v4 @ 2.40GHz
+ - Haystack version (commit or version number): v1.0.0
+ - DocumentStore: FAISSDocumentStore
+ - Reader: NA
+ - Retriever: DensePassageRetriever
+  </issue>
+  
+  <patch>
+  diff --git a/haystack/document_stores/faiss.py b/haystack/document_stores/faiss.py
+index 7d77f7614b..c375f0aeb2 100644
+--- a/haystack/document_stores/faiss.py
++++ b/haystack/document_stores/faiss.py
+@@ -106,7 +106,6 @@ def __init__(
+             sql_url=sql_url, 
+             vector_dim=vector_dim, 
+             faiss_index_factory_str=faiss_index_factory_str,
+-            faiss_index=faiss_index, 
+             return_embedding=return_embedding,
+             duplicate_documents=duplicate_documents, 
+             index=index, 
+diff --git a/test/test_faiss_and_milvus.py b/test/test_faiss_and_milvus.py
+index 81bcca8093..af1a3f6e9d 100644
+--- a/test/test_faiss_and_milvus.py
++++ b/test/test_faiss_and_milvus.py
+@@ -51,6 +51,10 @@ def test_faiss_index_save_and_load(tmp_path):
+     # Check if the init parameters are kept
+     assert not new_document_store.progress_bar
+ 
++    # test saving and loading the loaded faiss index
++    new_document_store.save(tmp_path / "haystack_test_faiss")
++    new_document_store.load(tmp_path / "haystack_test_faiss")
++
+     # test loading the index via init
+     new_document_store = FAISSDocumentStore(faiss_index_path=tmp_path / "haystack_test_faiss")
+ 
+@@ -90,6 +94,10 @@ def test_faiss_index_save_and_load_custom_path(tmp_path):
+     # Check if the init parameters are kept
+     assert not new_document_store.progress_bar
+ 
++    # test saving and loading the loaded faiss index
++    new_document_store.save(tmp_path / "haystack_test_faiss", config_path=tmp_path / "custom_path.json")
++    new_document_store.load(tmp_path / "haystack_test_faiss", config_path=tmp_path / "custom_path.json")
++
+     # test loading the index via init
+     new_document_store = FAISSDocumentStore(faiss_index_path=tmp_path / "haystack_test_faiss", faiss_config_path=tmp_path / "custom_path.json")
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,158 @@
+  Task-ID: netbox-community__netbox-9314@c7e2cb6
+  Please checkout to this commit first: 39a9ebaeee982dc787de5df3b42f66ac9fbe39d4
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Allow filtering FHRP group assignments by device/VM
+### NetBox version
+
+v3.1.8
+
+### Feature type
+
+New functionality
+
+### Proposed functionality
+
+Currently there is no direct way to get all FHRP group assignments for a particular device using the API. Currently the only way to do this is to use the `interface_id` filter multiple times on `GET /ipam/fhrp-group-assignments/`.
+
+The following parameters could be added to the FHRP group assignment filterset (taken from `/ipam/ip-address`):
+* `virtual_machine`
+* `virtual_machine_id`
+* `device`
+* `device_id`
+
+### Use case
+
+Get all FHRP group assignments for a particular device in order to configure them.
+
+### Database changes
+
+n/a
+
+### External dependencies
+
+n/a
+  </issue>
+  
+  <patch>
+  diff --git a/netbox/ipam/filtersets.py b/netbox/ipam/filtersets.py
+index 53c589bb377..f5e54c3f422 100644
+--- a/netbox/ipam/filtersets.py
++++ b/netbox/ipam/filtersets.py
+@@ -681,11 +681,53 @@ class FHRPGroupAssignmentFilterSet(ChangeLoggedModelFilterSet):
+         queryset=FHRPGroup.objects.all(),
+         label='Group (ID)',
+     )
++    device = MultiValueCharFilter(
++        method='filter_device',
++        field_name='name',
++        label='Device (name)',
++    )
++    device_id = MultiValueNumberFilter(
++        method='filter_device',
++        field_name='pk',
++        label='Device (ID)',
++    )
++    virtual_machine = MultiValueCharFilter(
++        method='filter_virtual_machine',
++        field_name='name',
++        label='Virtual machine (name)',
++    )
++    virtual_machine_id = MultiValueNumberFilter(
++        method='filter_virtual_machine',
++        field_name='pk',
++        label='Virtual machine (ID)',
++    )
+ 
+     class Meta:
+         model = FHRPGroupAssignment
+         fields = ['id', 'group_id', 'interface_type', 'interface_id', 'priority']
+ 
++    def filter_device(self, queryset, name, value):
++        devices = Device.objects.filter(**{'{}__in'.format(name): value})
++        if not devices.exists():
++            return queryset.none()
++        interface_ids = []
++        for device in devices:
++            interface_ids.extend(device.vc_interfaces().values_list('id', flat=True))
++        return queryset.filter(
++            Q(interface_type=ContentType.objects.get_for_model(Interface), interface_id__in=interface_ids)
++        )
++
++    def filter_virtual_machine(self, queryset, name, value):
++        virtual_machines = VirtualMachine.objects.filter(**{'{}__in'.format(name): value})
++        if not virtual_machines.exists():
++            return queryset.none()
++        interface_ids = []
++        for vm in virtual_machines:
++            interface_ids.extend(vm.interfaces.values_list('id', flat=True))
++        return queryset.filter(
++            Q(interface_type=ContentType.objects.get_for_model(VMInterface), interface_id__in=interface_ids)
++        )
++
+ 
+ class VLANGroupFilterSet(OrganizationalModelFilterSet):
+     scope_type = ContentTypeFilter()
+diff --git a/netbox/ipam/tests/test_filtersets.py b/netbox/ipam/tests/test_filtersets.py
+index 4bb72dce25d..94c806d0def 100644
+--- a/netbox/ipam/tests/test_filtersets.py
++++ b/netbox/ipam/tests/test_filtersets.py
+@@ -1024,6 +1024,24 @@ def test_priority(self):
+         params = {'priority': [10, 20]}
+         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 4)
+ 
++    def test_device(self):
++        device = Device.objects.all()[0]
++
++        params = {'device': [device.name]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
++
++        params = {'device_id': [device.pk]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
++
++    def test_virtual_machine(self):
++        vm = VirtualMachine.objects.all()[0]
++
++        params = {'virtual_machine': [vm.name]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
++
++        params = {'virtual_machine_id': [vm.pk]}
++        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
++
+ 
+ class VLANGroupTestCase(TestCase, ChangeLoggedFilterSetTests):
+     queryset = VLANGroup.objects.all()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,141 @@
+  Task-ID: freqtrade__freqtrade-3799@44ad0f6
+  Please checkout to this commit first: 058d40a72c389ab90c643fe1cede812c4c5038b2
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Telegram Recommendations 
+<!-- 
+Note: this section will not show up in the issue.
+Have you search for this feature before requesting it? It's highly likely that a similar request was already filed.
+-->
+
+## Describe your environment
+(if applicable)
+
+Operating system: UBUNTU 18.04
+Python Version: 3.6.9 (python -V)
+CCXT version: ccxt==1.33.72 (pip freeze | grep ccxt)
+Freqtrade Version: develop-10c5b230 (freqtrade -V or docker-compose run --rm freqtrade -V for Freqtrade running in docker)
+
+
+## Describe the enhancement
+
+*Explain the enhancement you would like*
+
+Backtesting is very important when making a strategy. As well, Live and Dry testing are more important and I think it would be really cool if Telegram had a stat box for sell reasons during testing mode like this. It could also help in determine what the strategy needs fixing.
+
+/sellreason
+
+Total Trades: 100
+ROI Trades: 45
+Stoploss Trades: 15
+Trailing Stoploss: 5
+Forcesell Trades: 10
+Sell Signal Trades: 25
+
+Another recommendation that would be nice to add is an Average Duration stat box because there is nothing more worrisome than wondering if the trade is going to win, lose, or draw. Having an Average Duration for telegram trades can make the user feel comfortable knowing how long a winning or losing trade should take based on the stats.
+
+/duration
+
+Avg. Duration Winners: 1:55:00
+Avg. Duration Losers: 6 days, 21:07:00
+Avg. Duration Draws: 4 days, 09:05:00
+  </issue>
+  
+  <patch>
+  diff --git a/freqtrade/rpc/telegram.py b/freqtrade/rpc/telegram.py
+index a01efaed6a7..47e9d67dc18 100644
+--- a/freqtrade/rpc/telegram.py
++++ b/freqtrade/rpc/telegram.py
+@@ -108,6 +108,7 @@ def _init(self) -> None:
+             CommandHandler('edge', self._edge),
+             CommandHandler('help', self._help),
+             CommandHandler('version', self._version),
++            CommandHandler('stats', self._stats),
+         ]
+         for handle in handles:
+             self._updater.dispatcher.add_handler(handle)
+@@ -738,6 +739,50 @@ def _version(self, update: Update, context: CallbackContext) -> None:
+         """
+         self._send_msg('*Version:* `{}`'.format(__version__))
+ 
++    @authorized_only
++    def _stats(self, update: Update, context: CallbackContext) -> None:
++        """
++        Handler for /stats
++        https://github.com/freqtrade/freqtrade/issues/3783
++        Show stats of recent trades
++        :param update: message update
++        :return: None
++        """
++        # TODO: self._send_msg(...)
++        def trade_win_loss(trade):
++            if trade['profit_abs'] > 0:
++                return 'Wins'
++            elif trade['profit_abs'] < 0:
++                return 'Losses'
++            else:
++                return 'Draws'
++
++        trades = self._rpc_trade_history(-1)
++        trades_closed = [trade for trade in trades if not trade['is_open']]
++
++        # Sell reason
++        sell_reasons = {}
++        for trade in trades_closed:
++            if trade['sell_reason'] in sell_reasons:
++                sell_reasons[trade['sell_reason']][trade_win_loss(trade)] += 1
++            else:
++            win_loss_count = {'Wins': 0, 'Losses': 0, 'Draws': 0}
++            win_loss_count[trade_win_loss(trade)] += 1
++            sell_reasons[trade['sell_reason']] = win_loss_count
++        sell_reason_msg = [
++            '| Sell Reason | Sells | Wins | Draws | Losses |',
++            '|-------------|------:|-----:|------:|-------:|'
++        ]
++        # | Sell Reason | Sells | Wins | Draws | Losses |
++        # |-------------|------:|-----:|------:|-------:|
++        # | test        |     1 |    2 |     3 |      4 |
++        for reason, count in sell_reasons.items():
++            msg = f'| `{reason}` | `{sum(count.values())}` | `{count['Wins']}` | `{count['Draws']}` | `{count['Losses']}` |'
++            sell_reason_msg.append(msg)
++
++        # TODO: Duration
++
++        
+     @authorized_only
+     def _show_config(self, update: Update, context: CallbackContext) -> None:
+         """
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

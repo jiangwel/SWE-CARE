@@ -1,0 +1,336 @@
+  Task-ID: scipy__scipy-21597@7b0f8fa
+  Please checkout to this commit first: f20fb1de05de7d9d033001963f47d4d7885b2145
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: special: Loss of precision in `logsumexp`
+### Describe your issue.
+
+`logsumexp` loses precision in cases where it shouldn't, and in extreme cases it can return 0 when it should return a nonzero float.
+
+### Reproducing Code Example
+
+```python
+In [2]: from scipy.special import logsumexp
+
+In [3]: logsumexp([0, -40.0])
+Out[3]: 0.0
+
+In [4]: np.logaddexp(0, -40)  # This is the expected result of `logsumexp([0, -40.0])`.
+Out[4]: 4.248354255291589e-18
+```
+
+<details>
+<summary>
+
+### SciPy/NumPy/Python version and system information
+
+</summary>
+
+```shell
+{
+  "Compilers": {
+    "c": {
+      "name": "gcc",
+      "linker": "ld.bfd",
+      "version": "11.3.0",
+      "commands": "cc"
+    },
+    "cython": {
+      "name": "cython",
+      "linker": "cython",
+      "version": "0.29.33",
+      "commands": "cython"
+    },
+    "c++": {
+      "name": "gcc",
+      "linker": "ld.bfd",
+      "version": "11.3.0",
+      "commands": "c++"
+    },
+    "fortran": {
+      "name": "gcc",
+      "linker": "ld.bfd",
+      "version": "11.3.0",
+      "commands": "gfortran"
+    },
+    "pythran": {
+      "version": "0.12.1",
+      "include directory": "../../../../../py3.10.8/lib/python3.10/site-packages/pythran"
+    }
+  },
+  "Machine Information": {
+    "host": {
+      "cpu": "x86_64",
+      "family": "x86_64",
+      "endian": "little",
+      "system": "linux"
+    },
+    "build": {
+      "cpu": "x86_64",
+      "family": "x86_64",
+      "endian": "little",
+      "system": "linux"
+    },
+    "cross-compiled": false
+  },
+  "Build Dependencies": {
+    "blas": {
+      "name": "openblas",
+      "found": true,
+      "version": "0.3.20",
+      "detection method": "pkgconfig",
+      "include directory": "/usr/include/x86_64-linux-gnu/openblas-pthread/",
+      "lib directory": "/usr/lib/x86_64-linux-gnu/openblas-pthread/",
+      "openblas configuration": "USE_64BITINT= DYNAMIC_ARCH=1 DYNAMIC_OLDER=1 NO_CBLAS= NO_LAPACK= NO_LAPACKE=1 NO_AFFINITY=1 USE_OPENMP=0 generic MAX_THREADS=64",
+      "pc file directory": "/usr/lib/x86_64-linux-gnu/pkgconfig"
+    },
+    "lapack": {
+      "name": "openblas",
+      "found": true,
+      "version": "0.3.20",
+      "detection method": "pkgconfig",
+      "include directory": "/usr/include/x86_64-linux-gnu/openblas-pthread/",
+      "lib directory": "/usr/lib/x86_64-linux-gnu/openblas-pthread/",
+      "openblas configuration": "USE_64BITINT= DYNAMIC_ARCH=1 DYNAMIC_OLDER=1 NO_CBLAS= NO_LAPACK= NO_LAPACKE=1 NO_AFFINITY=1 USE_OPENMP=0 generic MAX_THREADS=64",
+      "pc file directory": "/usr/lib/x86_64-linux-gnu/pkgconfig"
+    }
+  },
+  "Python Information": {
+    "path": "/home/warren/py3.10.8/bin/python3",
+    "version": "3.10"
+  }
+}
+```
+
+</details>
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/integrate/tests/test_tanhsinh.py b/scipy/integrate/tests/test_tanhsinh.py
+index ee990bd0e787..bfeff6d21ddd 100644
+--- a/scipy/integrate/tests/test_tanhsinh.py
++++ b/scipy/integrate/tests/test_tanhsinh.py
+@@ -844,7 +844,7 @@ def test_basic(self, f_number):
+             logres = nsum(lambda *args: np.log(f(*args)),
+                            f.a, f.b, log=True, args=f.args)
+         assert_allclose(np.exp(logres.sum), res.sum)
+-        assert_allclose(np.exp(logres.error), res.error)
++        assert_allclose(np.exp(logres.error), res.error, atol=1e-15)
+         assert_equal(logres.status, 0)
+         assert_equal(logres.success, True)
+ 
+diff --git a/scipy/special/_logsumexp.py b/scipy/special/_logsumexp.py
+index d8efad6d5bde..bd4d7f82de63 100644
+--- a/scipy/special/_logsumexp.py
++++ b/scipy/special/_logsumexp.py
+@@ -4,6 +4,7 @@
+     array_namespace,
+     xp_size,
+     xp_broadcast_promote,
++    xp_atleast_nd,
+ )
+ 
+ __all__ = ["logsumexp", "softmax", "log_softmax"]
+@@ -100,53 +101,113 @@ def logsumexp(a, axis=None, b=None, keepdims=False, return_sign=False):
+     """
+     xp = array_namespace(a, b)
+     a, b = xp_broadcast_promote(a, b, ensure_writeable=True, force_floating=True, xp=xp)
+-    axis = tuple(range(a.ndim)) if axis is None else axis
++    a = xp_atleast_nd(a, ndim=1)
++    b = xp_atleast_nd(b, ndim=1) if b is not None else b
+ 
+-    if b is not None:
+-        a[b == 0] = -xp.inf
+-
+-    # Scale by real part for complex inputs, because this affects
+-    # the magnitude of the exponential.
+     if xp_size(a) == 0:
+-        # because `xp.max` doesn't have `initial` argument...
+-        shape = np.asarray(a.shape)  # NumPy is concise for scalar or tuple `axis`
++        shape = np.asarray(a.shape)  # NumPy is convenient for shape manipulation
++        axis = tuple(range(a.ndim)) if axis is None else axis
+         shape[axis] = 1
+-        a_max = xp.full(tuple(shape), -xp.inf, dtype=a.dtype)
++        out = xp.full(tuple(shape), -xp.inf, dtype=a.dtype)
++        sgn = xp.sign(out)
++    else:
++        with np.errstate(divide='ignore', invalid='ignore'):  # log of zero is OK
++            out, sgn = _logsumexp(a, b, axis=axis, return_sign=return_sign, xp=xp)
++
++    # Deal with shape details - reducing dimensions and convert 0-D to scalar for NumPy
++    out = xp.squeeze(out, axis=axis) if not keepdims else out
++    sgn = xp.squeeze(sgn, axis=axis) if (sgn is not None and not keepdims) else sgn
++    out = out[()] if out.ndim == 0 else out
++    sgn = sgn[()] if (sgn is not None and sgn.ndim == 0) else sgn
++
++    return (out, sgn) if return_sign else out
++
++
++def _elements_and_indices_with_max_real(a, axis=-1, xp=None):
++    # We need *an* element with the maximum real part.
++    # If the array is complex, we need to choose *one* of the complex values,
++    # not all values with the same real part.
++    # We could use `argmax` on real component, but array API doesn't yet have
++    # `take_along_axis`, and even if it did, we would have problems with axis tuples.
++    xp = array_namespace(a) if xp is None else xp
++
++    if xp.isdtype(a.dtype, "complex floating"):
++        # select all elements with max real part.
++        max = xp.max(xp.real(a), axis=axis, keepdims=True)
++        mask = xp.real(a) == max
++
++        # Of those, choose one arbitrarily. This is a reasonably
++        # simple, array-API compatible way of doing so that doesn't
++        # have a problem with `axis` being a tuple or None.
++        i = xp.reshape(xp.arange(xp_size(a)), a.shape)
++        i[~mask] = -1
++        max_i = xp.max(i, axis=axis, keepdims=True)
++        mask = i == max_i
++        max = xp.reshape(a[mask], max_i.shape)
+     else:
+-        real = xp.real(a) if xp.isdtype(a.dtype, "complex floating") else a
+-        a_max = xp.max(real, axis=axis, keepdims=True)
++        max = xp.max(a, axis=axis, keepdims=True)
++        mask = a == max
+ 
+-    if a_max.ndim > 0:
+-        a_max[~xp.isfinite(a_max)] = 0
+-    elif not xp.isfinite(a_max):
+-        a_max = 0
++    return xp.asarray(max), xp.asarray(mask)
+ 
+-    if b is not None:
+-        b = xp.asarray(b)
+-        tmp = b * xp.exp(a - a_max)
+-    else:
+-        tmp = xp.exp(a - a_max)
+ 
+-    # suppress warnings about log of zero
+-    with np.errstate(divide='ignore'):
+-        s = xp.sum(tmp, axis=axis, keepdims=keepdims, dtype=tmp.dtype)
+-        if return_sign:
+-            # For complex, use the numpy>=2.0 convention for sign.
+-            if xp.isdtype(s.dtype, "complex floating"):
+-                sgn = s / xp.where(s == 0, xp.asarray(1, dtype=s.dtype), xp.abs(s))
+-            else:
+-                sgn = xp.sign(s)
+-            s = xp.abs(s)
+-        out = xp.log(s)
+-
+-    if not keepdims:
+-        a_max = xp.squeeze(a_max, axis=axis)
+-    out += a_max
++def _sign(x, xp):
++    return x / xp.where(x == 0, xp.asarray(1, dtype=x.dtype), xp.abs(x))
++
+ 
++def _logsumexp(a, b, axis, return_sign, xp):
++
++    # This has been around for about a decade, so let's consider it a feature:
++    # Even if element of `a` is infinite or NaN, it adds nothing to the sum if
++    # the corresponding weight is zero.
++    if b is not None:
++        a[b == 0] = -xp.inf
++
++    # Find element with maximum real part, since this is what affects the magnitude
++    # of the exponential. Possible enhancement: include log of `b` magnitude in `a`.
++    a_max, i_max = _elements_and_indices_with_max_real(a, axis=axis, xp=xp)
++
++    # for precision, these terms are separated out of the main sum.
++    a[i_max] = -xp.inf
++    i_max_dt = xp.astype(i_max, a.dtype)
++    # This is an inefficient way of getting `m` because it is the sum of a sparse
++    # array; however, this is the simplest way I can think of to get the right shape.
++    m = (xp.sum(i_max_dt, axis=axis, keepdims=True, dtype=a.dtype) if b is None
++         else xp.sum(b * i_max_dt, axis=axis, keepdims=True, dtype=a.dtype))
++
++    # Arithmetic between infinities will introduce NaNs.
++    # `+ a_max` at the end naturally corrects for removing them here.
++    shift = xp.where(xp.isfinite(a_max), a_max, xp.asarray(0, dtype=a_max.dtype))
++
++    # Shift, exponentiate, scale, and sum
++    exp = b * xp.exp(a - shift) if b is not None else xp.exp(a - shift)
++    s = xp.sum(exp, axis=axis, keepdims=True, dtype=exp.dtype)
++    s = xp.where(s == 0, s, s/m)
++
++    # Separate sign/magnitude information
++    sgn = None
+     if return_sign:
+-        return out, sgn
+-    else:
+-        return out
++        # Use the numpy>=2.0 convention for sign.
++        # When all array libraries agree, this can become sng = xp.sign(s).
++        sgn = _sign(s + 1, xp=xp) * _sign(m, xp=xp)
++
++        if xp.isdtype(s.dtype, "real floating"):
++            # The log functions need positive arguments
++            s = xp.where(s < -1, -s - 2, s)
++            m = xp.abs(m)
++        else:
++            # `a_max` can have a sign component for complex input
++            j = xp.asarray(1j, dtype=a_max.dtype)
++            sgn = sgn * xp.exp(xp.imag(a_max) * j)
++
++    # Take log and undo shift
++    out = xp.log1p(s) + xp.log(m) + a_max
++
++    # Sigh... imagine a world in which we could just take the real part of a real array
++    out = (xp.real(out) if return_sign and xp.isdtype(s.dtype, "complex floating")
++           else out)
++
++    return out, sgn
+ 
+ 
+ def softmax(x, axis=None):
+diff --git a/scipy/special/tests/test_logsumexp.py b/scipy/special/tests/test_logsumexp.py
+index 138959a5bc47..3b3306b730c5 100644
+--- a/scipy/special/tests/test_logsumexp.py
++++ b/scipy/special/tests/test_logsumexp.py
+@@ -195,6 +195,12 @@ def test_dtypes_ab(self, dtype_a, dtype_b, xp):
+         desired = xp.asarray(math.log(math.exp(2) - math.exp(1)), dtype=desired_dtype)
+         xp_assert_close(logsumexp(a, b=b), desired)
+ 
++    def test_gh18295(self, xp):
++        a = xp.asarray([0.0, -40.0])
++        res = logsumexp(a)
++        ref = xp.logaddexp(a[0], a[1])
++        xp_assert_close(res, ref)
++
+ 
+ class TestSoftmax:
+     def test_softmax_fixtures(self):
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

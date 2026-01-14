@@ -1,0 +1,680 @@
+  Task-ID: skypilot-org__skypilot-504@baa3924
+  Please checkout to this commit first: b99ae426fcdaef545872ae3bf6f50ef87e898ffc
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [Azure] `sky launch azure-start-stop.yaml` fails due to dependency 
+I failed to launch two azure nodes with the following error during launching the head node.
+```
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+fbprophet 0.7.1 requires cmdstanpy==0.9.5, which is not installed.
+fbprophet 0.7.1 requires setuptools-git>=1.2, which is not installed.
+azure-storage-file 2.1.0 requires azure-storage-common~=2.1, but you have azure-storage-common 1.4.2 which is incompatible.
+```
+
+That error causes the problem when ray tries to launch the worker node, and `ray status` generates the following error.
+```
+I 02-22 14:38:39 backend_utils.py:547] Fetched IP: 20.110.200.1
+I 02-22 14:38:39 backend_utils.py:547] 
+I 02-22 14:38:57 backend_utils.py:547] No cluster status.
+I 02-22 14:38:57 backend_utils.py:547] The autoscaler failed with the following error:
+I 02-22 14:38:57 backend_utils.py:547] Traceback (most recent call last):
+I 02-22 14:38:57 backend_utils.py:547]   File "/anaconda/envs/py38_default/lib/python3.8/site-packages/ray/autoscaler/_private/monitor.py", line 435, in run
+I 02-22 14:38:57 backend_utils.py:547]     self._run()
+I 02-22 14:38:57 backend_utils.py:547]   File "/anaconda/envs/py38_default/lib/python3.8/site-packages/ray/autoscaler/_private/monitor.py", line 325, in _run
+I 02-22 14:38:57 backend_utils.py:547]     status["autoscaler_report"] = asdict(self.autoscaler.summary())
+I 02-22 14:38:57 backend_utils.py:547]   File "/anaconda/envs/py38_default/lib/python3.8/site-packages/ray/autoscaler/_private/autoscaler.py", line 1195, in summary
+I 02-22 14:38:57 backend_utils.py:547]     for node_id in self.non_terminated_nodes.all_node_ids:
+I 02-22 14:38:57 backend_utils.py:547] AttributeError: 'NoneType' object has no attribute 'all_node_ids'
+I 02-22 14:38:57 backend_utils.py:547] 
+I 02-22 14:38:57 backend_utils.py:547] Loaded cached provider configuration
+I 02-22 14:38:57 backend_utils.py:547] If you experience issues with the cloud provider, try re-running the command with --no-config-cache.
+```
+@suquark Do you know why this happens?
+
+Launching multiple nodes will wait the worker node forever when quota exceeds
+I have 3 m4.2xlarge instances running on us-east-1, and my quota for this instance on that region is 32 vCPUs (4 m4.2xlarge). When I tried to `sky launch -c env ./examples/env_check.yaml` (2 nodes), it keeps showing the following `ray status` due to the quota exceeding for the worker node. I am going to make multi-node timeout PR happen to mitigate this problem.
+
+```
+=====
+I 03-07 15:54:39 backend_utils.py:503] Node status
+I 03-07 15:54:39 backend_utils.py:503] ---------------------------------------------------------------
+I 03-07 15:54:39 backend_utils.py:503] Healthy:
+I 03-07 15:54:39 backend_utils.py:503]  1 ray.head.default
+I 03-07 15:54:39 backend_utils.py:503] Pending:
+I 03-07 15:54:39 backend_utils.py:503]  ray.worker.default, 1 launching
+I 03-07 15:54:39 backend_utils.py:503] Recent failures:
+I 03-07 15:54:39 backend_utils.py:503]  (no failures)
+I 03-07 15:54:39 backend_utils.py:503] 
+I 03-07 15:54:39 backend_utils.py:503] Resources
+I 03-07 15:54:39 backend_utils.py:503] ---------------------------------------------------------------
+I 03-07 15:54:39 backend_utils.py:503] Usage:
+I 03-07 15:54:39 backend_utils.py:503]  0.0/8.0 CPU
+I 03-07 15:54:39 backend_utils.py:503]  0.00/18.612 GiB memory
+I 03-07 15:54:39 backend_utils.py:503]  0.00/9.306 GiB object_store_memory
+I 03-07 15:54:39 backend_utils.py:503] 
+I 03-07 15:54:39 backend_utils.py:503] Demands:
+I 03-07 15:54:39 backend_utils.py:503]  (no resource demands)
+I 03-07 15:54:39 backend_utils.py:503] Loaded cached provider configuration
+I 03-07 15:54:39 backend_utils.py:503] If you experience issues with the cloud provider, try re-running the command with --no-config-cache.
+I 03-07 15:54:39 backend_utils.py:503] Fetched IP: 3.90.43.174
+I 03-07 15:54:39 backend_utils.py:503] 
+```
+  </issue>
+  
+  <patch>
+  diff --git a/sky/backends/backend_utils.py b/sky/backends/backend_utils.py
+index bcb26d916d5..cda5a261389 100644
+--- a/sky/backends/backend_utils.py
++++ b/sky/backends/backend_utils.py
+@@ -6,6 +6,7 @@
+ from multiprocessing import pool
+ import os
+ import pathlib
++import re
+ import shlex
+ import subprocess
+ import sys
+@@ -46,7 +47,14 @@
+ 
+ # Do not use /tmp because it gets cleared on VM restart.
+ _SKY_REMOTE_FILE_MOUNTS_DIR = '~/.sky/file_mounts/'
+-# Keep the following two fields in sync with the cluster template:
++
++_LAUNCHED_WORKER_PATTERN = re.compile(r'(\d+) ray[.|_]worker[.|_]default')
++# Intentionally not using prefix 'rf' for the string format because yapf have a
++# bug with python=3.6.
++# 10.133.0.5: ray.worker.default,
++_LAUNCHING_IP_PATTERN = re.compile(
++    r'({}): ray[.|_]worker[.|_]default'.format(IP_ADDR_REGEX))
++WAIT_HEAD_NODE_IP_RETRY_COUNT = 3
+ 
+ 
+ def _fill_template(template_name: str,
+@@ -479,34 +487,84 @@ def get_run_timestamp() -> str:
+     return 'sky-' + datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S-%f')
+ 
+ 
+-def wait_until_ray_cluster_ready(cloud: clouds.Cloud, cluster_config_file: str,
+-                                 num_nodes: int) -> bool:
++def wait_until_ray_cluster_ready(
++        cluster_config_file: str,
++        num_nodes: int,
++        log_path: str,
++        per_node_timeout: Optional[int] = None) -> bool:
+     """Returns whether the entire ray cluster is ready."""
+     # FIXME: It may takes a while for the cluster to be available for ray,
+     # especially for Azure, causing `ray exec` to fail.
+     if num_nodes <= 1:
+         return
++
++    # Manually fetching head ip instead of using `ray exec` to avoid the bug
++    # that `ray exec` fails to connect to the head node after some workers
++    # launched especially for Azure.
++    head_ip = get_head_ip(cluster_config_file,
++                          use_cached_head_ip=False,
++                          retry_count=WAIT_HEAD_NODE_IP_RETRY_COUNT)
++
+     expected_worker_count = num_nodes - 1
+-    if isinstance(cloud, (clouds.AWS, clouds.Azure)):
+-        worker_str = 'ray.worker.default'
+-    elif isinstance(cloud, clouds.GCP):
+-        worker_str = 'ray_worker_default'
+-    else:
+-        assert False, f'No support for distributed clusters for {cloud}.'
++
++    ssh_user, ssh_key = ssh_credential_from_yaml(cluster_config_file)
++    last_fetched_workers = 0
++    start = time.time()
+     while True:
+-        proc = subprocess.run(f'ray exec {cluster_config_file} "ray status"',
+-                              shell=True,
+-                              check=True,
+-                              stdout=subprocess.PIPE,
+-                              stderr=subprocess.PIPE)
+-        output = proc.stdout.decode('ascii')
++        rc, output, stderr = run_command_on_ip_via_ssh(head_ip,
++                                                       'ray status',
++                                                       ssh_user=ssh_user,
++                                                       ssh_private_key=ssh_key,
++                                                       log_path=log_path,
++                                                       stream_logs=False,
++                                                       require_outputs=True)
++
++        handle_returncode(rc, 'ray status',
++                          'Failed to run ray status on head node.', stderr)
+         logger.info(output)
+-        if f'{expected_worker_count} {worker_str}' in output:
++
++        # Healthy workers
++        result = _LAUNCHED_WORKER_PATTERN.findall(output)
++        healthy_workers = 0
++        if result:
++            assert len(result) == 1, result
++            healthy_workers = int(result[0])
++
++        if healthy_workers == expected_worker_count:
++            # All workers are up.
+             break
++
++        # Pending workers that have been launched by ray up.
++        found_ips = _LAUNCHING_IP_PATTERN.findall(output)
++        pending_workers = len(found_ips) if found_ips else 0
++
++        fetched_workers = healthy_workers + pending_workers
++
++        # Check the number of nodes that are fetched. Timeout if no new
++        # nodes fetched in a while (per_node_timeout), though number of
++        # fetched_workers is still not as expected.
++        if fetched_workers != last_fetched_workers:
++            # Reset the start time if the number of launching nodes
++            # changes, i.e. new nodes are launched.
++            logger.debug('Reset start time, as new nodes are launched. '
++                         f'({last_fetched_workers} -> {fetched_workers})')
++            start = time.time()
++            last_fetched_workers = fetched_workers
++        elif (per_node_timeout is not None and
++              time.time() - start > per_node_timeout and
++              fetched_workers != expected_worker_count):
++            logger.error(f'{colorama.Fore.RED}Got Timedout in waiting for '
++                         f'cluster to be ready.{colorama.Style.RESET_ALL}')
++            return False  # failed
++
+         if '(no pending nodes)' in output and '(no failures)' in output:
+             # Bug in ray autoscaler: e.g., on GCP, if requesting 2 nodes that
+             # GCP can satisfy only by half, the worker node would be forgotten.
+             # The correct behavior should be for it to error out.
++            logger.error(
++                f'{colorama.Fore.RED}Failed to launch multiple nodes on '
++                'GCP due to a nondeterministic bug in ray autoscaler.'
++                f'{colorama.Style.RESET_ALL}')
+             return False  # failed
+         time.sleep(10)
+     return True  # success
+@@ -569,6 +627,15 @@ def _ssh_control_path(ssh_control_filename: Optional[str]) -> Optional[str]:
+     return path
+ 
+ 
++def ssh_credential_from_yaml(cluster_yaml: str) -> str:
++    """Returns ssh_user and ssh_private_key."""
++    config = read_yaml(cluster_yaml)
++    auth_section = config['auth']
++    ssh_user = auth_section['ssh_user'].strip()
++    ssh_private_key = auth_section.get('ssh_private_key')
++    return ssh_user, ssh_private_key
++
++
+ class SshMode(enum.Enum):
+     """Enum for SSH mode."""
+     # Do not allocating pseudo-tty to avoid user input corrupting the output.
+@@ -773,6 +840,68 @@ def generate_cluster_name():
+     return f'sky-{uuid.uuid4().hex[:4]}-{getpass.getuser()}'
+ 
+ 
++def get_node_ips(cluster_yaml: str,
++                 expected_num_nodes: int,
++                 return_private_ips: bool = False) -> List[str]:
++    """Returns the IPs of all nodes in the cluster."""
++    yaml_handle = cluster_yaml
++    if return_private_ips:
++        config = read_yaml(yaml_handle)
++        # Add this field to a temp file to get private ips.
++        config['provider']['use_internal_ips'] = True
++        yaml_handle = cluster_yaml + '.tmp'
++        dump_yaml(yaml_handle, config)
++
++    out = run(f'ray get-head-ip {yaml_handle}',
++              stdout=subprocess.PIPE).stdout.decode().strip()
++    head_ip = re.findall(IP_ADDR_REGEX, out)
++    assert 1 == len(head_ip), out
++
++    out = run(f'ray get-worker-ips {yaml_handle}',
++              stdout=subprocess.PIPE).stdout.decode()
++    worker_ips = re.findall(IP_ADDR_REGEX, out)
++    assert expected_num_nodes - 1 == len(worker_ips), (expected_num_nodes - 1,
++                                                       out)
++    if return_private_ips:
++        os.remove(yaml_handle)
++    return head_ip + worker_ips
++
++
++def get_head_ip(
++    handle: Union[backends.Backend.ResourceHandle, str],
++    use_cached_head_ip: bool = True,
++    retry_count: int = 1,
++) -> str:
++    """Returns the ip of the head node"""
++    assert not use_cached_head_ip or retry_count == 1, (
++        'Cannot use cached_head_ip when retry_count is not 1')
++    assert not use_cached_head_ip or isinstance(
++        handle, str), ('Cannot use cached_head_ip when handle is None')
++    if use_cached_head_ip:
++        if handle.head_ip is None:
++            # This happens for INIT clusters (e.g., exit 1 in setup).
++            raise ValueError(
++                'Cluster\'s head IP not found; is it up? To fix: '
++                'run a successful launch first (`sky launch`) to ensure'
++                ' the cluster status is UP (`sky status`).')
++        head_ip = handle.head_ip
++    else:
++        for i in range(retry_count):
++            try:
++                out = run(f'ray get-head-ip {handle}',
++                          stdout=subprocess.PIPE).stdout.decode().strip()
++                head_ip = re.findall(IP_ADDR_REGEX, out)
++                assert 1 == len(head_ip), out
++                head_ip = head_ip[0]
++                break
++            except subprocess.CalledProcessError as e:
++                if i == retry_count - 1:
++                    raise e
++                # Retry if the cluster is not up yet.
++                time.sleep(5)
++    return head_ip
++
++
+ def get_backend_from_handle(
+         handle: backends.Backend.ResourceHandle) -> backends.Backend:
+     """Gets a Backend object corresponding to a handle.
+diff --git a/sky/backends/cloud_vm_ray_backend.py b/sky/backends/cloud_vm_ray_backend.py
+index 614b357d362..40c275e8016 100644
+--- a/sky/backends/cloud_vm_ray_backend.py
++++ b/sky/backends/cloud_vm_ray_backend.py
+@@ -49,6 +49,9 @@
+ 
+ _PATH_SIZE_MEGABYTES_WARN_THRESHOLD = 256
+ 
++# Timeout for provision a cluster and wait for it to be ready in seconds.
++_CLUSTER_PER_NODE_PROVISION_TIMEOUT = 30
++
+ 
+ def _check_cluster_name_is_valid(cluster_name: str) -> None:
+     """Errors out on invalid cluster names not supported by cloud providers.
+@@ -714,34 +717,34 @@ def _retry_region_zones(self, to_provision: Resources, num_nodes: int,
+                 'region_name': region.name,
+                 'zone_str': zone_str,
+             }
+-            gang_failed, rc, stdout, stderr = self._gang_schedule_ray_up(
++            gang_succeeded, rc, stdout, stderr = self._gang_schedule_ray_up(
+                 to_provision.cloud, num_nodes, cluster_config_file,
+                 log_abs_path, stream_logs, logging_info)
+ 
+-            if gang_failed or rc != 0:
+-                if gang_failed:
+-                    # There exist partial nodes (e.g., head node) so we must
+-                    # down before moving on to other regions.
+-                    # FIXME(zongheng): terminating a potentially live cluster
+-                    # is scary.  Say: users have an existing cluster, do sky
+-                    # launch, gang failed, then we are terminating it here.
+-                    logger.error('*** Failed provisioning the cluster. ***')
+-                    logger.error('====== stdout ======')
+-                    logger.error(stdout)
+-                    logger.error('====== stderr ======')
+-                    logger.error(stderr)
+-                    logger.error('*** Tearing down the failed cluster. ***')
+-                    CloudVmRayBackend().teardown(handle, terminate=True)
+-                    self._update_blocklist_on_error(
+-                        to_provision.cloud,
+-                        region,
+-                        # Ignored and block region:
+-                        zones=None,
+-                        stdout=None,
+-                        stderr=None)
+-                else:
+-                    self._update_blocklist_on_error(to_provision.cloud, region,
+-                                                    zones, stdout, stderr)
++            if rc != 0:
++                # ray up failed.
++                self._update_blocklist_on_error(to_provision.cloud, region,
++                                                zones, stdout, stderr)
++            elif not gang_succeeded:
++                # gang scheduling failed.
++
++                # There exist partial nodes (e.g., head node) so we must
++                # down before moving on to other regions.
++                # FIXME(zongheng): terminating a potentially live cluster
++                # is scary.  Say: users have an existing cluster, do sky
++                # launch, gang failed, then we are terminating it here.
++                logger.error('*** Failed provisioning the cluster. ***')
++                # The stdout/stderr of ray up is not useful here, since
++                # head node is successfully provisioned.
++                logger.error('*** Tearing down the failed cluster. ***')
++                CloudVmRayBackend().teardown(handle, terminate=True)
++                self._update_blocklist_on_error(
++                    to_provision.cloud,
++                    region,
++                    # Ignored and block region:
++                    zones=None,
++                    stdout=None,
++                    stderr=None)
+             else:
+                 # Success.
+ 
+@@ -772,7 +775,7 @@ def _gang_schedule_ray_up(self, to_provision_cloud: clouds.Cloud,
+             would fail.)
+ 
+         Returns:
+-          (did gang scheduling failed; proc; stdout; stderr).
++          (did gang scheduling succeeded; returncode; stdout; stderr).
+         """
+         # FIXME(zhwu,zongheng): ray up on multiple nodes ups the head node then
+         # waits for all workers; turn it into real gang scheduling.
+@@ -826,7 +829,7 @@ def ray_up(start_streaming_at):
+ 
+         # Only 1 node or head node provisioning failure.
+         if num_nodes == 1 or returncode != 0:
+-            return False, returncode, stdout, stderr
++            return True, returncode, stdout, stderr
+ 
+         logger.info(f'{style.BRIGHT}Successfully provisioned or found'
+                     f' existing head VM. Waiting for workers.{style.RESET_ALL}')
+@@ -834,16 +837,14 @@ def ray_up(start_streaming_at):
+         # FIXME(zongheng): the below requires ray processes are up on head. To
+         # repro it failing: launch a 2-node cluster, log into head and ray
+         # stop, then launch again.
+-        # TODO: if requesting a large amount (say 32) of expensive VMs, this
+-        # may loop for a long time.  Use timeouts and treat as gang_failed.
+         cluster_ready = backend_utils.wait_until_ray_cluster_ready(
+-            to_provision_cloud, cluster_config_file, num_nodes)
+-        gang_failed = not cluster_ready
+-        if gang_failed:
+-            # Head OK; gang scheduling failure.
+-            return gang_failed, returncode, stdout, stderr
+-
+-        return False, returncode, stdout, stderr
++            cluster_config_file,
++            num_nodes,
++            log_path=log_abs_path,
++            per_node_timeout=_CLUSTER_PER_NODE_PROVISION_TIMEOUT)
++        # Do not need rc/stdout/stderr if gang scheduling failed.
++        # gang_succeeded = False, if head OK, but workers failed.
++        return cluster_ready, returncode, None, None
+ 
+     def _ensure_cluster_ray_started(self,
+                                     handle: 'CloudVmRayBackend.ResourceHandle',
+@@ -1038,8 +1039,8 @@ def _check_existing_cluster(
+     def _set_tpu_name(self, cluster_config_file: str, num_nodes: int,
+                       tpu_name: str) -> None:
+         """Sets TPU_NAME on all nodes."""
+-        ip_list = self._get_node_ips(cluster_config_file, num_nodes)
+-        ssh_user, ssh_private_key = self._get_ssh_credential(
++        ip_list = backend_utils.get_node_ips(cluster_config_file, num_nodes)
++        ssh_user, ssh_key = backend_utils.ssh_credential_from_yaml(
+             cluster_config_file)
+ 
+         for ip in ip_list:
+@@ -1049,7 +1050,7 @@ def _set_tpu_name(self, cluster_config_file: str, num_nodes: int,
+                 ip,
+                 cmd,
+                 ssh_user=ssh_user,
+-                ssh_private_key=ssh_private_key,
++                ssh_private_key=ssh_key,
+                 log_path=os.path.join(self.log_dir, 'tpu_setup.log'))
+             backend_utils.handle_returncode(returncode, cmd,
+                                             'Failed to set TPU_NAME on node.')
+@@ -1102,11 +1103,15 @@ def provision(self,
+         if tpu_name is not None:
+             self._set_tpu_name(cluster_config_file, launched_nodes, tpu_name)
+ 
++        head_ip = backend_utils.get_head_ip(
++            cluster_config_file,
++            use_cached_head_ip=False,
++            retry_count=backend_utils.WAIT_HEAD_NODE_IP_RETRY_COUNT)
+         handle = self.ResourceHandle(
+             cluster_name=cluster_name,
+             cluster_yaml=cluster_config_file,
+             # Cache head ip in the handle to speed up ssh operations.
+-            head_ip=self._get_node_ips(cluster_config_file, launched_nodes)[0],
++            head_ip=head_ip,
+             launched_nodes=launched_nodes,
+             launched_resources=provisioned_resources,
+             # TPU.
+@@ -1125,7 +1130,8 @@ def sync_workdir(self, handle: ResourceHandle, workdir: Path) -> None:
+         # e.g., in CLI.  So we should rerun rsync_up.
+         fore = colorama.Fore
+         style = colorama.Style
+-        ip_list = self._get_node_ips(handle.cluster_yaml, handle.launched_nodes)
++        ip_list = backend_utils.get_node_ips(handle.cluster_yaml,
++                                             handle.launched_nodes)
+         full_workdir = os.path.abspath(os.path.expanduser(workdir))
+ 
+         # These asserts have been validated at Task construction time.
+@@ -1187,8 +1193,9 @@ def sync_file_mounts(
+         style = colorama.Style
+         logger.info(f'{fore.CYAN}Processing file mounts.{style.RESET_ALL}')
+ 
+-        ip_list = self._get_node_ips(handle.cluster_yaml, handle.launched_nodes)
+-        ssh_user, ssh_private_key = self._get_ssh_credential(
++        ip_list = backend_utils.get_node_ips(handle.cluster_yaml,
++                                             handle.launched_nodes)
++        ssh_user, ssh_key = backend_utils.ssh_credential_from_yaml(
+             handle.cluster_yaml)
+ 
+         log_path = os.path.join(self.log_dir, 'file_mounts.log')
+@@ -1211,7 +1218,7 @@ def _sync_node(ip):
+                         ip,
+                         command,
+                         ssh_user=ssh_user,
+-                        ssh_private_key=ssh_private_key,
++                        ssh_private_key=ssh_key,
+                         log_path=log_path,
+                         stream_logs=False,
+                         ssh_control_name=self._ssh_control_name(handle))
+@@ -1323,7 +1330,7 @@ def _symlink_node(ip):
+                 ip,
+                 symlink_command,
+                 ssh_user=ssh_user,
+-                ssh_private_key=ssh_private_key,
++                ssh_private_key=ssh_key,
+                 log_path=log_path,
+                 ssh_control_name=self._ssh_control_name(handle))
+             backend_utils.handle_returncode(
+@@ -1353,9 +1360,9 @@ def setup(self, handle: ResourceHandle, task: Task) -> None:
+             setup_sh_path = f.name
+             setup_file = os.path.basename(setup_sh_path)
+             # Sync the setup script up and run it.
+-            ip_list = self._get_node_ips(handle.cluster_yaml,
+-                                         handle.launched_nodes)
+-            ssh_user, ssh_private_key = self._get_ssh_credential(
++            ip_list = backend_utils.get_node_ips(handle.cluster_yaml,
++                                                 handle.launched_nodes)
++            ssh_user, ssh_key = backend_utils.ssh_credential_from_yaml(
+                 handle.cluster_yaml)
+ 
+             def _setup_node(ip: int) -> int:
+@@ -1370,7 +1377,7 @@ def _setup_node(ip: int) -> int:
+                     ip,
+                     cmd,
+                     ssh_user=ssh_user,
+-                    ssh_private_key=ssh_private_key,
++                    ssh_private_key=ssh_key,
+                     log_path=os.path.join(self.log_dir, 'setup.log'),
+                     ssh_control_name=self._ssh_control_name(handle))
+                 backend_utils.handle_returncode(
+@@ -1409,7 +1416,8 @@ def sync_down_logs(self, handle: ResourceHandle, job_id: int) -> None:
+         logger.info(f'{fore.CYAN}Logs Directory: '
+                     f'{style.BRIGHT}{local_log_dir}{style.RESET_ALL}')
+ 
+-        ips = self._get_node_ips(handle.cluster_yaml, handle.launched_nodes)
++        ips = backend_utils.get_node_ips(handle.cluster_yaml,
++                                         handle.launched_nodes)
+ 
+         def rsync_down(ip: str) -> None:
+             from ray.autoscaler import sdk  # pylint: disable=import-outside-toplevel
+@@ -1816,33 +1824,6 @@ def teardown(self, handle: ResourceHandle, terminate: bool) -> None:
+                 os.remove(handle.tpu_create_script)
+                 os.remove(handle.tpu_delete_script)
+ 
+-    def _get_node_ips(self,
+-                      cluster_yaml: str,
+-                      expected_num_nodes: int,
+-                      return_private_ips: bool = False) -> List[str]:
+-        """Returns the IPs of all nodes in the cluster."""
+-        yaml_handle = cluster_yaml
+-        if return_private_ips:
+-            config = backend_utils.read_yaml(yaml_handle)
+-            # Add this field to a temp file to get private ips.
+-            config['provider']['use_internal_ips'] = True
+-            yaml_handle = cluster_yaml + '.tmp'
+-            backend_utils.dump_yaml(yaml_handle, config)
+-
+-        out = backend_utils.run(f'ray get-head-ip {yaml_handle}',
+-                                stdout=subprocess.PIPE).stdout.decode().strip()
+-        head_ip = re.findall(backend_utils.IP_ADDR_REGEX, out)
+-        assert 1 == len(head_ip), out
+-
+-        out = backend_utils.run(f'ray get-worker-ips {yaml_handle}',
+-                                stdout=subprocess.PIPE).stdout.decode()
+-        worker_ips = re.findall(backend_utils.IP_ADDR_REGEX, out)
+-        assert expected_num_nodes - 1 == len(worker_ips), (expected_num_nodes -
+-                                                           1, out)
+-        if return_private_ips:
+-            os.remove(yaml_handle)
+-        return head_ip + worker_ips
+-
+     def _rsync_up(
+         self,
+         handle: ResourceHandle,
+@@ -1863,7 +1844,7 @@ def _rsync_up(
+                 f'The cluster "{handle.cluster_name}" appears to be down. '
+                 'Run a re-provisioning command (e.g., sky launch) and retry.')
+ 
+-        ssh_user, ssh_private_key = self._get_ssh_credential(
++        ssh_user, ssh_key = backend_utils.ssh_credential_from_yaml(
+             handle.cluster_yaml)
+         # Build command.
+         # TODO(zhwu): This will print a per-file progress bar (with -P),
+@@ -1873,7 +1854,7 @@ def _rsync_up(
+         rsync_command = ['rsync', '-Pavz']
+         rsync_command.append('--filter=\':- .gitignore\'')
+         ssh_options = ' '.join(
+-            backend_utils.ssh_options_list(ssh_private_key,
++            backend_utils.ssh_options_list(ssh_key,
+                                            self._ssh_control_name(handle)))
+         rsync_command.append(f'-e "ssh {ssh_options}"')
+         rsync_command.extend([
+@@ -1895,33 +1876,6 @@ def _rsync_up(
+     def _ssh_control_name(self, handle: ResourceHandle) -> str:
+         return f'{hashlib.md5(handle.cluster_yaml.encode()).hexdigest()[:10]}'
+ 
+-    def _get_head_ip(
+-        self,
+-        handle: ResourceHandle,
+-        use_cached_head_ip: bool = True,
+-    ) -> str:
+-        """Returns the ip of the head node"""
+-        if use_cached_head_ip:
+-            if handle.head_ip is None:
+-                # This happens for INIT clusters (e.g., exit 1 in setup).
+-                raise ValueError(
+-                    'Cluster\'s head IP not found; is it up? To fix: '
+-                    'run a successful launch first (`sky launch`) to ensure'
+-                    ' the cluster status is UP (`sky status`).')
+-            head_ip = handle.head_ip
+-        else:
+-            head_ip = self._get_node_ips(handle.cluster_yaml,
+-                                         handle.launched_nodes)[0]
+-        return head_ip
+-
+-    def _get_ssh_credential(self, cluster_yaml: str) -> str:
+-        """Returns ssh_user and ssh_private_key."""
+-        config = backend_utils.read_yaml(cluster_yaml)
+-        auth = config['auth']
+-        ssh_user = auth['ssh_user'].strip()
+-        ssh_private_key = auth.get('ssh_private_key')
+-        return ssh_user, ssh_private_key
+-
+     # TODO(zhwu): Refactor this to a CommandRunner class, so different backends
+     # can support its own command runner.
+     def run_on_head(
+@@ -1939,8 +1893,8 @@ def run_on_head(
+         require_outputs: bool = False,
+     ) -> Union[int, Tuple[int, str, str]]:
+         """Runs 'cmd' on the cluster's head node."""
+-        head_ip = self._get_head_ip(handle, use_cached_head_ip)
+-        ssh_user, ssh_private_key = self._get_ssh_credential(
++        head_ip = backend_utils.get_head_ip(handle, use_cached_head_ip)
++        ssh_user, ssh_private_key = backend_utils.ssh_credential_from_yaml(
+             handle.cluster_yaml)
+         if under_remote_workdir:
+             cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
+diff --git a/sky/sky_logging.py b/sky/sky_logging.py
+index e9c0828b1da..95b29a884dd 100644
+--- a/sky/sky_logging.py
++++ b/sky/sky_logging.py
+@@ -29,5 +29,5 @@ def init_logger(name: str):
+ 
+     logger = logging.getLogger(name)
+     logger.addHandler(h)
+-    logger.setLevel(logging.INFO)
++    logger.setLevel(logging.DEBUG)
+     return logger
+diff --git a/sky/templates/aws-ray.yml.j2 b/sky/templates/aws-ray.yml.j2
+index 46871d22a1b..d6c1fcc1068 100644
+--- a/sky/templates/aws-ray.yml.j2
++++ b/sky/templates/aws-ray.yml.j2
+@@ -2,6 +2,7 @@ cluster_name: {{cluster_name}}
+ 
+ # The maximum number of workers nodes to launch in addition to the head node.
+ max_workers: {{num_nodes - 1}}
++upscaling_speed: {{num_nodes - 1}}
+ idle_timeout_minutes: 60
+ 
+ provider:
+diff --git a/sky/templates/azure-ray.yml.j2 b/sky/templates/azure-ray.yml.j2
+index 01c86401f3e..e3b08f1009b 100644
+--- a/sky/templates/azure-ray.yml.j2
++++ b/sky/templates/azure-ray.yml.j2
+@@ -2,6 +2,7 @@ cluster_name: {{cluster_name}}
+ 
+ # The maximum number of workers nodes to launch in addition to the head node.
+ max_workers: {{num_nodes - 1}}
++upscaling_speed: {{num_nodes - 1}}
+ idle_timeout_minutes: 60
+ 
+ provider:
+diff --git a/sky/templates/gcp-ray.yml.j2 b/sky/templates/gcp-ray.yml.j2
+index 2a0036b5e3d..437faa19d76 100644
+--- a/sky/templates/gcp-ray.yml.j2
++++ b/sky/templates/gcp-ray.yml.j2
+@@ -5,6 +5,7 @@ cluster_name: {{cluster_name}}
+ 
+ # The maximum number of workers nodes to launch in addition to the head node.
+ max_workers: {{num_nodes - 1}}
++upscaling_speed: {{num_nodes - 1}}
+ idle_timeout_minutes: 60
+ 
+ provider:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

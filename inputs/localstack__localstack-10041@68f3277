@@ -1,0 +1,295 @@
+  Task-ID: localstack__localstack-10041@68f3277
+  Please checkout to this commit first: 4407db9bc9373103950f8c364669e95b26ccecdd
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  DynamoDB TTL not implemented
+I'm trying to use the recent time-to-live feature in DynamoDB, but I get a `An unknown operation was requested` exception. My guess is that the feature is not yet implemented in Localstack. Are there any plans for including it?
+  </issue>
+  
+  <patch>
+  diff --git a/localstack/services/dynamodb/models.py b/localstack/services/dynamodb/models.py
+index e128540690891..ec9e1cc433a1b 100644
+--- a/localstack/services/dynamodb/models.py
++++ b/localstack/services/dynamodb/models.py
+@@ -1,4 +1,9 @@
+-from localstack.aws.api.dynamodb import RegionName, ReplicaDescription, TableName
++from localstack.aws.api.dynamodb import (
++    RegionName,
++    ReplicaDescription,
++    TableName,
++    TimeToLiveSpecification,
++)
+ from localstack.services.stores import (
+     AccountRegionBundle,
+     BaseStore,
+@@ -29,7 +34,7 @@ class DynamoDBStore(BaseStore):
+     table_properties: dict[str, dict] = LocalAttribute(default=dict)
+ 
+     # maps table names to TTL specifications
+-    ttl_specifications: dict[str, dict] = LocalAttribute(default=dict)
++    ttl_specifications: dict[str, TimeToLiveSpecification] = LocalAttribute(default=dict)
+ 
+     # maps backups
+     backups: dict[str, dict] = LocalAttribute(default=dict)
+diff --git a/localstack/services/dynamodb/provider.py b/localstack/services/dynamodb/provider.py
+index e928ed02d6c49..6bdbd992f94bc 100644
+--- a/localstack/services/dynamodb/provider.py
++++ b/localstack/services/dynamodb/provider.py
+@@ -4,12 +4,14 @@
+ import os
+ import random
+ import re
++import threading
+ import time
+ import traceback
+ from binascii import crc32
+ from contextlib import contextmanager
++from datetime import datetime
+ from operator import itemgetter
+-from typing import Dict, List
++from typing import Dict, List, Optional
+ 
+ import requests
+ import werkzeug
+@@ -105,7 +107,7 @@
+     AWS_REGION_US_EAST_1,
+     TEST_AWS_SECRET_ACCESS_KEY,
+ )
+-from localstack.http import Response
++from localstack.http import Request, Response, route
+ from localstack.services.dynamodb.models import DynamoDBStore, dynamodb_stores
+ from localstack.services.dynamodb.server import DynamodbServer
+ from localstack.services.dynamodb.utils import (
+@@ -132,8 +134,9 @@
+ from localstack.utils.collections import select_attributes, select_from_typed_dict
+ from localstack.utils.common import short_uid, to_bytes
+ from localstack.utils.json import BytesEncoder, canonical_json
++from localstack.utils.scheduler import Scheduler
+ from localstack.utils.strings import long_uid, to_str
+-from localstack.utils.threads import start_worker_thread
++from localstack.utils.threads import FuncThread, start_thread, start_worker_thread
+ 
+ # set up logger
+ LOG = logging.getLogger(__name__)
+@@ -356,15 +359,123 @@ def modify_context_region(context: RequestContext, region: str):
+         context.request.headers["Authorization"] = original_authorization
+ 
+ 
++class DynamoDBDeveloperEndpoints:
++    """
++    Developer endpoints for DynamoDB
++    DELETE /_aws/dynamodb/expired - delete expired items from tables with TTL enabled; return the number of expired
++        items deleted
++    """
++
++    @route("/_aws/dynamodb/expired", methods=["DELETE"])
++    def delete_expired_messages(self, _: Request):
++        no_expired_items = delete_expired_items()
++        return {"ExpiredItems": no_expired_items}
++
++
++def delete_expired_items() -> int:
++    """
++    This utility function iterates over all stores, looks for tables with TTL enabled,
++    scan such tables and delete expired items.
++    """
++    no_expired_items = 0
++
++    for account_id, account_bundle in dynamodb_stores.items():
++        for region_name, state in account_bundle.items():
++            ttl_specs = state.ttl_specifications
++            for table_name, ttl_spec in ttl_specs.items():
++                if ttl_spec.get("Enabled", False):
++                    attribute_name = ttl_spec.get("AttributeName")
++                    client = connect_to(region_name=region_name).dynamodb
++                    current_time = int(datetime.now().timestamp())
++                    try:
++                        result = client.scan(
++                            TableName=table_name,
++                            FilterExpression=f"{attribute_name} <= :threshold",
++                            ExpressionAttributeValues={":threshold": {"N": str(current_time)}},
++                        )
++                        items_to_delete = result.get("Items", [])
++                        no_expired_items += len(items_to_delete)
++                        table_description = client.describe_table(TableName=table_name)
++                        partition_key = _get_partition_key(table_description)
++                        keys_to_delete = [
++                            {partition_key: item.get(partition_key)} for item in items_to_delete
++                        ]
++                        delete_requests = [
++                            {"DeleteRequest": {"Key": key}} for key in keys_to_delete
++                        ]
++                        for i in range(0, len(delete_requests), 25):
++                            batch = delete_requests[i : i + 25]
++                            client.batch_write_item(RequestItems={table_name: batch})
++                    except Exception as e:
++                        LOG.warning(
++                            "An error occurred when deleting expired items from table %s: %s",
++                            table_name,
++                            e,
++                        )
++    return no_expired_items
++
++
++def _get_partition_key(table_description: DescribeTableOutput) -> str:
++    key_schema = table_description.get("Table", {}).get("KeySchema", [])
++    for key in key_schema:
++        if key["KeyType"] == "HASH":
++            return key["AttributeName"]
++
++
++class ExpiredItemsWorker:
++    """A worker that periodically computes and deletes expired items from DynamoDB tables"""
++
++    def __init__(self) -> None:
++        super().__init__()
++        self.scheduler = Scheduler()
++        self.thread: Optional[FuncThread] = None
++        self.mutex = threading.RLock()
++
++    def start(self):
++        with self.mutex:
++            if self.thread:
++                return
++
++            self.scheduler = Scheduler()
++            self.scheduler.schedule(
++                delete_expired_items, period=60 * 60
++            )  # the background process seems slow on AWS
++
++            def _run(*_args):
++                self.scheduler.run()
++
++            self.thread = start_thread(_run, name="ddb-remove-expired-items")
++
++    def stop(self):
++        with self.mutex:
++            if self.scheduler:
++                self.scheduler.close()
++
++            if self.thread:
++                self.thread.stop()
++
++            self.thread = None
++            self.scheduler = None
++
++
+ class DynamoDBProvider(DynamodbApi, ServiceLifecycleHook):
+     server: DynamodbServer
+     """The instance of the server managing the instance of DynamoDB local"""
+ 
+     def __init__(self):
+         self.server = self._new_dynamodb_server()
++        self._expired_items_worker = ExpiredItemsWorker()
++        self._router_rules = []
+ 
+     def on_before_start(self):
+         self.server.start_dynamodb()
++        self._expired_items_worker.start()
++        self._router_rules = ROUTER.add(DynamoDBDeveloperEndpoints())
++
++    def on_before_stop(self):
++        self._expired_items_worker.stop()
++        for rule in self._router_rules:
++            ROUTER.remove_rule(rule)
+ 
+     def accept_state_visitor(self, visitor: StateVisitor):
+         visitor.visit(dynamodb_stores)
+diff --git a/tests/aws/services/dynamodb/test_dynamodb.py b/tests/aws/services/dynamodb/test_dynamodb.py
+index 3f984cc2dc700..ceb147da508a5 100644
+--- a/tests/aws/services/dynamodb/test_dynamodb.py
++++ b/tests/aws/services/dynamodb/test_dynamodb.py
+@@ -1,14 +1,17 @@
+ import json
+ import re
++import time
+ from datetime import datetime
+ from time import sleep
+ from typing import Dict
+ 
+ import botocore.exceptions
+ import pytest
++import requests
+ from boto3.dynamodb.types import STRING
+ from botocore.exceptions import ClientError
+ 
++from localstack import config
+ from localstack.aws.api.dynamodb import PointInTimeRecoverySpecification
+ from localstack.constants import AWS_REGION_US_EAST_1, TEST_AWS_ACCOUNT_ID, TEST_AWS_REGION_NAME
+ from localstack.services.dynamodbstreams.dynamodbstreams_api import get_kinesis_stream_name
+@@ -102,9 +105,40 @@ def test_large_data_download(self, aws_client, ddb_test_table):
+         result = aws_client.dynamodb.scan(TableName=ddb_test_table)
+         assert len(result["Items"]) == num_items
+ 
++    @markers.aws.only_localstack
++    def test_time_to_live_deletion(self, aws_client, ddb_test_table):
++        table_name = ddb_test_table
++        aws_client.dynamodb.update_time_to_live(
++            TableName=table_name,
++            TimeToLiveSpecification={"Enabled": True, "AttributeName": "expiringAt"},
++        )
++        aws_client.dynamodb.describe_time_to_live(TableName=table_name)
++
++        exp = int(time.time()) - 10  # expired
++        items = [
++            {PARTITION_KEY: {"S": "expired"}, "expiringAt": {"N": str(exp)}},
++            {PARTITION_KEY: {"S": "not-expired"}, "expiringAt": {"N": str(exp + 120)}},
++        ]
++        for item in items:
++            aws_client.dynamodb.put_item(TableName=table_name, Item=item)
++
++        url = f"{config.internal_service_url()}/_aws/dynamodb/expired"
++        response = requests.delete(url)
++        assert response.status_code == 200
++        assert response.json() == {"ExpiredItems": 1}
++
++        result = aws_client.dynamodb.get_item(
++            TableName=table_name, Key={PARTITION_KEY: {"S": "not-expired"}}
++        )
++        assert result.get("Item")
++        result = aws_client.dynamodb.get_item(
++            TableName=table_name, Key={PARTITION_KEY: {"S": "expired"}}
++        )
++        assert not result.get("Item")
++
+     @markers.aws.only_localstack
+     def test_time_to_live(self, aws_client, ddb_test_table):
+-        # check response for inexistent table
++        # check response for nonexistent table
+         response = testutil.send_describe_dynamodb_ttl_request("test")
+         assert json.loads(response._content)["__type"] == "ResourceNotFoundException"
+         assert response.status_code == 400
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,145 @@
+  Task-ID: scipy__scipy-23280@1fb2ea1
+  Please checkout to this commit first: 8bb0f1737178bceddbfd7b33e9dde33b84e9ed14
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  BUG: stats.beta.entropy: doesn't work with array-valued a, b
+### Describe your issue.
+
+Beta distribution entropy doesn't work with array-valued a, b
+
+### Reproducing Code Example
+
+```python
+import numpy as np
+import scipy.stats as ss
+beta = ss.make_distribution(ss.beta)
+b = beta(a=np.zeros(10), b=np.ones(10))
+b.entropy()
+```
+
+### Error message
+
+```shell
+  File "/home/neil/src/efax/.venv/lib/python3.13/site-packages/scipy/stats/_distribution_infrastructure.py", line 1088, in filtered
+    res = f(self, *args, **kwargs)
+  File "/home/neil/src/efax/.venv/lib/python3.13/site-packages/scipy/stats/_distribution_infrastructure.py", line 2299, in entropy
+    return self._entropy_dispatch(method=method, **self._parameters)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neil/src/efax/.venv/lib/python3.13/site-packages/scipy/stats/_distribution_infrastructure.py", line 1152, in wrapped
+    return method(*args, **kwargs)
+  File "/home/neil/src/efax/.venv/lib/python3.13/site-packages/scipy/stats/_continuous_distns.py", line 947, in _entropy
+    if a >= 4.96e6 and b >= 4.96e6:
+       ^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+```
+Probably just needs to use `xp.where`.
+
+### SciPy/NumPy/Python version and system information
+
+```shell
+1.16
+```
+  </issue>
+  
+  <patch>
+  diff --git a/scipy/stats/_continuous_distns.py b/scipy/stats/_continuous_distns.py
+index 52208164a2ff..0adc8aecab2d 100644
+--- a/scipy/stats/_continuous_distns.py
++++ b/scipy/stats/_continuous_distns.py
+@@ -935,23 +935,28 @@ def asymptotic_b_large(a, b):
+             log_term = sum_ab*np.log1p(a/b) + np.log(b) - 2*np.log(sum_ab)
+             return t1 + t2 + log_term
+ 
+-        def threshold_large(v):
+-            if v == 1.0:
+-                return 1000
+-
+-            j = np.log10(v)
+-            digits = int(j)
+-            d = int(v / 10 ** digits) + 2
+-            return d*10**(7 + j)
+-
+-        if a >= 4.96e6 and b >= 4.96e6:
+-            return asymptotic_ab_large(a, b)
+-        elif a <= 4.9e6 and b - a >= 1e6 and b >= threshold_large(a):
+-            return asymptotic_b_large(a, b)
+-        elif b <= 4.9e6 and a - b >= 1e6 and a >= threshold_large(b):
++        def asymptotic_a_large(a, b):
+             return asymptotic_b_large(b, a)
+-        else:
+-            return regular(a, b)
++
++        def threshold_large(v):
++            j = np.floor(np.log10(v))
++            d = np.floor(v / 10 ** j) + 2
++            return xpx.apply_where(v != 1.0, (d, j), lambda d_, j_: d_ * 10**(7 + j_),
++                                   fill_value=1000)
++
++        threshold_a = threshold_large(a)
++        threshold_b = threshold_large(b)
++        return _lazyselect([np.logical_and(a >= 4.96e6, b >= 4.96e6),
++                            np.logical_and(np.logical_and(a <= 4.9e6, b - a >= 1e6),
++                                           b >= threshold_a),
++                            np.logical_and(np.logical_and(b <= 4.9e6, a - b >= 1e6),
++                                           a >= threshold_b),
++                            np.logical_and(a < 4.9e6, b < 4.9e6)
++                           ],
++                           [asymptotic_ab_large, asymptotic_b_large,
++                            asymptotic_a_large, regular],
++                           [a, b]
++        )
+ 
+ 
+ beta = beta_gen(a=0.0, b=1.0, name='beta')
+diff --git a/scipy/stats/tests/test_distributions.py b/scipy/stats/tests/test_distributions.py
+index e2bf87b6b8a1..ebf34e573244 100644
+--- a/scipy/stats/tests/test_distributions.py
++++ b/scipy/stats/tests/test_distributions.py
+@@ -5003,6 +5003,13 @@ def test_extreme_entropy(self, a, b, ref, tol):
+         #     return float(entropy)
+         assert_allclose(stats.beta(a, b).entropy(), ref, rtol=tol)
+ 
++    def test_entropy_broadcasting(self):
++        # gh-23127 reported that the entropy method of the beta
++        # distribution did not broadcast correctly.
++        beta_dist = stats.make_distribution(stats.beta)
++        b = beta_dist(a=np.zeros(10), b=np.ones(10))
++        b.entropy()
++
+ 
+ class TestBetaPrime:
+     # the test values are used in test_cdf_gh_17631 / test_ppf_gh_17631
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

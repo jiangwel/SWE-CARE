@@ -1,0 +1,189 @@
+  Task-ID: ansible__ansible-36996@4b45ffc
+  Please checkout to this commit first: 4021194532dde444e34e8a33f254d91ef4e25be3
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Missing force_init function in module
+<!---
+Verify first that your issue/request is not already reported on GitHub.
+Also test if the latest release, and devel branch are affected too.
+-->
+
+##### ISSUE TYPE
+<!--- Pick one below and delete the rest -->
+ - Bug Report
+
+##### COMPONENT NAME
+<!---
+Name of the module, plugin, task or feature
+Do not include extra details here, e.g. "vyos_command" not "the network module vyos_command" or the full path
+-->
+
+- terraform
+
+##### ANSIBLE VERSION
+<!--- Paste verbatim output from "ansible --version" between quotes below -->
+```
+(ansible) ubuntu@ip-172-31-45-246:~$ ansible --version
+ansible 2.6.0
+  config file = /home/ubuntu/kubernetes/ansible.cfg
+  configured module search path = [u'/home/ubuntu/.ansible/plugins/modules', u'/usr/share/ansible/plugins/modules']
+  ansible python module location = /home/ubuntu/ansible/local/lib/python2.7/site-packages/ansible
+  executable location = /home/ubuntu/ansible/bin/ansible
+  python version = 2.7.12 (default, Dec  4 2017, 14:50:18) [GCC 5.4.0 20160609]
+```
+
+##### CONFIGURATION
+<!---
+If using Ansible 2.4 or above, paste the results of "ansible-config dump --only-changed"
+Otherwise, mention any settings you have changed/added/removed in ansible.cfg
+(or using the ANSIBLE_* environment variables).
+-->
+Nothing.
+
+##### OS / ENVIRONMENT
+<!---
+Mention the OS you are running Ansible from, and the OS you are
+managing, or say "N/A" for anything that is not platform-specific.
+Also mention the specific version of what you are trying to control,
+e.g. if this is a network bug the version of firmware on the network device.
+-->
+```
+Distributor ID: Ubuntu
+Description:    Ubuntu 16.04.2 LTS
+Release:        16.04
+Codename:       xenial
+```
+
+##### SUMMARY
+<!--- Explain the problem briefly -->
+We need to run `terraform init` to download providers for Terraform.
+In documentation we have `force_init` parameter which is missing in terraform.py module
+
+##### STEPS TO REPRODUCE
+<!---
+For bugs, show exactly how to reproduce the problem, using a minimal test-case.
+For new features, show how the feature would be used.
+-->
+* ansible-playbook -c local main.yml
+
+<!--- Paste example playbooks or commands between quotes below -->
+```yaml
+  tasks:
+  - name: Provide infrastructure
+    terraform:
+      variables:
+        aws_access_key: <access_key>
+        aws_secret_key: <secret_keky>
+        aws_region: eu-west-1
+        cluster_tag: ansible-test
+      project_path: ./terraform
+      force_init: true
+```
+
+<!--- You can also paste gist.github.com links for larger files -->
+
+##### EXPECTED RESULTS
+<!--- What did you expect to happen when running the steps above? -->
+Ansible runs `terraform init`, all providers have been downloaded successful, terraform files are running.
+
+##### ACTUAL RESULTS
+<!--- What actually happened? If possible run with extra verbosity (-vvvv) -->
+```
+TASK [Provide infrastructure] *********************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Unsupported parameters for (terraform) module: force_init Supported parameters include: binary_path, lock, lock_timeout, plan_file, project_path, state, state_file, targets, variables, variables_file"}
+```
+  </issue>
+  
+  <patch>
+  diff --git a/lib/ansible/modules/cloud/misc/terraform.py b/lib/ansible/modules/cloud/misc/terraform.py
+index dd0fcdd33e2815..5a03ae3fece312 100644
+--- a/lib/ansible/modules/cloud/misc/terraform.py
++++ b/lib/ansible/modules/cloud/misc/terraform.py
+@@ -79,8 +79,9 @@
+       - To avoid duplicating infra, if a state file can't be found this will
+         force a `terraform init`. Generally, this should be turned off unless
+         you intend to provision an entirely new Terraform deployment.
+-    required: false
+     default: false
++    required: false
++    type: bool
+ notes:
+    - To just run a `terraform plan`, use check mode.
+ requirements: [ "terraform" ]
+@@ -155,6 +156,13 @@ def _state_args(state_file):
+     return []
+ 
+ 
++def init_plugins(bin_path, project_path):
++    command = [bin_path, 'init']
++    rc, out, err = module.run_command(command, cwd=project_path)
++    if rc != 0:
++        module.fail_json(msg="Failed to initialize Terraform modules:\r\n{0}".format(err))
++
++
+ def build_plan(bin_path, project_path, variables_args, state_file, plan_path=None):
+     if plan_path is None:
+         f, plan_path = tempfile.mkstemp(suffix='.tfplan')
+@@ -191,6 +199,7 @@ def main():
+             targets=dict(type='list', default=[]),
+             lock=dict(type='bool', default=True),
+             lock_timeout=dict(type='int',),
++            force_init=dict(type='bool', default=False)
+         ),
+         required_if=[('state', 'planned', ['plan_file'])],
+         supports_check_mode=True,
+@@ -209,6 +218,8 @@ def main():
+     else:
+         command = [module.get_bin_path('terraform')]
+ 
++    init_plugins(command[0], project_path)
++
+     variables_args = []
+     for k, v in variables.items():
+         variables_args.extend([
+diff --git a/test/sanity/validate-modules/ignore.txt b/test/sanity/validate-modules/ignore.txt
+index 09116cbc2e0c2f..cfeef89ece67d5 100644
+--- a/test/sanity/validate-modules/ignore.txt
++++ b/test/sanity/validate-modules/ignore.txt
+@@ -573,7 +573,6 @@ lib/ansible/modules/cloud/misc/rhevm.py E324
+ lib/ansible/modules/cloud/misc/rhevm.py E325
+ lib/ansible/modules/cloud/misc/serverless.py E324
+ lib/ansible/modules/cloud/misc/serverless.py E325
+-lib/ansible/modules/cloud/misc/terraform.py E323
+ lib/ansible/modules/cloud/misc/terraform.py E324
+ lib/ansible/modules/cloud/misc/terraform.py E325
+ lib/ansible/modules/cloud/misc/virt.py E322
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

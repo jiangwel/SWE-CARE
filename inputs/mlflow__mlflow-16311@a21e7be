@@ -1,0 +1,218 @@
+  Task-ID: mlflow__mlflow-16311@a21e7be
+  Please checkout to this commit first: cbde7a8a7f7c4b8364df65403cf593fade34586a
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add linting rule to enforce thread_name_prefix for ThreadPoolExecutor
+## Problem Statement
+
+Currently, there is no automated check to ensure that `ThreadPoolExecutor` instances are created with a `thread_name_prefix` argument. This leads to inconsistent thread naming practices in the codebase, which makes debugging and traceability of thread-related issues more difficult.
+
+## Motivation
+
+Thread naming is crucial for debugging and monitoring thread-related issues in a complex application like MLflow. Without proper thread naming:
+
+- It's difficult to identify which threads belong to which component during debugging
+- Thread dumps and logs become less informative
+- Performance monitoring and profiling are harder to interpret
+
+The MLflow codebase already follows good practices in many places by using `thread_name_prefix` (e.g., "MLflowBatchLoggingWorkerPool", "MlflowTraceLoggingWorker"), but this practice isn't enforced automatically.
+
+## Proposed Solution
+
+Create a new linting rule in the `clint` tool that detects `ThreadPoolExecutor` instantiations without a `thread_name_prefix` argument and suggests adding one for better debugging and traceability.
+
+### Implementation Details
+
+1. **Add a new rule class `ThreadPoolExecutorWithoutThreadNamePrefix` in `dev/clint/src/clint/rules.py`** that:
+   - Checks if a call is to `concurrent.futures.ThreadPoolExecutor`
+   - Verifies if `thread_name_prefix` is provided as a keyword argument
+   - Returns a violation if the prefix is missing
+
+2. **Update `dev/clint/src/clint/linter.py`** to include the new rule check in the `visit_Call` method, excluding tests and examples directories
+
+### Example
+
+**Bad (should trigger the rule)**:
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+# Missing thread_name_prefix
+executor = ThreadPoolExecutor(max_workers=4)
+```
+
+**Good (should not trigger the rule)**:
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+# With thread_name_prefix
+executor = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="MyComponent"
+)
+```
+
+### Post-Implementation
+
+After implementing the rule, we'll need to:
+1. Run clint on the codebase to identify existing violations
+2. Fix violations by adding appropriate thread name prefixes
+3. Follow the existing naming convention: `"MLflow{ComponentName}"`
+
+## Additional Context
+
+A detailed implementation plan is available at: `.claude/plans/202506181937_threadpoolexecutor_thread_name_prefix_rule.md`
+  </issue>
+  
+  <patch>
+  diff --git a/dev/clint/src/clint/linter.py b/dev/clint/src/clint/linter.py
+index 27941ce1efa5e..9fecf7d72e5b5 100644
+--- a/dev/clint/src/clint/linter.py
++++ b/dev/clint/src/clint/linter.py
+@@ -651,6 +651,12 @@ def visit_Call(self, node: ast.Call) -> None:
+         if self.path.parts[0] != "tests" and rules.UnnamedThread.check(node, self.resolver):
+             self._check(Location.from_node(node), rules.UnnamedThread())
+ 
++        if self.path.parts[0] not in (
++            "tests",
++            "examples",
++        ) and rules.ThreadPoolExecutorWithoutThreadNamePrefix.check(node, self.resolver):
++            self._check(Location.from_node(node), rules.ThreadPoolExecutorWithoutThreadNamePrefix())
++
+         self.generic_visit(node)
+ 
+     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+diff --git a/dev/clint/src/clint/rules.py b/dev/clint/src/clint/rules.py
+index 765255d64cda0..4063902c54fed 100644
+--- a/dev/clint/src/clint/rules.py
++++ b/dev/clint/src/clint/rules.py
+@@ -365,6 +365,25 @@ def check(node: ast.Call, resolver: Resolver) -> bool:
+         )
+ 
+ 
++class ThreadPoolExecutorWithoutThreadNamePrefix(Rule):
++    def _message(self) -> str:
++        return (
++            "`ThreadPoolExecutor()` must be called with a `thread_name_prefix` argument to improve "
++            "debugging and traceability of thread-related issues."
++        )
++
++    @staticmethod
++    def check(node: ast.Call, resolver: Resolver) -> bool:
++        """
++        Returns True if the call is ThreadPoolExecutor() without a thread_name_prefix parameter.
++        """
++        return (
++            (resolved := resolver.resolve(node))
++            and resolved == ["concurrent", "futures", "ThreadPoolExecutor"]
++            and not any(keyword.arg == "thread_name_prefix" for keyword in node.keywords)
++        )
++
++
+ class InvalidExperimentalDecorator(Rule):
+     def _message(self) -> str:
+         return (
+diff --git a/mlflow/langchain/api_request_parallel_processor.py b/mlflow/langchain/api_request_parallel_processor.py
+index a969612b88fe3..29d884c045d00 100644
+--- a/mlflow/langchain/api_request_parallel_processor.py
++++ b/mlflow/langchain/api_request_parallel_processor.py
+@@ -240,7 +240,9 @@ def process_api_requests(
+     ) = transform_request_json_for_chat_if_necessary(requests, lc_model)
+ 
+     requests_iter = enumerate(converted_chat_requests)
+-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
++    with ThreadPoolExecutor(
++        max_workers=max_workers, thread_name_prefix="LangChain-API"
++    ) as executor:
+         while True:
+             # get next request (if one is not already waiting for capacity)
+             if not retry_queue.empty():
+diff --git a/mlflow/metrics/genai/genai_metric.py b/mlflow/metrics/genai/genai_metric.py
+index 847466c305f01..52f0e3b7eaad1 100644
+--- a/mlflow/metrics/genai/genai_metric.py
++++ b/mlflow/metrics/genai/genai_metric.py
+@@ -132,7 +132,9 @@ def _score_model_on_payloads(
+ ) -> tuple[list[int], list[str]]:
+     scores = [None] * len(grading_payloads)
+     justifications = [None] * len(grading_payloads)
+-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
++    with ThreadPoolExecutor(
++        max_workers=max_workers, thread_name_prefix="GenAI-Scoring"
++    ) as executor:
+         futures = {
+             executor.submit(
+                 _score_model_on_one_payload,
+@@ -584,7 +586,9 @@ def eval_fn(
+         scores = [None] * len(inputs)
+         justifications = [None] * len(inputs)
+ 
+-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
++        with ThreadPoolExecutor(
++            max_workers=max_workers, thread_name_prefix="GenAI-Evaluation"
++        ) as executor:
+             futures = {
+                 executor.submit(
+                     _score_model_on_one_payload,
+diff --git a/mlflow/openai/api_request_parallel_processor.py b/mlflow/openai/api_request_parallel_processor.py
+index 74fa628e62811..9eb4636236e80 100644
+--- a/mlflow/openai/api_request_parallel_processor.py
++++ b/mlflow/openai/api_request_parallel_processor.py
+@@ -97,7 +97,7 @@ def process_api_requests(
+     results: list[tuple[int, Any]] = []
+     request_tasks_iter = enumerate(request_tasks)
+     _logger.debug(f"Request pool executor will run {len(request_tasks)} requests")
+-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
++    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="OpenAI-API") as executor:
+         futures = [
+             executor.submit(
+                 call_api,
+diff --git a/mlflow/tracing/client.py b/mlflow/tracing/client.py
+index 8c2a74cc84223..6b60d86fc5fb3 100644
+--- a/mlflow/tracing/client.py
++++ b/mlflow/tracing/client.py
+@@ -368,7 +368,11 @@ def download_trace_extra_fields(
+         next_token = page_token
+ 
+         max_workers = MLFLOW_SEARCH_TRACES_MAX_THREADS.get()
+-        executor = ThreadPoolExecutor(max_workers=max_workers) if include_spans else nullcontext()
++        executor = (
++            ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="TracingSearch")
++            if include_spans
++            else nullcontext()
++        )
+         with executor:
+             while len(traces) < max_results:
+                 trace_infos, next_token = self._search_traces(
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

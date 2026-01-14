@@ -1,0 +1,419 @@
+  Task-ID: jina-ai__serve-2366@c627d55
+  Please checkout to this commit first: 199d54ba2968c4c5d13cd9b3767a219c88b2805c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Implement Executors/Drivers for Ranker Trainers
+Implement the `Executors` and `Drivers` interfaces that will receive `TrainRequests` and do an incremental learning step for each request as a `batch`.  These executors and drivers will be used for training `Rankers`.
+
+`TrainRequests` already reserved at `types.request.train`
+
+- [ ] Trainer as new ExecutorType
+- [ ] to be added
+  </issue>
+  
+  <patch>
+  diff --git a/extra-requirements.txt b/extra-requirements.txt
+index 1188c360e854a..4087f578b465d 100644
+--- a/extra-requirements.txt
++++ b/extra-requirements.txt
+@@ -34,7 +34,7 @@ onnx:                       framework, py37
+ onnxruntime:                framework, py37
+ Pillow:                     cv, cicd, multimodal
+ annoy>=1.9.5:               index
+-sklearn:                    numeric
++sklearn:                    numeric, test
+ plyvel:                     index
+ jieba:                      nlp
+ lz4<3.1.2:                  devel, cicd, perf, network
+diff --git a/jina/drivers/train/__init__.py b/jina/drivers/train/__init__.py
+new file mode 100644
+index 0000000000000..e69de29bb2d1d
+diff --git a/jina/drivers/train/rank/__init__.py b/jina/drivers/train/rank/__init__.py
+new file mode 100644
+index 0000000000000..337f3e7cb20b7
+--- /dev/null
++++ b/jina/drivers/train/rank/__init__.py
+@@ -0,0 +1,40 @@
++from ...rank import Matches2DocRankDriver
++from ....types.sets import DocumentSet
++
++
++class RankerTrainerDriver(Matches2DocRankDriver):
++    """Ranker trainer driver."""
++
++    def __init__(self, method: str = 'train', *args, **kwargs):
++        super().__init__(method=method, *args, **kwargs)
++
++    def _apply_all(self, docs: 'DocumentSet', *args, **kwargs) -> None:
++        """
++
++        :param docs: the matches of the ``context_doc``, they are at granularity ``k``
++        :param args: not used (kept to maintain interface)
++        :param kwargs: not used (kept to maintain interface)
++
++        .. note::
++            - This driver will change in place the ordering of ``matches`` of the ``context_doc`.
++            - Set the ``traversal_paths`` of this driver such that it traverses along the ``matches`` of the ``chunks`` at the level desired.
++        """
++        queries_metas = []
++        matches_metas = []
++        for doc in docs:
++            query_meta = (
++                doc.get_attrs(*self._exec_query_keys) if self._exec_query_keys else None
++            )
++
++            matches = doc.matches
++            needs_match_meta = self._exec_match_keys is not None
++            match_meta = [] if needs_match_meta else None
++            for match in matches:
++                if needs_match_meta:
++                    match_meta.append(match.get_attrs(*self._exec_match_keys))
++
++            # if there are no matches, no need to sort them
++            queries_metas.append(query_meta)
++            matches_metas.append(match_meta)
++
++        self.exec_fn(queries_metas, matches_metas)
+diff --git a/jina/executors/rankers/trainer.py b/jina/executors/rankers/trainer.py
+new file mode 100644
+index 0000000000000..57048a095e44b
+--- /dev/null
++++ b/jina/executors/rankers/trainer.py
+@@ -0,0 +1,26 @@
++__copyright__ = "Copyright (c) 2021 Jina AI Limited. All rights reserved."
++__license__ = "Apache-2.0"
++
++from .. import BaseExecutor
++
++
++class RankerTrainer(BaseExecutor):
++    """Class :class:`RankerTrainer` is used to train a ranker for ranker fine-tunning purpose.
++    such as offline-learning and online-learning.
++    """
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++
++    def train(self, *args, **kwargs):
++        """Train ranker based on user feedback, updating ranker weights based on
++        the `loss` function.
++
++        :param args: Additional arguments.
++        :param kwargs: Additional key value arguments.
++        """
++        raise NotImplementedError
++
++    def save(self):
++        """Save the of the ranker model."""
++        raise NotImplementedError
+diff --git a/tests/integration/ranker_training/__init__.py b/tests/integration/ranker_training/__init__.py
+new file mode 100644
+index 0000000000000..e69de29bb2d1d
+diff --git a/tests/integration/ranker_training/offline/__init__.py b/tests/integration/ranker_training/offline/__init__.py
+new file mode 100644
+index 0000000000000..e69de29bb2d1d
+diff --git a/tests/integration/ranker_training/offline/flow_offline_search.yml b/tests/integration/ranker_training/offline/flow_offline_search.yml
+new file mode 100644
+index 0000000000000..4a27eac266199
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/flow_offline_search.yml
+@@ -0,0 +1,5 @@
++jtype: Flow
++version: '1'
++pods:
++  - name: search
++    uses: yaml/search.yml
+diff --git a/tests/integration/ranker_training/offline/flow_offline_train.yml b/tests/integration/ranker_training/offline/flow_offline_train.yml
+new file mode 100644
+index 0000000000000..015cdcb17c9a3
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/flow_offline_train.yml
+@@ -0,0 +1,5 @@
++jtype: Flow
++version: '1'
++pods:
++  - name: trainer
++    uses: yaml/train.yml
+diff --git a/tests/integration/ranker_training/offline/test_offline_training.py b/tests/integration/ranker_training/offline/test_offline_training.py
+new file mode 100644
+index 0000000000000..6bf5a64b78a49
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/test_offline_training.py
+@@ -0,0 +1,96 @@
++import os
++import pickle
++
++import pytest
++
++from jina import Document, Flow
++from jina.types.sets import DocumentSet
++
++'''
++User -> Train request -> RankTrainer Train -> RankTrainer Dump Weights/Parameters/Model ->
++Ranker Load Model -> Re-rank
++'''
++
++cur_dir = os.path.dirname(os.path.abspath(__file__))
++
++
++@pytest.fixture
++def documents_to_train():
++    """The relevance is correlated to the size feature."""
++    queries = []
++    for q in range(1, 100):
++        query = Document()
++        for i in range(1, 50):
++            match = Document()
++            # large size higher relevance
++            match.tags['price'] = 1
++            match.tags['size'] = i * 2
++            match.tags['relevance'] = i
++            query.matches.add(match)
++        queries.append(query)
++    return DocumentSet(queries)
++
++
++@pytest.fixture
++def doc_to_query():
++    doc = Document()
++    for i in range(1, 5):
++        match = Document()
++        match.tags['price'] = 1
++        match.tags['size'] = i * 2
++        doc.matches.add(match)
++    return doc
++
++
++def test_train_offline(documents_to_train, doc_to_query):
++    """
++    The objective of this test is to ensure ranker trainer works as expected.
++    Our data set consist of 2 features field, `price` and `size`. Label field is named as `relevance`.
++    Before using ranker trainer, we manually train a linear model based on `price` field, use a
++      Jina search flow to find documents and scores with the `doc_to_query`. Since the `price` of the `doc_to_query`
++      has been set to 1, so the pre-trained model will always return the same value and all the scores will be the same.
++      so we assert the length of prediction is 1 in `validate_ranking_by_price`.
++    Afterwords, we fire a ranker trainer, it will dump a new model. The trainiang set of the new model is based on `size`
++      feature, see `docs_to_train`, and the `price` is not going to have any impact on the predictions. When we search the result
++      with `doc_to_query`, we expect the relevance score keep increase since the `size` in `doc_to_query` keeps increase.
++      see `validate_ranking_by_size`.
++    """
++
++    def validate_ranking_by_price(req):
++        pred = set()
++        for match in req.docs[0].matches:
++            pred.add(match.score.value)
++        assert len(pred) == 1  # since price tag never changes, all scores are the same.
++
++    def validate_ranking_by_size(req):
++        pred = []
++        for match in req.docs[0].matches:
++            pred.append(match.score.value)
++        assert (
++            sorted(pred, reverse=True) == pred
++        )  # assure predictions are ordered since size increases
++
++    # Before Ranker Trainer, the feature is completely rely on `price` tag, `size` can be seen as a bias.
++
++    from sklearn.linear_model import LinearRegression
++
++    model = LinearRegression()
++
++    X = [[1, 1], [2, 1], [4, 1], [8, 1], [16, 1]]
++    y = [1, 2, 3, 4, 5]
++    model.fit(X, y)
++    with open('model.pickle', mode='wb') as model_file_name:
++        pickle.dump(model, model_file_name)
++
++    with Flow.load_config(os.path.join(cur_dir, 'flow_offline_search.yml')) as f:
++        f.search(inputs=[doc_to_query], on_done=validate_ranking_by_price)
++
++    # Run Ranker Trainer
++
++    with Flow.load_config(os.path.join(cur_dir, 'flow_offline_train.yml')) as f:
++        f.train(inputs=documents_to_train)
++
++    # After Ranker Trainer, the feature should be completely rely on `size` tag.
++
++    with Flow.load_config(os.path.join(cur_dir, 'flow_offline_search.yml')) as f:
++        f.search(inputs=[doc_to_query], on_done=validate_ranking_by_size)
+diff --git a/tests/integration/ranker_training/offline/yaml/ranker.py b/tests/integration/ranker_training/offline/yaml/ranker.py
+new file mode 100644
+index 0000000000000..2852b32111fb1
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/yaml/ranker.py
+@@ -0,0 +1,48 @@
++import pickle
++from typing import List, Dict
++
++import numpy as np
++
++from jina.executors.decorators import single
++from jina.executors.rankers import Match2DocRanker
++
++
++class SGDRegressorRanker(Match2DocRanker):
++    """The :class:`SGDRegressorRanker` loads an :class:`SGDRegressor` and make use of the trained model
++    to predict relevance score."""
++
++    MODEL_FILENAME = 'model.pickle'
++
++    def __init__(self, model_path: str, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.model = None
++        self.model_path = model_path
++        self.match_required_keys = {'tags__size', 'tags__price'}
++        self.query_required_keys = None
++
++    def post_init(self):
++        super().post_init()
++        with open(self.model_path + '/' + self.MODEL_FILENAME, 'rb') as pickle_file:
++            self.model = pickle.load(pickle_file)
++
++    @single
++    def score(
++        self,
++        old_match_scores: List[List[float]],
++        queries_metas: List[Dict],
++        matches_metas: List[List[Dict]],
++    ) -> 'np.ndarray':
++        """
++        Scoring function of the ranker.
++
++        This method extract features, i.e. `size` and `price` from `Document` tags,
++        make prediction based on the loaded model and return the score.
++        """
++        sizes = []
++        prices = []
++        for match_meta in matches_metas:
++            for m in match_meta:
++                sizes.append(m['tags__size'])
++                prices.append(m['tags__price'])
++        X = np.column_stack((prices, sizes))
++        return self.model.predict(X)
+diff --git a/tests/integration/ranker_training/offline/yaml/search.yml b/tests/integration/ranker_training/offline/yaml/search.yml
+new file mode 100644
+index 0000000000000..9db1012fdaf42
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/yaml/search.yml
+@@ -0,0 +1,11 @@
++!SGDRegressorRanker
++with:
++  model_path: .
++metas:
++  py_modules: ranker.py
++requests:
++  on:
++    SearchRequest:
++      - jtype: Matches2DocRankDriver
++        with:
++          traversal_paths: ['r']
+diff --git a/tests/integration/ranker_training/offline/yaml/train.yml b/tests/integration/ranker_training/offline/yaml/train.yml
+new file mode 100644
+index 0000000000000..26511e934e5dd
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/yaml/train.yml
+@@ -0,0 +1,9 @@
++!SGDRegressorRankerTrainer
++with:
++  model_path: .
++metas:
++  py_modules: trainer.py
++requests:
++  on:
++    TrainRequest:
++      - jtype: RankerTrainerDriver {}
+diff --git a/tests/integration/ranker_training/offline/yaml/trainer.py b/tests/integration/ranker_training/offline/yaml/trainer.py
+new file mode 100644
+index 0000000000000..cd719247521b6
+--- /dev/null
++++ b/tests/integration/ranker_training/offline/yaml/trainer.py
+@@ -0,0 +1,55 @@
++import pickle
++from pathlib import Path
++
++import numpy as np
++
++from jina.executors.rankers.trainer import RankerTrainer
++
++
++class SGDRegressorRankerTrainer(RankerTrainer):
++    """The :class:`SGDRegressorRankerTrainer` trains an :class:`SGDRegressor` and save the trained model
++    to the expected directory. To be loaded into :class:`SGDRegressorRanker`."""
++
++    MODEL_FILENAME = 'model.pickle'
++
++    def __init__(self, model_path: str, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.model = None
++        self.model_path = model_path
++        self.match_required_keys = {'tags__size', 'tags__price', 'tags__relevance'}
++        self.query_required_keys = None
++
++    def post_init(self):
++        from sklearn.linear_model import LinearRegression
++
++        self.model = LinearRegression()
++
++    def train(self, query_metas, matches_metas, *args, **kwargs):
++        """
++        Train the ranker, the core function of trainer.
++
++        This method extract `size` and `price` features from ``Document`` tags,
++        serve as the features for model training. And extract `relevance` from ``Document``,
++        serve as the labels for model training.
++        """
++        sizes = []
++        prices = []
++        relevance = []
++        for match_meta in matches_metas:
++            for m in match_meta:
++                sizes.append(m['tags__size'])
++                prices.append(m['tags__price'])
++                relevance.append(m['tags__relevance'])
++        X = np.column_stack((prices, sizes))
++        y = np.asarray(relevance)
++        self.model.fit(X, y)
++
++    def save(self):
++        """Save the updated the ranker model."""
++        path = Path(self.model_path)
++
++        if not path.exists():
++            path.mkdir(parents=True)
++
++        with open(str(path) + '/' + self.MODEL_FILENAME, mode='wb') as model_file_name:
++            pickle.dump(self.model, model_file_name)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

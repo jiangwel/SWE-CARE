@@ -1,0 +1,140 @@
+  Task-ID: PostHog__posthog-8874@960dad4
+  Please checkout to this commit first: e3dcdb5ca0bdf8ffca1eea88c3e04eb134993e62
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Calculate multi-line trends in parallel
+## Is your feature request related to a problem?
+
+If you have a trend with multiple lines, clickhouse queries for each are run one-after-another. If each takes 10s to calculate, then user will need to wait >30s in total.
+
+## Describe the solution you'd like
+
+Run queries in parallel.
+
+## Describe alternatives you've considered
+
+## Additional context
+
+cc @EDsCODE @neilkakkar This seems like a quick win query-api wise though not 100% sure on how best implement this. Would you be up for prioritizing this _next_ sprint?
+
+#### *Thank you* for your feature request – we love each and every one!
+  </issue>
+  
+  <patch>
+  diff --git a/ee/clickhouse/queries/trends/clickhouse_trends.py b/ee/clickhouse/queries/trends/clickhouse_trends.py
+index 9053bf4fe3d8f..f6b0d3f90f1c3 100644
+--- a/ee/clickhouse/queries/trends/clickhouse_trends.py
++++ b/ee/clickhouse/queries/trends/clickhouse_trends.py
+@@ -1,6 +1,7 @@
+ import copy
++import threading
+ from itertools import accumulate
+-from typing import Any, Callable, Dict, List, Tuple
++from typing import Any, Callable, Dict, List, Tuple, Union
+ 
+ from django.db.models.query import Prefetch
+ from django.utils import timezone
+@@ -52,6 +53,45 @@ def _run_query(self, filter: Filter, entity: Entity, team_id: int) -> List[Dict[
+             serialized_data = self._handle_cumulative(serialized_data)
+         return serialized_data
+ 
++    def _run_query_for_threading(self, result: List, index: int, sql, params):
++        result[index] = sync_execute(sql, params)
++
++    def _run_parallel(self, filter: Filter, team: Team) -> List[Dict[str, Any]]:
++        result: List[Union[None, List[Dict[str, Any]]]] = [None] * len(filter.entities)
++        jobs = []
++
++        for entity in filter.entities:
++            sql, params, _ = self._get_sql_for_entity(filter, entity, team.pk)
++            thread = threading.Thread(target=self._run_query_for_threading, args=(result, entity.index, sql, params),)
++            jobs.append(thread)
++
++        # Start the threads (i.e. calculate the random number lists)
++        for j in jobs:
++            j.start()
++
++        # Ensure all of the threads have finished
++        for j in jobs:
++            j.join()
++
++        # Parse results for each thread
++        for entity in filter.entities:
++            _, _, parse_function = self._get_sql_for_entity(filter, entity, team.pk)
++            serialized_data = parse_function(result[entity.index])
++            serialized_data = self._format_serialized(entity, serialized_data)
++
++            if filter.display == TRENDS_CUMULATIVE:
++                serialized_data = self._handle_cumulative(serialized_data)
++            result[entity.index] = serialized_data
++
++        # flatten results
++        flat_results: List[Dict[str, Any]] = []
++        for item in result:
++            if item is not None:  # Mypy thinks results might still be None
++                for flat in item:
++                    flat_results.append(flat)
++
++        return flat_results
++
+     def run(self, filter: Filter, team: Team, *args, **kwargs) -> List[Dict[str, Any]]:
+         actions = Action.objects.filter(team_id=team.pk).order_by("-id")
+         if len(filter.actions) > 0:
+@@ -63,15 +103,19 @@ def run(self, filter: Filter, team: Team, *args, **kwargs) -> List[Dict[str, Any
+         if filter.formula:
+             return handle_compare(filter, self._run_formula_query, team)
+ 
+-        result = []
+         for entity in filter.entities:
+             if entity.type == TREND_FILTER_TYPE_ACTIONS:
+                 try:
+                     entity.name = actions.get(id=entity.id).name
+                 except Action.DoesNotExist:
+-                    continue
+-            entities_list = handle_compare(filter, self._run_query, team, entity=entity)
+-            result.extend(entities_list)
++                    return []
++
++        if len(filter.entities) == 1 or filter.compare:
++            result = []
++            for entity in filter.entities:
++                result.extend(handle_compare(filter, self._run_query, team, entity=entity))
++        else:
++            result = self._run_parallel(filter, team)
+ 
+         return result
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

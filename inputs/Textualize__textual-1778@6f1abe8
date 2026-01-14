@@ -1,0 +1,914 @@
+  Task-ID: Textualize__textual-1778@6f1abe8
+  Please checkout to this commit first: 555cf8e6ee9932c15996a0d127e4b775079f922b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  install_screen shouldn't add screen to the DOM
+Calling `install_screen` should add the screen to `_install_screens` but it should not add it to the DOM.
+
+Screens should only be added to the DOM explicitly with `push_screen` or `switch_screen`
+
+App children should only contain the current screen
+Currently the DOM will contain every Screen on the stack. This means that doing `app.query` considers all screens and may produce unexpected results. 
+
+We should restrict queries to only the current screen.
+
+I think the best way to do this would be for `App` to have a custom `NodeList` object which only ever contains the current screen.
+
+Flesh out API reference for screens.
+The screens API methods on App are a little too terse. Devs that read the API without the docs are making incorrect assumptions. We should flesh these out a little more. Particularily around the concept of installing and uninstalling screens,
+  </issue>
+  
+  <patch>
+  diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 974e5ee860..6df3da39e6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -19,13 +19,20 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
+ - Added Shift+scroll wheel and ctrl+scroll wheel to scroll horizontally
+ - Added `Tree.action_toggle_node` to toggle a node without selecting, and bound it to <kbd>Space</kbd> https://github.com/Textualize/textual/issues/1433
+ - Added `Tree.reset` to fully reset a `Tree` https://github.com/Textualize/textual/issues/1437
+-- Added DOMNode.watch and DOMNode.is_attached methods  https://github.com/Textualize/textual/pull/1750
++- Added `DOMNode.watch` and `DOMNode.is_attached` methods  https://github.com/Textualize/textual/pull/1750
++- Added `DOMNode.css_tree` which is a renderable that shows the DOM and CSS https://github.com/Textualize/textual/pull/1778
++- Added `DOMNode.children_view` which is a view on to a nodes children list, use for querying https://github.com/Textualize/textual/pull/1778
+ 
+ ### Changed
+ 
+ - Breaking change: `TreeNode` can no longer be imported from `textual.widgets`; it is now available via `from textual.widgets.tree import TreeNode`. https://github.com/Textualize/textual/pull/1637
+ - `Tree` now shows a (subdued) cursor for a highlighted node when focus has moved elsewhere https://github.com/Textualize/textual/issues/1471
+ - Breaking change: renamed `Checkbox` to `Switch` https://github.com/Textualize/textual/issues/1746
++- `App.install_screen` name is no longer optional https://github.com/Textualize/textual/pull/1778
++- `App.query` now only includes the current screen https://github.com/Textualize/textual/pull/1778
++- `DOMNode.tree` now displays simple DOM structure only https://github.com/Textualize/textual/pull/1778
++- `App.install_screen` now returns None rather than AwaitMount https://github.com/Textualize/textual/pull/1778
++- `DOMNode.children` is now a simple sequence, the NodesList is exposed as `DOMNode._nodes` https://github.com/Textualize/textual/pull/1778
+ 
+ ### Fixed
+ 
+diff --git a/docs/widgets/tree.md b/docs/widgets/tree.md
+index 5ae8b14efd..9014f3d979 100644
+--- a/docs/widgets/tree.md
++++ b/docs/widgets/tree.md
+@@ -21,7 +21,7 @@ The example below creates a simple tree.
+     --8<-- "docs/examples/widgets/tree.py"
+     ```
+ 
+-Tree widgets have a "root" attribute which is an instance of a [TreeNode][textual.widgets.tree.TreeNode]. Call [add()][textual.widgets.tree.TreeNode.add] or [add_leaf()][textual.widgets.tree,TreeNode.add_leaf] to add new nodes underneath the root. Both these methods return a TreeNode for the child which you can use to add additional levels.
++Tree widgets have a "root" attribute which is an instance of a [TreeNode][textual.widgets.tree.TreeNode]. Call [add()][textual.widgets.tree.TreeNode.add] or [add_leaf()][textual.widgets.tree.TreeNode.add_leaf] to add new nodes underneath the root. Both these methods return a TreeNode for the child which you can use to add additional levels.
+ 
+ 
+ ## Reactive Attributes
+diff --git a/pyproject.toml b/pyproject.toml
+index 7b627f0af0..f49d9c615c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -47,7 +47,6 @@ typing-extensions = "^4.0.0"
+ aiohttp = { version = ">=3.8.1", optional = true }
+ click = {version = ">=8.1.2", optional = true}
+ msgpack = { version = ">=1.0.3", optional = true }
+-nanoid = ">=2.0.0"
+ mkdocs-exclude = "^1.0.2"
+ 
+ [tool.poetry.extras]
+diff --git a/src/textual/_layout.py b/src/textual/_layout.py
+index 5556a705e6..5123d832e1 100644
+--- a/src/textual/_layout.py
++++ b/src/textual/_layout.py
+@@ -57,7 +57,7 @@ def get_content_width(self, widget: Widget, container: Size, viewport: Size) ->
+         Returns:
+             Width of the content.
+         """
+-        if not widget.children:
++        if not widget._nodes:
+             width = 0
+         else:
+             # Use a size of 0, 0 to ignore relative sizes, since those are flexible anyway
+@@ -85,7 +85,7 @@ def get_content_height(
+         Returns:
+             Content height (in lines).
+         """
+-        if not widget.children:
++        if not widget._nodes:
+             height = 0
+         else:
+             # Use a height of zero to ignore relative heights
+diff --git a/src/textual/app.py b/src/textual/app.py
+index 5261b5b6e0..46a11d9bc0 100644
+--- a/src/textual/app.py
++++ b/src/textual/app.py
+@@ -25,15 +25,15 @@
+     Generic,
+     Iterable,
+     List,
++    Sequence,
+     Type,
+     TypeVar,
+     Union,
+     cast,
+     overload,
+ )
+-from weakref import WeakSet, WeakValueDictionary
++from weakref import WeakSet
+ 
+-import nanoid
+ import rich
+ import rich.repr
+ from rich.console import Console, RenderableType
+@@ -385,9 +385,7 @@ def __init__(
+         self.scroll_sensitivity_y: float = 2.0
+         """Number of lines to scroll in the Y direction with wheel or trackpad."""
+ 
+-        self._installed_screens: WeakValueDictionary[
+-            str, Screen | Callable[[], Screen]
+-        ] = WeakValueDictionary()
++        self._installed_screens: dict[str, Screen | Callable[[], Screen]] = {}
+         self._installed_screens.update(**self.SCREENS)
+ 
+         self.devtools: DevtoolsClient | None = None
+@@ -420,6 +418,14 @@ def return_value(self) -> ReturnType | None:
+         """ReturnType | None: The return type of the app."""
+         return self._return_value
+ 
++    @property
++    def children(self) -> Sequence["Widget"]:
++        """A view on to the children which contains just the screen."""
++        try:
++            return (self.screen,)
++        except ScreenError:
++            return ()
++
+     def animate(
+         self,
+         attribute: str,
+@@ -1265,15 +1271,16 @@ def switch_screen(self, screen: Screen | str) -> AwaitMount:
+             return await_mount
+         return AwaitMount(self.screen, [])
+ 
+-    def install_screen(self, screen: Screen, name: str | None = None) -> AwaitMount:
++    def install_screen(self, screen: Screen, name: str) -> None:
+         """Install a screen.
+ 
+         Installing a screen prevents Textual from destroying it when it is no longer on the screen stack.
++        Note that you don't need to install a screen to use it. See [push_screen][textual.app.App.push_screen]
++        or [switch_screen][textual.app.App.switch_screen] to make a new screen current.
+ 
+         Args:
+             screen: Screen to install.
+-            name: Unique name of screen or None to auto-generate.
+-                Defaults to None.
++            name: Unique name to identify the screen.
+ 
+         Raises:
+             ScreenError: If the screen can't be installed.
+@@ -1281,8 +1288,6 @@ def install_screen(self, screen: Screen, name: str | None = None) -> AwaitMount:
+         Returns:
+             An awaitable that awaits the mounting of the screen and its children.
+         """
+-        if name is None:
+-            name = nanoid.generate()
+         if name in self._installed_screens:
+             raise ScreenError(f"Can't install screen; {name!r} is already installed")
+         if screen in self._installed_screens.values():
+@@ -1290,13 +1295,17 @@ def install_screen(self, screen: Screen, name: str | None = None) -> AwaitMount:
+                 "Can't install screen; {screen!r} has already been installed"
+             )
+         self._installed_screens[name] = screen
+-        _screen, await_mount = self._get_screen(name)  # Ensures screen is running
+         self.log.system(f"{screen} INSTALLED name={name!r}")
+-        return await_mount
+ 
+     def uninstall_screen(self, screen: Screen | str) -> str | None:
+-        """Uninstall a screen. If the screen was not previously installed then this
+-        method is a null-op.
++        """Uninstall a screen.
++
++        If the screen was not previously installed then this method is a null-op.
++        Uninstalling a screen allows Textual to delete it when it is popped or switched.
++        Note that uninstalling a screen is only required if you have previously installed it
++        with [install_screen][textual.app.App.install_screen].
++        Textual will also uninstall screens automatically on exit.
++
+ 
+         Args:
+             screen: The screen to uninstall or the name of a installed screen.
+@@ -1641,19 +1650,19 @@ def _register_child(
+             # Now to figure out where to place it. If we've got a `before`...
+             if before is not None:
+                 # ...it's safe to NodeList._insert before that location.
+-                parent.children._insert(before, child)
++                parent._nodes._insert(before, child)
+             elif after is not None and after != -1:
+                 # In this case we've got an after. -1 holds the special
+                 # position (for now) of meaning "okay really what I mean is
+                 # do an append, like if I'd asked to add with no before or
+                 # after". So... we insert before the next item in the node
+                 # list, iff after isn't -1.
+-                parent.children._insert(after + 1, child)
++                parent._nodes._insert(after + 1, child)
+             else:
+                 # At this point we appear to not be adding before or after,
+                 # or we've got a before/after value that really means
+                 # "please append". So...
+-                parent.children._append(child)
++                parent._nodes._append(child)
+ 
+             # Now that the widget is in the NodeList of its parent, sort out
+             # the rest of the admin.
+@@ -1698,8 +1707,8 @@ def _register(
+                 raise AppError(f"Can't register {widget!r}; expected a Widget instance")
+             if widget not in self._registry:
+                 self._register_child(parent, widget, before, after)
+-                if widget.children:
+-                    self._register(widget, *widget.children)
++                if widget._nodes:
++                    self._register(widget, *widget._nodes)
+                 apply_stylesheet(widget)
+ 
+         if not self._running:
+@@ -1716,7 +1725,7 @@ def _unregister(self, widget: Widget) -> None:
+         """
+         widget.reset_focus()
+         if isinstance(widget._parent, Widget):
+-            widget._parent.children._remove(widget)
++            widget._parent._nodes._remove(widget)
+             widget._detach()
+         self._registry.discard(widget)
+ 
+@@ -1894,6 +1903,7 @@ async def on_event(self, event: events.Event) -> None:
+         # Handle input events that haven't been forwarded
+         # If the event has been forwarded it may have bubbled up back to the App
+         if isinstance(event, events.Compose):
++            self.log(event)
+             screen = Screen(id="_default")
+             self._register(self, screen)
+             self._screen_stack.append(screen)
+@@ -2098,7 +2108,7 @@ def _detach_from_dom(self, widgets: list[Widget]) -> list[Widget]:
+         # snipping each affected branch from the DOM.
+         for widget in pruned_remove:
+             if widget.parent is not None:
+-                widget.parent.children._remove(widget)
++                widget.parent._nodes._remove(widget)
+ 
+         # Return the list of widgets that should end up being sent off in a
+         # prune event.
+@@ -2117,10 +2127,10 @@ def _walk_children(self, root: Widget) -> Iterable[list[Widget]]:
+ 
+         while stack:
+             widget = pop()
+-            children = [*widget.children, *widget._get_virtual_dom()]
++            children = [*widget._nodes, *widget._get_virtual_dom()]
+             if children:
+                 yield children
+-            for child in widget.children:
++            for child in widget._nodes:
+                 push(child)
+ 
+     def _remove_nodes(self, widgets: list[Widget]) -> AwaitRemove:
+diff --git a/src/textual/dom.py b/src/textual/dom.py
+index 1ed204aa9e..0d7ef4e784 100644
+--- a/src/textual/dom.py
++++ b/src/textual/dom.py
+@@ -7,6 +7,7 @@
+     ClassVar,
+     Iterable,
+     Iterator,
++    Sequence,
+     Type,
+     TypeVar,
+     cast,
+@@ -132,7 +133,7 @@ def __init__(
+         check_identifiers("class name", *_classes)
+         self._classes.update(_classes)
+ 
+-        self.children: NodeList = NodeList()
++        self._nodes: NodeList = NodeList()
+         self._css_styles: Styles = Styles(self)
+         self._inline_styles: Styles = Styles(self)
+         self.styles: RenderStyles = RenderStyles(
+@@ -150,6 +151,11 @@ def __init__(
+ 
+         super().__init__()
+ 
++    @property
++    def children(self) -> Sequence["Widget"]:
++        """A view on to the children."""
++        return self._nodes
++
+     @property
+     def auto_refresh(self) -> float | None:
+         return self._auto_refresh
+@@ -484,7 +490,7 @@ def visible(self) -> bool:
+         return self.styles.visibility != "hidden"
+ 
+     @visible.setter
+-    def visible(self, new_value: bool) -> None:
++    def visible(self, new_value: bool | str) -> None:
+         if isinstance(new_value, bool):
+             self.styles.visibility = "visible" if new_value else "hidden"
+         elif new_value in VALID_VISIBILITY:
+@@ -499,6 +505,30 @@ def visible(self, new_value: bool) -> None:
+     def tree(self) -> Tree:
+         """Get a Rich tree object which will recursively render the structure of the node tree.
+ 
++        Returns:
++            A Rich object which may be printed.
++        """
++
++        def render_info(node: DOMNode) -> Pretty:
++            return Pretty(node)
++
++        tree = Tree(render_info(self))
++
++        def add_children(tree, node):
++            for child in node.children:
++                info = render_info(child)
++                branch = tree.add(info)
++                if tree.children:
++                    add_children(branch, child)
++
++        add_children(tree, self)
++        return tree
++
++    @property
++    def css_tree(self) -> Tree:
++        """Get a Rich tree object which will recursively render the structure of the node tree,
++        which also displays CSS and size information.
++
+         Returns:
+             A Rich object which may be printed.
+         """
+@@ -648,7 +678,7 @@ def displayed_children(self) -> list[Widget]:
+             Children of this widget which will be displayed.
+ 
+         """
+-        return [child for child in self.children if child.display]
++        return [child for child in self._nodes if child.display]
+ 
+     def watch(
+         self,
+@@ -691,7 +721,7 @@ def _add_child(self, node: Widget) -> None:
+         Args:
+             node: A DOM node.
+         """
+-        self.children._append(node)
++        self._nodes._append(node)
+         node._attach(self)
+ 
+     def _add_children(self, *nodes: Widget) -> None:
+@@ -700,7 +730,7 @@ def _add_children(self, *nodes: Widget) -> None:
+         Args:
+             *nodes: Positional args should be new DOM nodes.
+         """
+-        _append = self.children._append
++        _append = self._nodes._append
+         for node in nodes:
+             node._attach(self)
+             _append(node)
+diff --git a/src/textual/drivers/linux_driver.py b/src/textual/drivers/linux_driver.py
+index d2c00f61b4..4686cba05d 100644
+--- a/src/textual/drivers/linux_driver.py
++++ b/src/textual/drivers/linux_driver.py
+@@ -236,5 +236,4 @@ def more_data() -> bool:
+         except Exception as error:
+             log(error)
+         finally:
+-            with timer("selector.close"):
+-                selector.close()
++            selector.close()
+diff --git a/src/textual/walk.py b/src/textual/walk.py
+index 0dc6724716..d43d40b064 100644
+--- a/src/textual/walk.py
++++ b/src/textual/walk.py
+@@ -53,7 +53,7 @@ def walk_depth_first(
+     """
+     from textual.dom import DOMNode
+ 
+-    stack: list[Iterator[DOMNode]] = [iter(root.children)]
++    stack: list[Iterator[DOMNode]] = [iter(root._nodes)]
+     pop = stack.pop
+     push = stack.append
+     check_type = filter_type or DOMNode
+diff --git a/src/textual/widget.py b/src/textual/widget.py
+index 197eb6147b..0842aff932 100644
+--- a/src/textual/widget.py
++++ b/src/textual/widget.py
+@@ -299,7 +299,7 @@ def siblings(self) -> list[Widget]:
+         """
+         parent = self.parent
+         if parent is not None:
+-            siblings = list(parent.children)
++            siblings = list(parent._nodes)
+             siblings.remove(self)
+             return siblings
+         else:
+@@ -390,7 +390,7 @@ def get_child_by_id(
+             NoMatches: if no children could be found for this ID
+             WrongType: if the wrong type was found.
+         """
+-        child = self.children._get_by_id(id)
++        child = self._nodes._get_by_id(id)
+         if child is None:
+             raise NoMatches(f"No child found with id={id!r}")
+         if expect_type is None:
+@@ -472,7 +472,7 @@ def _arrange(self, size: Size) -> DockArrangeResult:
+         """
+         assert self.is_container
+ 
+-        cache_key = (size, self.children._updates)
++        cache_key = (size, self._nodes._updates)
+         if (
+             self._arrangement_cache_key == cache_key
+             and self._cached_arrangement is not None
+@@ -481,7 +481,7 @@ def _arrange(self, size: Size) -> DockArrangeResult:
+ 
+         self._arrangement_cache_key = cache_key
+         arrangement = self._cached_arrangement = arrange(
+-            self, self.children, size, self.screen.size
++            self, self._nodes, size, self.screen.size
+         )
+ 
+         return arrangement
+@@ -549,7 +549,7 @@ def _find_mount_point(self, spot: int | str | "Widget") -> tuple["Widget", int]:
+         # children. We should be able to go looking for the widget's
+         # location amongst its parent's children.
+         try:
+-            return cast("Widget", spot.parent), spot.parent.children.index(spot)
++            return cast("Widget", spot.parent), spot.parent._nodes.index(spot)
+         except ValueError:
+             raise MountError(f"{spot!r} is not a child of {self!r}") from None
+ 
+@@ -687,7 +687,7 @@ def _to_widget(child: int | Widget, called: str) -> Widget:
+             """Ensure a given child reference is a Widget."""
+             if isinstance(child, int):
+                 try:
+-                    child = self.children[child]
++                    child = self._nodes[child]
+                 except IndexError:
+                     raise WidgetError(
+                         f"An index of {child} for the child to {called} is out of bounds"
+@@ -696,7 +696,7 @@ def _to_widget(child: int | Widget, called: str) -> Widget:
+                 # We got an actual widget, so let's be sure it really is one of
+                 # our children.
+                 try:
+-                    _ = self.children.index(child)
++                    _ = self._nodes.index(child)
+                 except ValueError:
+                     raise WidgetError(f"{child!r} is not a child of {self!r}") from None
+             return child
+@@ -709,11 +709,11 @@ def _to_widget(child: int | Widget, called: str) -> Widget:
+         # child; where we're moving it to, which should be within the child
+         # list; and how we're supposed to move it. All that's left is doing
+         # the right thing.
+-        self.children._remove(child)
++        self._nodes._remove(child)
+         if before is not None:
+-            self.children._insert(self.children.index(target), child)
++            self._nodes._insert(self._nodes.index(target), child)
+         else:
+-            self.children._insert(self.children.index(target) + 1, child)
++            self._nodes._insert(self._nodes.index(target) + 1, child)
+ 
+         # Request a refresh.
+         self.refresh(layout=True)
+@@ -1181,9 +1181,7 @@ def focusable_children(self) -> list[Widget]:
+             List of widgets that can receive focus.
+ 
+         """
+-        focusable = [
+-            child for child in self.children if child.display and child.visible
+-        ]
++        focusable = [child for child in self._nodes if child.display and child.visible]
+         return sorted(focusable, key=attrgetter("_focus_sort_key"))
+ 
+     @property
+@@ -1277,7 +1275,7 @@ def is_container(self) -> bool:
+         Returns:
+             True if this widget is a container.
+         """
+-        return self.styles.layout is not None or bool(self.children)
++        return self.styles.layout is not None or bool(self._nodes)
+ 
+     @property
+     def is_scrollable(self) -> bool:
+@@ -1286,7 +1284,7 @@ def is_scrollable(self) -> bool:
+         Returns:
+             True if this widget may be scrolled.
+         """
+-        return self.styles.layout is not None or bool(self.children)
++        return self.styles.layout is not None or bool(self._nodes)
+ 
+     @property
+     def layer(self) -> str:
+diff --git a/src/textual/widgets/_list_view.py b/src/textual/widgets/_list_view.py
+index 3d9db58922..76c0fdf059 100644
+--- a/src/textual/widgets/_list_view.py
++++ b/src/textual/widgets/_list_view.py
+@@ -94,33 +94,33 @@ def highlighted_child(self) -> ListItem | None:
+         """
+         if self.index is None:
+             return None
+-        elif 0 <= self.index < len(self.children):
+-            return self.children[self.index]
++        elif 0 <= self.index < len(self._nodes):
++            return self._nodes[self.index]
+ 
+     def validate_index(self, index: int | None) -> int | None:
+         """Clamp the index to the valid range, or set to None if there's nothing to highlight."""
+-        if not self.children or index is None:
++        if not self._nodes or index is None:
+             return None
+         return self._clamp_index(index)
+ 
+     def _clamp_index(self, index: int) -> int:
+         """Clamp the index to a valid value given the current list of children"""
+-        last_index = max(len(self.children) - 1, 0)
++        last_index = max(len(self._nodes) - 1, 0)
+         return clamp(index, 0, last_index)
+ 
+     def _is_valid_index(self, index: int | None) -> bool:
+         """Return True if the current index is valid given the current list of children"""
+         if index is None:
+             return False
+-        return 0 <= index < len(self.children)
++        return 0 <= index < len(self._nodes)
+ 
+     def watch_index(self, old_index: int, new_index: int) -> None:
+         """Updates the highlighting when the index changes."""
+         if self._is_valid_index(old_index):
+-            old_child = self.children[old_index]
++            old_child = self._nodes[old_index]
+             old_child.highlighted = False
+         if self._is_valid_index(new_index):
+-            new_child = self.children[new_index]
++            new_child = self._nodes[new_index]
+             new_child.highlighted = True
+         else:
+             new_child = None
+@@ -166,7 +166,7 @@ def action_cursor_up(self) -> None:
+ 
+     def on_list_item__child_clicked(self, event: ListItem._ChildClicked) -> None:
+         self.focus()
+-        self.index = self.children.index(event.sender)
++        self.index = self._nodes.index(event.sender)
+         self.post_message_no_wait(self.Selected(self, event.sender))
+ 
+     def _scroll_highlighted_region(self) -> None:
+@@ -175,4 +175,4 @@ def _scroll_highlighted_region(self) -> None:
+             self.scroll_to_widget(self.highlighted_child, animate=False)
+ 
+     def __len__(self):
+-        return len(self.children)
++        return len(self._nodes)
+diff --git a/src/textual/widgets/_tree.py b/src/textual/widgets/_tree.py
+index 3786b080da..5117d10dc1 100644
+--- a/src/textual/widgets/_tree.py
++++ b/src/textual/widgets/_tree.py
+@@ -473,7 +473,7 @@ def __init__(
+         text_label = self.process_label(label)
+ 
+         self._updates = 0
+-        self._nodes: dict[NodeID, TreeNode[TreeDataType]] = {}
++        self._tree_nodes: dict[NodeID, TreeNode[TreeDataType]] = {}
+         self._current_id = 0
+         self.root = self._add_node(None, text_label, data)
+ 
+@@ -515,7 +515,7 @@ def _add_node(
+         expand: bool = False,
+     ) -> TreeNode[TreeDataType]:
+         node = TreeNode(self, parent, self._new_id(), label, data, expanded=expand)
+-        self._nodes[node._id] = node
++        self._tree_nodes[node._id] = node
+         self._updates += 1
+         return node
+ 
+@@ -630,7 +630,7 @@ def get_node_by_id(self, node_id: NodeID) -> TreeNode[TreeDataType]:
+             Tree.UnknownID: Raised if the `TreeNode` ID is unknown.
+         """
+         try:
+-            return self._nodes[node_id]
++            return self._tree_nodes[node_id]
+         except KeyError:
+             raise self.UnknownNodeID(f"Unknown NodeID ({node_id}) in tree") from None
+ 
+diff --git a/tests/test_screens.py b/tests/test_screens.py
+index e877c1ade1..ca56df9c5b 100644
+--- a/tests/test_screens.py
++++ b/tests/test_screens.py
+@@ -42,9 +42,11 @@ class ScreensApp(App):
+             pilot.app.pop_screen()
+ 
+ 
+-@skip_py310
+ async def test_screens():
+     app = App()
++    # There should be nothing in the children since the app hasn't run yet
++    assert not app._nodes
++    assert not app.children
+     app._set_active()
+ 
+     with pytest.raises(ScreenStackError):
+@@ -60,6 +62,10 @@ async def test_screens():
+     app.install_screen(screen1, "screen1")
+     app.install_screen(screen2, "screen2")
+ 
++    # Installing a screen does not add it to the DOM
++    assert not app._nodes
++    assert not app.children
++
+     # Check they are installed
+     assert app.is_screen_installed("screen1")
+     assert app.is_screen_installed("screen2")
+@@ -84,17 +90,22 @@ async def test_screens():
+     assert app.screen_stack == [screen1]
+     # Check it is current
+     assert app.screen is screen1
++    # There should be one item in the children view
++    assert app.children == (screen1,)
+ 
+     # Switch to another screen
+     app.switch_screen("screen2")
+     # Check it has changed the stack and that it is current
+     assert app.screen_stack == [screen2]
+     assert app.screen is screen2
++    assert app.children == (screen2,)
+ 
+     # Push another screen
+     app.push_screen("screen3")
+     assert app.screen_stack == [screen2, screen3]
+     assert app.screen is screen3
++    # Only the current screen is in children
++    assert app.children == (screen3,)
+ 
+     # Pop a screen
+     assert app.pop_screen() is screen3
+diff --git a/tests/test_unmount.py b/tests/test_unmount.py
+index 6ef23f247d..2301e4010a 100644
+--- a/tests/test_unmount.py
++++ b/tests/test_unmount.py
+@@ -13,7 +13,7 @@ async def test_unmount():
+     class UnmountWidget(Container):
+         def on_unmount(self, event: events.Unmount):
+             unmount_ids.append(
+-                f"{self.__class__.__name__}#{self.id}-{self.parent is not None}-{len(self.children)}"
++                f"{self.__class__.__name__}#{self.id}-{self.parent is not None}-{len(self._nodes)}"
+             )
+ 
+     class MyScreen(Screen):
+diff --git a/tests/test_widget_child_moving.py b/tests/test_widget_child_moving.py
+index d9e15de66a..9b99b3ae80 100644
+--- a/tests/test_widget_child_moving.py
++++ b/tests/test_widget_child_moving.py
+@@ -59,9 +59,9 @@ async def test_widget_move_child() -> None:
+             container = Widget(*widgets)
+             await pilot.app.mount(container)
+             container.move_child(child, before=target)
+-            assert container.children[0].id == "widget-1"
+-            assert container.children[1].id == "widget-0"
+-            assert container.children[2].id == "widget-2"
++            assert container._nodes[0].id == "widget-1"
++            assert container._nodes[1].id == "widget-0"
++            assert container._nodes[2].id == "widget-2"
+ 
+     # Test the different permutations of moving one widget after another.
+     perms = ((0, 1), (widgets[0], 1), (0, widgets[1]), (widgets[0], widgets[1]))
+@@ -70,22 +70,22 @@ async def test_widget_move_child() -> None:
+             container = Widget(*widgets)
+             await pilot.app.mount(container)
+             container.move_child(child, after=target)
+-            assert container.children[0].id == "widget-1"
+-            assert container.children[1].id == "widget-0"
+-            assert container.children[2].id == "widget-2"
++            assert container._nodes[0].id == "widget-1"
++            assert container._nodes[1].id == "widget-0"
++            assert container._nodes[2].id == "widget-2"
+ 
+     # Test moving after a child after the last child.
+     async with App().run_test() as pilot:
+         container = Widget(*widgets)
+         await pilot.app.mount(container)
+         container.move_child(widgets[0], after=widgets[-1])
+-        assert container.children[0].id == "widget-1"
+-        assert container.children[-1].id == "widget-0"
++        assert container._nodes[0].id == "widget-1"
++        assert container._nodes[-1].id == "widget-0"
+ 
+     # Test moving after a child after the last child's numeric position.
+     async with App().run_test() as pilot:
+         container = Widget(*widgets)
+         await pilot.app.mount(container)
+         container.move_child(widgets[0], after=widgets[9])
+-        assert container.children[0].id == "widget-1"
+-        assert container.children[-1].id == "widget-0"
++        assert container._nodes[0].id == "widget-1"
++        assert container._nodes[-1].id == "widget-0"
+diff --git a/tests/test_widget_mount_point.py b/tests/test_widget_mount_point.py
+index eebfdec5a7..57e070df62 100644
+--- a/tests/test_widget_mount_point.py
++++ b/tests/test_widget_mount_point.py
+@@ -23,7 +23,7 @@ def test_find_dom_spot():
+ 
+     # Just as a quick double-check, make sure the main components are in
+     # their intended place.
+-    assert list(screen.children) == [header, body, footer]
++    assert list(screen._nodes) == [header, body, footer]
+ 
+     # Now check that we find what we're looking for in the places we expect
+     # to find them.
+diff --git a/tests/test_widget_mounting.py b/tests/test_widget_mounting.py
+index 666dca5373..305fd7c827 100644
+--- a/tests/test_widget_mounting.py
++++ b/tests/test_widget_mounting.py
+@@ -26,72 +26,72 @@ async def test_mount_via_app() -> None:
+     async with App().run_test() as pilot:
+         # Mount the first one and make sure it's there.
+         await pilot.app.mount(widgets[0])
+-        assert len(pilot.app.screen.children) == 1
+-        assert pilot.app.screen.children[0] == widgets[0]
++        assert len(pilot.app.screen._nodes) == 1
++        assert pilot.app.screen._nodes[0] == widgets[0]
+ 
+         # Mount the next 2 widgets via mount.
+         await pilot.app.mount(*widgets[1:3])
+-        assert list(pilot.app.screen.children) == widgets[0:3]
++        assert list(pilot.app.screen._nodes) == widgets[0:3]
+ 
+         # Finally mount the rest of the widgets via mount_all.
+         await pilot.app.mount_all(widgets[3:])
+-        assert list(pilot.app.screen.children) == widgets
++        assert list(pilot.app.screen._nodes) == widgets
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget before -1, which is "before the end".
+         penultimate = Static(id="penultimate")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(penultimate, before=-1)
+-        assert pilot.app.screen.children[-2] == penultimate
++        assert pilot.app.screen._nodes[-2] == penultimate
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget after -1, which is "at the end".
+         ultimate = Static(id="ultimate")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(ultimate, after=-1)
+-        assert pilot.app.screen.children[-1] == ultimate
++        assert pilot.app.screen._nodes[-1] == ultimate
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget before -2, which is "before the penultimate".
+         penpenultimate = Static(id="penpenultimate")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(penpenultimate, before=-2)
+-        assert pilot.app.screen.children[-3] == penpenultimate
++        assert pilot.app.screen._nodes[-3] == penpenultimate
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget after -2, which is "before the end".
+         penultimate = Static(id="penultimate")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(penultimate, after=-2)
+-        assert pilot.app.screen.children[-2] == penultimate
++        assert pilot.app.screen._nodes[-2] == penultimate
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget before 0, which is "at the start".
+         start = Static(id="start")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(start, before=0)
+-        assert pilot.app.screen.children[0] == start
++        assert pilot.app.screen._nodes[0] == start
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget after 0. You get the idea...
+         second = Static(id="second")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(second, after=0)
+-        assert pilot.app.screen.children[1] == second
++        assert pilot.app.screen._nodes[1] == second
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget relative to another via query.
+         queue_jumper = Static(id="queue-jumper")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(queue_jumper, after="#starter-5")
+-        assert pilot.app.screen.children[6] == queue_jumper
++        assert pilot.app.screen._nodes[6] == queue_jumper
+ 
+     async with App().run_test() as pilot:
+         # Mount a widget relative to another via query.
+         queue_jumper = Static(id="queue-jumper")
+         await pilot.app.mount_all(widgets)
+         await pilot.app.mount(queue_jumper, after=widgets[5])
+-        assert pilot.app.screen.children[6] == queue_jumper
++        assert pilot.app.screen._nodes[6] == queue_jumper
+ 
+     async with App().run_test() as pilot:
+         # Make sure we get told off for trying to before and after.
+diff --git a/tests/test_widget_removing.py b/tests/test_widget_removing.py
+index 49b92e1913..6c648d04c7 100644
+--- a/tests/test_widget_removing.py
++++ b/tests/test_widget_removing.py
+@@ -13,28 +13,28 @@ async def test_remove_single_widget():
+         assert not widget.is_attached
+         await pilot.app.mount(widget)
+         assert widget.is_attached
+-        assert len(pilot.app.screen.children) == 1
++        assert len(pilot.app.screen._nodes) == 1
+         await pilot.app.query_one(Static).remove()
+         assert not widget.is_attached
+-        assert len(pilot.app.screen.children) == 0
++        assert len(pilot.app.screen._nodes) == 0
+ 
+ 
+ async def test_many_remove_all_widgets():
+     """It should be possible to remove all widgets on a multi-widget screen."""
+     async with App().run_test() as pilot:
+         await pilot.app.mount(*[Static() for _ in range(10)])
+-        assert len(pilot.app.screen.children) == 10
++        assert len(pilot.app.screen._nodes) == 10
+         await pilot.app.query(Static).remove()
+-        assert len(pilot.app.screen.children) == 0
++        assert len(pilot.app.screen._nodes) == 0
+ 
+ 
+ async def test_many_remove_some_widgets():
+     """It should be possible to remove some widgets on a multi-widget screen."""
+     async with App().run_test() as pilot:
+         await pilot.app.mount(*[Static(classes=f"is-{n%2}") for n in range(10)])
+-        assert len(pilot.app.screen.children) == 10
++        assert len(pilot.app.screen._nodes) == 10
+         await pilot.app.query(".is-0").remove()
+-        assert len(pilot.app.screen.children) == 5
++        assert len(pilot.app.screen._nodes) == 5
+ 
+ 
+ async def test_remove_branch():
+@@ -46,7 +46,7 @@ async def test_remove_branch():
+             Container(Container(Container(Container(Container(Static()))))),
+         )
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 13
+-        await pilot.app.screen.children[0].remove()
++        await pilot.app.screen._nodes[0].remove()
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 7
+ 
+ 
+@@ -68,14 +68,14 @@ async def test_remove_move_focus():
+     async with App().run_test() as pilot:
+         buttons = [Button(str(n)) for n in range(10)]
+         await pilot.app.mount(Container(*buttons[:5]), Container(*buttons[5:]))
+-        assert len(pilot.app.screen.children) == 2
++        assert len(pilot.app.screen._nodes) == 2
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 12
+         assert pilot.app.focused is None
+         await pilot.press("tab")
+         assert pilot.app.focused is not None
+         assert pilot.app.focused == buttons[0]
+-        await pilot.app.screen.children[0].remove()
+-        assert len(pilot.app.screen.children) == 1
++        await pilot.app.screen._nodes[0].remove()
++        assert len(pilot.app.screen._nodes) == 1
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 6
+         assert pilot.app.focused is not None
+         assert pilot.app.focused == buttons[9]
+@@ -95,7 +95,7 @@ def on_unmount(self, _):
+             Removable(Removable(Removable(id="grandchild"), id="child"), id="parent")
+         )
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 3
+-        await pilot.app.screen.children[0].remove()
++        await pilot.app.screen._nodes[0].remove()
+         assert len(pilot.app.screen.walk_children(with_self=False)) == 0
+         assert removals == ["grandchild", "child", "parent"]
+ 
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

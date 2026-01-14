@@ -1,0 +1,2179 @@
+  Task-ID: skypilot-org__skypilot-1489@1430d74
+  Please checkout to this commit first: e1c4121894bed919e2a59eba7096ec75a44ab65b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  [IAM] Utilize ray-autoscaler-v1 IAM role on the remote VM
+Instead of using user's credentials on the remote VM, we need to utilize the `ray-autoscaler-v1` to handle the autostop/autodown and make the spot controller able to operate the clusters.
+This will benefits:
+1. better security for not copying the user's credentials.
+2. it will unblock the users using SSO login, with which the user's credential can be expired.
+  </issue>
+  
+  <patch>
+  diff --git a/docs/source/getting-started/installation.rst b/docs/source/getting-started/installation.rst
+index ecd92246886..cbffed8fd51 100644
+--- a/docs/source/getting-started/installation.rst
++++ b/docs/source/getting-started/installation.rst
+@@ -58,6 +58,8 @@ To get the **AWS access key** required by :code:`aws configure`, please go to th
+   $ # Configure your AWS credentials
+   $ aws configure
+ 
++Note: If you are using AWS IAM Identity Center (AWS SSO), you will need :code:`pip install awscli>=1.27.10`. See `here <https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html>`_ for instructions on how to configure AWS SSO.
++
+ **GCP**
+ 
+ .. code-block:: console
+@@ -177,4 +179,4 @@ If you experience any issues after installation, you can use the :code:`--uninst
+   $ sky --uninstall-shell-completion auto
+   $ # sky --uninstall-shell-completion zsh
+   $ # sky --uninstall-shell-completion bash
+-  $ # sky --uninstall-shell-completion fish
+\ No newline at end of file
++  $ # sky --uninstall-shell-completion fish
+diff --git a/examples/using_file_mounts.yaml b/examples/using_file_mounts.yaml
+index 2906c231a0d..b6a961ab15b 100644
+--- a/examples/using_file_mounts.yaml
++++ b/examples/using_file_mounts.yaml
+@@ -70,6 +70,8 @@ file_mounts:
+ 
+   /s3-data-test: s3://fah-public-data-covid19-cryptic-pockets/human/il6/PROJ14534/RUN999/CLONE0/results0
+   /s3-data-file: s3://fah-public-data-covid19-cryptic-pockets/human/il6/PROJ14534/RUN999/CLONE0/results0/frame0.xtc
++  # Test access to private bucket
++  # /my-bucket: s3://sky-detectron2-outputs
+   # /test-my-gcs: gs://cloud-storage-test-zhwu-2
+ 
+   # If a source path points to a "directory", its contents will be recursively
+diff --git a/sky/clouds/aws.py b/sky/clouds/aws.py
+index 4d1a5bdb7b6..7569b37f0a8 100644
+--- a/sky/clouds/aws.py
++++ b/sky/clouds/aws.py
+@@ -16,21 +16,19 @@
+     # renaming to avoid shadowing variables
+     from sky import resources as resources_lib
+ 
+-# Minimum set of files under ~/.aws that grant AWS access.
++# No need to upload the credentials file to AWS node, since we have
++# enabled the sky-service-v1 IAM role for all the nodes, i.e. they can
++# access ec2, s3, etc.
++# We Should still upload the credentials file to the VM, when the VM
++# is not running on AWS (access s3 or spot controller managing
++# instances).
++# TODO(zhwu): For VMs on other clouds, we should find a way to not
++# upload the credentials file.
+ _CREDENTIAL_FILES = [
+     'credentials',
+ ]
+ 
+ 
+-def _run_output(cmd):
+-    proc = subprocess.run(cmd,
+-                          shell=True,
+-                          check=True,
+-                          stderr=subprocess.PIPE,
+-                          stdout=subprocess.PIPE)
+-    return proc.stdout.decode('ascii')
+-
+-
+ @clouds.CLOUD_REGISTRY.register
+ class AWS(clouds.Cloud):
+     """Amazon Web Services."""
+@@ -292,30 +290,34 @@ def check_credentials(self) -> Tuple[bool, Optional[str]]:
+         except ImportError:
+             raise ImportError('Fail to import dependencies for AWS.'
+                               'Try pip install "skypilot[aws]"') from None
++        prefix = '    '
+         help_str = (
+             ' Run the following commands:'
+-            '\n      $ pip install boto3'
+-            '\n      $ aws configure'
+-            '\n    For more info: '
++            f'\n{prefix}  $ pip install boto3'
++            f'\n{prefix}  $ aws configure'
++            f'\n{prefix}For more info: '
+             'https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html'  # pylint: disable=line-too-long
+         )
+-        # This file is required because it will be synced to remote VMs for
+-        # `aws` to access private storage buckets.
+-        # `aws configure list` does not guarantee this file exists.
+-        if not os.path.isfile(os.path.expanduser('~/.aws/credentials')):
+-            return (False, '~/.aws/credentials does not exist.' + help_str)
+ 
+         # Checks if the AWS CLI is installed properly
+-        try:
+-            _run_output('aws configure list')
+-        except subprocess.CalledProcessError:
++        proc = subprocess.run('aws configure list',
++                              shell=True,
++                              check=False,
++                              stdout=subprocess.PIPE,
++                              stderr=subprocess.PIPE)
++        if proc.returncode != 0:
++            additional_help = f'\n{prefix}Credentials may also need to be set.' + help_str
++            if 'SSO' in proc.stderr.decode().split():
++                additional_help = (
++                    f'\n{prefix}You are using SSO account, please update the awscli package with:'
++                    f'\n{prefix}  $ pip install awscli>=1.27.10 boto3')
+             return False, (
+-                'AWS CLI is not installed properly.'
+-                ' Run the following commands under sky folder:'
++                'AWS CLI is not installed properly. '
++                'Run the following commands under sky folder:'
+                 # TODO(zhwu): after we publish sky to PyPI,
+                 # change this to `pip install sky[aws]`
+-                '\n     $ pip install .[aws]'
+-                '\n   Credentials may also need to be set.' + help_str)
++                f'\n{prefix}  $ pip install .[aws]'
++                f'{additional_help}')
+ 
+         # Checks if AWS credentials 1) exist and 2) are valid.
+         # https://stackoverflow.com/questions/53548737/verify-aws-credentials-with-boto3
+@@ -331,14 +333,39 @@ def check_credentials(self) -> Tuple[bool, Optional[str]]:
+                 ' To reconfigure the credentials, ' + help_str[1].lower() +
+                 help_str[2:])
+ 
++        hints = None
++        # This file is required for multiple clouds because it will be synced to remote VMs
++        # for `aws` to access private storage buckets.
++        # `aws configure list` does not guarantee this file exists.
++        if not os.path.isfile(os.path.expanduser('~/.aws/credentials')):
++            hints = (
++                'AWS static credentials are not set. SSO configuration might be used. '
++                'It will work if you use AWS only, but will cause problems for multiple '
++                'clouds. To set up static credentials, try: aws configure')
++
+         # Fetch the AWS availability zones mapping from ID to name.
+         from sky.clouds.service_catalog import aws_catalog  # pylint: disable=import-outside-toplevel,unused-import
+-        return True, None
++        return True, hints
++
++    def _is_sso_identity(self) -> bool:
++        proc = subprocess.run('aws configure list',
++                              shell=True,
++                              check=False,
++                              stdout=subprocess.PIPE,
++                              stderr=subprocess.PIPE)
++        if proc.returncode != 0:
++            return False
++        return 'sso' in proc.stdout.decode().split()
+ 
+     def get_credential_file_mounts(self) -> Dict[str, str]:
++        # Do not upload the credential file if the user is using SSO, as
++        # the credential file can from a different account, and will cause
++        # autopstop/autodown/spot controller misbehave.
+         return {
+             f'~/.aws/{filename}': f'~/.aws/{filename}'
+             for filename in _CREDENTIAL_FILES
++            if (os.path.exists(os.path.expanduser(f'~/.aws/{filename}')) and
++                not self._is_sso_identity())
+         }
+ 
+     def instance_type_exists(self, instance_type):
+diff --git a/sky/setup_files/setup.py b/sky/setup_files/setup.py
+index 8b960afef65..ea184e3ac46 100644
+--- a/sky/setup_files/setup.py
++++ b/sky/setup_files/setup.py
+@@ -101,6 +101,7 @@ def parse_readme(readme: str) -> str:
+ # packages dependencies are changed.
+ extras_require = {
+     'aws': [
++        # awscli>=1.27.10 is required for SSO support.
+         'awscli',
+         'boto3',
+         # 'Crypto' module used in authentication.py for AWS.
+diff --git a/sky/skylet/providers/aws/__init__.py b/sky/skylet/providers/aws/__init__.py
+index e71ef477e46..5e592213448 100644
+--- a/sky/skylet/providers/aws/__init__.py
++++ b/sky/skylet/providers/aws/__init__.py
+@@ -1,2 +1,2 @@
+ """AWS node provider"""
+-from sky.skylet.providers.aws.node_provider import AWSNodeProvider
++from sky.skylet.providers.aws.node_provider import AWSNodeProvider, AWSNodeProviderV2
+diff --git a/sky/skylet/providers/aws/config_v2.py b/sky/skylet/providers/aws/config_v2.py
+new file mode 100644
+index 00000000000..3e7a51fcab5
+--- /dev/null
++++ b/sky/skylet/providers/aws/config_v2.py
+@@ -0,0 +1,1234 @@
++import copy
++import itertools
++import json
++import logging
++import os
++import time
++from distutils.version import StrictVersion
++from functools import lru_cache, partial
++from typing import Any, Dict, List, Optional, Set, Tuple
++
++import boto3
++import botocore
++
++from sky.skylet.providers.aws.cloudwatch.cloudwatch_helper import (
++    CloudwatchHelper as cwh,
++)
++from sky.skylet.providers.aws.utils import (
++    LazyDefaultDict,
++    handle_boto_error,
++    resource_cache,
++)
++from ray.autoscaler._private.cli_logger import cf, cli_logger
++from ray.autoscaler._private.event_system import CreateClusterEvent, global_event_system
++from ray.autoscaler._private.providers import _PROVIDER_PRETTY_NAMES
++from ray.autoscaler._private.util import check_legacy_fields
++from ray.autoscaler.tags import NODE_TYPE_LEGACY_HEAD, NODE_TYPE_LEGACY_WORKER
++
++logger = logging.getLogger(__name__)
++
++# TODO(skypilot, zhwu): backward compatibility for old config
++SKYPILOT = "skypilot-service"
++DEFAULT_SKYPILOT_INSTANCE_PROFILE = SKYPILOT + "-v1"
++DEFAULT_SKYPILOT_IAM_ROLE = SKYPILOT + "-v1"
++SECURITY_GROUP_TEMPLATE = SKYPILOT + "-{}"
++
++# V61.0 has CUDA 11.2
++DEFAULT_AMI_NAME = "AWS Deep Learning AMI (Ubuntu 18.04) V61.0"
++
++# Obtained from https://aws.amazon.com/marketplace/pp/B07Y43P7X5 on 6/10/2022.
++# NOTE(skypilot): these are not used; skypilot instead uses the default AMIs in aws.py.
++DEFAULT_AMI = {
++    "us-east-1": "ami-0dd6adfad4ad37eec",  # US East (N. Virginia)
++    "us-east-2": "ami-0c77cd5ca05bf1281",  # US East (Ohio)
++    "us-west-1": "ami-020ab1b368a5ed1db",  # US West (N. California)
++    "us-west-2": "ami-0387d929287ab193e",  # US West (Oregon)
++    "ca-central-1": "ami-07dbafdbd38f18d98",  # Canada (Central)
++    "eu-central-1": "ami-0383bd0c1fc4c63ec",  # EU (Frankfurt)
++    "eu-west-1": "ami-0a074b0a311a837ac",  # EU (Ireland)
++    "eu-west-2": "ami-094ba2b4651f761ca",  # EU (London)
++    "eu-west-3": "ami-031da10fbf225bf5f",  # EU (Paris)
++    "sa-east-1": "ami-0be7c1f1dd96d7337",  # SA (Sao Paulo)
++}
++
++# todo: cli_logger should handle this assert properly
++# this should probably also happens somewhere else
++assert StrictVersion(boto3.__version__) >= StrictVersion(
++    "1.4.8"
++), "Boto3 version >= 1.4.8 required, try `pip install -U boto3`"
++
++
++def key_pair(i, region, key_name):
++    """
++    If key_name is not None, key_pair will be named after key_name.
++    Returns the ith default (aws_key_pair_name, key_pair_path).
++    """
++    # SkyPilot: we don't use this, as we explicitly set the key already.
++    # For backwards compatibility, we'll just return the key pair with
++    # the previous name.
++    LEGACY_KEY_NAME = "ray-autoscaler"
++    if i == 0:
++        key_pair_name = "{}_{}".format(LEGACY_KEY_NAME, region) if key_name is None else key_name
++        return (
++            key_pair_name,
++            os.path.expanduser("~/.ssh/{}.pem".format(key_pair_name)),
++        )
++
++    key_pair_name = (
++        "{}_{}_{}".format(LEGACY_KEY_NAME, i, region)
++        if key_name is None
++        else key_name + "_key-{}".format(i)
++    )
++    return (key_pair_name, os.path.expanduser("~/.ssh/{}.pem".format(key_pair_name)))
++
++
++# Suppress excessive connection dropped logs from boto
++logging.getLogger("botocore").setLevel(logging.WARNING)
++
++_log_info = {}
++
++
++def reload_log_state(override_log_info):
++    _log_info.update(override_log_info)
++
++
++def get_log_state():
++    return _log_info.copy()
++
++
++def _set_config_info(**kwargs):
++    """Record configuration artifacts useful for logging."""
++
++    # todo: this is technically fragile iff we ever use multiple configs
++
++    for k, v in kwargs.items():
++        _log_info[k] = v
++
++
++def _arn_to_name(arn):
++    return arn.split(":")[-1].split("/")[-1]
++
++
++def log_to_cli(config: Dict[str, Any]) -> None:
++    provider_name = _PROVIDER_PRETTY_NAMES.get("aws", None)
++
++    cli_logger.doassert(
++        provider_name is not None, "Could not find a pretty name for the AWS provider."
++    )
++
++    head_node_type = config["head_node_type"]
++    head_node_config = config["available_node_types"][head_node_type]["node_config"]
++
++    with cli_logger.group("{} config", provider_name):
++
++        def print_info(
++            resource_string: str,
++            key: str,
++            src_key: str,
++            allowed_tags: Optional[List[str]] = None,
++            list_value: bool = False,
++        ) -> None:
++            if allowed_tags is None:
++                allowed_tags = ["default"]
++
++            node_tags = {}
++
++            # set of configurations corresponding to `key`
++            unique_settings = set()
++
++            for node_type_key, node_type in config["available_node_types"].items():
++                node_tags[node_type_key] = {}
++                tag = _log_info[src_key][node_type_key]
++                if tag in allowed_tags:
++                    node_tags[node_type_key][tag] = True
++                setting = node_type["node_config"].get(key)
++
++                if list_value:
++                    unique_settings.add(tuple(setting))
++                else:
++                    unique_settings.add(setting)
++
++            head_value_str = head_node_config[key]
++            if list_value:
++                head_value_str = cli_logger.render_list(head_value_str)
++
++            if len(unique_settings) == 1:
++                # all node types are configured the same, condense
++                # log output
++                cli_logger.labeled_value(
++                    resource_string + " (all available node types)",
++                    "{}",
++                    head_value_str,
++                    _tags=node_tags[config["head_node_type"]],
++                )
++            else:
++                # do head node type first
++                cli_logger.labeled_value(
++                    resource_string + f" ({head_node_type})",
++                    "{}",
++                    head_value_str,
++                    _tags=node_tags[head_node_type],
++                )
++
++                # go through remaining types
++                for node_type_key, node_type in config["available_node_types"].items():
++                    if node_type_key == head_node_type:
++                        continue
++                    workers_value_str = node_type["node_config"][key]
++                    if list_value:
++                        workers_value_str = cli_logger.render_list(workers_value_str)
++                    cli_logger.labeled_value(
++                        resource_string + f" ({node_type_key})",
++                        "{}",
++                        workers_value_str,
++                        _tags=node_tags[node_type_key],
++                    )
++
++        tags = {"default": _log_info["head_instance_profile_src"] == "default"}
++        # head_node_config is the head_node_type's config,
++        # config["head_node"] is a field that gets applied only to the actual
++        # head node (and not workers of the head's node_type)
++        assert (
++            "IamInstanceProfile" in head_node_config
++            or "IamInstanceProfile" in config["head_node"]
++        )
++        if "IamInstanceProfile" in head_node_config:
++            # If the user manually configured the role we're here.
++            IamProfile = head_node_config["IamInstanceProfile"]
++        elif "IamInstanceProfile" in config["head_node"]:
++            # If we filled the default IAM role, we're here.
++            IamProfile = config["head_node"]["IamInstanceProfile"]
++        profile_arn = IamProfile.get("Arn")
++        profile_name = _arn_to_name(profile_arn) if profile_arn else IamProfile["Name"]
++        cli_logger.labeled_value("IAM Profile", "{}", profile_name, _tags=tags)
++
++        if all(
++            "KeyName" in node_type["node_config"]
++            for node_type in config["available_node_types"].values()
++        ):
++            print_info("EC2 Key pair", "KeyName", "keypair_src")
++
++        print_info("VPC Subnets", "SubnetIds", "subnet_src", list_value=True)
++        print_info(
++            "EC2 Security groups",
++            "SecurityGroupIds",
++            "security_group_src",
++            list_value=True,
++        )
++        print_info("EC2 AMI", "ImageId", "ami_src", allowed_tags=["dlami"])
++
++    cli_logger.newline()
++
++
++def bootstrap_aws(config):
++    # create a copy of the input config to modify
++    config = copy.deepcopy(config)
++
++    # Log warnings if user included deprecated `head_node` or `worker_nodes`
++    # fields. Raise error if no `available_node_types`
++    check_legacy_fields(config)
++    # Used internally to store head IAM role.
++    config["head_node"] = {}
++
++    # If a LaunchTemplate is provided, extract the necessary fields for the
++    # config stages below.
++    config = _configure_from_launch_template(config)
++
++    # If NetworkInterfaces are provided, extract the necessary fields for the
++    # config stages below.
++    config = _configure_from_network_interfaces(config)
++
++    # The head node needs to have an IAM role that allows it to create further
++    # EC2 instances.
++    config = _configure_iam_role(config)
++
++    # Configure SSH access, using an existing key pair if possible.
++    config = _configure_key_pair(config)
++    global_event_system.execute_callback(
++        CreateClusterEvent.ssh_keypair_downloaded,
++        {"ssh_key_path": config["auth"]["ssh_private_key"]},
++    )
++
++    # Pick a reasonable subnet if not specified by the user.
++    config = _configure_subnet(config)
++
++    # Cluster workers should be in a security group that permits traffic within
++    # the group, and also SSH access from outside.
++    config = _configure_security_group(config)
++
++    # Provide a helpful message for missing AMI.
++    _check_ami(config)
++
++    return config
++
++
++def _configure_iam_role(config):
++    head_node_type = config["head_node_type"]
++    head_node_config = config["available_node_types"][head_node_type]["node_config"]
++    if "IamInstanceProfile" in head_node_config:
++        _set_config_info(head_instance_profile_src="config")
++        # SkyPilot: let the workers use the same role as the head node, so that they
++        # can access the same S3 buckets.
++        for node_type in config["available_node_types"].values():
++            node_type["node_config"]["IamInstanceProfile"] = {"Arn": profile.arn}
++        return config
++    _set_config_info(head_instance_profile_src="default")
++
++    instance_profile_name = cwh.resolve_instance_profile_name(
++        config["provider"],
++        DEFAULT_SKYPILOT_INSTANCE_PROFILE,
++    )
++    profile = _get_instance_profile(instance_profile_name, config)
++
++    if profile is None:
++        cli_logger.verbose(
++            "Creating new IAM instance profile {} for use as the default.",
++            cf.bold(instance_profile_name),
++        )
++        client = _client("iam", config)
++        client.create_instance_profile(InstanceProfileName=instance_profile_name)
++        profile = _get_instance_profile(instance_profile_name, config)
++        time.sleep(15)  # wait for propagation
++
++    cli_logger.doassert(
++        profile is not None, "Failed to create instance profile."
++    )  # todo: err msg
++    assert profile is not None, "Failed to create instance profile"
++
++    if not profile.roles:
++        role_name = cwh.resolve_iam_role_name(config["provider"], DEFAULT_SKYPILOT_IAM_ROLE)
++        role = _get_role(role_name, config)
++        if role is None:
++            cli_logger.verbose(
++                "Creating new IAM role {} for use as the default instance role.",
++                cf.bold(role_name),
++            )
++            iam = _resource("iam", config)
++            policy_doc = {
++                "Statement": [
++                    {
++                        "Effect": "Allow",
++                        "Principal": {"Service": "ec2.amazonaws.com"},
++                        "Action": "sts:AssumeRole",
++                    },
++                ]
++            }
++            attach_policy_arns = cwh.resolve_policy_arns(
++                config["provider"],
++                iam,
++                [
++                    "arn:aws:iam::aws:policy/AmazonEC2FullAccess",
++                    "arn:aws:iam::aws:policy/AmazonS3FullAccess",
++                ],
++            )
++            iam.create_role(
++                RoleName=role_name, AssumeRolePolicyDocument=json.dumps(policy_doc)
++            )
++            
++            role = _get_role(role_name, config)
++            cli_logger.doassert(
++                role is not None, "Failed to create role."
++            )  # todo: err msg
++
++            assert role is not None, "Failed to create role"
++
++            for policy_arn in attach_policy_arns:
++                role.attach_policy(PolicyArn=policy_arn)
++            
++            # SkyPilot: "PassRole" is required by the head node to pass the role to
++            # the workers, so we can access S3 buckets on the workers. "Resource"
++            # is to limit the role to only able to pass itself to the workers.
++            iam_self_read_write_policy_doc = {
++                "Statement": [
++                    {
++                        "Effect": "Allow",
++                        "Action": [
++                            "iam:GetRole",
++                            "iam:PassRole",
++                        ],
++                        "Resource": role.arn,
++                    },
++                    {
++                        "Effect": "Allow",
++                        "Action": "iam:GetInstanceProfile",
++                        "Resource": profile.arn,
++                    }
++                ]
++            }
++            role.Policy("IAMSelfReadWritePolicy").put(
++                PolicyDocument=json.dumps(iam_self_read_write_policy_doc)
++            )
++
++        profile.add_role(RoleName=role.name)
++        time.sleep(15)  # wait for propagation
++    # Add IAM role to "head_node" field so that it is applied only to
++    # the head node -- not to workers with the same node type as the head.
++    # config["head_node"]["IamInstanceProfile"] = {"Arn": profile.arn}
++
++    # SkyPilot: make all the node types use the same role, so that all the nodes
++    # can access the same S3 buckets.
++    for node_type in config["available_node_types"].values():
++        node_type["node_config"]["IamInstanceProfile"] = {"Arn": profile.arn}
++
++    return config
++
++
++def _configure_key_pair(config):
++    node_types = config["available_node_types"]
++
++    # map from node type key -> source of KeyName field
++    key_pair_src_info = {}
++    _set_config_info(keypair_src=key_pair_src_info)
++
++    if "ssh_private_key" in config["auth"]:
++        for node_type_key in node_types:
++            # keypairs should be provided in the config
++            key_pair_src_info[node_type_key] = "config"
++
++        # If the key is not configured via the cloudinit
++        # UserData, it should be configured via KeyName or
++        # else we will risk starting a node that we cannot
++        # SSH into:
++
++        for node_type in node_types:
++            node_config = node_types[node_type]["node_config"]
++            if "UserData" not in node_config:
++                cli_logger.doassert(
++                    "KeyName" in node_config, _key_assert_msg(node_type)
++                )
++                assert "KeyName" in node_config
++
++        return config
++
++    for node_type_key in node_types:
++        key_pair_src_info[node_type_key] = "default"
++
++    ec2 = _resource("ec2", config)
++
++    # Writing the new ssh key to the filesystem fails if the ~/.ssh
++    # directory doesn't already exist.
++    os.makedirs(os.path.expanduser("~/.ssh"), exist_ok=True)
++
++    # Try a few times to get or create a good key pair.
++    MAX_NUM_KEYS = 30
++    for i in range(MAX_NUM_KEYS):
++
++        key_name = config["provider"].get("key_pair", {}).get("key_name")
++
++        key_name, key_path = key_pair(i, config["provider"]["region"], key_name)
++        key = _get_key(key_name, config)
++
++        # Found a good key.
++        if key and os.path.exists(key_path):
++            break
++
++        # We can safely create a new key.
++        if not key and not os.path.exists(key_path):
++            cli_logger.verbose(
++                "Creating new key pair {} for use as the default.", cf.bold(key_name)
++            )
++            key = ec2.create_key_pair(KeyName=key_name)
++
++            # We need to make sure to _create_ the file with the right
++            # permissions. In order to do that we need to change the default
++            # os.open behavior to include the mode we want.
++            with open(key_path, "w", opener=partial(os.open, mode=0o600)) as f:
++                f.write(key.key_material)
++            break
++
++    if not key:
++        cli_logger.abort(
++            "No matching local key file for any of the key pairs in this "
++            "account with ids from 0..{}. "
++            "Consider deleting some unused keys pairs from your account.",
++            key_name,
++        )
++
++    cli_logger.doassert(
++        os.path.exists(key_path),
++        "Private key file " + cf.bold("{}") + " not found for " + cf.bold("{}"),
++        key_path,
++        key_name,
++    )  # todo: err msg
++    assert os.path.exists(key_path), "Private key file {} not found for {}".format(
++        key_path, key_name
++    )
++
++    config["auth"]["ssh_private_key"] = key_path
++    for node_type in node_types.values():
++        node_config = node_type["node_config"]
++        node_config["KeyName"] = key_name
++
++    return config
++
++
++def _key_assert_msg(node_type: str) -> str:
++    if node_type == NODE_TYPE_LEGACY_WORKER:
++        return "`KeyName` missing for worker nodes."
++    elif node_type == NODE_TYPE_LEGACY_HEAD:
++        return "`KeyName` missing for head node."
++    else:
++        return (
++            "`KeyName` missing from the `node_config` of" f" node type `{node_type}`."
++        )
++
++
++def _usable_subnet_ids(
++    user_specified_subnets: Optional[List[Any]],
++    all_subnets: List[Any],
++    azs: Optional[str],
++    vpc_id_of_sg: Optional[str],
++    use_internal_ips: bool,
++    node_type_key: str,
++) -> Tuple[List[str], str]:
++    """Prunes subnets down to those that meet the following criteria.
++
++    Subnets must be:
++    * 'Available' according to AWS.
++    * Public, unless `use_internal_ips` is specified.
++    * In one of the AZs, if AZs are provided.
++    * In the given VPC, if a VPC is specified for Security Groups.
++
++    Returns:
++        List[str]: Subnets that are usable.
++        str: VPC ID of the first subnet.
++    """
++
++    def _are_user_subnets_pruned(current_subnets: List[Any]) -> bool:
++        return user_specified_subnets is not None and len(current_subnets) != len(
++            user_specified_subnets
++        )
++
++    def _get_pruned_subnets(current_subnets: List[Any]) -> Set[str]:
++        current_subnet_ids = {s.subnet_id for s in current_subnets}
++        user_specified_subnet_ids = {s.subnet_id for s in user_specified_subnets}
++        return user_specified_subnet_ids - current_subnet_ids
++
++    try:
++        candidate_subnets = (
++            user_specified_subnets
++            if user_specified_subnets is not None
++            else all_subnets
++        )
++        if vpc_id_of_sg:
++            candidate_subnets = [
++                s for s in candidate_subnets if s.vpc_id == vpc_id_of_sg
++            ]
++        subnets = sorted(
++            (
++                s
++                for s in candidate_subnets
++                if s.state == "available"
++                and (use_internal_ips or s.map_public_ip_on_launch)
++            ),
++            reverse=True,  # sort from Z-A
++            key=lambda subnet: subnet.availability_zone,
++        )
++    except botocore.exceptions.ClientError as exc:
++        handle_boto_error(exc, "Failed to fetch available subnets from AWS.")
++        raise exc
++
++    if not subnets:
++        cli_logger.abort(
++            f"No usable subnets found for node type {node_type_key}, try "
++            "manually creating an instance in your specified region to "
++            "populate the list of subnets and trying this again.\n"
++            "Note that the subnet must map public IPs "
++            "on instance launch unless you set `use_internal_ips: true` in "
++            "the `provider` config."
++        )
++    elif _are_user_subnets_pruned(subnets):
++        cli_logger.abort(
++            f"The specified subnets for node type {node_type_key} are not "
++            f"usable: {_get_pruned_subnets(subnets)}"
++        )
++
++    if azs is not None:
++        azs = [az.strip() for az in azs.split(",")]
++        subnets = [
++            s
++            for az in azs  # Iterate over AZs first to maintain the ordering
++            for s in subnets
++            if s.availability_zone == az
++        ]
++        if not subnets:
++            cli_logger.abort(
++                f"No usable subnets matching availability zone {azs} found "
++                f"for node type {node_type_key}.\nChoose a different "
++                "availability zone or try manually creating an instance in "
++                "your specified region to populate the list of subnets and "
++                "trying this again."
++            )
++        elif _are_user_subnets_pruned(subnets):
++            cli_logger.abort(
++                f"MISMATCH between specified subnets and Availability Zones! "
++                "The following Availability Zones were specified in the "
++                f"`provider section`: {azs}.\n The following subnets for node "
++                f"type `{node_type_key}` have no matching availability zone: "
++                f"{list(_get_pruned_subnets(subnets))}."
++            )
++
++    # Use subnets in only one VPC, so that _configure_security_groups only
++    # needs to create a security group in this one VPC. Otherwise, we'd need
++    # to set up security groups in all of the user's VPCs and set up networking
++    # rules to allow traffic between these groups.
++    # See https://github.com/ray-project/ray/pull/14868.
++    first_subnet_vpc_id = subnets[0].vpc_id
++    subnets = [s.subnet_id for s in subnets if s.vpc_id == subnets[0].vpc_id]
++    if _are_user_subnets_pruned(subnets):
++        subnet_vpcs = {s.subnet_id: s.vpc_id for s in user_specified_subnets}
++        cli_logger.abort(
++            f"Subnets specified in more than one VPC for node type `{node_type_key}`! "
++            f"Please ensure that all subnets share the same VPC and retry your "
++            "request. Subnet VPCs: {}",
++            subnet_vpcs,
++        )
++    return subnets, first_subnet_vpc_id
++
++
++def _configure_subnet(config):
++    ec2 = _resource("ec2", config)
++
++    # If head or worker security group is specified, filter down to subnets
++    # belonging to the same VPC as the security group.
++    sg_ids = []
++    for node_type in config["available_node_types"].values():
++        node_config = node_type["node_config"]
++        sg_ids.extend(node_config.get("SecurityGroupIds", []))
++    if sg_ids:
++        vpc_id_of_sg = _get_vpc_id_of_sg(sg_ids, config)
++    else:
++        vpc_id_of_sg = None
++
++    # map from node type key -> source of SubnetIds field
++    subnet_src_info = {}
++    _set_config_info(subnet_src=subnet_src_info)
++    all_subnets = list(ec2.subnets.all())
++    # separate node types with and without user-specified subnets
++    node_types_subnets = []
++    node_types_no_subnets = []
++    for key, node_type in config["available_node_types"].items():
++        if "SubnetIds" in node_type["node_config"]:
++            node_types_subnets.append((key, node_type))
++        else:
++            node_types_no_subnets.append((key, node_type))
++
++    vpc_id = None
++
++    # iterate over node types with user-specified subnets first...
++    for key, node_type in node_types_subnets:
++        node_config = node_type["node_config"]
++        user_subnets = _get_subnets_or_die(ec2, tuple(node_config["SubnetIds"]))
++        subnet_ids, vpc_id = _usable_subnet_ids(
++            user_subnets,
++            all_subnets,
++            azs=config["provider"].get("availability_zone"),
++            vpc_id_of_sg=vpc_id_of_sg,
++            use_internal_ips=config["provider"].get("use_internal_ips", False),
++            node_type_key=key,
++        )
++        subnet_src_info[key] = "config"
++
++    # lock-in a good VPC shared by the last set of user-specified subnets...
++    if vpc_id and not vpc_id_of_sg:
++        vpc_id_of_sg = vpc_id
++
++    # iterate over node types without user-specified subnets last...
++    for key, node_type in node_types_no_subnets:
++        node_config = node_type["node_config"]
++        subnet_ids, vpc_id = _usable_subnet_ids(
++            None,
++            all_subnets,
++            azs=config["provider"].get("availability_zone"),
++            vpc_id_of_sg=vpc_id_of_sg,
++            use_internal_ips=config["provider"].get("use_internal_ips", False),
++            node_type_key=key,
++        )
++        subnet_src_info[key] = "default"
++        node_config["SubnetIds"] = subnet_ids
++
++    return config
++
++
++def _get_vpc_id_of_sg(sg_ids: List[str], config: Dict[str, Any]) -> str:
++    """Returns the VPC id of the security groups with the provided security
++    group ids.
++
++    Errors if the provided security groups belong to multiple VPCs.
++    Errors if no security group with any of the provided ids is identified.
++    """
++    # sort security group IDs to support deterministic unit test stubbing
++    sg_ids = sorted(set(sg_ids))
++
++    ec2 = _resource("ec2", config)
++    filters = [{"Name": "group-id", "Values": sg_ids}]
++    security_groups = ec2.security_groups.filter(Filters=filters)
++    vpc_ids = [sg.vpc_id for sg in security_groups]
++    vpc_ids = list(set(vpc_ids))
++
++    multiple_vpc_msg = (
++        "All security groups specified in the cluster config "
++        "should belong to the same VPC."
++    )
++    cli_logger.doassert(len(vpc_ids) <= 1, multiple_vpc_msg)
++    assert len(vpc_ids) <= 1, multiple_vpc_msg
++
++    no_sg_msg = (
++        "Failed to detect a security group with id equal to any of "
++        "the configured SecurityGroupIds."
++    )
++    cli_logger.doassert(len(vpc_ids) > 0, no_sg_msg)
++    assert len(vpc_ids) > 0, no_sg_msg
++
++    return vpc_ids[0]
++
++
++def _configure_security_group(config):
++    # map from node type key -> source of SecurityGroupIds field
++    security_group_info_src = {}
++    _set_config_info(security_group_src=security_group_info_src)
++
++    for node_type_key in config["available_node_types"]:
++        security_group_info_src[node_type_key] = "config"
++
++    node_types_to_configure = [
++        node_type_key
++        for node_type_key, node_type in config["available_node_types"].items()
++        if "SecurityGroupIds" not in node_type["node_config"]
++    ]
++    if not node_types_to_configure:
++        return config  # have user-defined groups
++    head_node_type = config["head_node_type"]
++    if config["head_node_type"] in node_types_to_configure:
++        # configure head node security group last for determinism
++        # in tests
++        node_types_to_configure.remove(head_node_type)
++        node_types_to_configure.append(head_node_type)
++    security_groups = _upsert_security_groups(config, node_types_to_configure)
++
++    for node_type_key in node_types_to_configure:
++        node_config = config["available_node_types"][node_type_key]["node_config"]
++        sg = security_groups[node_type_key]
++        node_config["SecurityGroupIds"] = [sg.id]
++        security_group_info_src[node_type_key] = "default"
++
++    return config
++
++
++def _check_ami(config):
++    """Provide helpful message for missing ImageId for node configuration."""
++
++    # map from node type key -> source of ImageId field
++    ami_src_info = {key: "config" for key in config["available_node_types"]}
++    _set_config_info(ami_src=ami_src_info)
++
++    region = config["provider"]["region"]
++    default_ami = DEFAULT_AMI.get(region)
++
++    for key, node_type in config["available_node_types"].items():
++        node_config = node_type["node_config"]
++        node_ami = node_config.get("ImageId", "").lower()
++        if node_ami in ["", "latest_dlami"]:
++            if not default_ami:
++                cli_logger.abort(
++                    f"Node type `{key}` has no ImageId in its node_config "
++                    f"and no default AMI is available for the region `{region}`. "
++                    "ImageId will need to be set manually in your cluster config."
++                )
++            else:
++                node_config["ImageId"] = default_ami
++                ami_src_info[key] = "dlami"
++
++
++def _upsert_security_groups(config, node_types):
++    security_groups = _get_or_create_vpc_security_groups(config, node_types)
++    _upsert_security_group_rules(config, security_groups)
++
++    return security_groups
++
++
++def _get_or_create_vpc_security_groups(conf, node_types):
++    # Figure out which VPC each node_type is in...
++    ec2 = _resource("ec2", conf)
++    node_type_to_vpc = {
++        node_type: _get_vpc_id_or_die(
++            ec2,
++            conf["available_node_types"][node_type]["node_config"]["SubnetIds"][0],
++        )
++        for node_type in node_types
++    }
++
++    # Generate the name of the security group we're looking for...
++    expected_sg_name = (
++        conf["provider"]
++        .get("security_group", {})
++        .get("GroupName", SECURITY_GROUP_TEMPLATE.format(conf["cluster_name"]))
++    )
++
++    # Figure out which security groups with this name exist for each VPC...
++    vpc_to_existing_sg = {
++        sg.vpc_id: sg
++        for sg in _get_security_groups(
++            conf,
++            node_type_to_vpc.values(),
++            [expected_sg_name],
++        )
++    }
++
++    # Lazily create any security group we're missing for each VPC...
++    vpc_to_sg = LazyDefaultDict(
++        partial(_create_security_group, conf, group_name=expected_sg_name),
++        vpc_to_existing_sg,
++    )
++
++    # Then return a mapping from each node_type to its security group...
++    return {
++        node_type: vpc_to_sg[vpc_id] for node_type, vpc_id in node_type_to_vpc.items()
++    }
++
++
++def _get_vpc_id_or_die(ec2, subnet_id: str):
++    subnets = _get_subnets_or_die(ec2, (subnet_id,))
++    cli_logger.doassert(
++        len(subnets) == 1,
++        f"Expected 1 subnet with ID `{subnet_id}` but found {len(subnets)}",
++    )
++    return subnets[0].vpc_id
++
++
++@lru_cache()
++def _get_subnets_or_die(ec2, subnet_ids: Tuple[str]):
++    subnets = list(
++        ec2.subnets.filter(Filters=[{"Name": "subnet-id", "Values": list(subnet_ids)}])
++    )
++
++    # TODO: better error message
++    cli_logger.doassert(
++        len(subnets) == len(subnet_ids), "Not all subnet IDs found: {}", subnet_ids
++    )
++    assert len(subnets) == len(subnet_ids), "Subnet ID not found: {}".format(subnet_ids)
++    return subnets
++
++
++def _get_security_group(config, vpc_id, group_name):
++    security_group = _get_security_groups(config, [vpc_id], [group_name])
++    return None if not security_group else security_group[0]
++
++
++def _get_security_groups(config, vpc_ids, group_names):
++    unique_vpc_ids = list(set(vpc_ids))
++    unique_group_names = set(group_names)
++
++    ec2 = _resource("ec2", config)
++    existing_groups = list(
++        ec2.security_groups.filter(
++            Filters=[{"Name": "vpc-id", "Values": unique_vpc_ids}]
++        )
++    )
++    filtered_groups = [
++        sg for sg in existing_groups if sg.group_name in unique_group_names
++    ]
++    return filtered_groups
++
++
++def _create_security_group(config, vpc_id, group_name):
++    client = _client("ec2", config)
++    client.create_security_group(
++        Description="Auto-created security group for Ray workers",
++        GroupName=group_name,
++        VpcId=vpc_id,
++    )
++    security_group = _get_security_group(config, vpc_id, group_name)
++    cli_logger.doassert(security_group, "Failed to create security group")  # err msg
++
++    cli_logger.verbose(
++        "Created new security group {}",
++        cf.bold(security_group.group_name),
++        _tags=dict(id=security_group.id),
++    )
++    cli_logger.doassert(security_group, "Failed to create security group")  # err msg
++    assert security_group, "Failed to create security group"
++    return security_group
++
++
++def _upsert_security_group_rules(conf, security_groups):
++    sgids = {sg.id for sg in security_groups.values()}
++
++    # Update sgids to include user-specified security groups.
++    # This is necessary if the user specifies the head node type's security
++    # groups but not the worker's, or vice-versa.
++    for node_type in conf["available_node_types"]:
++        sgids.update(
++            conf["available_node_types"][node_type].get("SecurityGroupIds", [])
++        )
++
++    # sort security group items for deterministic inbound rule config order
++    # (mainly supports more precise stub-based boto3 unit testing)
++    for node_type, sg in sorted(security_groups.items()):
++        sg = security_groups[node_type]
++        if not sg.ip_permissions:
++            _update_inbound_rules(sg, sgids, conf)
++
++
++def _update_inbound_rules(target_security_group, sgids, config):
++    extended_rules = (
++        config["provider"].get("security_group", {}).get("IpPermissions", [])
++    )
++    ip_permissions = _create_default_inbound_rules(sgids, extended_rules)
++    target_security_group.authorize_ingress(IpPermissions=ip_permissions)
++
++
++def _create_default_inbound_rules(sgids, extended_rules=None):
++    if extended_rules is None:
++        extended_rules = []
++    intracluster_rules = _create_default_intracluster_inbound_rules(sgids)
++    ssh_rules = _create_default_ssh_inbound_rules()
++    merged_rules = itertools.chain(
++        intracluster_rules,
++        ssh_rules,
++        extended_rules,
++    )
++    return list(merged_rules)
++
++
++def _create_default_intracluster_inbound_rules(intracluster_sgids):
++    return [
++        {
++            "FromPort": -1,
++            "ToPort": -1,
++            "IpProtocol": "-1",
++            "UserIdGroupPairs": [
++                {"GroupId": security_group_id}
++                for security_group_id in sorted(intracluster_sgids)
++                # sort security group IDs for deterministic IpPermission models
++                # (mainly supports more precise stub-based boto3 unit testing)
++            ],
++        }
++    ]
++
++
++def _create_default_ssh_inbound_rules():
++    return [
++        {
++            "FromPort": 22,
++            "ToPort": 22,
++            "IpProtocol": "tcp",
++            "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
++        }
++    ]
++
++
++def _get_role(role_name, config):
++    iam = _resource("iam", config)
++    role = iam.Role(role_name)
++    try:
++        role.load()
++        return role
++    except botocore.exceptions.ClientError as exc:
++        if exc.response.get("Error", {}).get("Code") == "NoSuchEntity":
++            return None
++        else:
++            handle_boto_error(
++                exc,
++                "Failed to fetch IAM role data for {} from AWS.",
++                cf.bold(role_name),
++            )
++            raise exc
++
++
++def _get_instance_profile(profile_name, config):
++    iam = _resource("iam", config)
++    profile = iam.InstanceProfile(profile_name)
++    try:
++        profile.load()
++        return profile
++    except botocore.exceptions.ClientError as exc:
++        if exc.response.get("Error", {}).get("Code") == "NoSuchEntity":
++            return None
++        else:
++            handle_boto_error(
++                exc,
++                "Failed to fetch IAM instance profile data for {} from AWS.",
++                cf.bold(profile_name),
++            )
++            raise exc
++
++
++def _get_key(key_name, config):
++    ec2 = _resource("ec2", config)
++    try:
++        for key in ec2.key_pairs.filter(
++            Filters=[{"Name": "key-name", "Values": [key_name]}]
++        ):
++            if key.name == key_name:
++                return key
++    except botocore.exceptions.ClientError as exc:
++        handle_boto_error(
++            exc, "Failed to fetch EC2 key pair {} from AWS.", cf.bold(key_name)
++        )
++        raise exc
++
++
++def _configure_from_launch_template(config: Dict[str, Any]) -> Dict[str, Any]:
++    """
++    Merges any launch template data referenced by the node config of all
++    available node type's into their parent node config. Any parameters
++    specified in node config override the same parameters in the launch
++    template, in compliance with the behavior of the ec2.create_instances
++    API.
++
++    Args:
++        config (Dict[str, Any]): config to bootstrap
++    Returns:
++        config (Dict[str, Any]): The input config with all launch template
++        data merged into the node config of all available node types. If no
++        launch template data is found, then the config is returned
++        unchanged.
++    Raises:
++        ValueError: If no launch template is found for any launch
++        template [name|id] and version, or more than one launch template is
++        found.
++    """
++    # create a copy of the input config to modify
++    config = copy.deepcopy(config)
++    node_types = config["available_node_types"]
++
++    # iterate over sorted node types to support deterministic unit test stubs
++    for name, node_type in sorted(node_types.items()):
++        node_types[name] = _configure_node_type_from_launch_template(config, node_type)
++    return config
++
++
++def _configure_node_type_from_launch_template(
++    config: Dict[str, Any], node_type: Dict[str, Any]
++) -> Dict[str, Any]:
++    """
++    Merges any launch template data referenced by the given node type's
++    node config into the parent node config. Any parameters specified in
++    node config override the same parameters in the launch template.
++
++    Args:
++        config (Dict[str, Any]): config to bootstrap
++        node_type (Dict[str, Any]): node type config to bootstrap
++    Returns:
++        node_type (Dict[str, Any]): The input config with all launch template
++        data merged into the node config of the input node type. If no
++        launch template data is found, then the config is returned
++        unchanged.
++    Raises:
++        ValueError: If no launch template is found for the given launch
++        template [name|id] and version, or more than one launch template is
++        found.
++    """
++    # create a copy of the input config to modify
++    node_type = copy.deepcopy(node_type)
++
++    node_cfg = node_type["node_config"]
++    if "LaunchTemplate" in node_cfg:
++        node_type["node_config"] = _configure_node_cfg_from_launch_template(
++            config, node_cfg
++        )
++    return node_type
++
++
++def _configure_node_cfg_from_launch_template(
++    config: Dict[str, Any], node_cfg: Dict[str, Any]
++) -> Dict[str, Any]:
++    """
++    Merges any launch template data referenced by the given node type's
++    node config into the parent node config. Any parameters specified in
++    node config override the same parameters in the launch template.
++
++    Note that this merge is simply a bidirectional dictionary update, from
++    the node config to the launch template data, and from the launch
++    template data to the node config. Thus, the final result captures the
++    relative complement of launch template data with respect to node config,
++    and allows all subsequent config bootstrapping code paths to act as
++    if the complement was explicitly specified in the user's node config. A
++    deep merge of nested elements like tag specifications isn't required
++    here, since the AWSNodeProvider's ec2.create_instances call will do this
++    for us after it fetches the referenced launch template data.
++
++    Args:
++        config (Dict[str, Any]): config to bootstrap
++        node_cfg (Dict[str, Any]): node config to bootstrap
++    Returns:
++        node_cfg (Dict[str, Any]): The input node config merged with all launch
++        template data. If no launch template data is found, then the node
++        config is returned unchanged.
++    Raises:
++        ValueError: If no launch template is found for the given launch
++        template [name|id] and version, or more than one launch template is
++        found.
++    """
++    # create a copy of the input config to modify
++    node_cfg = copy.deepcopy(node_cfg)
++
++    ec2 = _client("ec2", config)
++    kwargs = copy.deepcopy(node_cfg["LaunchTemplate"])
++    template_version = str(kwargs.pop("Version", "$Default"))
++    # save the launch template version as a string to prevent errors from
++    # passing an integer to ec2.create_instances in AWSNodeProvider
++    node_cfg["LaunchTemplate"]["Version"] = template_version
++    kwargs["Versions"] = [template_version] if template_version else []
++
++    template = ec2.describe_launch_template_versions(**kwargs)
++    lt_versions = template["LaunchTemplateVersions"]
++    if len(lt_versions) != 1:
++        raise ValueError(
++            f"Expected to find 1 launch template but found " f"{len(lt_versions)}"
++        )
++
++    lt_data = template["LaunchTemplateVersions"][0]["LaunchTemplateData"]
++    # override launch template parameters with explicit node config parameters
++    lt_data.update(node_cfg)
++    # copy all new launch template parameters back to node config
++    node_cfg.update(lt_data)
++
++    return node_cfg
++
++
++def _configure_from_network_interfaces(config: Dict[str, Any]) -> Dict[str, Any]:
++    """
++    Copies all network interface subnet and security group IDs up to their
++    parent node config for each available node type.
++
++    Args:
++        config (Dict[str, Any]): config to bootstrap
++    Returns:
++        config (Dict[str, Any]): The input config with all network interface
++        subnet and security group IDs copied into the node config of all
++        available node types. If no network interfaces are found, then the
++        config is returned unchanged.
++    Raises:
++        ValueError: If [1] subnet and security group IDs exist at both the
++        node config and network interface levels, [2] any network interface
++        doesn't have a subnet defined, or [3] any network interface doesn't
++        have a security group defined.
++    """
++    # create a copy of the input config to modify
++    config = copy.deepcopy(config)
++
++    node_types = config["available_node_types"]
++    for name, node_type in node_types.items():
++        node_types[name] = _configure_node_type_from_network_interface(node_type)
++    return config
++
++
++def _configure_node_type_from_network_interface(
++    node_type: Dict[str, Any]
++) -> Dict[str, Any]:
++    """
++    Copies all network interface subnet and security group IDs up to the
++    parent node config for the given node type.
++
++    Args:
++        node_type (Dict[str, Any]): node type config to bootstrap
++    Returns:
++        node_type (Dict[str, Any]): The input config with all network interface
++        subnet and security group IDs copied into the node config of the
++        given node type. If no network interfaces are found, then the
++        config is returned unchanged.
++    Raises:
++        ValueError: If [1] subnet and security group IDs exist at both the
++        node config and network interface levels, [2] any network interface
++        doesn't have a subnet defined, or [3] any network interface doesn't
++        have a security group defined.
++    """
++    # create a copy of the input config to modify
++    node_type = copy.deepcopy(node_type)
++
++    node_cfg = node_type["node_config"]
++    if "NetworkInterfaces" in node_cfg:
++        node_type[
++            "node_config"
++        ] = _configure_subnets_and_groups_from_network_interfaces(node_cfg)
++    return node_type
++
++
++def _configure_subnets_and_groups_from_network_interfaces(
++    node_cfg: Dict[str, Any]
++) -> Dict[str, Any]:
++    """
++    Copies all network interface subnet and security group IDs into their
++    parent node config.
++
++    Args:
++        node_cfg (Dict[str, Any]): node config to bootstrap
++    Returns:
++        node_cfg (Dict[str, Any]): node config with all copied network
++        interface subnet and security group IDs
++    Raises:
++        ValueError: If [1] subnet and security group IDs exist at both the
++        node config and network interface levels, [2] any network interface
++        doesn't have a subnet defined, or [3] any network interface doesn't
++        have a security group defined.
++    """
++    # create a copy of the input config to modify
++    node_cfg = copy.deepcopy(node_cfg)
++
++    # If NetworkInterfaces are defined, SubnetId and SecurityGroupIds
++    # can't be specified in the same node type config.
++    conflict_keys = ["SubnetId", "SubnetIds", "SecurityGroupIds"]
++    if any(conflict in node_cfg for conflict in conflict_keys):
++        raise ValueError(
++            "If NetworkInterfaces are defined, subnets and security groups "
++            "must ONLY be given in each NetworkInterface."
++        )
++    subnets = _subnets_in_network_config(node_cfg)
++    if not all(subnets):
++        raise ValueError(
++            "NetworkInterfaces are defined but at least one is missing a "
++            "subnet. Please ensure all interfaces have a subnet assigned."
++        )
++    security_groups = _security_groups_in_network_config(node_cfg)
++    if not all(security_groups):
++        raise ValueError(
++            "NetworkInterfaces are defined but at least one is missing a "
++            "security group. Please ensure all interfaces have a security "
++            "group assigned."
++        )
++    node_cfg["SubnetIds"] = subnets
++    node_cfg["SecurityGroupIds"] = list(itertools.chain(*security_groups))
++
++    return node_cfg
++
++
++def _subnets_in_network_config(config: Dict[str, Any]) -> List[str]:
++    """
++    Returns all subnet IDs found in the given node config's network interfaces.
++
++    Args:
++        config (Dict[str, Any]): node config
++    Returns:
++        subnet_ids (List[str]): List of subnet IDs for all network interfaces,
++        or an empty list if no network interfaces are defined. An empty string
++        is returned for each missing network interface subnet ID.
++    """
++    return [ni.get("SubnetId", "") for ni in config.get("NetworkInterfaces", [])]
++
++
++def _security_groups_in_network_config(config: Dict[str, Any]) -> List[List[str]]:
++    """
++    Returns all security group IDs found in the given node config's network
++    interfaces.
++
++    Args:
++        config (Dict[str, Any]): node config
++    Returns:
++        security_group_ids (List[List[str]]): List of security group ID lists
++        for all network interfaces, or an empty list if no network interfaces
++        are defined. An empty list is returned for each missing network
++        interface security group list.
++    """
++    return [ni.get("Groups", []) for ni in config.get("NetworkInterfaces", [])]
++
++
++def _client(name, config):
++    return _resource(name, config).meta.client
++
++
++def _resource(name, config):
++    region = config["provider"]["region"]
++    aws_credentials = config["provider"].get("aws_credentials", {})
++    return resource_cache(name, region, **aws_credentials)
+diff --git a/sky/skylet/providers/aws/node_provider.py b/sky/skylet/providers/aws/node_provider.py
+index 7203ab70f84..0edd5e95379 100644
+--- a/sky/skylet/providers/aws/node_provider.py
++++ b/sky/skylet/providers/aws/node_provider.py
+@@ -18,7 +18,6 @@
+     CLOUDWATCH_AGENT_INSTALLED_AMI_TAG,
+     CLOUDWATCH_AGENT_INSTALLED_TAG,
+ )
+-from sky.skylet.providers.aws.config import bootstrap_aws
+ from sky.skylet.providers.aws.utils import (
+     boto_exception_handler,
+     resource_cache,
+@@ -593,6 +592,7 @@ def _get_cached_node(self, node_id):
+ 
+     @staticmethod
+     def bootstrap_config(cluster_config):
++        from sky.skylet.providers.aws.config import bootstrap_aws
+         return bootstrap_aws(cluster_config)
+ 
+     @staticmethod
+@@ -662,3 +662,16 @@ def fillout_available_node_types_resources(
+                     + "."
+                 )
+         return cluster_config
++
++
++class AWSNodeProviderV2(AWSNodeProvider):
++    # The new version of the AWS node provider uses a new IAM role
++    # with different permissions for the head node and worker nodes,
++    # so as to support AWS SSO login system (see #1489).
++    # We did not overwrite the original AWSNodeProvider class to avoid
++    # breaking existing clusters. Otherwise, the existing clusters will
++    # have a new launch_hash and will be restarted.
++    @staticmethod
++    def bootstrap_config(cluster_config):
++        from sky.skylet.providers.aws.config_v2 import bootstrap_aws
++        return bootstrap_aws(cluster_config)
+diff --git a/sky/templates/aws-ray.yml.j2 b/sky/templates/aws-ray.yml.j2
+index 4646ff12241..7181b12e7f0 100644
+--- a/sky/templates/aws-ray.yml.j2
++++ b/sky/templates/aws-ray.yml.j2
+@@ -7,7 +7,7 @@ idle_timeout_minutes: 60
+ 
+ provider:
+   type: external
+-  module: sky.skylet.providers.aws.AWSNodeProvider
++  module: sky.skylet.providers.aws.AWSNodeProviderV2
+   region: {{region}}
+   availability_zone: {{zones}}
+   # Keep (otherwise cannot reuse when re-provisioning).
+diff --git a/tests/backward_comaptibility_tests.sh b/tests/backward_comaptibility_tests.sh
+index 769a89b7055..9050ce718e9 100755
+--- a/tests/backward_comaptibility_tests.sh
++++ b/tests/backward_comaptibility_tests.sh
+@@ -1,3 +1,7 @@
++# This script is used to test backward compatibility of skypilot.
++# To run this script, you need to remove the skypilot and ray in the base
++# conda environment, and run it in the base conda environment.
++
+ #!/bin/bash
+ set -ev
+ 
+@@ -19,6 +23,7 @@ conda install -c conda-forge google-cloud-sdk -y
+ rm -r  ~/.sky/wheels || true
+ cd ../sky-master
+ git pull origin master
++pip uninstall -y skypilot
+ pip install -e ".[all]"
+ cd -
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+index c418a89d7fd..668ec07451f 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -14,20 +14,43 @@ def pytest_addoption(parser):
+                      action='store_true',
+                      default=False,
+                      help='run slow tests')
++    parser.addoption('--sso',
++                     action='store_true',
++                     default=False,
++                     help='run tests that require SSO')
++
++
++@pytest.fixture
++def sso(request):
++    return request.config.getoption('--sso')
++
++
++@pytest.fixture
++def instance_type_restriction(request) -> str:
++    if request.config.getoption('--sso'):
++        return '--instance-type t3.micro'
++    return ''
+ 
+ 
+ def pytest_configure(config):
+     config.addinivalue_line('markers', 'slow: mark test as slow to run')
++    config.addinivalue_line('markers',
++                            'nosso: mark test as not running under SSO')
+ 
+ 
+ def pytest_collection_modifyitems(config, items):
+-    if config.getoption('--runslow'):
+-        # --runslow given in cli: do not skip slow tests
+-        return
+-    skip_slow = pytest.mark.skip(reason='need --runslow option to run')
+-    for item in items:
+-        if 'slow' in item.keywords:
+-            item.add_marker(skip_slow)
++    if not config.getoption('--runslow'):
++        # --runslow not given in cli: skip slow tests
++        skip_slow = pytest.mark.skip(reason='need --runslow option to run')
++        for item in items:
++            if 'slow' in item.keywords:
++                item.add_marker(skip_slow)
++    if config.getoption('--sso'):
++        # --sso given in cli: skip costly tests
++        skip_costly = pytest.mark.skip(reason='skip costly tests under SSO')
++        for item in items:
++            if 'costly' in item.keywords:
++                item.add_marker(skip_costly)
+ 
+ 
+ def pytest_sessionstart(session):
+diff --git a/tests/run_smoke_tests.sh b/tests/run_smoke_tests.sh
+index 1738d7e97d0..ad51b360515 100755
+--- a/tests/run_smoke_tests.sh
++++ b/tests/run_smoke_tests.sh
+@@ -12,11 +12,12 @@ test=${1:-""}
+ if [ -z "$test" ]
+ then
+     test_spec=tests/test_smoke.py
++elif [[ "$test" == "--*" ]]
++then
++    [[ "$test" == "--runslow" ]] || [[ "$test" == "--sso" ]] || echo "Unknown option: $test"
++    test_spec="$test tests/test_smoke.py"
+ else
+     test_spec=tests/test_smoke.py::"${test}"
+ fi
+ 
+ pytest -s -n 16 -q --tb=short --disable-warnings "$test_spec"
+-
+-# To run all tests including the slow ones, add the --runslow flag:
+-# pytest --runslow -s -n 16 -q --tb=short --disable-warnings tests/test_smoke.py
+diff --git a/tests/test_smoke.py b/tests/test_smoke.py
+index c3b536f5a35..0302221e2ed 100644
+--- a/tests/test_smoke.py
++++ b/tests/test_smoke.py
+@@ -127,15 +127,15 @@ def test_example_app():
+ 
+ 
+ # ---------- A minimal task ----------
+-def test_minimal():
++def test_minimal(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'minimal',
+         [
+-            f'sky launch -y -c {name} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+-            f'sky launch -c {name} --image-id skypilot:gpu-ubuntu-2004 examples/minimal.yaml && exit 1 || true',
+-            f'sky launch -y -c {name} examples/minimal.yaml',
++            f'sky launch -c {name} {instance_type_restriction} --image-id skypilot:gpu-ubuntu-2004 examples/minimal.yaml && exit 1 || true',
++            f'sky launch -y {instance_type_restriction} -c {name} examples/minimal.yaml',
+             f'sky logs {name} 2 --status',
+             f'sky logs {name} --status | grep "Job 2: SUCCEEDED"',  # Equivalent.
+             # Ensure the raylet process has the correct file descriptor limit.
+@@ -148,12 +148,12 @@ def test_minimal():
+ 
+ 
+ # ---------- Test region ----------
+-def test_region():
++def test_region(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'region',
+         [
+-            f'sky launch -y -c {name} --region us-west-2 examples/minimal.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --region us-west-2 examples/minimal.yaml',
+             f'sky exec {name} examples/minimal.yaml',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+             f'sky status --all | grep {name} | grep us-west-2',  # Ensure the region is correct.
+@@ -164,12 +164,12 @@ def test_region():
+ 
+ 
+ # ---------- Test zone ----------
+-def test_zone():
++def test_zone(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'zone',
+         [
+-            f'sky launch -y -c {name} examples/minimal.yaml --zone us-west-2b',
++            f'sky launch -y -c {name} {instance_type_restriction} examples/minimal.yaml --zone us-west-2b',
+             f'sky exec {name} examples/minimal.yaml --zone us-west-2b',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+             f'sky status --all | grep {name} | grep us-west-2b',  # Ensure the zone is correct.
+@@ -179,13 +179,13 @@ def test_zone():
+     run_one_test(test)
+ 
+ 
+-def test_image_id_dict():
++def test_image_id_dict(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'image_id_dict',
+         [
+             # Use image id dict.
+-            f'sky launch -y -c {name} examples/per_region_images.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} examples/per_region_images.yaml',
+             f'sky exec {name} examples/per_region_images.yaml',
+             f'sky exec {name} "ls ~"',
+             f'sky logs {name} 1 --status',
+@@ -197,17 +197,17 @@ def test_image_id_dict():
+     run_one_test(test)
+ 
+ 
+-def test_image_id_dict_with_region():
++def test_image_id_dict_with_region(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'image_id_dict_with_region',
+         [
+             # Use region to filter image_id dict.
+-            f'sky launch -y -c {name} --region us-west-2 examples/per_region_images.yaml && exit 1 || true',
++            f'sky launch -y -c {name} {instance_type_restriction} --region us-west-2 examples/per_region_images.yaml && exit 1 || true',
+             f'sky status | grep {name} && exit 1 || true',  # Ensure the cluster is not created.
+-            f'sky launch -y -c {name} --region us-west-1 examples/per_region_images.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --region us-west-1 examples/per_region_images.yaml',
+             # Should success because the image id match for the region.
+-            f'sky launch -c {name} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
++            f'sky launch -c {name} {instance_type_restriction} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
+             f'sky exec {name} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
+             f'sky exec {name} --image-id skypilot:gpu-ubuntu-2004 examples/minimal.yaml && exit 1 || true',
+             f'sky logs {name} 1 --status',
+@@ -229,17 +229,17 @@ def test_image_id_dict_with_region():
+     run_one_test(test)
+ 
+ 
+-def test_image_id_dict_with_zone():
++def test_image_id_dict_with_zone(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'image_id_dict_with_region',
+         [
+             # Use zone to filter image_id dict.
+-            f'sky launch -y -c {name} --zone us-west-2b examples/per_region_images.yaml && exit 1 || true',
++            f'sky launch -y -c {name} --zone us-west-2b {instance_type_restriction} examples/per_region_images.yaml && exit 1 || true',
+             f'sky status | grep {name} && exit 1 || true',  # Ensure the cluster is not created.
+-            f'sky launch -y -c {name} --zone us-west-1a examples/per_region_images.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --zone us-west-1a examples/per_region_images.yaml',
+             # Should success because the image id match for the zone.
+-            f'sky launch -y -c {name} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
+             f'sky exec {name} --image-id skypilot:gpu-ubuntu-1804 examples/minimal.yaml',
+             # Fail due to image id mismatch.
+             f'sky exec {name} --image-id skypilot:gpu-ubuntu-2004 examples/minimal.yaml && exit 1 || true',
+@@ -280,13 +280,13 @@ def test_stale_job():
+     run_one_test(test)
+ 
+ 
+-def test_stale_job_manual_restart():
++def test_stale_job_manual_restart(instance_type_restriction: str):
+     name = _get_cluster_name()
+     region = 'us-west-2'
+     test = Test(
+         'stale-job',
+         [
+-            f'sky launch -y -c {name} --cloud aws --region {region} "echo hi"',
++            f'sky launch -y -c {name} {instance_type_restriction} --cloud aws --region {region} "echo hi"',
+             f'sky exec {name} -d "echo start; sleep 10000"',
+             # Stop the cluster manually.
+             f'id=`aws ec2 describe-instances --region {region} --filters '
+@@ -296,7 +296,7 @@ def test_stale_job_manual_restart():
+             f'aws ec2 stop-instances --region {region} '
+             '--instance-ids $id',
+             'sleep 40',
+-            f'sky launch -c {name} -y "echo hi"',
++            f'sky launch -c {name} {instance_type_restriction} -y "echo hi"',
+             f'sky logs {name} 1 --status',
+             f'sky logs {name} 3 --status',
+             # Ensure the skylet updated the stale job status.
+@@ -309,12 +309,12 @@ def test_stale_job_manual_restart():
+ 
+ 
+ # ---------- Check Sky's environment variables; workdir. ----------
+-def test_env_check():
++def test_env_check(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'env_check',
+         [
+-            f'sky launch -y -c {name} --detach-setup examples/env_check.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} --detach-setup examples/env_check.yaml',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+         ],
+         f'sky down -y {name}',
+@@ -323,7 +323,7 @@ def test_env_check():
+ 
+ 
+ # ---------- file_mounts ----------
+-def test_file_mounts():
++def test_file_mounts(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'using_file_mounts',
+@@ -333,7 +333,7 @@ def test_file_mounts():
+             'touch ~/tmp-workdir/tmp\ file',
+             'touch ~/tmp-workdir/foo',
+             'ln -f -s ~/tmp-workdir/ ~/tmp-workdir/circle-link',
+-            f'sky launch -y -c {name} examples/using_file_mounts.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} examples/using_file_mounts.yaml',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+         ],
+         f'sky down -y {name}',
+@@ -343,13 +343,13 @@ def test_file_mounts():
+ 
+ 
+ # ---------- CLI logs ----------
+-def test_logs():
++def test_logs(instance_type_restriction: str):
+     name = _get_cluster_name()
+     timestamp = time.time()
+     test = Test(
+         'cli_logs',
+         [
+-            f'sky launch -y -c {name} --num-nodes 2 "echo {timestamp} 1"',
++            f'sky launch -y -c {name} {instance_type_restriction} --num-nodes 2 "echo {timestamp} 1"',
+             f'sky exec {name} "echo {timestamp} 2"',
+             f'sky exec {name} "echo {timestamp} 3"',
+             f'sky exec {name} "echo {timestamp} 4"',
+@@ -365,6 +365,7 @@ def test_logs():
+ 
+ 
+ # ---------- Job Queue. ----------
++@pytest.mark.costly
+ def test_job_queue():
+     name = _get_cluster_name()
+     test = Test(
+@@ -391,6 +392,7 @@ def test_job_queue():
+     run_one_test(test)
+ 
+ 
++@pytest.mark.costly
+ def test_n_node_job_queue():
+     name = _get_cluster_name()
+     test = Test(
+@@ -427,6 +429,7 @@ def test_n_node_job_queue():
+     run_one_test(test)
+ 
+ 
++@pytest.mark.costly
+ def test_large_job_queue():
+     name = _get_cluster_name()
+     test = Test(
+@@ -446,6 +449,7 @@ def test_large_job_queue():
+ 
+ 
+ # ---------- Submitting multiple tasks to the same cluster. ----------
++@pytest.mark.costly
+ def test_multi_echo():
+     name = _get_cluster_name()
+     test = Test(
+@@ -466,6 +470,7 @@ def test_multi_echo():
+ 
+ 
+ # ---------- Task: 1 node training. ----------
++@pytest.mark.costly
+ def test_huggingface():
+     name = _get_cluster_name()
+     test = Test(
+@@ -482,6 +487,7 @@ def test_huggingface():
+ 
+ 
+ # ---------- TPU. ----------
++@pytest.mark.costly
+ def test_tpu():
+     name = _get_cluster_name()
+     test = Test(
+@@ -499,6 +505,7 @@ def test_tpu():
+ 
+ 
+ # ---------- TPU VM. ----------
++@pytest.mark.costly
+ def test_tpu_vm():
+     name = _get_cluster_name()
+     test = Test(
+@@ -523,6 +530,7 @@ def test_tpu_vm():
+ 
+ 
+ # ---------- TPU VM Pod. ----------
++@pytest.mark.costly
+ def test_tpu_vm_pod():
+     name = _get_cluster_name()
+     test = Test(
+@@ -539,12 +547,12 @@ def test_tpu_vm_pod():
+ 
+ 
+ # ---------- Simple apps. ----------
+-def test_multi_hostname():
++def test_multi_hostname(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'multi_hostname',
+         [
+-            f'sky launch -y -c {name} examples/multi_hostname.yaml',
++            f'sky launch -y -c {name} {instance_type_restriction} examples/multi_hostname.yaml',
+             f'sky logs {name} 1 --status',  # Ensure the job succeeded.
+             f'sky exec {name} examples/multi_hostname.yaml',
+             f'sky logs {name} 2 --status',  # Ensure the job succeeded.
+@@ -555,6 +563,7 @@ def test_multi_hostname():
+ 
+ 
+ # ---------- Task: n=2 nodes with setups. ----------
++@pytest.mark.costly
+ def test_distributed_tf():
+     name = _get_cluster_name()
+     test = Test(
+@@ -571,6 +580,7 @@ def test_distributed_tf():
+ 
+ 
+ # ---------- Testing GCP start and stop instances ----------
++@pytest.mark.costly
+ def test_gcp_start_stop():
+     name = _get_cluster_name()
+     test = Test(
+@@ -594,6 +604,7 @@ def test_gcp_start_stop():
+ 
+ 
+ # ---------- Testing Azure start and stop instances ----------
++@pytest.mark.costly
+ def test_azure_start_stop():
+     name = _get_cluster_name()
+     test = Test(
+@@ -616,12 +627,12 @@ def test_azure_start_stop():
+ 
+ 
+ # ---------- Testing Autostopping ----------
+-def test_autostop():
++def test_autostop(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'autostop',
+         [
+-            f'sky launch -y -d -c {name} --num-nodes 2 examples/minimal.yaml',
++            f'sky launch -y -d -c {name} {instance_type_restriction} --num-nodes 2 examples/minimal.yaml',
+             f'sky autostop -y {name} -i 1',
+ 
+             # Ensure autostop is set.
+@@ -671,12 +682,12 @@ def test_autostop():
+ 
+ 
+ # ---------- Testing Autodowning ----------
+-def test_autodown():
++def test_autodown(instance_type_restriction: str):
+     name = _get_cluster_name()
+     test = Test(
+         'autodown',
+         [
+-            f'sky launch -y -d -c {name} --num-nodes 2 --cloud aws examples/minimal.yaml',
++            f'sky launch -y -d -c {name} {instance_type_restriction} --num-nodes 2 --cloud aws examples/minimal.yaml',
+             f'sky autostop -y {name} --down -i 1',
+             # Ensure autostop is set.
+             f'sky status | grep {name} | grep "1m (down)"',
+@@ -686,14 +697,14 @@ def test_autodown():
+             # Ensure the cluster is terminated.
+             'sleep 200',
+             f's=$(SKYPILOT_DEBUG=0 sky status --refresh) && printf "$s" && {{ echo "$s" | grep {name} | grep "Autodowned cluster\|terminated on the cloud"; }} || {{ echo "$s" | grep {name} && exit 1 || exit 0; }}',
+-            f'sky launch -y -d -c {name} --cloud aws --num-nodes 2 --down examples/minimal.yaml',
++            f'sky launch -y -d -c {name} {instance_type_restriction} --cloud aws --num-nodes 2 --down examples/minimal.yaml',
+             f'sky status | grep {name} | grep UP',  # Ensure the cluster is UP.
+             f'sky exec {name} --cloud aws examples/minimal.yaml',
+             f'sky status | grep {name} | grep "1m (down)"',
+             'sleep 240',
+             # Ensure the cluster is terminated.
+             f's=$(SKYPILOT_DEBUG=0 sky status --refresh) && printf "$s" && {{ echo "$s" | grep {name} | grep "Autodowned cluster\|terminated on the cloud"; }} || {{ echo "$s" | grep {name} && exit 1 || exit 0; }}',
+-            f'sky launch -y -d -c {name} --cloud aws --num-nodes 2 --down examples/minimal.yaml',
++            f'sky launch -y -d -c {name} {instance_type_restriction} --cloud aws --num-nodes 2 --down examples/minimal.yaml',
+             f'sky autostop -y {name} --cancel',
+             'sleep 240',
+             # Ensure the cluster is still UP.
+@@ -727,6 +738,7 @@ def _get_cancel_task_with_cloud(name, cloud, timeout=15 * 60):
+ 
+ 
+ # ---------- Testing `sky cancel` on AWS ----------
++@pytest.mark.costly
+ def test_cancel_aws():
+     name = _get_cluster_name()
+     test = _get_cancel_task_with_cloud(name, 'aws')
+@@ -734,6 +746,7 @@ def test_cancel_aws():
+ 
+ 
+ # ---------- Testing `sky cancel` on Azure ----------
++@pytest.mark.costly
+ def test_cancel_azure():
+     name = _get_cluster_name()
+     test = _get_cancel_task_with_cloud(name, 'azure', timeout=30 * 60)
+@@ -741,6 +754,7 @@ def test_cancel_azure():
+ 
+ 
+ # ---------- Testing `sky cancel` on GCP ----------
++@pytest.mark.costly
+ def test_cancel_gcp():
+     name = _get_cluster_name()
+     test = _get_cancel_task_with_cloud(name, 'gcp')
+@@ -748,6 +762,7 @@ def test_cancel_gcp():
+ 
+ 
+ # ---------- Testing `sky cancel` ----------
++@pytest.mark.costly
+ def test_cancel_pytorch():
+     name = _get_cluster_name()
+     test = Test(
+@@ -771,13 +786,13 @@ def test_cancel_pytorch():
+ 
+ 
+ # ---------- Testing use-spot option ----------
+-def test_use_spot():
++def test_use_spot(instance_type_restriction: str):
+     """Test use-spot and sky exec."""
+     name = _get_cluster_name()
+     test = Test(
+         'use-spot',
+         [
+-            f'sky launch -c {name} examples/minimal.yaml --use-spot -y',
++            f'sky launch -c {name} {instance_type_restriction} examples/minimal.yaml --use-spot -y',
+             f'sky logs {name} 1 --status',
+             f'sky exec {name} echo hi',
+             f'sky logs {name} 2 --status',
+@@ -788,7 +803,7 @@ def test_use_spot():
+ 
+ 
+ # ---------- Testing managed spot ----------
+-def test_spot():
++def test_spot(instance_type_restriction: str):
+     """Test the spot yaml."""
+     name = _get_cluster_name()
+     cancel_command = (
+@@ -796,8 +811,8 @@ def test_spot():
+     test = Test(
+         'managed-spot',
+         [
+-            f'sky spot launch -n {name}-1 examples/managed_spot.yaml -y -d',
+-            f'sky spot launch -n {name}-2 examples/managed_spot.yaml -y -d',
++            f'sky spot launch -n {name}-1 {instance_type_restriction} examples/managed_spot.yaml -y -d',
++            f'sky spot launch -n {name}-2 {instance_type_restriction} examples/managed_spot.yaml -y -d',
+             'sleep 5',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name}-1 | head -n1 | grep "STARTING\|RUNNING"',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name}-2 | head -n1 | grep "STARTING\|RUNNING"',
+@@ -806,13 +821,13 @@ def test_spot():
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name}-1 | head -n1 | grep CANCELLED',
+             'sleep 200',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name}-2 | head -n1 | grep "RUNNING\|SUCCEEDED"',
+-            # Test autostop. This assumes no regular spot jobs are running.
+-            cancel_command,
+-            'sleep 720',  # Sleep for a bit more than the default 10m.
+-            'sky status --refresh | grep sky-spot-controller- | grep STOPPED',
+-            'sky start "sky-spot-controller-*" -y',
+-            # Ensures it's up and the autostop setting is restored.
+-            'sky status | grep sky-spot-controller- | grep UP | grep 10m',
++            # # Test autostop. This assumes no regular spot jobs are running.
++            # cancel_command,
++            # 'sleep 720',  # Sleep for a bit more than the default 10m.
++            # 'sky status --refresh | grep sky-spot-controller- | grep STOPPED',
++            # 'sky start "sky-spot-controller-*" -y',
++            # # Ensures it's up and the autostop setting is restored.
++            # 'sky status | grep sky-spot-controller- | grep UP | grep 10m',
+         ],
+         cancel_command,
+     )
+@@ -840,14 +855,14 @@ def test_spot_gcp():
+ 
+ 
+ # ---------- Testing managed spot recovery ----------
+-def test_spot_recovery():
++def test_spot_recovery(instance_type_restriction: str):
+     """Test managed spot recovery."""
+     name = _get_cluster_name()
+     region = 'us-west-2'
+     test = Test(
+         'managed-spot-recovery',
+         [
+-            f'sky spot launch --cloud aws --region {region} -n {name} "echo SKYPILOT_JOB_ID: \$SKYPILOT_JOB_ID; sleep 1800"  -y -d',
++            f'sky spot launch --cloud aws --region {region} {instance_type_restriction} -n {name} "echo SKYPILOT_JOB_ID: \$SKYPILOT_JOB_ID; sleep 1800"  -y -d',
+             'sleep 360',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name} | head -n1 | grep "RUNNING"',
+             f'RUN_ID=$(sky spot logs -n {name} --no-follow | grep SKYPILOT_JOB_ID | cut -d: -f2); echo "$RUN_ID" | tee /tmp/{name}-run-id',
+@@ -869,14 +884,14 @@ def test_spot_recovery():
+     run_one_test(test)
+ 
+ 
+-def test_spot_recovery_multi_node():
++def test_spot_recovery_multi_node(instance_type_restriction: str):
+     """Test managed spot recovery."""
+     name = _get_cluster_name()
+     region = 'us-west-2'
+     test = Test(
+         'managed-spot-recovery-multi',
+         [
+-            f'sky spot launch --cloud aws --region {region} -n {name} --num-nodes 2 "echo SKYPILOT_JOB_ID: \$SKYPILOT_JOB_ID; sleep 1800"  -y -d',
++            f'sky spot launch --cloud aws --region {region} {instance_type_restriction} -n {name} --num-nodes 2 "echo SKYPILOT_JOB_ID: \$SKYPILOT_JOB_ID; sleep 1800"  -y -d',
+             'sleep 400',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name} | head -n1 | grep "RUNNING"',
+             f'RUN_ID=$(sky spot logs -n {name} --no-follow | grep SKYPILOT_JOB_ID | cut -d: -f2); echo "$RUN_ID" | tee /tmp/{name}-run-id',
+@@ -899,14 +914,14 @@ def test_spot_recovery_multi_node():
+     run_one_test(test)
+ 
+ 
+-def test_spot_cancellation():
++def test_spot_cancellation(instance_type_restriction: str):
+     name = _get_cluster_name()
+     region = 'us-east-2'
+     test = Test(
+         'managed-spot-cancellation',
+         [
+             # Test cancellation during spot cluster being launched.
+-            f'sky spot launch --cloud aws --region {region} -n {name} "sleep 1000"  -y -d',
++            f'sky spot launch --cloud aws --region {region} {instance_type_restriction} -n {name} "sleep 1000"  -y -d',
+             'sleep 60',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name} | head -n1 | grep "STARTING"',
+             f'sky spot cancel -y -n {name}',
+@@ -919,7 +934,7 @@ def test_spot_cancellation():
+              '--output text) && printf "$s" && echo; [[ -z "$s" ]] || [[ "$s" = "terminated" ]] || [[ "$s" = "shutting-down" ]]'
+             ),
+             # Test cancelling the spot cluster during spot job being setup.
+-            f'sky spot launch --cloud aws --region {region} -n {name}-2 tests/test_yamls/long_setup.yaml  -y -d',
++            f'sky spot launch --cloud aws --region {region} {instance_type_restriction} -n {name}-2 tests/test_yamls/long_setup.yaml  -y -d',
+             'sleep 300',
+             f'sky spot cancel -y -n {name}-2',
+             'sleep 5',
+@@ -931,7 +946,7 @@ def test_spot_cancellation():
+              '--output text) && printf "$s" && echo; [[ -z "$s" ]] || [[ "$s" = "terminated" ]] || [[ "$s" = "shutting-down" ]]'
+             ),
+             # Test cancellation during spot job is recovering.
+-            f'sky spot launch --cloud aws --region {region} -n {name}-3 "sleep 1000"  -y -d',
++            f'sky spot launch --cloud aws --region {region} {instance_type_restriction} -n {name}-3 "sleep 1000"  -y -d',
+             'sleep 300',
+             f's=$(sky spot queue); printf "$s"; echo; echo; printf "$s" | grep {name}-3 | head -n1 | grep "RUNNING"',
+             # Terminate the cluster manually.
+@@ -958,7 +973,7 @@ def test_spot_cancellation():
+ 
+ 
+ # ---------- Testing storage for managed spot ----------
+-def test_spot_storage():
++def test_spot_storage(instance_type_restriction: str):
+     """Test storage with managed spot"""
+     name = _get_cluster_name()
+     yaml_str = pathlib.Path(
+@@ -972,7 +987,7 @@ def test_spot_storage():
+         test = Test(
+             'managed-spot-storage',
+             [
+-                f'sky spot launch -n {name} {file_path} -y',
++                f'sky spot launch {instance_type_restriction} -n {name} {file_path} -y',
+                 'sleep 60',  # Wait the spot queue to be updated
+                 f'sky spot queue | grep {name} | grep SUCCEEDED',
+                 f'[ $(aws s3api list-buckets --query "Buckets[?contains(Name, \'{storage_name}\')].Name" --output text | wc -l) -eq 0 ]'
+@@ -983,6 +998,7 @@ def test_spot_storage():
+ 
+ 
+ # ---------- Testing spot TPU ----------
++@pytest.mark.costly
+ def test_spot_tpu():
+     """Test managed spot on TPU."""
+     name = _get_cluster_name()
+@@ -1001,13 +1017,13 @@ def test_spot_tpu():
+ 
+ 
+ # ---------- Testing env ----------
+-def test_inline_env():
++def test_inline_env(instance_type_restriction: str):
+     """Test env"""
+     name = _get_cluster_name()
+     test = Test(
+         'test-inline-env',
+         [
+-            f'sky launch -c {name} -y --env TEST_ENV="hello world" -- "([[ ! -z \\"\$TEST_ENV\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_IPS\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_RANK\\" ]]) || exit 1"',
++            f'sky launch -c {name} {instance_type_restriction} -y --env TEST_ENV="hello world" -- "([[ ! -z \\"\$TEST_ENV\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_IPS\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_RANK\\" ]]) || exit 1"',
+             f'sky logs {name} 1 --status',
+             f'sky exec {name} --env TEST_ENV2="success" "([[ ! -z \\"\$TEST_ENV2\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_IPS\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_RANK\\" ]]) || exit 1"',
+             f'sky logs {name} 2 --status',
+@@ -1018,13 +1034,13 @@ def test_inline_env():
+ 
+ 
+ # ---------- Testing env for spot ----------
+-def test_inline_spot_env():
++def test_inline_spot_env(instance_type_restriction: str):
+     """Test env"""
+     name = _get_cluster_name()
+     test = Test(
+         'test-inline-spot-env',
+         [
+-            f'sky spot launch -n {name} -y --env TEST_ENV="hello world" -- "([[ ! -z \\"\$TEST_ENV\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_IPS\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_RANK\\" ]]) || exit 1"',
++            f'sky spot launch {instance_type_restriction} -n {name} -y --env TEST_ENV="hello world" -- "([[ ! -z \\"\$TEST_ENV\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_IPS\\" ]] && [[ ! -z \\"\$SKYPILOT_NODE_RANK\\" ]]) || exit 1"',
+             'sleep 20',
+             f's=$(sky spot queue) && printf "$s" && echo "$s"  | grep {name} | grep SUCCEEDED',
+         ],
+@@ -1034,13 +1050,13 @@ def test_inline_spot_env():
+ 
+ 
+ # ---------- Testing custom image ----------
+-def test_custom_image():
++def test_custom_image(instance_type_restriction: str):
+     """Test custom image"""
+     name = _get_cluster_name()
+     test = Test(
+         'test-custom-image',
+         [
+-            f'sky launch -c {name} --retry-until-up -y examples/custom_image.yaml',
++            f'sky launch -c {name} {instance_type_restriction} --retry-until-up -y examples/custom_image.yaml',
+             f'sky logs {name} 1 --status',
+         ],
+         f'sky down -y {name}',
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,220 @@
+  Task-ID: netbox-community__netbox-14047@0ec158d
+  Please checkout to this commit first: 14447befb9dd2479ef265ef1a52b9430ffa10ed5
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Add manufacturer to platform of virtual machines
+### NetBox version
+
+v3.5.2
+
+### Feature type
+
+Data model extension
+
+### Proposed functionality
+
+Add "manufacturer" field before "platform" selection inside virtual machine configuration
+
+### Use case
+
+Currently, when you create a device you should choose it's vendor and platform, and drop down list of platform filters to that vendor.
+With that approach you can create platforms as software versions with specific manufacturer.
+
+But when you choose platform for virtual machine it is one list which becomes confusing without vendor
+
+### Database changes
+
+Add field "manufacturer" to Virtualization -> Virtual Machine to filter platforms
+
+### External dependencies
+
+_No response_
+  </issue>
+  
+  <patch>
+  diff --git a/netbox/dcim/forms/filtersets.py b/netbox/dcim/forms/filtersets.py
+index 7f99d1ca499..ce600673c9b 100644
+--- a/netbox/dcim/forms/filtersets.py
++++ b/netbox/dcim/forms/filtersets.py
+@@ -643,7 +643,7 @@ class DeviceFilterForm(
+         (None, ('q', 'filter_id', 'tag')),
+         (_('Location'), ('region_id', 'site_group_id', 'site_id', 'location_id', 'rack_id')),
+         (_('Operation'), ('status', 'role_id', 'airflow', 'serial', 'asset_tag', 'mac_address')),
+-        (_('Hardware'), ('manufacturer_id', 'device_type_id', 'platform_id')),
++        (_('Hardware'), ('manufacturer_id', 'platform_id', 'device_type_id')),
+         (_('Tenant'), ('tenant_group_id', 'tenant_id')),
+         (_('Contacts'), ('contact', 'contact_role', 'contact_group')),
+         (_('Components'), (
+@@ -713,7 +713,10 @@ class DeviceFilterForm(
+         queryset=Platform.objects.all(),
+         required=False,
+         null_option='None',
+-        label=_('Platform')
++        label=_('Platform'),
++        query_params={
++            "manufacturer_id": '$manufacturer_id'
++        }
+     )
+     status = forms.MultipleChoiceField(
+         label=_('Status'),
+diff --git a/netbox/dcim/forms/model_forms.py b/netbox/dcim/forms/model_forms.py
+index 93e21459873..d465f214c4c 100644
+--- a/netbox/dcim/forms/model_forms.py
++++ b/netbox/dcim/forms/model_forms.py
+@@ -439,10 +439,21 @@ class DeviceForm(TenancyForm, NetBoxModelForm):
+         label=_('Device role'),
+         queryset=DeviceRole.objects.all()
+     )
++    manufacturer = DynamicModelChoiceField(
++        label=_('Manufacturer'),
++        queryset=Manufacturer.objects.all(),
++        required=False,
++        initial_params={
++            'platforms': '$platform'
++        }
++    )
+     platform = DynamicModelChoiceField(
+         label=_('Platform'),
+         queryset=Platform.objects.all(),
+-        required=False
++        required=False,
++        query_params={
++            "manufacturer_id": '$manufacturer'
++        }
+     )
+     cluster = DynamicModelChoiceField(
+         label=_('Cluster'),
+diff --git a/netbox/templates/dcim/device_edit.html b/netbox/templates/dcim/device_edit.html
+index 4dbb2f477d9..af448c2f200 100644
+--- a/netbox/templates/dcim/device_edit.html
++++ b/netbox/templates/dcim/device_edit.html
+@@ -64,6 +64,7 @@ <h5 class="offset-sm-3">{% trans "Location" %}</h5>
+         <h5 class="offset-sm-3">{% trans "Management" %}</h5>
+       </div>
+       {% render_field form.status %}
++      {% render_field form.manufacturer %}
+       {% render_field form.platform %}
+       {% render_field form.config_template %}
+       {% if object.pk %}
+diff --git a/netbox/virtualization/forms/filtersets.py b/netbox/virtualization/forms/filtersets.py
+index 99ac0cb774d..91d9f037581 100644
+--- a/netbox/virtualization/forms/filtersets.py
++++ b/netbox/virtualization/forms/filtersets.py
+@@ -1,7 +1,7 @@
+ from django import forms
+ from django.utils.translation import gettext_lazy as _
+ 
+-from dcim.models import Device, DeviceRole, Platform, Region, Site, SiteGroup
++from dcim.models import Device, DeviceRole, Manufacturer, Platform, Region, Site, SiteGroup
+ from extras.forms import LocalConfigContextFilterForm
+ from extras.models import ConfigTemplate
+ from ipam.models import L2VPN, VRF
+@@ -94,7 +94,7 @@ class VirtualMachineFilterForm(
+         (None, ('q', 'filter_id', 'tag')),
+         (_('Cluster'), ('cluster_group_id', 'cluster_type_id', 'cluster_id', 'device_id')),
+         (_('Location'), ('region_id', 'site_group_id', 'site_id')),
+-        (_('Attributes'), ('status', 'role_id', 'platform_id', 'mac_address', 'has_primary_ip', 'config_template_id', 'local_context_data')),
++        (_('Attributes'), ('status', 'role_id', 'manufacturer_id', 'platform_id', 'mac_address', 'has_primary_ip', 'config_template_id', 'local_context_data')),
+         (_('Tenant'), ('tenant_group_id', 'tenant_id')),
+         (_('Contacts'), ('contact', 'contact_role', 'contact_group')),
+     )
+@@ -154,11 +154,19 @@ class VirtualMachineFilterForm(
+         choices=VirtualMachineStatusChoices,
+         required=False
+     )
++    manufacturer_id = DynamicModelMultipleChoiceField(
++        queryset=Manufacturer.objects.all(),
++        required=False,
++        label=_('Manufacturer'),
++    )
+     platform_id = DynamicModelMultipleChoiceField(
+         queryset=Platform.objects.all(),
+         required=False,
+         null_option='None',
+-        label=_('Platform')
++        label=_('Platform'),
++        query_params = {
++            "manufacturer_id": '$manufacturer_id'
++        }
+     )
+     mac_address = forms.CharField(
+         required=False,
+diff --git a/netbox/virtualization/forms/model_forms.py b/netbox/virtualization/forms/model_forms.py
+index 21dbc895a76..3c03bc96a94 100644
+--- a/netbox/virtualization/forms/model_forms.py
++++ b/netbox/virtualization/forms/model_forms.py
+@@ -4,7 +4,7 @@
+ from django.utils.translation import gettext_lazy as _
+ 
+ from dcim.forms.common import InterfaceCommonForm
+-from dcim.models import Device, DeviceRole, Platform, Rack, Region, Site, SiteGroup
++from dcim.models import Device, DeviceRole, Manufacturer, Platform, Rack, Region, Site, SiteGroup
+ from extras.models import ConfigTemplate
+ from ipam.models import IPAddress, VLAN, VLANGroup, VRF
+ from netbox.forms import NetBoxModelForm
+@@ -197,10 +197,21 @@ class VirtualMachineForm(TenancyForm, NetBoxModelForm):
+             "vm_role": "True"
+         }
+     )
++    manufacturer = DynamicModelChoiceField(
++        label=_('Manufacturer'),
++        queryset=Manufacturer.objects.all(),
++        required=False,
++        initial_params={
++            'platforms': '$platform'
++        }
++    )
+     platform = DynamicModelChoiceField(
+         label=_('Platform'),
+         queryset=Platform.objects.all(),
+-        required=False
++        required=False,
++        query_params={
++            "manufacturer_id": '$manufacturer'
++        }
+     )
+     local_context_data = JSONField(
+         required=False,
+@@ -217,7 +228,7 @@ class VirtualMachineForm(TenancyForm, NetBoxModelForm):
+         (_('Virtual Machine'), ('name', 'role', 'status', 'description', 'tags')),
+         (_('Site/Cluster'), ('site', 'cluster', 'device')),
+         (_('Tenancy'), ('tenant_group', 'tenant')),
+-        (_('Management'), ('platform', 'primary_ip4', 'primary_ip6', 'config_template')),
++        (_('Management'), ('manufacturer', 'platform', 'primary_ip4', 'primary_ip6', 'config_template')),
+         (_('Resources'), ('vcpus', 'memory', 'disk')),
+         (_('Config Context'), ('local_context_data',)),
+     )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

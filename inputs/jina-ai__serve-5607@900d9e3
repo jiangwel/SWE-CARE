@@ -1,0 +1,939 @@
+  Task-ID: jina-ai__serve-5607@900d9e3
+  Please checkout to this commit first: ff7365ff2662b0771b51388922baae896767441c
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  feat: provide post request level prefetch argument 
+**Describe the feature**
+<!-- A clear and concise description of what the feature is. -->
+
+The `prefetch` argument is currently used in the Gateway to control the number of in flight requests. This mechanism acts a preliminary back pressure to the executors by not overloading the executors until the `prefetch` or lesser number of requests are completed before continuing with the next request from the request generator/iterator. This single configuration value at the Gateway level is too restrictive because the load handling capability varies for different kinds of requests or workloads. For example an `index` request can have a large payload which requires more time for IO and other CPU intensive tasks. In comparison to a `search` request for look up by id is very lightweight and the operation is mostly offloaded to the underlying database. In this scenario, the executor **could** handle more concurrent `search` requests than indexing requests. Knowing the parameters or behavior of the system, different `prefetch` values can be used to slow down or speed up each operation independently.
+
+**Your proposal**
+<!-- copy past your code/pull request link -->
+
+An optional `prefetch` argument is implemented at the client `post` method which can override the Gateway `prefetch` argument. Now the client is initiating requests satisfying the `prefetch` criteria which may prevent overloading the Gateway/Executor with the proper number.
+  </issue>
+  
+  <patch>
+  diff --git a/docs/concepts/flow/executor-args.md b/docs/concepts/flow/executor-args.md
+index 721c7e51c5f0e..eacc98f476c92 100644
+--- a/docs/concepts/flow/executor-args.md
++++ b/docs/concepts/flow/executor-args.md
+@@ -44,7 +44,6 @@
+ | `metrics_exporter_host` | If tracing is enabled, this hostname will be used to configure the metrics exporter agent. | `string` | `None` |
+ | `metrics_exporter_port` | If tracing is enabled, this port will be used to configure the metrics exporter agent. | `number` | `None` |
+ | `force_update` | If set, always pull the latest Hub Executor bundle even it exists on local | `boolean` | `False` |
+-| `prefer_platform` | The preferred target Docker platform. (e.g. "linux/amd64", "linux/arm64") | `string` | `None` |
+ | `compression` | The compression mechanism used when sending requests from the Head to the WorkerRuntimes. For more details, check https://grpc.github.io/grpc/python/grpc.html#compression. | `string` | `None` |
+ | `uses_before_address` | The address of the uses-before runtime | `string` | `None` |
+ | `uses_after_address` | The address of the uses-before runtime | `string` | `None` |
+diff --git a/jina/clients/__init__.py b/jina/clients/__init__.py
+index 15c3192238cf2..fcd77427a0e1c 100644
+--- a/jina/clients/__init__.py
++++ b/jina/clients/__init__.py
+@@ -23,7 +23,6 @@ def Client(*,
+     metrics_exporter_host: Optional[str] = None, 
+     metrics_exporter_port: Optional[int] = None, 
+     port: Optional[int] = None, 
+-    prefetch: Optional[int] = 1000, 
+     protocol: Optional[Union[str, List[str]]] = 'GRPC', 
+     proxy: Optional[bool] = False, 
+     tls: Optional[bool] = False, 
+@@ -39,9 +38,6 @@ def Client(*,
+     :param metrics_exporter_host: If tracing is enabled, this hostname will be used to configure the metrics exporter agent.
+     :param metrics_exporter_port: If tracing is enabled, this port will be used to configure the metrics exporter agent.
+     :param port: The port of the Gateway, which the client should connect to.
+-    :param prefetch: Number of requests fetched from the client before feeding into the first Executor. 
+-              
+-              Used to control the speed of data input into a Flow. 0 disables prefetch (1000 requests is the default)
+     :param protocol: Communication protocol between server and client.
+     :param proxy: If set, respect the http_proxy and https_proxy environment variables. otherwise, it will unset these proxy variables before start. gRPC seems to prefer no proxy
+     :param tls: If set, connect to gateway using tls encryption
+@@ -92,9 +88,6 @@ def Client(
+     :param metrics_exporter_host: If tracing is enabled, this hostname will be used to configure the metrics exporter agent.
+     :param metrics_exporter_port: If tracing is enabled, this port will be used to configure the metrics exporter agent.
+     :param port: The port of the Gateway, which the client should connect to.
+-    :param prefetch: Number of requests fetched from the client before feeding into the first Executor. 
+-              
+-              Used to control the speed of data input into a Flow. 0 disables prefetch (1000 requests is the default)
+     :param protocol: Communication protocol between server and client.
+     :param proxy: If set, respect the http_proxy and https_proxy environment variables. otherwise, it will unset these proxy variables before start. gRPC seems to prefer no proxy
+     :param tls: If set, connect to gateway using tls encryption
+diff --git a/jina/clients/base/grpc.py b/jina/clients/base/grpc.py
+index 79d100f20ab0f..65461491b2ff9 100644
+--- a/jina/clients/base/grpc.py
++++ b/jina/clients/base/grpc.py
+@@ -5,6 +5,7 @@
+ 
+ import grpc
+ from grpc import RpcError
++
+ from jina.clients.base import BaseClient
+ from jina.clients.helper import callback_exec
+ from jina.excepts import BadClientInput, BadServerFlow, InternalNetworkError
+@@ -24,7 +25,7 @@ class GRPCBaseClient(BaseClient):
+ 
+     It manages the asyncio event loop internally, so all interfaces are synchronous from the outside.
+     """
+-    
++
+     _lock = threading.RLock()
+ 
+     async def _is_flow_ready(self, **kwargs) -> bool:
+@@ -35,9 +36,9 @@ async def _is_flow_ready(self, **kwargs) -> bool:
+         """
+         try:
+             async with GrpcConnectionPool.get_grpc_channel(
+-                    f'{self.args.host}:{self.args.port}',
+-                    asyncio=True,
+-                    tls=self.args.tls,
++                f'{self.args.host}:{self.args.port}',
++                asyncio=True,
++                tls=self.args.tls,
+             ) as channel:
+                 stub = jina_pb2_grpc.JinaGatewayDryRunRPCStub(channel)
+                 self.logger.debug(f'connected to {self.args.host}:{self.args.port}')
+@@ -65,24 +66,24 @@ async def _is_flow_ready(self, **kwargs) -> bool:
+         return False
+ 
+     async def _stream_rpc(
+-            self,
+-            channel,
+-            req_iter,
+-            metadata,
+-            on_error,
+-            on_done,
+-            on_always,
+-            continue_on_error,
+-            p_bar,
+-            **kwargs,
++        self,
++        channel,
++        req_iter,
++        metadata,
++        on_error,
++        on_done,
++        on_always,
++        continue_on_error,
++        p_bar,
++        **kwargs,
+     ):
+         stub = jina_pb2_grpc.JinaRPCStub(channel)
+         async for resp in stub.Call(
+-                req_iter,
+-                compression=self.compression,
+-                metadata=metadata,
+-                credentials=kwargs.get('credentials', None),
+-                timeout=kwargs.get('timeout', None),
++            req_iter,
++            compression=self.compression,
++            metadata=metadata,
++            credentials=kwargs.get('credentials', None),
++            timeout=kwargs.get('timeout', None),
+         ):
+             callback_exec(
+                 response=resp,
+@@ -97,30 +98,36 @@ async def _stream_rpc(
+             yield resp
+ 
+     async def _unary_rpc(
+-            self,
+-            channel,
+-            req_iter,
+-            metadata,
+-            on_error,
+-            on_done,
+-            on_always,
+-            continue_on_error,
+-            p_bar,
+-            results_in_order,
+-            **kwargs,
++        self,
++        channel,
++        req_iter,
++        metadata,
++        on_error,
++        on_done,
++        on_always,
++        continue_on_error,
++        p_bar,
++        results_in_order,
++        prefetch,
++        **kwargs,
+     ):
+         stub = jina_pb2_grpc.JinaSingleDataRequestRPCStub(channel)
+ 
+         def _request_handler(
+-                request: 'Request',
++            request: 'Request',
+         ) -> 'Tuple[asyncio.Future, Optional[asyncio.Future]]':
+-            return asyncio.ensure_future(stub.process_single_data(
+-                request,
+-                compression=self.compression,
+-                metadata=metadata,
+-                credentials=kwargs.get('credentials', None),
+-                timeout=kwargs.get('timeout', None),
+-            )), None
++            return (
++                asyncio.ensure_future(
++                    stub.process_single_data(
++                        request,
++                        compression=self.compression,
++                        metadata=metadata,
++                        credentials=kwargs.get('credentials', None),
++                        timeout=kwargs.get('timeout', None),
++                    )
++                ),
++                None,
++            )
+ 
+         def _result_handler(resp):
+             callback_exec(
+@@ -138,29 +145,31 @@ def _result_handler(resp):
+             result_handler=_result_handler,
+             iterate_sync_in_thread=False,
+             logger=self.logger,
++            prefetch=prefetch or 0,
+             **vars(self.args),
+         )
+         async for response in streamer.stream(
+-                request_iterator=req_iter, results_in_order=results_in_order
++            request_iterator=req_iter, results_in_order=results_in_order
+         ):
+             if self.show_progress:
+                 p_bar.update()
+             yield response
+ 
+     async def _get_results(
+-            self,
+-            inputs: 'InputType',
+-            on_done: 'CallbackFnType',
+-            on_error: Optional['CallbackFnType'] = None,
+-            on_always: Optional['CallbackFnType'] = None,
+-            compression: Optional[str] = None,
+-            max_attempts: int = 1,
+-            initial_backoff: float = 0.5,
+-            max_backoff: float = 0.1,
+-            backoff_multiplier: float = 1.5,
+-            results_in_order: bool = False,
+-            stream: bool = True,
+-            **kwargs,
++        self,
++        inputs: 'InputType',
++        on_done: 'CallbackFnType',
++        on_error: Optional['CallbackFnType'] = None,
++        on_always: Optional['CallbackFnType'] = None,
++        compression: Optional[str] = None,
++        max_attempts: int = 1,
++        initial_backoff: float = 0.5,
++        max_backoff: float = 0.1,
++        backoff_multiplier: float = 1.5,
++        results_in_order: bool = False,
++        stream: bool = True,
++        prefetch: Optional[int] = None,
++        **kwargs,
+     ):
+         try:
+             self.compression = (
+@@ -200,54 +209,60 @@ async def _get_results(
+                 options.append(("grpc.enable_retries", 1))
+                 options.append(("grpc.service_config", service_config_json))
+ 
+-            metadata = kwargs.pop('metadata', None)
++            metadata = kwargs.pop('metadata', ())
+             if results_in_order:
+-                metadata = metadata or ()
+                 metadata = metadata + (('__results_in_order__', 'true'),)
+ 
++            if prefetch:
++                metadata = metadata + (('__prefetch__', str(prefetch)),)
++
+             with self._lock:
+                 async with GrpcConnectionPool.get_grpc_channel(
+-                        f'{self.args.host}:{self.args.port}',
+-                        options=options,
+-                        asyncio=True,
+-                        tls=self.args.tls,
+-                        aio_tracing_client_interceptors=self.aio_tracing_client_interceptors(),
++                    f'{self.args.host}:{self.args.port}',
++                    options=options,
++                    asyncio=True,
++                    tls=self.args.tls,
++                    aio_tracing_client_interceptors=self.aio_tracing_client_interceptors(),
+                 ) as channel:
+                     self.logger.debug(f'connected to {self.args.host}:{self.args.port}')
+ 
+                     with ProgressBar(
+-                            total_length=self._inputs_length, disable=not self.show_progress
++                        total_length=self._inputs_length, disable=not self.show_progress
+                     ) as p_bar:
+                         try:
+                             if stream:
+                                 async for resp in self._stream_rpc(
+-                                        channel=channel,
+-                                        req_iter=req_iter,
+-                                        metadata=metadata,
+-                                        on_error=on_error,
+-                                        on_done=on_done,
+-                                        on_always=on_always,
+-                                        continue_on_error=continue_on_error,
+-                                        p_bar=p_bar,
+-                                        **kwargs,
++                                    channel=channel,
++                                    req_iter=req_iter,
++                                    metadata=metadata,
++                                    on_error=on_error,
++                                    on_done=on_done,
++                                    on_always=on_always,
++                                    continue_on_error=continue_on_error,
++                                    p_bar=p_bar,
++                                    **kwargs,
+                                 ):
+                                     yield resp
+                             else:
+                                 async for resp in self._unary_rpc(
+-                                        channel=channel,
+-                                        req_iter=req_iter,
+-                                        metadata=metadata,
+-                                        on_error=on_error,
+-                                        on_done=on_done,
+-                                        on_always=on_always,
+-                                        continue_on_error=continue_on_error,
+-                                        p_bar=p_bar,
+-                                        results_in_order=results_in_order,
+-                                        **kwargs,
++                                    channel=channel,
++                                    req_iter=req_iter,
++                                    metadata=metadata,
++                                    on_error=on_error,
++                                    on_done=on_done,
++                                    on_always=on_always,
++                                    continue_on_error=continue_on_error,
++                                    p_bar=p_bar,
++                                    results_in_order=results_in_order,
++                                    prefetch=prefetch,
++                                    **kwargs,
+                                 ):
+                                     yield resp
+ 
+-                        except (grpc.aio._call.AioRpcError, InternalNetworkError) as err:
++                        except (
++                            grpc.aio._call.AioRpcError,
++                            InternalNetworkError,
++                        ) as err:
+                             my_code = err.code()
+                             my_details = err.details()
+                             trailing_metadata = extract_trailing_metadata(err)
+@@ -271,8 +286,8 @@ async def _get_results(
+                                 )
+                                 raise err
+                             elif (
+-                                    my_code == grpc.StatusCode.UNKNOWN
+-                                    and 'asyncio.exceptions.TimeoutError' in my_details
++                                my_code == grpc.StatusCode.UNKNOWN
++                                and 'asyncio.exceptions.TimeoutError' in my_details
+                             ):
+                                 raise BadClientInput(
+                                     f'{msg}\n'
+diff --git a/jina/clients/base/http.py b/jina/clients/base/http.py
+index a2242fc33a72a..3c0852aa5962a 100644
+--- a/jina/clients/base/http.py
++++ b/jina/clients/base/http.py
+@@ -90,6 +90,7 @@ async def _get_results(
+         max_backoff: float = 0.1,
+         backoff_multiplier: float = 1.5,
+         results_in_order: bool = False,
++        prefetch: Optional[int] = None,
+         **kwargs,
+     ):
+         """
+@@ -102,6 +103,7 @@ async def _get_results(
+         :param max_backoff: The maximum accepted backoff after the exponential incremental delay
+         :param backoff_multiplier: The n-th attempt will occur at random(0, min(initialBackoff*backoffMultiplier**(n-1), maxBackoff))
+         :param results_in_order: return the results in the same order as the inputs
++        :param prefetch: How many Requests are processed from the Client at the same time.
+         :param kwargs: kwargs coming from the public interface. Includes arguments to be passed to the `HTTPClientlet`
+         :yields: generator over results
+         """
+@@ -150,6 +152,7 @@ def _result_handler(result):
+                 request_handler=_request_handler,
+                 result_handler=_result_handler,
+                 logger=self.logger,
++                prefetch=prefetch or 0,
+                 **vars(self.args),
+             )
+             async for response in streamer.stream(
+diff --git a/jina/clients/base/websocket.py b/jina/clients/base/websocket.py
+index 1b0065eb03357..53802bdc47600 100644
+--- a/jina/clients/base/websocket.py
++++ b/jina/clients/base/websocket.py
+@@ -87,6 +87,7 @@ async def _get_results(
+         max_backoff: float = 0.1,
+         backoff_multiplier: float = 1.5,
+         results_in_order: bool = False,
++        prefetch: Optional[int] = None,
+         **kwargs,
+     ):
+         """
+@@ -99,6 +100,7 @@ async def _get_results(
+         :param max_backoff: The maximum accepted backoff after the exponential incremental delay
+         :param backoff_multiplier: The n-th attempt will occur at random(0, min(initialBackoff*backoffMultiplier**(n-1), maxBackoff))
+         :param results_in_order: return the results in the same order as the inputs
++        :param prefetch: How many Requests are processed from the Client at the same time.
+         :param kwargs: kwargs coming from the public interface. Includes arguments to be passed to the `WebsocketClientlet`
+         :yields: generator over results
+         """
+@@ -185,6 +187,7 @@ def _request_handler(
+                 result_handler=_result_handler,
+                 end_of_iter_handler=_handle_end_of_iter,
+                 logger=self.logger,
++                prefetch=prefetch or 0,
+                 **vars(self.args),
+             )
+ 
+diff --git a/jina/clients/mixin.py b/jina/clients/mixin.py
+index c3e7f9f337f30..895c2929e9bb5 100644
+--- a/jina/clients/mixin.py
++++ b/jina/clients/mixin.py
+@@ -196,7 +196,9 @@ async def profiling(self, show_table: bool = True) -> Dict[str, float]:
+         from docarray import Document
+ 
+         st = time.perf_counter()
+-        async for r in self.client.post(on='/', inputs=Document(), return_responses=True):
++        async for r in self.client.post(
++            on='/', inputs=Document(), return_responses=True
++        ):
+             ed = time.perf_counter()
+             return _render_response_table(r, st, ed, show_table=show_table)
+ 
+@@ -223,6 +225,7 @@ def post(
+         backoff_multiplier: float = 1.5,
+         results_in_order: bool = False,
+         stream: bool = True,
++        prefetch: Optional[int] = None,
+         **kwargs,
+     ) -> Optional[Union['DocumentArray', List['Response']]]:
+         """Post a general data request to the Flow.
+@@ -244,6 +247,7 @@ def post(
+         :param backoff_multiplier: The n-th attempt will occur at random(0, min(initialBackoff*backoffMultiplier**(n-1), maxBackoff))
+         :param results_in_order: return the results in the same order as the inputs
+         :param stream: Applicable only to grpc client. If True, the requests are sent to the target using the gRPC streaming interface otherwise the gRPC unary interface will be used. The value is True by default.
++        :param prefetch: How many Requests are processed from the Client at the same time. If not provided then Gateway prefetch value will be used.
+         :param kwargs: additional parameters
+         :return: None or DocumentArray containing all response Documents
+ 
+@@ -288,6 +292,7 @@ async def _get_results(*args, **kwargs):
+             backoff_multiplier=backoff_multiplier,
+             results_in_order=results_in_order,
+             stream=stream,
++            prefetch=prefetch,
+             **kwargs,
+         )
+ 
+@@ -320,6 +325,7 @@ async def post(
+         backoff_multiplier: float = 1.5,
+         results_in_order: bool = False,
+         stream: bool = True,
++        prefetch: Optional[int] = None,
+         **kwargs,
+     ) -> AsyncGenerator[None, Union['DocumentArray', 'Response']]:
+         """Async Post a general data request to the Flow.
+@@ -341,6 +347,7 @@ async def post(
+         :param backoff_multiplier: The n-th attempt will occur at random(0, min(initialBackoff*backoffMultiplier**(n-1), maxBackoff))
+         :param results_in_order: return the results in the same order as the inputs
+         :param stream: Applicable only to grpc client. If True, the requests are sent to the target using the gRPC streaming interface otherwise the gRPC unary interface will be used. The value is True by default.
++        :param prefetch: How many Requests are processed from the Client at the same time. If not provided then Gateway prefetch value will be used.
+         :param kwargs: additional parameters, can be used to pass metadata or authentication information in the server call
+         :yield: Response object
+ 
+@@ -368,6 +375,7 @@ async def post(
+             backoff_multiplier=backoff_multiplier,
+             results_in_order=results_in_order,
+             stream=stream,
++            prefetch=prefetch,
+             **kwargs,
+         ):
+             if not return_responses:
+diff --git a/jina/orchestrate/deployments/__init__.py b/jina/orchestrate/deployments/__init__.py
+index 979fe25029067..864b2542a98bc 100644
+--- a/jina/orchestrate/deployments/__init__.py
++++ b/jina/orchestrate/deployments/__init__.py
+@@ -141,7 +141,6 @@ def __init__(
+         polling: Optional[str] = 'ANY', 
+         port: Optional[int] = None, 
+         port_monitoring: Optional[int] = None, 
+-        prefer_platform: Optional[str] = None, 
+         py_modules: Optional[List[str]] = None, 
+         quiet: Optional[bool] = False, 
+         quiet_error: Optional[bool] = False, 
+@@ -229,7 +228,6 @@ def __init__(
+               {'/custom': 'ALL', '/search': 'ANY', '*': 'ANY'}
+         :param port: The port for input data to bind to, default is a random port between [49152, 65535]. In the case of an external Executor (`--external` or `external=True`) this can be a list of ports. Then, every resulting address will be considered as one replica of the Executor.
+         :param port_monitoring: The port on which the prometheus server is exposed, default is a random port between [49152, 65535]
+-        :param prefer_platform: The preferred target Docker platform. (e.g. "linux/amd64", "linux/arm64")
+         :param py_modules: The customized python modules need to be imported before loading the executor
+           
+           Note that the recommended way is to only import a single module - a simple python file, if your
+diff --git a/jina/orchestrate/flow/base.py b/jina/orchestrate/flow/base.py
+index fa82db9976673..f4a27cb04d8a8 100644
+--- a/jina/orchestrate/flow/base.py
++++ b/jina/orchestrate/flow/base.py
+@@ -124,7 +124,6 @@ def __init__(
+         metrics_exporter_host: Optional[str] = None, 
+         metrics_exporter_port: Optional[int] = None, 
+         port: Optional[int] = None, 
+-        prefetch: Optional[int] = 1000, 
+         protocol: Optional[Union[str, List[str]]] = 'GRPC', 
+         proxy: Optional[bool] = False, 
+         tls: Optional[bool] = False, 
+@@ -140,9 +139,6 @@ def __init__(
+         :param metrics_exporter_host: If tracing is enabled, this hostname will be used to configure the metrics exporter agent.
+         :param metrics_exporter_port: If tracing is enabled, this port will be used to configure the metrics exporter agent.
+         :param port: The port of the Gateway, which the client should connect to.
+-        :param prefetch: Number of requests fetched from the client before feeding into the first Executor. 
+-              
+-              Used to control the speed of data input into a Flow. 0 disables prefetch (1000 requests is the default)
+         :param protocol: Communication protocol between server and client.
+         :param proxy: If set, respect the http_proxy and https_proxy environment variables. otherwise, it will unset these proxy variables before start. gRPC seems to prefer no proxy
+         :param tls: If set, connect to gateway using tls encryption
+@@ -382,9 +378,6 @@ def __init__(
+         :param metrics_exporter_host: If tracing is enabled, this hostname will be used to configure the metrics exporter agent.
+         :param metrics_exporter_port: If tracing is enabled, this port will be used to configure the metrics exporter agent.
+         :param port: The port of the Gateway, which the client should connect to.
+-        :param prefetch: Number of requests fetched from the client before feeding into the first Executor. 
+-              
+-              Used to control the speed of data input into a Flow. 0 disables prefetch (1000 requests is the default)
+         :param protocol: Communication protocol between server and client.
+         :param proxy: If set, respect the http_proxy and https_proxy environment variables. otherwise, it will unset these proxy variables before start. gRPC seems to prefer no proxy
+         :param tls: If set, connect to gateway using tls encryption
+@@ -875,7 +868,6 @@ def add(
+         polling: Optional[str] = 'ANY', 
+         port: Optional[int] = None, 
+         port_monitoring: Optional[int] = None, 
+-        prefer_platform: Optional[str] = None, 
+         py_modules: Optional[List[str]] = None, 
+         quiet: Optional[bool] = False, 
+         quiet_error: Optional[bool] = False, 
+@@ -963,7 +955,6 @@ def add(
+               {'/custom': 'ALL', '/search': 'ANY', '*': 'ANY'}
+         :param port: The port for input data to bind to, default is a random port between [49152, 65535]. In the case of an external Executor (`--external` or `external=True`) this can be a list of ports. Then, every resulting address will be considered as one replica of the Executor.
+         :param port_monitoring: The port on which the prometheus server is exposed, default is a random port between [49152, 65535]
+-        :param prefer_platform: The preferred target Docker platform. (e.g. "linux/amd64", "linux/arm64")
+         :param py_modules: The customized python modules need to be imported before loading the executor
+           
+           Note that the recommended way is to only import a single module - a simple python file, if your
+@@ -1111,7 +1102,6 @@ def add(
+               {'/custom': 'ALL', '/search': 'ANY', '*': 'ANY'}
+         :param port: The port for input data to bind to, default is a random port between [49152, 65535]. In the case of an external Executor (`--external` or `external=True`) this can be a list of ports. Then, every resulting address will be considered as one replica of the Executor.
+         :param port_monitoring: The port on which the prometheus server is exposed, default is a random port between [49152, 65535]
+-        :param prefer_platform: The preferred target Docker platform. (e.g. "linux/amd64", "linux/arm64")
+         :param py_modules: The customized python modules need to be imported before loading the executor
+           
+           Note that the recommended way is to only import a single module - a simple python file, if your
+diff --git a/jina/parsers/__init__.py b/jina/parsers/__init__.py
+index 30a677c81ce6b..d785da7edbf26 100644
+--- a/jina/parsers/__init__.py
++++ b/jina/parsers/__init__.py
+@@ -15,9 +15,13 @@ def set_pod_parser(parser=None):
+ 
+         parser = set_base_parser()
+ 
+-    from jina.parsers.orchestrate.base import mixin_scalable_deployment_parser
+-    from jina.parsers.orchestrate.pod import mixin_pod_parser, mixin_hub_pull_options_parser
+     from hubble.executor.parsers.pull import mixin_hub_pull_options_parser
++
++    from jina.parsers.orchestrate.base import mixin_scalable_deployment_parser
++    from jina.parsers.orchestrate.pod import (
++        mixin_hub_pull_options_parser,
++        mixin_pod_parser,
++    )
+     from jina.parsers.orchestrate.runtimes.container import (
+         mixin_container_runtime_parser,
+     )
+@@ -139,12 +143,11 @@ def set_client_cli_parser(parser=None):
+         mixin_client_features_parser,
+         mixin_client_protocol_parser,
+     )
+-    from jina.parsers.orchestrate.runtimes.remote import mixin_client_gateway_parser, mixin_prefetch_parser
++    from jina.parsers.orchestrate.runtimes.remote import mixin_client_gateway_parser
+ 
+     mixin_client_gateway_parser(parser)
+     mixin_client_features_parser(parser)
+     mixin_client_protocol_parser(parser)
+-    mixin_prefetch_parser(parser)
+ 
+     return parser
+ 
+@@ -289,8 +292,8 @@ def get_main_parser():
+         sp.add_parser(
+             'pod',
+             description='Start a Pod. '
+-                        'You should rarely use this directly unless you '
+-                        'are doing low-level orchestration',
++            'You should rarely use this directly unless you '
++            'are doing low-level orchestration',
+             formatter_class=_chf,
+             **(dict(help='Start a Pod')) if _SHOW_ALL_ARGS else {},
+         )
+@@ -300,8 +303,8 @@ def get_main_parser():
+         sp.add_parser(
+             'deployment',
+             description='Start a Deployment. '
+-                        'You should rarely use this directly unless you '
+-                        'are doing low-level orchestration',
++            'You should rarely use this directly unless you '
++            'are doing low-level orchestration',
+             formatter_class=_chf,
+             **(dict(help='Start a Deployment')) if _SHOW_ALL_ARGS else {},
+         )
+diff --git a/jina/serve/executors/__init__.py b/jina/serve/executors/__init__.py
+index b355dc78501b4..6afd8cd555947 100644
+--- a/jina/serve/executors/__init__.py
++++ b/jina/serve/executors/__init__.py
+@@ -555,7 +555,6 @@ def serve(
+         polling: Optional[str] = 'ANY', 
+         port: Optional[int] = None, 
+         port_monitoring: Optional[int] = None, 
+-        prefer_platform: Optional[str] = None, 
+         py_modules: Optional[List[str]] = None, 
+         quiet: Optional[bool] = False, 
+         quiet_error: Optional[bool] = False, 
+@@ -643,7 +642,6 @@ def serve(
+               {'/custom': 'ALL', '/search': 'ANY', '*': 'ANY'}
+         :param port: The port for input data to bind to, default is a random port between [49152, 65535]. In the case of an external Executor (`--external` or `external=True`) this can be a list of ports. Then, every resulting address will be considered as one replica of the Executor.
+         :param port_monitoring: The port on which the prometheus server is exposed, default is a random port between [49152, 65535]
+-        :param prefer_platform: The preferred target Docker platform. (e.g. "linux/amd64", "linux/arm64")
+         :param py_modules: The customized python modules need to be imported before loading the executor
+           
+           Note that the recommended way is to only import a single module - a simple python file, if your
+diff --git a/jina/serve/stream/__init__.py b/jina/serve/stream/__init__.py
+index f43dde97784f3..f5e42a453a4dc 100644
+--- a/jina/serve/stream/__init__.py
++++ b/jina/serve/stream/__init__.py
+@@ -6,8 +6,8 @@
+     Callable,
+     Iterator,
+     Optional,
++    Tuple,
+     Union,
+-    Tuple
+ )
+ 
+ from aiostream.aiter_utils import anext
+@@ -35,7 +35,9 @@ class _EndOfStreaming:
+ 
+     def __init__(
+         self,
+-        request_handler: Callable[['Request'], Tuple[Awaitable['Request'], Optional[Awaitable['Request']]]],
++        request_handler: Callable[
++            ['Request'], Tuple[Awaitable['Request'], Optional[Awaitable['Request']]]
++        ],
+         result_handler: Callable[['Request'], Optional['Request']],
+         prefetch: int = 0,
+         iterate_sync_in_thread: bool = True,
+@@ -62,7 +64,12 @@ def __init__(
+         self.total_num_floating_tasks_alive = 0
+ 
+     async def stream(
+-        self, request_iterator, context=None, results_in_order: bool = False, *args
++        self,
++        request_iterator,
++        context=None,
++        results_in_order: bool = False,
++        prefetch: Optional[int] = None,
++        *args,
+     ) -> AsyncIterator['Request']:
+         """
+         stream requests from client iterator and stream responses back.
+@@ -70,16 +77,25 @@ async def stream(
+         :param request_iterator: iterator of requests
+         :param context: context of the grpc call
+         :param results_in_order: return the results in the same order as the request_iterator
++        :param prefetch: How many Requests are processed from the Client at the same time. If not provided then the prefetch value from the metadata will be utilized.
+         :param args: positional arguments
+         :yield: responses from Executors
+         """
++        prefetch = self._prefetch
+         if context is not None:
+             for metadatum in context.invocation_metadata():
+                 if metadatum.key == '__results_in_order__':
+                     results_in_order = metadatum.value == 'true'
++                if metadatum.key == '__prefetch__':
++                    try:
++                        prefetch = int(metadatum.value)
++                    except:
++                        self.logger.debug(f'Couldn\'t parse prefetch to int value!')
+ 
+         async_iter: AsyncIterator = self._stream_requests(
+-            request_iterator=request_iterator, results_in_order=results_in_order
++            request_iterator=request_iterator,
++            results_in_order=results_in_order,
++            prefetch=prefetch,
+         )
+ 
+         try:
+@@ -112,10 +128,12 @@ async def _stream_requests(
+         self,
+         request_iterator: Union[Iterator, AsyncIterator],
+         results_in_order: bool = False,
++        prefetch: Optional[int] = None,
+     ) -> AsyncIterator:
+         """Implements request and response handling without prefetching
+         :param request_iterator: requests iterator from Client
+         :param results_in_order: return the results in the same order as the request_iterator
++        :param prefetch: How many Requests are processed from the Client at the same time. If not provided then the prefetch value from the class will be utilized.
+         :yield: responses
+         """
+         result_queue = asyncio.Queue()
+@@ -166,8 +184,8 @@ async def iterate_requests() -> None:
+             async for request in AsyncRequestsIterator(
+                 iterator=request_iterator,
+                 request_counter=requests_to_handle,
+-                prefetch=self._prefetch,
+-                iterate_sync_in_thread=self._iterate_sync_in_thread
++                prefetch=prefetch or self._prefetch,
++                iterate_sync_in_thread=self._iterate_sync_in_thread,
+             ):
+                 num_reqs += 1
+                 requests_to_handle.count += 1
+diff --git a/jina_cli/autocomplete.py b/jina_cli/autocomplete.py
+index ba8fd951a83f3..145378be9210f 100644
+--- a/jina_cli/autocomplete.py
++++ b/jina_cli/autocomplete.py
+@@ -74,7 +74,6 @@
+             '--metrics-exporter-port',
+             '--force-update',
+             '--force',
+-            '--prefer-platform',
+             '--compression',
+             '--uses-before-address',
+             '--uses-after-address',
+@@ -307,7 +306,6 @@
+             '--metrics-exporter-port',
+             '--force-update',
+             '--force',
+-            '--prefer-platform',
+             '--compression',
+             '--uses-before-address',
+             '--uses-after-address',
+@@ -370,7 +368,6 @@
+             '--metrics-exporter-port',
+             '--force-update',
+             '--force',
+-            '--prefer-platform',
+             '--compression',
+             '--uses-before-address',
+             '--uses-after-address',
+@@ -399,7 +396,6 @@
+             '--metrics-exporter-host',
+             '--metrics-exporter-port',
+             '--protocol',
+-            '--prefetch',
+         ],
+     },
+ }
+diff --git a/tests/integration/gateway_clients/test_streaming.py b/tests/integration/gateway_clients/test_streaming.py
+index f51b9a664b31f..9fc10f4f971b2 100644
+--- a/tests/integration/gateway_clients/test_streaming.py
++++ b/tests/integration/gateway_clients/test_streaming.py
+@@ -5,11 +5,11 @@
+ import time
+ from datetime import datetime
+ from functools import partial
+-from typing import Dict
++from typing import Dict, List
+ 
+ import pytest
+-
+ from docarray import Document, DocumentArray
++
+ from jina.clients import Client
+ from jina.helper import random_port
+ from jina.parsers import set_gateway_parser
+@@ -325,17 +325,52 @@ def test_disable_prefetch_fast_client_slow_executor(
+     assert first_on_done_time < last_executor_time
+ 
+ 
++def _search_first_and_last_prefix_occurrence(
++    search_prefix: str, search_list: List[str]
++):
++    first_idx, last_idx = None, None
++    for idx, value in enumerate(search_list):
++        if value.startswith(search_prefix):
++            if not first_idx:
++                first_idx = idx
++            else:
++                last_idx = idx
++
++    return first_idx, last_idx
++
++
+ @pytest.mark.parametrize('prefetch', [0, 5])
+ @pytest.mark.parametrize('protocol', ['websocket', 'http', 'grpc'])
+ @pytest.mark.parametrize('use_stream', [True, False])
+-def test_multiple_clients(prefetch, protocol, monkeypatch, simple_graph_dict_indexer, use_stream):
++@pytest.mark.parametrize('prefetch_implementation', ['gateway', 'client'])
++def test_multiple_clients(
++    prefetch,
++    protocol,
++    monkeypatch,
++    simple_graph_dict_indexer,
++    use_stream,
++    prefetch_implementation,
++):
+     if not use_stream and protocol != 'grpc':
+         return
+-    
++
+     GOOD_CLIENTS = 5
+     GOOD_CLIENT_NUM_DOCS = 20
+     MALICIOUS_CLIENT_NUM_DOCS = 50
+ 
++    port = random_port()
++    gateway_kwargs = {
++        'protocol': protocol,
++        'port': port,
++        'graph_dict': simple_graph_dict_indexer,
++    }
++    client_prefetch = None
++
++    if prefetch_implementation == 'gateway':
++        gateway_kwargs['prefetch'] = prefetch
++    else:
++        client_prefetch = prefetch
++
+     def get_document(i):
+         return Document(
+             id=f'{multiprocessing.current_process().name}_{i}',
+@@ -352,8 +387,12 @@ async def malicious_client_gen():
+             yield get_document(i)
+ 
+     def client(gen, port):
+-        Client(protocol=protocol, port=port, prefetch=prefetch).post(
+-            on='/index', inputs=gen, request_size=1, stream=use_stream
++        Client(protocol=protocol, port=port).post(
++            on='/index',
++            inputs=gen,
++            request_size=1,
++            stream=use_stream,
++            prefetch=client_prefetch,
+         )
+ 
+     monkeypatch.setattr(
+@@ -366,17 +405,12 @@ def client(gen, port):
+         'send_discover_endpoint',
+         DummyMockConnectionPool.send_discover_endpoint,
+     )
+-    port = random_port()
+ 
+     pool = []
++
+     runtime_process = multiprocessing.Process(
+         target=create_runtime,
+-        kwargs={
+-            'protocol': protocol,
+-            'port': port,
+-            'graph_dict': simple_graph_dict_indexer,
+-            'prefetch': prefetch,
+-        },
++        kwargs=gateway_kwargs,
+     )
+     runtime_process.start()
+     time.sleep(1.0)
+@@ -402,7 +436,7 @@ def client(gen, port):
+         p.join()
+ 
+     order_of_ids = list(
+-        Client(protocol=protocol, port=port, prefetch=prefetch)
++        Client(protocol=protocol, port=port)
+         .post(on='/status', inputs=[Document()], stream=use_stream)[0]
+         .tags['ids']
+     )
+@@ -414,16 +448,48 @@ def client(gen, port):
+         len(order_of_ids)
+         == GOOD_CLIENTS * GOOD_CLIENT_NUM_DOCS + MALICIOUS_CLIENT_NUM_DOCS
+     )
++    (
++        malicious_client_first_response_idx,
++        malicious_client_last_response_idx,
++    ) = _search_first_and_last_prefix_occurrence('badguy', order_of_ids)
+ 
+     """
+-    If prefetch is set, each Client is allowed (max) 5 requests at a time.
+-    Since requests are controlled, `badguy` has to do the last 20 requests.
+-
+     If prefetch is disabled, clients can freeflow requests. No client is blocked.
+     Hence last 20 requests go from `goodguy`.
+     (Ideally last 30 requests should be validated, to avoid flaky CI, we test last 20)
+ 
+     When there are no rules, badguy wins! With rule, you find balance in the world.
+     """
+-    if prefetch == 5 and use_stream and protocol == 'grpc':
+-        assert set(map(lambda x: x.split('_')[0], order_of_ids[-20:])) == {'badguy'}
++    # first response from malicilious client will (mostly) appear after all the good clients
++    assert malicious_client_first_response_idx >= GOOD_CLIENTS - 1
++    # first responses will always be from the good clients
++    assert set(map(lambda x: x.split('_')[0], order_of_ids[:GOOD_CLIENTS])) == {
++        'goodguy'
++    }
++    if prefetch == 0:
++        # mailicious client will finish before all the good clients
++        assert malicious_client_last_response_idx < (len(order_of_ids) - 1)
++
++    if prefetch == 5:
++        if prefetch_implementation == 'gateway' and not use_stream:
++            # gateway with prefetch will complete the full iteration from the gateway recieves
++            # the full malicious client request iterator which is processed with prefetch
++            assert set(map(lambda x: x.split('_')[0], order_of_ids[-10:])) == {
++                'goodguy'
++            }
++            # mailicious client will finish before all the good clients
++            assert malicious_client_last_response_idx < (len(order_of_ids) - 1)
++        elif prefetch_implementation == 'gateway' and protocol == 'http':
++            # gateway with prefetch will complete the full iteration from the gateway recieves
++            # the full malicious client request iterator which is processed with prefetch
++            # and due to the request <-> response coupling
++            assert set(map(lambda x: x.split('_')[0], order_of_ids[-10:])) == {
++                'goodguy'
++            }
++            # mailicious client will finish before all the good clients
++            assert malicious_client_last_response_idx < (len(order_of_ids) - 1)
++
++        else:
++            assert set(map(lambda x: x.split('_')[0], order_of_ids[-10:])) == {'badguy'}
++            # mailicious client will finish last
++            assert malicious_client_last_response_idx == (len(order_of_ids) - 1)
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

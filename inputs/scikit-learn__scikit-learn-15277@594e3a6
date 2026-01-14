@@ -1,0 +1,194 @@
+  Task-ID: scikit-learn__scikit-learn-15277@594e3a6
+  Please checkout to this commit first: 70351e6efca51de0ec2a2834831d67f024a9525b
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Use linting to for a requirement for some jobs on azure
+Now that there are 8 jobs on azure, may we use linting as a dependency on some of these jobs to save resources? For example the following will always run:
+
+1. `Linux32 py35_ubuntu_atlas_32bit`
+2. `Linux pylatest_pip_openblas_pandas`
+3. `macOS pylatest_conda_mkl`
+4. `Windows py37_conda_mkl`
+
+The rest will run linting first, and only when lint passes, the rest of the tests will run.
+
+I hope this proposal is a good balance of lowering our carbon footprint and also have the benefits of having tests always run.
+  </issue>
+  
+  <patch>
+  diff --git a/azure-pipelines.yml b/azure-pipelines.yml
+index 9eca835865868..b614046317a10 100644
+--- a/azure-pipelines.yml
++++ b/azure-pipelines.yml
+@@ -1,9 +1,49 @@
+ # Adapted from https://github.com/pandas-dev/pandas/blob/master/azure-pipelines.yml
+ jobs:
++- job: linting
++  displayName: Linting
++  pool:
++    vmImage: ubuntu-16.04
++  steps:
++    - bash: echo "##vso[task.prependpath]$CONDA/bin"
++      displayName: Add conda to PATH
++    - bash: sudo chown -R $USER $CONDA
++      displayName: Take ownership of conda installation
++    - bash: conda create --name flake8_env --yes flake8
++      displayName: Install flake8
++    - bash: |
++        source activate flake8_env
++        ./build_tools/circle/flake8_diff.sh
++      displayName: Run flake8
++    - bash: |
++        source activate flake8_env
++        ./build_tools/circle/check_deprecated_properties.sh
++      displayName: Run deprecation properties checks
++
++
++# Will run all the time regardless of linting outcome.
++- template: build_tools/azure/posix.yml
++  parameters:
++    name: Linux_Always_Runs
++    vmImage: ubuntu-16.04
++    matrix:
++      pylatest_conda_mkl:
++        DISTRIB: 'conda'
++        PYTHON_VERSION: '*'
++        INSTALL_MKL: 'true'
++        NUMPY_VERSION: '*'
++        SCIPY_VERSION: '*'
++        CYTHON_VERSION: '*'
++        PILLOW_VERSION: '*'
++        PYTEST_VERSION: '*'
++        JOBLIB_VERSION: '*'
++        COVERAGE: 'true'
++
+ - template: build_tools/azure/posix.yml
+   parameters:
+     name: Linux
+     vmImage: ubuntu-16.04
++    dependsOn: [linting]
+     matrix:
+       # Linux environment to test that scikit-learn can be built against
+       # versions of numpy, scipy with ATLAS that comes with Ubuntu Xenial 16.04
+@@ -38,22 +78,12 @@ jobs:
+         CHECK_PYTEST_SOFT_DEPENDENCY: 'true'
+         TEST_DOCSTRINGS: 'true'
+         CHECK_WARNINGS: 'true'
+-      pylatest_conda_mkl:
+-        DISTRIB: 'conda'
+-        PYTHON_VERSION: '*'
+-        INSTALL_MKL: 'true'
+-        NUMPY_VERSION: '*'
+-        SCIPY_VERSION: '*'
+-        CYTHON_VERSION: '*'
+-        PILLOW_VERSION: '*'
+-        PYTEST_VERSION: '*'
+-        JOBLIB_VERSION: '*'
+-        COVERAGE: 'true'
+ 
+ - template: build_tools/azure/posix-32.yml
+   parameters:
+     name: Linux32
+     vmImage: ubuntu-16.04
++    dependsOn: [linting]
+     matrix:
+       py35_ubuntu_atlas_32bit:
+         DISTRIB: 'ubuntu-32'
+@@ -65,6 +95,7 @@ jobs:
+   parameters:
+     name: macOS
+     vmImage: xcode9-macos10.13
++    dependsOn: [linting]
+     matrix:
+       pylatest_conda_mkl:
+         DISTRIB: 'conda'
+@@ -82,6 +113,7 @@ jobs:
+   parameters:
+     name: Windows
+     vmImage: vs2017-win2016
++    dependsOn: [linting]
+     matrix:
+       py37_conda_mkl:
+         PYTHON_VERSION: '3.7'
+diff --git a/build_tools/azure/posix-32.yml b/build_tools/azure/posix-32.yml
+index 127630b61ca65..606b2502daab3 100644
+--- a/build_tools/azure/posix-32.yml
++++ b/build_tools/azure/posix-32.yml
+@@ -2,9 +2,11 @@ parameters:
+   name: ''
+   vmImage: ''
+   matrix: []
++  dependsOn: []
+ 
+ jobs:
+ - job: ${{ parameters.name }}
++  dependsOn: ${{ parameters.dependsOn }}
+   pool:
+     vmImage: ${{ parameters.vmImage }}
+   variables:
+diff --git a/build_tools/azure/posix.yml b/build_tools/azure/posix.yml
+index 13bce4963cae9..d525214b3150b 100644
+--- a/build_tools/azure/posix.yml
++++ b/build_tools/azure/posix.yml
+@@ -2,9 +2,11 @@ parameters:
+   name: ''
+   vmImage: ''
+   matrix: []
++  dependsOn: []
+ 
+ jobs:
+ - job: ${{ parameters.name }}
++  dependsOn: ${{ parameters.dependsOn }}
+   pool:
+     vmImage: ${{ parameters.vmImage }}
+   variables:
+diff --git a/build_tools/azure/windows.yml b/build_tools/azure/windows.yml
+index e5a1eaf5fd9ce..76efdd54f83eb 100644
+--- a/build_tools/azure/windows.yml
++++ b/build_tools/azure/windows.yml
+@@ -3,9 +3,11 @@ parameters:
+   name: ''
+   vmImage: ''
+   matrix: []
++  dependsOn: []
+ 
+ jobs:
+ - job: ${{ parameters.name }}
++  dependsOn: ${{ parameters.dependsOn }}
+   pool:
+     vmImage: ${{ parameters.vmImage }}
+   variables:
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

@@ -1,0 +1,257 @@
+  Task-ID: Lightning-AI__pytorch-lightning-15637@6086d44
+  Please checkout to this commit first: 952b64b35878b66706d34907e3eca17434890922
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  Remove deprecated APIs that should've been removed in the past releases
+## Proposed refactor
+
+Here's a quick list of APIs to remove (there can be false negative).
+```console
+$ git grep -n "deprecated::"|egrep -v "1.7|1.8|1.9"
+src/pytorch_lightning/profiler/base.py:28:    .. deprecated:: v1.6
+src/pytorch_lightning/profiler/base.py:56:    .. deprecated:: v1.6
+src/pytorch_lightning/profiler/profiler.py:20:    .. deprecated:: v1.6
+src/pytorch_lightning/trainer/trainer.py:175:                .. deprecated:: v1.5
+src/pytorch_lightning/trainer/trainer.py:345:                .. deprecated:: v1.5
+src/pytorch_lightning/utilities/memory.py:101:    .. deprecated:: v1.5
+```
+
+cc @borda @justusschock
+  </issue>
+  
+  <patch>
+  diff --git a/src/pytorch_lightning/CHANGELOG.md b/src/pytorch_lightning/CHANGELOG.md
+index d6726f985d5d6..235edeb582d79 100644
+--- a/src/pytorch_lightning/CHANGELOG.md
++++ b/src/pytorch_lightning/CHANGELOG.md
+@@ -52,7 +52,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
+ 
+ - Removed deprecated `pytorch_lightning.utilities.memory.get_gpu_memory_map` in favor of `pytorch_lightning.accelerators.cuda.get_nvidia_gpu_stats` ([#15617](https://github.com/Lightning-AI/lightning/pull/15617))
+ 
+--
++- Removed deprecated `pytorch_lightning.profiler.base.AbstractProfiler` in favor of `pytorch_lightning.profilers.profiler.Profiler` ([#15637](https://github.com/Lightning-AI/lightning/pull/15637))
++
++- Removed deprecated `pytorch_lightning.profiler.base.BaseProfiler` in favor of `pytorch_lightning.profilers.profiler.Profiler` ([#15637](https://github.com/Lightning-AI/lightning/pull/15637))
+ 
+ -
+ 
+diff --git a/src/pytorch_lightning/_graveyard/__init__.py b/src/pytorch_lightning/_graveyard/__init__.py
+index 55f0f8241c084..d844f2665966e 100644
+--- a/src/pytorch_lightning/_graveyard/__init__.py
++++ b/src/pytorch_lightning/_graveyard/__init__.py
+@@ -16,6 +16,7 @@
+ import pytorch_lightning._graveyard.core
+ import pytorch_lightning._graveyard.legacy_import_unpickler
+ import pytorch_lightning._graveyard.loggers
++import pytorch_lightning._graveyard.profiler
+ import pytorch_lightning._graveyard.trainer
+ import pytorch_lightning._graveyard.training_type
+ import pytorch_lightning._graveyard.utilities  # noqa: F401
+diff --git a/src/pytorch_lightning/_graveyard/profiler.py b/src/pytorch_lightning/_graveyard/profiler.py
+new file mode 100644
+index 0000000000000..81a3a21558460
+--- /dev/null
++++ b/src/pytorch_lightning/_graveyard/profiler.py
+@@ -0,0 +1,36 @@
++# Copyright The PyTorch Lightning team.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import pytorch_lightning.profiler.base as base
++
++
++class AbstractProfiler:
++    # TODO: Remove in v2.0.0
++    def __init__(self, *_, **__):
++        raise NotImplementedError(
++            "`pytorch_lightning.profiler.base.AbstractProfiler` was deprecated in v1.6 and is no longer supported"
++            " as of v1.9. Use `pytorch_lightning.profilers.Profiler` instead."
++        )
++
++
++class BaseProfiler:
++    # TODO: Remove in v2.0.0
++    def __init__(self, *_, **__):
++        raise RuntimeError(
++            "`pytorch_lightning.profiler.base.AbstractProfiler` was deprecated in v1.6 and is no longer supported"
++            " as of v1.9. Use `pytorch_lightning.profilers.Profiler` instead."
++        )
++
++
++base.AbstractProfiler = AbstractProfiler
++base.BaseProfiler = BaseProfiler
+diff --git a/src/pytorch_lightning/profiler/__init__.py b/src/pytorch_lightning/profiler/__init__.py
+index f55d7223e4051..0e97d02feb202 100644
+--- a/src/pytorch_lightning/profiler/__init__.py
++++ b/src/pytorch_lightning/profiler/__init__.py
+@@ -11,7 +11,6 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+-from pytorch_lightning.profiler.base import AbstractProfiler, BaseProfiler
+ from pytorch_lightning.profilers.advanced import AdvancedProfiler
+ from pytorch_lightning.profilers.base import PassThroughProfiler
+ from pytorch_lightning.profilers.profiler import Profiler
+@@ -20,8 +19,6 @@
+ from pytorch_lightning.profilers.xla import XLAProfiler
+ 
+ __all__ = [
+-    "AbstractProfiler",
+-    "BaseProfiler",
+     "Profiler",
+     "AdvancedProfiler",
+     "PassThroughProfiler",
+diff --git a/src/pytorch_lightning/profiler/base.py b/src/pytorch_lightning/profiler/base.py
+index f2e0ad5276f2e..72eeccf38070b 100644
+--- a/src/pytorch_lightning/profiler/base.py
++++ b/src/pytorch_lightning/profiler/base.py
+@@ -12,59 +12,10 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ """Profiler to check if there are any bottlenecks in your code."""
+-from abc import ABC, abstractmethod
+-from typing import Any
+-
+ from pytorch_lightning.profilers.base import PassThroughProfiler as NewPassThroughProfiler
+-from pytorch_lightning.profilers.profiler import Profiler
+ from pytorch_lightning.utilities.rank_zero import rank_zero_deprecation
+ 
+ 
+-class AbstractProfiler(ABC):
+-    """Specification of a profiler.
+-
+-    See deprecation warning below
+-
+-    .. deprecated:: v1.6
+-        `AbstractProfiler` was deprecated in v1.6 and will be removed in v1.8.
+-        Please use `Profiler` instead.
+-    """
+-
+-    @abstractmethod
+-    def start(self, action_name: str) -> None:
+-        """Defines how to start recording an action."""
+-
+-    @abstractmethod
+-    def stop(self, action_name: str) -> None:
+-        """Defines how to record the duration once an action is complete."""
+-
+-    @abstractmethod
+-    def summary(self) -> str:
+-        """Create profiler summary in text format."""
+-
+-    @abstractmethod
+-    def setup(self, **kwargs: Any) -> None:
+-        """Execute arbitrary pre-profiling set-up steps as defined by subclass."""
+-
+-    @abstractmethod
+-    def teardown(self, **kwargs: Any) -> None:
+-        """Execute arbitrary post-profiling tear-down steps as defined by subclass."""
+-
+-
+-class BaseProfiler(Profiler):
+-    """
+-    .. deprecated:: v1.6
+-        `BaseProfiler` was deprecated in v1.6 and will be removed in v1.8.
+-        Please use `Profiler` instead.
+-    """
+-
+-    def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+-        rank_zero_deprecation(
+-            "`BaseProfiler` was deprecated in v1.6 and will be removed in v1.8. Please use `Profiler` instead."
+-        )
+-        super().__init__(*args, **kwargs)
+-
+-
+ class PassThroughProfiler(NewPassThroughProfiler):
+     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+         rank_zero_deprecation(
+diff --git a/src/pytorch_lightning/profiler/profiler.py b/src/pytorch_lightning/profiler/profiler.py
+index 40d18e79a3284..544a0a83f6054 100644
+--- a/src/pytorch_lightning/profiler/profiler.py
++++ b/src/pytorch_lightning/profiler/profiler.py
+@@ -17,7 +17,7 @@
+ 
+ class Profiler(NewProfiler):
+     """
+-    .. deprecated:: v1.6
++    .. deprecated:: v1.7
+         `pytorch_lightning.profiler.Profiler` is deprecated in v1.7 and will be removed in v1.9.
+         Use the equivalent `pytorch_lightning.profilers.Profiler` class instead.
+     """
+diff --git a/tests/tests_pytorch/graveyard/test_profiler.py b/tests/tests_pytorch/graveyard/test_profiler.py
+new file mode 100644
+index 0000000000000..8341ef4aeb76f
+--- /dev/null
++++ b/tests/tests_pytorch/graveyard/test_profiler.py
+@@ -0,0 +1,28 @@
++# Copyright The PyTorch Lightning team.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import pytest
++
++
++def test_v2_0_0_base_profilers():
++    from pytorch_lightning.profiler.base import AbstractProfiler, BaseProfiler
++
++    with pytest.raises(
++        RuntimeError, match="AbstractProfiler` was deprecated in v1.6 and is no longer supported as of v1.9."
++    ):
++        AbstractProfiler()
++
++    with pytest.raises(
++        RuntimeError, match="AbstractProfiler` was deprecated in v1.6 and is no longer supported as of v1.9."
++    ):
++        BaseProfiler()
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>

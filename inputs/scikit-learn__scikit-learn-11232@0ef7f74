@@ -1,0 +1,302 @@
+  Task-ID: scikit-learn__scikit-learn-11232@0ef7f74
+  Please checkout to this commit first: 4e9f97dba582bade957a6b3a0503125698978fc0
+  You will be provided with 1) a partial code base, 2) an issue statement explaining a problem to resolve, and 3) a patch addressing the issue.
+ 
+  <issue>
+  implement / benchmark loguniform distribution for randomized search
+Most of our standard grid searches use logarithmic scales. For the randomized search we approximate that using the exponential distribution. It might be quite a bit better to use an actual log uniform distribution. It would be great if someone could benchmark that and possibly add the log uniform distribution (to the utils?).
+  </issue>
+  
+  <patch>
+  diff --git a/doc/modules/classes.rst b/doc/modules/classes.rst
+index 22e12e837478c..d87de0456455a 100644
+--- a/doc/modules/classes.rst
++++ b/doc/modules/classes.rst
+@@ -1504,6 +1504,10 @@ Plotting
+ 
+ .. currentmodule:: sklearn
+ 
++.. autosummary::
++   :toctree: generated/
++   :template: class.rst
++
+ .. autosummary::
+    :toctree: generated/
+    :template: function.rst
+diff --git a/doc/modules/grid_search.rst b/doc/modules/grid_search.rst
+index 751637441c6bd..9e0028e6ec332 100644
+--- a/doc/modules/grid_search.rst
++++ b/doc/modules/grid_search.rst
+@@ -121,6 +121,7 @@ discrete choices (which will be sampled uniformly) can be specified::
+ This example uses the ``scipy.stats`` module, which contains many useful
+ distributions for sampling parameters, such as ``expon``, ``gamma``,
+ ``uniform`` or ``randint``.
++
+ In principle, any function can be passed that provides a ``rvs`` (random
+ variate sample) method to sample a value. A call to the ``rvs`` function should
+ provide independent random samples from possible parameter values on
+@@ -139,6 +140,22 @@ For continuous parameters, such as ``C`` above, it is important to specify
+ a continuous distribution to take full advantage of the randomization. This way,
+ increasing ``n_iter`` will always lead to a finer search.
+ 
++There is also a log-uniform random variable with
++:class:`utils.fixes.lograndom`, which is continuous version of ``[1, 10, 100,
++1000]`` and are all equally likely with a log-uniform random variable.
++Formally, this means that ``loguniform(10 ** 0, 10 ** 1) == 10**x`` for some
++``x`` that is uniformly distributed between 0 and 1. This is an alias to
++SciPy's
++`stats.reciprocal <https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.reciprocal.html>`_.
++
++Mirroring the example above in grid search, we can specify a continuous random
++variable that is log-uniformly distributed between ``10**0`` and ``10**-3``:
++
++  from sklearn.utils.fixes import loguniform
++  {'C': loguniform(10 ** 0, 10 ** 3),
++   'gamma': loguniform(10 ** -4, 10 ** -3),
++   'kernel': ['rbf'], 'class_weight':['balanced', None]}
++
+ .. topic:: Examples:
+ 
+     * :ref:`sphx_glr_auto_examples_model_selection_plot_randomized_search.py` compares the usage and efficiency
+diff --git a/doc/whats_new/v0.22.rst b/doc/whats_new/v0.22.rst
+index 98a95c98720d4..af7401f6f16f2 100644
+--- a/doc/whats_new/v0.22.rst
++++ b/doc/whats_new/v0.22.rst
+@@ -544,6 +544,15 @@ Changelog
+   :func:`~utils.estimator_checks.parametrize_with_checks`, to parametrize
+   estimator checks for a list of estimators. :pr:`14381` by `Thomas Fan`_.
+ 
++- A new random variable, :class:`utils.fixes.loguniform` implements a
++  log-uniform random variable (e.g., for use in RandomizedSearchCV).
++  For example, the outcomes ``1``, ``10`` and ``100`` are all equally likely
++  for ``loguniform(10 ** 0, 10 ** 2)``. See :issue:`11232` by
++  :user:`Scott Sievert <stsievert>` and :user:`Nathaniel Saul <sauln>`,
++  and `SciPy PR 10815 <https://github.com/scipy/scipy/pull/10815>`.
++
++:mod:`sklearn.neighbors`
++....................
+ - |API| The following utils have been deprecated and are now private:
+   - ``choose_check_classifiers_labels``
+   - ``enforce_estimator_tags_y``
+@@ -594,7 +603,7 @@ These changes mostly affect library developers.
+   Such classifiers need to have the `binary_only=True` estimator tag.
+   :pr:`13875` by `Trevor Stephens`_.
+ 
+-- `requires_positive_X` estimator tag (for models that require
++- |API| `requires_positive_X` estimator tag (for models that require
+   X to be non-negative) is now used by `check_estimator` to make sure
+   a proper error message is raised if X contains some negative entries.
+   :pr:`14680` by :user:`Alex Gramfort <agramfort>`.
+diff --git a/examples/model_selection/plot_randomized_search.py b/examples/model_selection/plot_randomized_search.py
+index af93bf4247d18..8c76b26c9bced 100644
+--- a/examples/model_selection/plot_randomized_search.py
++++ b/examples/model_selection/plot_randomized_search.py
+@@ -12,8 +12,8 @@
+ parameters. The result in parameter settings is quite similar, while the run
+ time for randomized search is drastically lower.
+ 
+-The performance is slightly worse for the randomized search, though this
+-is most likely a noise effect and would not carry over to a held-out test set.
++The performance is may slightly worse for the randomized search, and is likely
++due to a noise effect and would not carry over to a held-out test set.
+ 
+ Note that in practice, one would not search over this many different parameters
+ simultaneously using grid search, but pick only the ones deemed most important.
+@@ -23,18 +23,19 @@
+ import numpy as np
+ 
+ from time import time
+-from scipy.stats import randint as sp_randint
++import scipy.stats as stats
++from sklearn.utils.fixes import loguniform
+ 
+-from sklearn.model_selection import GridSearchCV
+-from sklearn.model_selection import RandomizedSearchCV
++from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+ from sklearn.datasets import load_digits
+-from sklearn.ensemble import RandomForestClassifier
++from sklearn.linear_model import SGDClassifier
+ 
+ # get some data
+ X, y = load_digits(return_X_y=True)
+ 
+ # build a classifier
+-clf = RandomForestClassifier(n_estimators=20)
++clf = SGDClassifier(loss='hinge', penalty='elasticnet',
++                    fit_intercept=True)
+ 
+ 
+ # Utility function to report best scores
+@@ -51,11 +52,9 @@ def report(results, n_top=3):
+ 
+ 
+ # specify parameters and distributions to sample from
+-param_dist = {"max_depth": [3, None],
+-              "max_features": sp_randint(1, 11),
+-              "min_samples_split": sp_randint(2, 11),
+-              "bootstrap": [True, False],
+-              "criterion": ["gini", "entropy"]}
++param_dist = {'average': [True, False],
++              'l1_ratio': stats.uniform(0, 1),
++              'alpha': loguniform(10 ** -4, 10 ** 0)}
+ 
+ # run randomized search
+ n_iter_search = 20
+@@ -69,11 +68,9 @@ def report(results, n_top=3):
+ report(random_search.cv_results_)
+ 
+ # use a full grid over all parameters
+-param_grid = {"max_depth": [3, None],
+-              "max_features": [1, 3, 10],
+-              "min_samples_split": [2, 3, 10],
+-              "bootstrap": [True, False],
+-              "criterion": ["gini", "entropy"]}
++param_grid = {'average': [True, False],
++              'l1_ratio': np.linspace(0, 1, num=10),
++              'alpha': [10**-i for i in [-4, -3, -2, -1, 0]]}
+ 
+ # run grid search
+ grid_search = GridSearchCV(clf, param_grid=param_grid)
+diff --git a/sklearn/utils/fixes.py b/sklearn/utils/fixes.py
+index 1d7d28a72c2e3..8c98e36d56662 100644
+--- a/sklearn/utils/fixes.py
++++ b/sklearn/utils/fixes.py
+@@ -15,6 +15,7 @@
+ import numpy as np
+ import scipy.sparse as sp
+ import scipy
++import scipy.stats
+ from scipy.sparse.linalg import lsqr as sparse_lsqr  # noqa
+ 
+ 
+@@ -256,3 +257,45 @@ def _joblib_parallel_args(**kwargs):
+         if require == 'sharedmem':
+             args['backend'] = 'threading'
+     return args
++
++
++class loguniform(scipy.stats.reciprocal):
++    """A class supporting log-uniform random variables.
++
++    Parameters
++    ----------
++    low : float
++        The minimum value
++    high : float
++        The maximum value
++
++    Methods
++    -------
++    rvs(self, size=None, random_state=None)
++        Generate log-uniform random variables
++
++    Notes
++    -----
++    This class generates values between ``base**low`` and ``base**high`` or
++
++        base**low <= loguniform(low, high, base=base).rvs() <= base**high
++
++    The logarithmic probability density function (PDF) is uniform. When
++    ``x`` is a uniformly distributed random variable between 0 and 1, ``10**x``
++    are random variales that are equally likely to be returned.
++
++    This class is an alias to ``scipy.stats.reciprocal``, which uses the
++    reciprocal distribution:
++    https://en.wikipedia.org/wiki/Reciprocal_distribution
++
++    Example
++    -------
++
++    >>> from sklearn.utils.fixes import loguniform
++    >>> rv = loguniform(10 ** -3, 10 ** 1)
++    >>> rvs = rv.rvs(random_state=42, size=1000)
++    >>> rvs.min()  # doctest: +SKIP
++    0.0010435856341129003
++    >>> rvs.max()  # doctest: +SKIP
++    9.97403052786026
++    """
+diff --git a/sklearn/utils/tests/test_fixes.py b/sklearn/utils/tests/test_fixes.py
+index 39b03be9c8a80..b1fe31b6bff93 100644
+--- a/sklearn/utils/tests/test_fixes.py
++++ b/sklearn/utils/tests/test_fixes.py
+@@ -3,16 +3,19 @@
+ #          Lars Buitinck
+ # License: BSD 3 clause
+ 
++import math
+ import pickle
+ 
+ import numpy as np
+ import pytest
++import scipy.stats
+ 
+ from sklearn.utils.testing import assert_array_equal
+ 
+ from sklearn.utils.fixes import MaskedArray
+ from sklearn.utils.fixes import _joblib_parallel_args
+ from sklearn.utils.fixes import _object_dtype_isnan
++from sklearn.utils.fixes import loguniform
+ 
+ 
+ def test_masked_array_obj_dtype_pickleable():
+@@ -68,3 +71,27 @@ def test_object_dtype_isnan(dtype, val):
+     mask = _object_dtype_isnan(X)
+ 
+     assert_array_equal(mask, expected_mask)
++
++
++@pytest.mark.parametrize("low,high,base",
++                         [(-1, 0, 10), (0, 2, np.exp(1)), (-1, 1, 2)])
++def test_loguniform(low, high, base):
++    rv = loguniform(base ** low, base ** high)
++    assert isinstance(rv, scipy.stats._distn_infrastructure.rv_frozen)
++    rvs = rv.rvs(size=2000, random_state=0)
++
++    # Test the basics; right bounds, right size
++    assert (base ** low <= rvs).all() and (rvs <= base ** high).all()
++    assert len(rvs) == 2000
++
++    # Test that it's actually (fairly) uniform
++    log_rvs = np.array([math.log(x, base) for x in rvs])
++    counts, _ = np.histogram(log_rvs)
++    assert counts.mean() == 200
++    assert np.abs(counts - counts.mean()).max() <= 40
++
++    # Test that random_state works
++    assert (
++        loguniform(base ** low, base ** high).rvs(random_state=0)
++        == loguniform(base ** low, base ** high).rvs(random_state=0)
++    )
+
+  </patch>
+  
+	I need you to comprehensively review the above patch with respect to the given issue from multiple dimensions such as functional implementation, code quality, and defects. Generate a report in the following format.
+  <review>
+  ## Function
+  Briefly describe the main purpose and implemented functionality of this patch. Specifically, does this patch address the issue?
+
+  ## Complexity
+  Is the patch more complex than it should be? Check it at every level - lines, functions, classes.
+
+  ## Style
+  Does the patch follow the programming conventions of the original code? Does it pick good names for newly introduced variables, functions, classes, and files?
+
+  ## Documentation
+  Does the patch provide clear and necessary comments? If the patch changes how users build, test, interact with, or release code, does it also update associated documentation?
+
+  ## Defects
+  If there are any defects in the patch, point out their locations (file path and line number) and provide improvement suggestions in the following format:
+  <defect>
+  file_path: file path of defect 1 in the patch
+  line: line number of defect 1 in the patch
+  suggestion: suggestion for defect 1
+  </defect>
+  <defect>
+  file_path: file path of defect 2 in the patch
+  line: line number of defect 2 in the patch
+  suggestion: suggestion for defect 2
+  </defect>
+  ...
+  Note:
+  - If there is no defect, output "None" in this section.
+  </review>
