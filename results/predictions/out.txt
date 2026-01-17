@@ -1,4 +1,3 @@
-
 [ansible__ansible-26156@c8ca9a9][<review>
   ## Function
 
@@ -11,84 +10,32 @@
   ## Defects
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py
-  line: 88
-  suggestion: > [!CAUTION]
-> **🚨** check_for_acl_int_present does not handle direction other than ingress/egress causing mdir to be undefined
-> 
-> The function only sets mdir when direction is 'ingress'/'egress', otherwise subsequent re.search using mdir will trigger UnboundLocalError. Although parameters are usually restricted by argument_spec, the module should remain robust internally, and future extensions/case differences may trigger this crash.
-> 
-> **Suggestion**: Normalize direction (lower) and explicitly fail or return False in the else branch; also suggest using module.fail_json to provide a clear error.
-> 
+  line: 197
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py
-  line: 91
-  suggestion: > [!WARNING]
-> **⚠️** Using intf.title() to normalize interface names is unreliable and may cause section matching failure
-> 
-> NX-OS interfaces common forms such as Ethernet1/2, port-channel10, loopback0, mgmt0, etc. Python's title() will turn 'ethernet1/2' into 'Ethernet1/2' (seemingly correct), but for 'port-channel10' it will become 'Port-Channel10' (may be inconsistent with actual output, NX-OS is often 'port-channel10' or 'Po10' or 'interface port-channel10'), and may produce unpredictable results for more complex naming. Once the section does not match the correct interface segment, the function will misjudge as unconfigured, resulting in configuration being issued every time, still not idempotent.
-> 
-> **Suggestion**: Avoid using title(); a more robust way is to use case-insensitive regex to locate 'interface <name>' section directly in running-config, or use the standardized interface name conversion function returned by the device (if nxos utils already provides it).
-> 
-
+This change removes the `acl_applied_to` key from the module's return data. However, the module's `RETURN` documentation block (lines 68-74) states that `acl_applied_to` is "returned: always". This is a breaking change that violates the module's documented contract. Please either update the documentation to reflect this change or restore the functionality to return this data.
   </defect>
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py
   line: 99
-  suggestion: > [!WARNING]
-> **⚠️** ACL detection regex does not escape name and is not anchored to line boundaries, posing a risk of false matches/misses
-> 
-> re.search('ip access-group {0} {1}'.format(name, mdir), ...) directly concatenates name:
-> 1) If the ACL name contains regex special characters, it will cause false matches or regex errors;
-> 2) Not matched at line start/single line, may be falsely hit in other contexts/comments/adjacent configurations;
-> 3) Also did not consider multi-space, case differences.
-> These will all affect the accuracy of idempotence judgment.
-> 
-> **Suggestion**: Use re.escape for name; use (?m) multiline + line start anchor, and allow variable whitespace and case insensitivity, e.g., r'(?im)^\s*ip\s+access-group\s+<acl>\s+(in|out)\s*$'
-> 
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
+The `name` variable, which holds the ACL name, is used directly in the `re.search` pattern. If an ACL name contains characters with special meaning in regular expressions (e.g., `.`, `*`, `+`), it can lead to incorrect matches and break idempotency. To prevent this, the `name` should be escaped using `re.escape()`.
+
+```suggestion
+    match = re.search('ip access-group {0} {1}'.format(re.escape(name), mdir), str(body[0]))
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py
-  line: 166
-  suggestion: > [!WARNING]
-> **⚠️** existing changed from "dict/list" semantics to bool, which may affect subsequent logic readability and future maintenance
-> 
-> The original logic existing was the existing binding entry (dict) in a certain direction, now it becomes True/False. Although it is only used for if not existing judgment in the current diff fragment, the variable semantics have changed but the naming has not, which is easy to introduce subsequent maintenance errors (e.g., future code still accessing existing.get in dict way).
-> 
-> **Suggestion**: Rename to is_present / acl_bound, and keep consistent in the code; or return a more structured result (e.g., matched line/current interface section) for easier debugging and extension.
-> 
+  line: 91
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py
-  line: 195
-  suggestion: > [!TIP]
-> **💡** Removing acl_applied_to return field may break backward compatibility and debugging experience
-> 
-> results['acl_applied_to'] was removed. Although this field may not be widely relied upon, it is an output interface change that may affect playbooks/tests/downstream dependencies. And when fixing idempotence issues, retaining some "detected status quo" output helps locate device differences.
-> 
-> **Suggestion**: If it must be removed, please explain in changelog/documentation; it is more recommended to keep it and return new detection results (e.g., access-group line matched in the interface section).
-> 
+Using `intf.title()` might lead to incorrect capitalization for some interface names. For example, `port-channel10` becomes `Port-Channel10`, which may not match the device's output if it is, for instance, `Port-channel10`. This could cause issues if the `section` filter is case-sensitive. Using `intf.capitalize()` is safer as it only capitalizes the first character of the string, which is less likely to cause mismatches for different interface types.
 
-  </defect>
-  <defect>
-  file_path: test/units/modules/network/nxos/fixtures/nxos_acl_interface/show_running-config_aclmgr.txt
-  line: 1
-  suggestion: > [!WARNING]
-> **⚠️** New fixture is inconsistent with new detection logic: ACL name and interface/direction do not cover typical use cases
-> 
-> fixture contains `interface Ethernet1/41` under which `copp-system-p-acl-bgp out` is bound, while ACL list also contains `ip access-list ANSIBLE_OUT`. This sample does not cover:
-> - `Ethernet1/2 ingress` in playbook example;
-> - in/out on the same interface;
-> - `port-channel/loopback` and other interface naming;
-> - case/space variants.
-> When test coverage is insufficient, idempotence fixes may regress on real device output differences.
-> 
-> **Suggestion**: Supplement multiple groups of fixtures and unit tests: at least cover ingress/out, different interface types, different case/spaces, and "not exist/exist/exist but different ACL" scenarios.
-> 
-
+```suggestion
+    command = ['show running-config aclmgr | section {0}'.format(intf.capitalize())]
+```
   </defect>
 
   </review>]
@@ -105,86 +52,61 @@
   <defect>
   file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
   line: 157
-  suggestion: > [!CAUTION]
-> **🚨** botocore ImportError is swallowed and no failure path is set
-> 
-> The current try/except only imports botocore, but the ImportError branch directly passes. Subsequent references to botocore.exceptions.* will still trigger NameError or unfriendly exceptions when botocore/boto3 is not installed, instead of giving clear fail_json information. Although documentation declares requirements, it should still explicitly report errors at runtime.
-> 
-> **Suggestion**: Set HAS_BOTO3/HAS_BOTOCORE flags in the ImportError branch and module.fail_json early in main(); or move the import into main and fail_json directly upon ImportError, ensuring that undefined botocore symbols are not referenced.
-> 
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+This `try...except` block for importing `botocore` is problematic. If `botocore` is not installed, the `ImportError` is caught and ignored (`pass`), but the code later attempts to use `botocore.exceptions`, which would raise a `NameError`. This would provide a confusing traceback to the user.
+
+The `AnsibleAWSModule` you're using already performs a check for `boto3` and `botocore` and will fail with a clear error message if they are missing. Therefore, this block is both redundant and buggy. Please remove it.
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
-  line: 228
-  suggestion: > [!CAUTION]
-> **🚨** Return structure has destructive changes: changed from elbs to elb_classic_facts
-> 
-> Old module output key was elbs, new code changed to module.exit_json(elb_classic_facts=elbs), which will break existing playbook/role references to return values, belonging to compatibility breakage. If it is not a new module/major version change, the original output key should be retained or an alias provided.
-> 
-> **Suggestion**: Retain `elbs` for compatibility, and optionally provide `elb_classic_facts` as a new field (or vice versa), dual writing for at least one release cycle.
-> 
+  line: 166
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+The `describe_load_balancers` API call will fail with a `ValidationError` if the `LoadBalancerNames` parameter is an empty list. Since the `names` module parameter defaults to an empty list, this module will fail when no names are provided. You should only pass the `LoadBalancerNames` parameter to the paginator if the `names` list is not empty.
+
+```python
+    kwargs = {}
+    if names:
+        kwargs['LoadBalancerNames'] = names
+    load_balancers = paginator.paginate(**kwargs).build_full_result().get('LoadBalancerDescriptions', [])
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
-  line: 165
-  suggestion: > [!WARNING]
-> **⚠️** Passing empty list to LoadBalancerNames may trigger parameter validation error
-> 
-> In argument_spec, names defaults to []. In some botocore versions, describe_load_balancers/paginator passing LoadBalancerNames=[] may trigger ParamValidationError or AWS side error; common practice is not to pass this parameter when names is not specified.
-> 
-> **Suggestion**: Make conditional judgment on names in list_elbs: pass LoadBalancerNames only when names is truthy, otherwise paginate() without this parameter.
-> 
+  line: 81
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+The description for the `elb_classic_facts` return value is just 'a'. Please provide a more descriptive explanation, for example: 'A list of facts about the Classic Load Balancers.'
+
+```suggestion
+  description: A list of facts about the Classic Load Balancers
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
-  line: 164
-  suggestion: > [!WARNING]
-> **⚠️** build_full_result() one-time aggregation may lead to high memory usage
-> 
-> paginator.paginate(...).build_full_result() will pull all pages into memory at once. When the number of ELBs in the account is large, it will cause unnecessary memory peaks. It is more recommended to iterate each page in a stream and process LoadBalancerDescriptions one by one.
-> 
-> **Suggestion**: Change to `for page in paginator.paginate(...): for lb in page.get('LoadBalancerDescriptions', []): ...` process page by page to avoid one-time aggregation.
-> 
+  line: 163
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+The `@AWSRetry.backoff` decorator on `list_elbs` can lead to inefficiency. If any of the API calls inside the loop (e.g., `get_tags`, `lb_instance_health`) fail with a retryable error, the entire `list_elbs` function will be re-executed. This includes the initial `describe_load_balancers` call, which could be very slow if there are many load balancers.
+
+Consider moving the retry logic to the individual helper functions (`get_tags`, `get_lb_attributes`, `lb_instance_health`) that make the API calls, and wrapping the `paginator.paginate` call in its own decorated helper function. This will make the retry logic more granular and efficient.
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
-  line: 195
-  suggestion: > [!WARNING]
-> **⚠️** describe_instance_health call may be redundant and Instances parameter passing/strategy is poor
-> 
-> Currently, {'InstanceId': ...} list is taken from lb.get('Instances', []) and passed directly to describe_instance_health. Even if instances is empty, multiple calls may still be initiated, causing meaningless requests; and making multiple API calls to classify by status will amplify the request volume.
-> 
-> **Suggestion**: Return empty list and 0 directly when instances is empty, without calling describe_instance_health; and consider calling describe_instance_health only once to get all statuses and classify locally by State, avoiding three calls.
-> 
+  line: 194
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py
-  line: 79
-  suggestion: > [!TIP]
-> **💡** RETURN documentation description is inaccurate and field naming is inconsistent
-> 
-> There are meaningless descriptions in RETURN (e.g., description: a), sample structure mixes old fields and new fields, and actual field naming may be inconsistent with sample due to camel_dict_to_snake_dict; also top-level key name/compatibility strategy (e.g., elbs) is not explained.
-> 
-> **Suggestion**: Improve RETURN: provide accurate description, minimal sample consistent with real return fields, and clarify top-level key name and compatibility fields/migration strategy.
-> 
+The `describe_instance_health` API call is made even when the `instances` list is empty. This is an unnecessary API call. You can add a check to return early if `instances` is empty.
 
-  </defect>
-  <defect>
-  file_path: ansible__ansible-27435@da1a331.patch
-  line: 1
-  suggestion: > [!TIP]
-> **💡** PR contains .patch file submitted as a new file
-> 
-> Added ansible__ansible-27435@da1a331.patch, which usually should not be submitted as part of the source code, creating review noise and potentially affecting packaging/licensing.
-> 
-> **Suggestion**: Remove the .patch file from the commit and keep only the actual modified source files.
-> 
-
+```python
+def lb_instance_health(connection, load_balancer_name, instances, state):
+    if not instances:
+        return [], 0
+    instance_states = connection.describe_instance_health(LoadBalancerName=load_balancer_name, Instances=instances).get('InstanceStates', [])
+    instate = [instance['InstanceId'] for instance in instance_states if instance['State'] == state]
+    return instate, len(instate)
+```
   </defect>
 
   </review>]
@@ -201,38 +123,13 @@
   <defect>
   file_path: lib/ansible/plugins/action/copy.py
   line: 411
-  suggestion: > [!WARNING]
-> **⚠️** Validation expression for empty string src is redundant and has poor readability
-> 
-> Current condition is `((not source or source is None) and content is None) or dest is None`. Where `source is None` is already covered by `not source` (None/'' are both falsy), causing redundancy and reducing readability. More importantly, it relies on falsy semantics to judge non-expected types like `src: 0` as "not provided". Although src should be a string/path as expected, clearer writing can reduce ambiguity.
-> 
-> **Suggestion**: Suggest changing the validation logic to explicitly handle None and empty strings (and pure whitespace) separately, and remove redundant judgments. For example: check dest first, then check content/src combination; src being a blank string should also fail (same category as empty string).
-> 
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: test/integration/targets/copy/tasks/tests.yml
-  line: 172
-  suggestion: > [!WARNING]
-> **⚠️** Failure assertion for empty src is not strict enough, may miss error message/error type verification
-> 
-> New test case only asserts `failed_copy | failed`, does not verify if msg is the expected "src (or content) and dest are required", nor does it verify that no unexpected files are generated under dest. If failure occurs due to different reasons in the future (e.g. path permission/temp directory issues), this test may still "falsely pass", reducing regression positioning ability.
-> 
-> **Suggestion**: Suggest adding assertions: 1) `failed_copy.msg` contains clear prompt; 2) (Optional) Ensure that a certain known file being copied does not exist under dest/or file count remains unchanged, to ensure CWD is not copied again.
-> 
+The expression `(not source or source is None)` is a bit redundant. The `not source` check is sufficient as it evaluates to `True` for both `None` and empty strings. You can simplify this condition for better readability.
 
-  </defect>
-  <defect>
-  file_path: test/integration/targets/copy/tasks/tests.yml
-  line: 179
-  suggestion: > [!TIP]
-> **💡** Adding a lot of debug in integration tests may increase noise and execution output
-> 
-> This change changes multiple commented-out debugs to actual debugs, and sets verbosity=1. Although it will not output under default verbosity, the overall test file change is large, noise increases, affecting subsequent maintenance and review.
-> 
-> **Suggestion**: Suggest keeping necessary debug only near new use cases, or maintain original commented status; at least avoid mixing large-scale formatting/debug output changes unrelated to this PR into bugfix.
-> 
-
+```suggestion
+        if (not source and content is None) or dest is None:
+```
   </defect>
 
   </review>]
@@ -247,112 +144,55 @@
 
   ## Defects
   <defect>
+  file_path: lib/ansible/module_utils/network/iosxr/iosxr.py
+  line: 354
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+There's a potential `UnboundLocalError` here. If `filter` is `None`, the `response` variable is never assigned, but it's used in `etree.tostring(response)`. The function should handle this case gracefully, for instance by initializing `response` to `None` and then checking if it's `None` before using it.
+
+```suggestion
+    response = None
+    if filter is not None:
+        response = conn.get(filter)
+
+    if response is None:
+        return b''
+
+    return to_bytes(etree.tostring(response), errors='surrogate_then_replace').strip()
+```
+  </defect>
+  <defect>
   file_path: lib/ansible/module_utils/network/common/netconf.py
-  line: 80
-  suggestion: > [!CAUTION]
-> **🚨** parse_rpc_error exception handling is too broad and may trigger AttributeError
-> 
-> Currently using try/except Exception to fetch error-info when fetching error-message fails. But both find(...).text may return None (node does not exist or text is empty), triggering AttributeError; and catching Exception too broadly will cover real errors like XML parsing, causing error information to be wrongly downgraded to error-info, making troubleshooting difficult.
-> 
-> **Suggestion**: Change to explicitly check if the node exists before fetching text; only fallback to error-info when node is missing, and provide default message when still missing, avoiding catching Exception.
-> 
+  line: 82
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+Using a broad `except Exception:` can mask unexpected errors. The likely intended exception to catch here is `AttributeError`, which occurs if `error.find(...)` returns `None`. Catching a more specific exception improves the robustness of the error handling.
+
+```suggestion
+                except AttributeError:
+```
   </defect>
   <defect>
   file_path: lib/ansible/module_utils/network/iosxr/iosxr.py
-  line: 349
-  suggestion: > [!CAUTION]
-> **🚨** get_oper response undefined when filter is None causing crash
-> 
-> get_oper() only assigns response when filter is not None, but uses response unconditionally for etree.tostring at the end of function. filter=None will trigger UnboundLocalError. Even if current callers all pass filter, this is a high-risk bug for public util.
-> 
-> **Suggestion**: Call conn.get() without filter or fail_json directly when filter is None; at least ensure response is always defined.
-> 
+  line: 260
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+Using `except Exception:` is too broad and can hide other issues, such as XML parsing errors. If the goal is to handle cases where `root` is an `Element` object instead of a string (which would cause a `TypeError`), it's better to catch the specific exception `TypeError`.
+
+```suggestion
+    except TypeError:
+```
   </defect>
   <defect>
   file_path: lib/ansible/module_utils/network/iosxr/iosxr.py
-  line: 257
-  suggestion: > [!WARNING]
-> **⚠️** etree_find/etree_findall handling of input types is messy and parses XML repeatedly
-> 
-> Function name implies root can be XML string, but Element (item) is also passed in iosxr_interface.py. Current implementation first etree.fromstring(root); if root is Element it throws exception, then re-parses via etree.tostring(root). This pattern has poor performance and masks type issues; and correct handling of bytes/str/Element should be more direct.
-> 
-> **Suggestion**: Clearly define input parameter type (recommend Element or bytes); if Element is allowed, use root.find/root.findall directly; if bytes/str, parse once. Avoid using Exception as type branch.
-> 
+  line: 272
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/iosxr/iosxr_banner.py
-  line: 213
-  suggestion: > [!CAUTION]
-> **🚨** Return field changed from commands to xml under netconf transport may cause compatibility breakage
-> 
-> The PR switched netconf test assertion from result.commands to result.xml, and NCConfiguration writes result to xml instead of commands. Historically many network modules put "sent content" uniformly in commands (even if it is xml). This change will affect user playbook/upper role dependency on result.commands (API behavior change).
-> 
-> **Suggestion**: Suggest keeping commands field existing and semantically consistent under both transports (can let netconf fill both commands and xml, or add xml as new field but do not remove/empty historical semantics of commands), and explicitly state in docs/CHANGELOG.
-> 
+Similar to the `etree_find` function, using `except Exception:` is too broad. To make the error handling more specific and avoid masking other potential issues, it would be better to catch `TypeError`, which is raised when `etree.fromstring` receives an `Element` object.
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/iosxr/iosxr_interface.py
-  line: 197
-  suggestion: > [!CAUTION]
-> **🚨** validate_mtu does not handle non-numeric input causing ValueError
-> 
-> validate_mtu directly int(value), when user passes non-numeric (e.g. 'auto', space, illegal string other than None) it will throw ValueError, becoming module crash instead of friendly error. Previous implementation via module.fail_json, but also didn't prevent ValueError; now returns (False,msg) but may still exception.
-> 
-> **Suggestion**: Do explicit validation/catch ValueError for int conversion, and return clear error message (e.g. "mtu must be an integer between ...").
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/iosxr/iosxr_interface.py
-  line: 230
-  suggestion: > [!CAUTION]
-> **🚨** Interface owner parsing regex is too narrow causing netconf MTU owner potentially missing
-> 
-> owner uses regex (^[a-z]+)([0-9/]+$) to extract, only supporting pure letter prefix + digit/slash suffix. IOS XR common interface names include hyphens/dots/sub-interfaces (e.g. TenGigE, GigabitEthernet0/0/0/0.100, Bundle-Ether1, MgmtEth0/RP0/CPU0/0 etc.), causing match failure and not setting owner. Subsequently build_xml will generate <owner>None</owner> or missing (depending on build_xml behavior), potentially causing device to reject config or error idempotence.
-> 
-> **Suggestion**: Use more reliable owner derivation method (e.g. take all characters until the first digit, or start directly from owner field rules required by YANG model), and fail_json with clear prompt when unable to derive.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/iosxr/iosxr_interface.py
-  line: 475
-  suggestion: > [!CAUTION]
-> **🚨** NCConfiguration.map_obj_to_xml_rpc incorrect judgment on absent status causing failure to delete interface not in running
-> 
-> When absent, intf_params is added only when item['name'] in intf_list, which then decides opcode=delete. If interface config exists in candidate/other views or filter condition causes running not to return this node, module will misjudge as no need to delete, thus not generating change (inconsistent with user declarative intent). In addition, filter construction relies on build_xml('filter') behavior on list params, if filter does not include all target interfaces, similar issues will occur.
-> 
-> **Suggestion**: absent should construct delete based on want (and rely on netconf delete idempotent semantics), or at least still try delete when filter miss; also ensure filter covers all want interfaces.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/module_utils/network/iosxr/iosxr.py
-  line: 393
-  suggestion: > [!WARNING]
-> **⚠️** load_config sending netconf edit_config item by item may change transaction semantics
-> 
-> Changing conn.edit_config(command_filter) to for filter in to_list(command_filter): conn.edit_config(filter). This splits what might be one edit-config (single transaction) into multiple RPCs, which may cause intermediate state validation failure, candidate diff calculation inconsistent with final commit, and performance degradation. Especially in interface module _edit_filter_list may contain multiple RPCs (config+shutdown/no-shutdown), splitting transaction risk is greater.
-> 
-> **Suggestion**: Confirm if netconf connection plugin's edit_config supports batch/single config; if must send multiple times, suggest declaring transaction semantic change in documentation, and ensuring candidate diff/commit behavior is consistent with multiple RPCs (e.g. unified get candidate before and after sending).
-> 
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/iosxr_interface/tasks/netconf.yaml
-  line: 10
-  suggestion: > [!TIP]
-> **💡** set_fact expression lacking spaces has average readability
-> 
-> set_fact: test_items="{{ ... }}" readability is poor; and include + with_items writing is older.
-> 
-> **Suggestion**: Can change to more standard YAML style (set_fact multiline, include_tasks/loop), improving maintainability.
-> 
-
+```suggestion
+    except TypeError:
+```
   </defect>
 
   </review>]
@@ -368,84 +208,21 @@
   ## Defects
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py
-  line: 439
-  suggestion: > [!CAUTION]
-> **🚨** get_existing using truthy judgment causes valid "existing values" like False/0/empty list to be treated as non-existent, breaking idempotence and comparison logic
-> 
-> Current logic is `if gv: existing[arg]=gv else: ...`. When device existing value is False, 0 or empty list, it will go to else branch, treating the parameter as "unconfigured/unparseable". This leads to incorrect diffs, extra commands or repeated changed. Should distinguish between "failed to parse" (None) and "parsed value may be False/0/[]".
-> 
-> **Suggestion**: Change judgment from `if gv:` to `if gv is not None:`, only consider filling default mapping when gv is None; for list parameters (networks/redistribute/inject_map) retain empty list semantics, do not use default mapping to replace.
-> 
-```suggestion:-0+10
-                    gv = get_value(arg, config, module)
-                    if gv is not None:
-                        existing[arg] = gv
-                    else:
-                        if arg != 'client_to_client' and arg in PARAM_TO_DEFAULT_KEYMAP:
-                            existing[arg] = PARAM_TO_DEFAULT_KEYMAP.get(arg)
-                        else:
-                            existing[arg] = gv
+  line: 443
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+The logic to determine the existing value is a bit complex and could be simplified for better readability and maintainability. The `if gv:` check is not explicit about handling falsy but valid values (like `False`, `[]`, or `''`), and the special handling for `client_to_client` adds to the complexity.
+
+Consider refactoring this block to more clearly separate the handling of valid values (including `False`) from "not present" values that might have a default. This would make the code easier to understand and maintain.
+
+```python
+if gv or gv is False:
+    existing[arg] = gv
+elif arg in PARAM_TO_DEFAULT_KEYMAP:
+    existing[arg] = PARAM_TO_DEFAULT_KEYMAP.get(arg)
+else:
+    existing[arg] = gv
 ```
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py
-  line: 585
-  suggestion: > [!CAUTION]
-> **🚨** get_redistribute_command unsafe assumption on input rule shape, may trigger IndexError or generate incorrect commands
-> 
-> New logic wraps non-list rule into `[rule]`, but subsequently uses `rule[0]` and `rule[1]` unconditionally. When user passes only one element (e.g. `['direct']`) or string (e.g. `'direct'`), it will index out of bounds or generate incorrect command; also semantics for "only specify protocol, no route-map" scenario are unclear.
-> 
-> **Suggestion**: Validate rule must be list and length 2 before generating command (or explicitly support length 1 NX-OS syntax and generate corresponding command); otherwise fail_json gives clear error. And normalize rule to fixed shape (e.g. tuple) before comparison/diff calculation.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py
-  line: 340
-  suggestion: > [!WARNING]
-> **⚠️** get_value parses networks/redistribute/inject_map uniformly but without normalization, easy to cause non-idempotence due to order/alias differences
-> 
-> Split and remove keywords for all three types of parameters, but inject-map's copy-attributes flag has underscore/hyphen historical difference risk; also did not normalize case/equivalent writing, and list-of-lists comparison is sensitive to order, device output order change will cause meaningless addition/deletion.
-> 
-> **Suggestion**: Unify inject-map's copy-attributes representation (suggest always using `copy-attributes`); normalize children to tuple and sort/deduplicate before list parameter comparison, or use set semantics when order is not required.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py
-  line: 381
-  suggestion: > [!WARNING]
-> **⚠️** dampening_state existing value judgment too loose: only judging by substring 'dampening' may misjudge
-> 
-> `'dampening' in config` may misjudge enabling basic dampening due to containing `dampening route-map ...` lines, or miss.
-> 
-> **Suggestion**: Change to use more precise regex match basic command by line (e.g. `^\s*dampening\s*$`), and keep consistent with dampening_routemap parsing logic.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py
-  line: 544
-  suggestion: > [!WARNING]
-> **⚠️** networks/inject_map diff deletion logic may cause flapping change due to order/equivalent writing differences
-> 
-> Deletion logic based on `if enet not in value` (inject_map same). If device echo order differs from input, or there are duplicate items/equivalent writings (space, case, copy-attributes representation difference), it will trigger unnecessary no/add causing changed flapping.
-> 
-> **Suggestion**: Do same set of normalization (case, token, copy-attributes etc.) for value and existing_*, sort/deduplicate before comparison; introduce stable normalized key for diff calculation if necessary.
-> 
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/nxos_bgp_af/tests/common/sanity.yaml
-  line: 79
-  suggestion: > [!TIP]
-> **💡** Test case boolean value case and style inconsistent, suggest unifying to true/false
-> 
-> Mixing True/False and true/false in the same YAML file, although usually parseable, consistency and readability are poor.
-> 
-> **Suggestion**: Unify to lowercase `true/false`, and keep style consistent within the same file.
-> 
-
   </defect>
 
   </review>]
@@ -461,78 +238,33 @@
   ## Defects
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_vrf.py
-  line: 255
-  suggestion: > [!CAUTION]
-> **🚨** Executing no vni on all existing VRFs when creating VRF may mistakenly delete VNI configuration of irrelevant VRFs
-> 
-> Current logic iterates have (all VRF objects) and inserts `no vni <vni>` into the command sequence to be executed for each object with vni when "target VRF does not exist, need to create" and want has vni.
-> 
-> This will try to delete vni of all VRFs after entering `vrf context <name>` (although command is executed under new VRF context, there are still two types of risks:
-> 1) If NX-OS allows `no vni` to affect current VRF in this context, it will be meaningless/error in new VRF;
-> 2) More seriously: if `no vni` is global or context-independent semantics (or device implementation/version difference), it may lead to deleting vni bindings of other VRFs.
-> 
-> Original bug was `have` is list causing `.get` crash; fix should only compare/clean "obj_in_have of current target VRF", not all VRFs. And in "create new VRF" branch, old vni does not exist itself, no need to clean.
-> 
-> **Suggestion**: Delete this logic of inserting into have iteration; if cleaning old vni is indeed needed, execute `no vni <old>` in that VRF context only when obj_in_have exists and its vni is inconsistent with target.
-> 
-```suggestion:-0+5
-                if commands:
-                    if vni and obj_in_have and obj_in_have.get('vni'):
-                        commands.insert(1, 'no vni {0}'.format(obj_in_have['vni']))
-                commands.append('exit')
+  line: 256
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+This block, which attempts to remove a VNI, is logically incorrect within the VRF creation path (`if not obj_in_have:`). A new VRF has no previous VNI to remove. Furthermore, the inner loop iterates over all existing VRFs (`have`) and would generate incorrect `no vni` commands for unrelated VRFs. This entire `if vni:` block should be removed. The logic for handling VNI changes belongs in the update path (`else` block).
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/network/nxos/nxos_vrf.py
+  line: 232
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+This direct dictionary access `w['vni']` could raise a `KeyError` if `'vni'` is not present in the `w` dictionary, for example when using `aggregate` where a user might not specify `vni` for all VRFs. It's safer to use `.get()` to avoid potential crashes, like `vni = w.get('vni')`. This would be consistent with how other parameters are accessed in this module.
+
+```suggestion
+        vni = w.get('vni')
 ```
   </defect>
   <defect>
   file_path: lib/ansible/modules/network/nxos/nxos_vrf.py
-  line: 245
-  suggestion: > [!WARNING]
-> **⚠️** candidate empty value judgment too wide, may generate invalid/unexpected commands (e.g. rd auto)
-> 
-> New logic uses `if candidate:` to filter rd/description/vni. For NX-OS/module parameters, many fields may be strings (e.g. rd: "auto"), which is certainly true; but if user explicitly passes empty string, 0, or false values that need to be allowed, they will be ignored. More importantly, this module previously used `!= ''` for rd/vni, semantics was allowing certain values but rejecting empty string; now unified to truthy judgment, semantics changed.
-> 
-> In addition, `cmd = item + ' ' + str(candidate)` converts non-string (e.g. int vni) to string which is good, but does not handle case where candidate contains only whitespace.
-> 
-> **Suggestion**: Change judgment to be consistent with original behavior: generate command only when candidate is not None and candidate != '' (or non-empty after strip); do strip validation for description if necessary.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_vrf.py
   line: 268
-  suggestion: > [!WARNING]
-> **⚠️** Updating existing VRF lacks handling of delete/replace semantics (especially vni/rd changes)
-> 
-> When obj_in_have exists, code appends `item <candidate>` only when candidate != obj_in_have.get(item), but does not handle that some fields may need `no <item> <old>`/`no <item>` before modification, or need specific order (e.g. no vni old then vni new).
-> 
-> Original error comes from vni; usually vni change needs to clear old value first, otherwise may fail or produce conflict.
-> 
-> **Suggestion**: For fields that may need replacement like vni/rd, explicitly implement "if have exists old value and differs from want, generate no old first, then generate new", and add corresponding unit/integration test coverage.
-> 
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/nxos/nxos_vrf.py
-  line: 229
-  suggestion: > [!TIP]
-> **💡** Direct access to w['vni']/w['admin_state'] may cause KeyError, suggest using .get uniformly and constraining in parameter validation stage
-> 
-> Current `vni = w['vni']`, `admin_state = w['admin_state']` assume fields always exist. If parameter schema does not enforce these fields as required (or upstream call constructs want/have object missing them), KeyError will be thrown when accessing w['vni'], causing module crash. Previous code also had direct indexing, but robustness can be enhanced during this refactoring.
-> 
-> **Suggestion**: Unify optional fields to w.get, and strictly validate required fields in argument_spec/validate stage to reduce runtime exceptions.
-> 
+This generic loop for updating properties is incomplete and can lead to incorrect device configurations. It has two main issues:
 
-  </defect>
-  <defect>
-  file_path: ansible__ansible-36494@c514aeb.patch
-  line: 1
-  suggestion: > [!TIP]
-> **💡** PR contains .patch file itself as new file, may not conform to repository specification
-> 
-> Added `ansible__ansible-36494@c514aeb.patch` file, content is diff of the same file. Usually repository should not submit patch file body (unless project explicitly requires). This adds noise and may duplicate actual source code changes.
-> 
-> **Suggestion**: Remove the .patch file, keep only actual modifications to source files; or submit according to project contribution specification (e.g. attach link/description in PR description, instead of adding patch file to version control).
-> 
+1.  **It doesn't handle property removal.** If a user removes a parameter like `description` or `vni` from their playbook (making `candidate` `None`), this loop does nothing. It should generate the appropriate `no` command to remove the configuration from the device.
+2.  **It doesn't handle properties that require a specific update sequence.** For example, to change a `vni`, the old one should typically be removed with `no vni <old_vni>` before the new one is configured. This loop only adds the new value, which might fail or leave the device in an inconsistent state.
 
+A more robust implementation would handle each property's update logic individually to ensure the correct commands are generated for all scenarios (add, remove, modify).
   </defect>
 
   </review>]
@@ -549,62 +281,18 @@
   <defect>
   file_path: lib/ansible/modules/cloud/misc/terraform.py
   line: 221
-  suggestion: > [!CAUTION]
-> **🚨** force_init parameter not effective and executes terraform init unconditionally, destroying idempotence and performance
-> 
-> PR goal is to complete force_init parameter in documentation, but current implementation calls init_plugins() every time module executes, completely ignoring module.params['force_init']. This leads to: 1) Running `terraform init` every task (slow, extra network dependency); 2) Executing init in check_mode (violating expectation); 3) Inconsistent with documentation "force init only when state file is missing".
-> 
-> **Suggestion**: Use force_init according to document semantics: execute init only when force_init=true and state_file specified but not exist (or default terraform.tfstate not exist); and skip init in check_mode. At least init call should be controlled by force_init, and avoid unconditional execution.
-> 
-```suggestion:-0+1
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+The `init_plugins` function is called unconditionally on every run. This means `terraform init` will be executed every time the module runs, which can be slow and is likely not the intended behavior. The `force_init` parameter is defined but not used to control this.
+
+The call to `init_plugins` should be conditional, based on the `force_init` parameter. This will align with the parameter's name and provide the user with control over when `terraform init` is run.
+
+```suggestion
     force_init = module.params.get('force_init')
-
-    if bin_path is not None:
-        command = [bin_path]
-    else:
-        command = [module.get_bin_path('terraform')]
-
-    # Only run `terraform init` when explicitly requested.
-    # Also avoid side effects in check_mode.
-    if force_init and not module.check_mode:
+    if force_init:
         init_plugins(command[0], project_path)
+
 ```
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/misc/terraform.py
-  line: 159
-  suggestion: > [!CAUTION]
-> **🚨** init_plugins uses implicit global module, unsafe design and error-prone
-> 
-> init_plugins(bin_path, project_path) internally directly references global variable module. This function does not show dependencies in signature, and if module is not initialized during future refactoring/reuse/unit testing, it will direct NameError. Style is also inconsistent with other helpers in this file (preflight_validation also relies on global, but at least is existing pattern). New code suggests changing to explicitly pass module.
-> 
-> **Suggestion**: Change init_plugins signature to init_plugins(module, bin_path, project_path) and pass module at call site, to eliminate implicit dependency, improve testability and maintainability.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/misc/terraform.py
-  line: 159
-  suggestion: > [!WARNING]
-> **⚠️** terraform init missing -no-color, and error message does not include stdout
-> 
-> Other commands in module use -no-color. Not adding it to init will pollute log/parsing; only returns err on failure, missing out, incomplete troubleshooting info.
-> 
-> **Suggestion**: Add -no-color to init, and include stdout/stderr in fail_json.
-> 
-
-  </defect>
-  <defect>
-  file_path: test/sanity/validate-modules/ignore.txt
-  line: 573
-  suggestion: > [!TIP]
-> **💡** Removing E323 ignore but not explaining/completing corresponding check item
-> 
-> ignore.txt removed E323 ignore item for terraform.py, indicating hope to pass validation. But this PR does not show root cause fix for E323 (usually documentation/parameter type etc.). If CI still reports E323, it will cause regression.
-> 
-> **Suggestion**: Confirm specific cause of E323 and fix in module; if still unable to fix, avoid removing ignore or explain reason and corresponding change in PR description.
-> 
-
   </defect>
 
   </review>]
@@ -620,66 +308,37 @@
   ## Defects
   <defect>
   file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
-  line: 624
-  suggestion: > [!CAUTION]
-> **🚨** exec_module manually appends 'tags' but does not ensure kwargs contains key, may trigger KeyError
-> 
-> Code appends `['tags']` to `self.module_args.keys()` then directly executes `setattr(self, key, kwargs[key])`. If tags is not defined in argument_spec in module parameter system or kwargs does not contain tags under certain paths, KeyError will be thrown when accessing `kwargs['tags']`, causing module crash. Current change aims to "bypass module_args not containing tags", but implementation is unsafe.
-> 
-> **Suggestion**: Formally include tags into argument_spec (thus entering module_args/kwargs) and go through unified parameter normalization flow; or change to `kwargs.get(key)` when reading kwargs and execute setattr only when key exists. Prefer former to be consistent with update_tags semantics.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
   line: 689
-  suggestion: > [!WARNING]
-> **⚠️** changed judgment only based on whether state contains tags field, may lead to wrong idempotence/missing or false report
-> 
-> Logic is: if `self.results['state']` has tags then call update_tags and set changed based on return value; otherwise as long as self.tags is non-empty then changed=True. Issues include:
-> 1) Whether tags field exists after state to dict depends on serialization implementation, branch behavior unstable;
-> 2) Even if tags are consistent, if state does not contain tags key it will still set changed=True, causing non-idempotence;
-> 3) After changed=True it triggers subsequent create/update, but currently only sets `tags=self.tags` when constructing LoadBalancer param, not necessarily covering final tags produced by update_tags.
-> 
-> **Suggestion**: Unify to calculate changed based on difference between "remote current tags" and "expected tags (final value after purge/update rules)"; do not rely on whether serialized dict contains tags key. Ensure tags finally written to Azure are consistent with tags used for changed judgment.
-> 
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py
-  line: 772
-  suggestion: > [!WARNING]
-> **⚠️** Create/update parameters directly use self.tags, may not conform to update_tags / purge_tags semantics
-> 
-> When constructing `LoadBalancer(...)`, set `tags=self.tags`, but result of calling `self.update_tags(self.results['state']['tags'])` above is only written back to `self.results['state']['tags']`, not backfilled to `self.tags` or used for request parameters. Therefore it may occur: changed is True based on update_tags, but tags actually sent to Azure are still original self.tags, causing overwrite/retain behavior error when supporting update_tags/purge_tags semantics.
-> 
-> **Suggestion**: Save result calculated by update_tags as `desired_tags` and use for subsequent create/update request (instead of original self.tags). Also ensure input of update_tags comes from real tags of SDK object (e.g. existing_resource.tags), avoiding relying on serialized dict potentially missing fields.
-> 
+The current logic for handling tags is not quite right. It correctly detects that a change is needed but fails to use the updated tags for the `create_or_update` operation. Instead, it uses `self.tags` which contains only the tags from the playbook, potentially leading to loss of existing tags when `append_tags` is `True`.
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
-  line: 157
-  suggestion: > [!WARNING]
-> **⚠️** facts module list() call signature may be wrong or change semantics: from subscription level list() to per RG list(resource_group)
-> 
-> Changed `self.network_client.load_balancers.list()` to `list(self.resource_group)`. Azure Python SDK common pattern is `load_balancers.list(resource_group_name)` (per RG) and `load_balancers.list_all()` (subscription level). Original code might be incorrect, but new code may also not match actual SDK method or change module semantics; if module needs subscription level enumeration should use list_all; if only per RG enumeration then need to ensure resource_group is required in all paths and documentation consistent.
-> 
-> **Suggestion**: Check correct method against currently supported azure-mgmt-network version: subscription level enumeration use `list_all()`; per RG enumeration use `list(self.resource_group)` and sync parameter validation and documentation. Suggest adding unit test/integration test covering this call.
-> 
+The logic can be simplified and corrected to ensure the merged tags are used for the update operation.
 
+```suggestion
+        update_tags, new_tags = self.update_tags(self.results['state'].get('tags'))
+        if update_tags:
+            changed = True
+            self.tags = new_tags
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
   line: 47
-  suggestion: > [!TIP]
-> **💡** Setting resource_group to required=true may be incompatible with existing usage
-> 
-> Marking facts module parameter resource_group as required brings backward incompatibility risk: if previously allowed listing all LBs under subscription without specifying RG, it will break existing playbooks; and coupled with list call change, if SDK supports list_all then RG is not mandatory.
-> 
-> **Suggestion**: Clarify module expected capability: if supporting subscription level enumeration then should not be required; if only supporting per RG, then need to mark destructive change in docs/CHANGELOG, and provide clear parameter validation and error prompts.
-> 
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
+Making `resource_group` a required parameter is a backward-incompatible change. Previously, users could omit this parameter to get a list of all load balancers in the subscription. This change removes that functionality. It would be better to keep this optional to preserve existing behavior. The `list_items` method can be adjusted to call `list_all()` when `resource_group` is not provided. Please remove this line.
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer_facts.py
+  line: 157
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+While the original call to `list()` was incorrect, changing it to `list(self.resource_group)` and making `resource_group` required removes the ability to list all load balancers in a subscription. To fix the original bug while preserving functionality, you can check if `resource_group` is provided and call either `list(self.resource_group)` or `list_all()` accordingly.
+
+```suggestion
+            response = self.network_client.load_balancers.list(self.resource_group) if self.resource_group else self.network_client.load_balancers.list_all()
+```
   </defect>
 
   </review>]
@@ -695,74 +354,15 @@
   ## Defects
   <defect>
   file_path: test/integration/targets/ecs_cluster/playbooks/roles/ecs_cluster/tasks/main.yml
-  line: 544
-  suggestion: > [!CAUTION]
-> **🚨** Execution role bound wrong Managed Policy when creating
-> 
-> Task execution role is used for pulling ECR images, writing CloudWatch Logs etc., usually requires AmazonECSTaskExecutionRolePolicy (or equivalent permission set). But currently using AmazonEC2ContainerServiceRole, which is not the policy required for task execution role, may cause subsequent Fargate task/log related steps to fail or produce misleading test results.
-> 
-> **Suggestion**: Replace managed_policy with AmazonECSTaskExecutionRolePolicy (or add this policy). Also confirm if trust policy (ecs-trust-policy.json) is ecs-tasks.amazonaws.com.
-> 
-```suggestion:-0+9
-    - name: ensure AmazonECSTaskExecutionRolePolicy exists
-      iam_role:
-        name: ecsTaskExecutionRole
-        assume_role_policy_document: "{{ lookup('file','ecs-trust-policy.json') }}"
-        description: "Allows ECS containers to make calls to ECR"
-        state: present
-        create_instance_profile: no
+  line: 551
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+The managed policy being attached to the `ecsTaskExecutionRole` seems incorrect. For a task execution role, the recommended AWS managed policy is `AmazonECSTaskExecutionRolePolicy`. The policy `AmazonEC2ContainerServiceRole` is intended for the ECS service role, not the task execution role. Using the correct, more specific policy adheres to the principle of least privilege and is the standard practice for this type of role.
+
+```yaml
         managed_policy:
         - AmazonECSTaskExecutionRolePolicy
-        <<: *aws_connection_info
 ```
-  </defect>
-  <defect>
-  file_path: test/integration/targets/ecs_cluster/playbooks/network_fail.yml
-  line: 47
-  suggestion: > [!CAUTION]
-> **🚨** Integration test case logic invalid: using invalid ARN to trigger botocore version threshold error
-> 
-> The case expects error 'botocore needs to be version 1.10.44...', but condition triggering this error is only parameter execution_role_arn non-empty and botocore version too low, irrelevant to whether ARN is valid. If test environment botocore >= 1.10.44, this step will continue to call AWS API, eventually may fail with different error due to illegal ARN, causing test instability/inconsistency with assertion.
-> 
-> **Suggestion**: Avoid relying on runtime environment botocore version to assert fixed error message: 1) If purpose is to cover version threshold, should explicitly control/simulate botocore version in test (usually impossible in integration test); 2) More reasonable to write unit test covering botocore_at_least branch; 3) Or provide real usable execution_role_arn in integration test to verify success path.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/amazon/ecs_taskdefinition.py
-  line: 324
-  suggestion: > [!WARNING]
-> **⚠️** execution_role_arn botocore version lower limit may be inaccurate and missing boto3 version check
-> 
-> executionRoleArn support depends on botocore/boto3 model version. Hardcoding botocore>=1.10.44 here may be too specific: future or other backport/packaged versions may not match; also checking only botocore but not boto3 version may still cause exception where client does not support parameter.
-> 
-> **Suggestion**: Consider checking boto3/botocore simultaneously, or adopting more robust way (e.g. catching Unknown parameter/ParamValidationError and giving friendly prompt), avoiding strong binding to single version number.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/amazon/ecs_taskdefinition.py
-  line: 208
-  suggestion: > [!WARNING]
-> **⚠️** register_task signature change needs to confirm all call sites and readability
-> 
-> register_task() added execution_role_arn parameter and adjusted parameter order. Current diff shows one call site updated, but need to confirm if there are other call sites in module (or future maintainers misusing positional parameters). Also function parameters are many, positional parameters are error-prone.
-> 
-> **Suggestion**: Suggest using keyword parameters at call site (if code style allows), or aggregate parameters into dict, improving maintainability, and confirm no missing call sites.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/amazon/ecs_taskdefinition.py
-  line: 72
-  suggestion: > [!TIP]
-> **💡** Parameter documentation can supplement Fargate association description and constraints
-> 
-> execution_role_arn is often required for Fargate + awslogs. Currently only describes ARN meaning, lacking prompts on when user must set, difference from task_role_arn etc.
-> 
-> **Suggestion**: Supplement in docs: Fargate using awslogs/ECR pull usually requires execution_role_arn; task_role_arn is AWS API permission inside application container, the two are different.
-> 
-
   </defect>
 
   </review>]
@@ -779,105 +379,37 @@
   <defect>
   file_path: lib/ansible/plugins/lookup/consul_kv.py
   line: 122
-  suggestion: > [!CAUTION]
-> **🚨** ANSIBLE_CONSUL_VALIDATE_CERTS environment variable parsing error and incorrect type
-> 
-> Code `validate_certs = os.environ['ANSIBLE_CONSUL_VALIDATE_CERTS'] or True` has two problems:
-> 1) When env var exists but is string "False", expression result is "False" (non-empty string) instead of boolean False; and in Python non-empty string is truthy, leading to unpredictable underlying verify behavior (depends on how python-consul/requests handles verify parameter).
-> 2) Only falls back to True when env var exists but is empty string; this is inconsistent with expected boolean parsing.
-> This directly affects the core requirement of "skipping certificate validation".
-> 
-> **Suggestion**: Use Ansible common boolean parsing (e.g. ansible.module_utils.parsing.convert_bool.boolean), or at least explicitly convert string to bool, and support 0/1, true/false, yes/no etc. Ensure verify parameter passed to consul.Consul is real bool or CA bundle path.
-> 
-```suggestion:-0+4
-                    url = os.environ['ANSIBLE_CONSUL_URL']
-                    from ansible.module_utils.parsing.convert_bool import boolean
-                    validate_certs = boolean(os.environ.get('ANSIBLE_CONSUL_VALIDATE_CERTS', 'true'), strict=False)
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+Accessing environment variables using `os.environ['KEY']` will raise a `KeyError` if the variable is not set. This will cause the lookup to fail unexpectedly when `ANSIBLE_CONSUL_URL` is set but the other SSL-related environment variables are not. You should use `os.environ.get('KEY', default_value)` instead.
+
+Additionally, the logic for `validate_certs` is incorrect. `os.environ['ANSIBLE_CONSUL_VALIDATE_CERTS'] or True` will evaluate to `True` for an empty string, and for a string like `'False'`, it will be the string `'False'` which is truthy. The `python-consul` library, which uses `requests`, expects a boolean for this parameter, or a path to a CA bundle. A string like `'False'` or `'True'` would be incorrectly interpreted as a path.
+
+The value from the environment variable needs to be correctly converted to a boolean or passed as a path string.
+
+```suggestion
+                    validate_certs_env = os.environ.get('ANSIBLE_CONSUL_VALIDATE_CERTS')
+                    if validate_certs_env is None:
+                        validate_certs = True
+                    elif validate_certs_env.lower() in ('true', '1', 'yes'):
+                        validate_certs = True
+                    elif validate_certs_env.lower() in ('false', '0', 'no'):
+                        validate_certs = False
+                    else:
+                        validate_certs = validate_certs_env
                     client_cert = os.environ.get('ANSIBLE_CONSUL_CLIENT_CERT')
-                    u = urlparse(url)
-                    consul_api = consul.Consul(host=u.hostname, port=u.port, scheme=u.scheme, verify=validate_certs,
-                                               cert=client_cert)
 ```
   </defect>
   <defect>
   file_path: lib/ansible/plugins/lookup/consul_kv.py
-  line: 128
-  suggestion: > [!WARNING]
-> **⚠️** port default value and type handling inconsistent (string vs integer)
-> 
-> `port = kwargs.get('port', '8500')` in kwargs branch default value is string. Consul client usually expects port as int; even if current library allows string, it is unnecessary hidden danger, and inconsistent with DOCUMENTATION port default: 8500 (number).
-> 
-> **Suggestion**: Change default value to integer 8500, and do int() conversion or validation on passed port, avoiding runtime type issues.
-> 
-```suggestion:-0+6
-                    port = int(kwargs.get('port', 8500))
-                    host = kwargs.get('host', 'localhost')
-                    scheme = kwargs.get('scheme', 'http')
-                    validate_certs = kwargs.get('validate_certs', True)
-                    client_cert = kwargs.get('client_cert', None)
-                    consul_api = consul.Consul(host=host, port=port, scheme=scheme, verify=validate_certs,
-                                               cert=client_cert)
+  line: 114
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+The URL for the `python-consul` installation guide was changed from HTTPS to HTTP. It's generally better to use HTTPS for all external links to ensure a secure connection.
+
+```suggestion
+                'python-consul is required for consul_kv lookup. see https://python-consul.readthedocs.io/en/latest/#installation')
 ```
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/lookup/consul_kv.py
-  line: 121
-  suggestion: > [!WARNING]
-> **⚠️** Environment variable branch and kwargs branch behavior inconsistent and does not support overriding URL config via kwargs
-> 
-> When ANSIBLE_CONSUL_URL is set, it enters env branch, at this time scheme/port/host come from URL, but validate_certs/client_cert read from env only, cannot be overridden by lookup parameters; also validate_certs default logic in env branch is different from kwargs branch (env branch currently even has wrong string logic). This causes user unable to adjust validation/cert per task when using ANSIBLE_CONSUL_URL.
-> 
-> **Suggestion**: Unify config priority: kwargs overrides env (or explicitly document opposite); and also read kwargs as override items in env branch. At least ensure validate_certs/client_cert parse consistently on both paths.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/lookup/consul_kv.py
-  line: 113
-  suggestion: > [!TIP]
-> **💡** Document link changed from https to http, and inconsistent with original error message/security best practice
-> 
-> python-consul documentation link in error prompt changed from https to http (and domain also from readthedocs.io to readthedocs.org). This is not core goal of this PR, and reduces security/consistency, likely unintentional change.
-> 
-> **Suggestion**: Keep original https link (readthedocs.io) or update to current official recommended link, avoiding irrelevant changes.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/lookup/consul_kv.py
-  line: 43
-  suggestion: > [!TIP]
-> **💡** DOCUMENTATION parameter naming inconsistent with user example (verify vs validate_certs)
-> 
-> PR description/reproduction case uses verify=False, but documentation and implementation use validate_certs (and pass to consul verify parameter). This causes user following issue writing to still fail or parameter ignored.
-> 
-> **Suggestion**: Add alias support in DOCUMENTATION/code (e.g. accept verify as alias of validate_certs), or at least clarify in docs/example that validate_certs should be used, and update PR description example.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/lookup/consul_kv.py
-  line: 56
-  suggestion: > [!TIP]
-> **💡** client_cert description inaccurate and missing client_key/CA bundle support explanation
-> 
-> client_cert doc says "verify the ssl connection", but it is actually client certificate for mTLS authentication; and requests/urllib3 common form is cert can be (cert, key) tuple, verify can be True/False or CA bundle path. Current implementation only supports single path string, capability may be insufficient and misleading.
-> 
-> **Suggestion**: Correct doc wording to "client certificate for mTLS authentication", and consider adding client_key / ca_path parameters, or explain only supporting python-consul cert/verify form.
-> 
-
-  </defect>
-  <defect>
-  file_path: ansible__ansible-42456@b29e00e.patch
-  line: 1
-  suggestion: > [!TIP]
-> **💡** Submitting patch file as repository new file does not conform to regular PR structure
-> 
-> Added a .patch file in PR and modified source file simultaneously. Usually generated patch file should not be included in repository (unless project has clear process requirement). This adds noise and maintenance cost.
-> 
-> **Suggestion**: Remove the .patch file from commit, keep only source code changes.
-> 
-
   </defect>
 
   </review>]
@@ -894,61 +426,17 @@
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_host_network.py
   line: 329
-  suggestion: > [!CAUTION]
-> **🚨** Misuse of variable/return type in needs_sync() may lead to out-of-sync states never being detected or direct exceptions.
-> 
-> for network_attachment_service in nic_service.network_attachments_service().list(): actually iterates over network attachment objects (attachment), but the code names it *service* and directly reads network_attachment_service.in_sync. Usually, the in_sync property is located on the NetworkAttachment entity, not the service; the current approach is both misleading in naming and may lead to the property not existing in the SDK or reading the wrong object, resulting in: 1) sync_all_networks not being triggered when synchronization is needed; 2) an AttributeError at runtime; thus failing to resolve the 409 issue described in the PR.
-> 
-> **Recommendation**: Rename the iteration variable to attachment and perform robust checks on attachment.in_sync (e.g., using getattr with a default of True/False) to ensure unsynchronized attachments are truly detected. Check the SDK if necessary: verify if the in_sync field is on the attachment; if details must be retrieved via a service, call attachment_service.get() first.
-> 
-```suggestion:-0+7
-def needs_sync(nics_service):
-    nics = nics_service.list()
-    for nic in nics:
-        nic_service = nics_service.nic_service(nic.id)
-        attachments_service = nic_service.network_attachments_service()
-        for attachment in attachments_service.list():
-            if not getattr(attachment, 'in_sync', True):
-                return True
-    return False
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+This implementation is inefficient as it makes an API call for each NIC in a loop. A more performant approach would be to fetch all network attachments for the host with a single API call.
+
+You can refactor this function to accept `host_service` instead of `nics_service` and implement it like this:
+```python
+def needs_sync(host_service):
+    attachments_service = host_service.network_attachments_service()
+    return any(not attachment.in_sync for attachment in attachments_service.list())
 ```
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_host_network.py
-  line: 382
-  suggestion: > [!WARNING]
-> **⚠️** Synchronous call lacks wait/refresh, which may still trigger 409 during setup_networks.
-> 
-> host_service.sync_all_networks() might be an asynchronous task; the current code immediately continues to calculate attachments/call setup_networks after synchronization without waiting for completion or re-fetching NIC/attachment states, which may still encounter the "Please synchronize ..." 409 error, making the fix unstable.
-> 
-> **Recommendation**: Confirm if the SDK sync_all_networks returns a waitable future/Job; if so, wait for completion before proceeding; otherwise, poll the in_sync status of attachments after sync until all are True or a timeout occurs, providing a clear error message on timeout.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_host_network.py
-  line: 382
-  suggestion: > [!WARNING]
-> **⚠️** The changed flag for synchronization behavior may be inconsistent with actual changes.
-> 
-> host_networks_module.changed is set to True as long as any attachment is out of sync. Whether the synchronization action itself should be considered a "configuration change" depends on the module's semantics; also, if sync_all_networks fails or does not complete, this changed flag will be misreported.
-> 
-> **Recommendation**: Only mark as changed after confirming synchronization has successfully completed; or clarify the meaning of changed in the documentation (e.g., synchronization counts as a change). It is also recommended to catch synchronization failures and return module.fail_json to avoid silent failure + changed=true.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_host_network.py
-  line: 79
-  suggestion: > [!TIP]
-> **💡** The parameter documentation description is too broad; it's recommended to clarify the scope and potential impact.
-> 
-> sync_networks is described as "all networks will be synchronized before modification," but the implementation executes sync_all_networks on the host (global impact) and only triggers it when not in check_mode. Users need to know that it may affect all network attachments on all interfaces of that host and could be time-consuming.
-> 
-> **Recommendation**: Supplement the documentation: synchronization affects all NICs/attachments of the specified host; it may take time; it is not executed in check_mode; and why it is needed (to avoid 409).
-> 
-
+Remember to update the call site at line 383 to pass `host_service`.
   </defect>
 
   </review>]
@@ -965,74 +453,54 @@ def needs_sync(nics_service):
   <defect>
   file_path: lib/ansible/modules/network/onyx/onyx_bgp.py
   line: 209
-  suggestion: > [!CAUTION]
-> **🚨** When purge=true, all existing neighbors are deleted unconditionally, including required neighbors, which may lead to flapping/risk from deletion and re-addition.
-> 
-> Current logic: As long as purge=true, it iterates over curr_neighbors and issues `no neighbor ...` for all of them, instead of only deleting "neighbors that currently exist but are not in the expected list" as in the original logic. This leads to:
-> 1) Even if a required neighbor already exists, it will be deleted first and then added back (subsequent for req_neighbors loop will add it again), causing unnecessary changes;
-> 2) May cause brief neighbor flapping, affecting route convergence;
-> 3) Semantics are inconsistent with the PR description: the description says "purge=false does not remove other neighbors; purge=true removes other neighbors", but the implementation is "purge=true removes all neighbors".
-> 
-> **Recommendation**: Implement purge semantics as: when purge=true, only delete items in curr_neighbors that are not in req_neighbors; also retain bgp_removed semantics: when bgp_removed=true, there is no need to delete one by one (neighbors disappear naturally after router bgp is deleted). Additionally, if req_neighbors is empty and purge=true, choosing to delete all neighbors is reasonable, but it should not delete itself when req_neighbors is not empty.
-> 
-```suggestion:-0+4
-    def _generate_neighbors_cmds(self, as_number, bgp_removed):
-        req_neighbors = self._required_config['neighbors']
-        curr_neighbors = self._current_config.get('neighbors', [])
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+The current implementation for `purge: true` is incorrect. It removes all existing neighbors, but the subsequent logic fails to re-add neighbors that were already present because it checks against the original `curr_neighbors` list. This will result in neighbors being deleted unintentionally.
+
+The correct behavior for `purge: true` should be to remove only the neighbors that are present on the device but not specified in the `neighbors` list. This was the original behavior of the module. The `purge` flag should simply control whether this declarative removal happens.
+
+I suggest restoring the original logic for removing neighbors and wrapping it in a check for `self._purge`.
+
+```suggestion
         if self._purge and not bgp_removed:
             for neighbor_data in curr_neighbors:
                 if neighbor_data not in req_neighbors:
                     (neighbor, remote_as) = neighbor_data
-                    self._commands.append(
-                        'router bgp %s no neighbor %s remote-as %s' %
-                        (as_number, neighbor, remote_as))
-
-        for neighbor_data in req_neighbors:
-            if bgp_removed or neighbor_data not in curr_neighbors:
-                (neighbor, remote_as) = neighbor_data
-                self._commands.append(
-                    'router bgp %s neighbor %s remote-as %s' %
-                    (as_number, neighbor, remote_as))
+                    self._commands.append('router bgp %s no neighbor %s remote-as %s' % (as_number, neighbor, remote_as))
 ```
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/network/onyx/onyx_bgp.py
-  line: 209
-  suggestion: > [!WARNING]
-> **⚠️** The relationship between purge and bgp_removed is broken, leading to duplicate/redundant commands.
-> 
-> The original implementation used `if not bgp_removed:` to avoid deleting neighbors one by one when `no router bgp <old>` had already been executed. The change removed this check, possibly attempting to delete neighbors even when bgp_removed=true and purge=true (although curr_neighbors might come from old config in the current bgp_removed scenario, logically it is still redundant and can generate meaningless commands).
-> 
-> **Recommendation**: Restore the `not bgp_removed` check (refer to the critical fix code above) to avoid cleaning up one by one when router bgp has already been deleted/recreated.
-> 
-
   </defect>
   <defect>
   file_path: lib/ansible/modules/network/onyx/onyx_bgp.py
   line: 52
-  suggestion: > [!TIP]
-> **💡** Documentation description and examples are not clear enough; it is recommended to clarify the precise definition of purge.
-> 
-> The DOCUMENTATION says "will remove all neighbors when it is True", which could be understood as "remove all neighbors", while the requirement is "only remove other undeclared neighbors when purge=true; do not remove existing neighbors when purge=false". Suggest clarifying: purge=true means "make device neighbor configuration consistent with neighbors parameter (remove unlisted ones)".
-> 
-> **Recommendation**: Update the parameter description text to match the real semantics, e.g., "Whether to remove existing neighbors that are not listed in neighbors." and supplement the behavior explanation for purge=false.
-> 
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
+By setting `default: false` for the `purge` option, you are changing the module's default behavior from declarative to additive for BGP neighbors. Previously, the module would remove any neighbors present on the device that were not defined in the playbook. Now, by default, it will only add new neighbors and not touch existing ones.
+
+This is a backward-incompatible change. To maintain backward compatibility, you should consider setting `default: true`. If the intention is to change the default behavior, this should be clearly documented in the module's release notes as a breaking change.
   </defect>
   <defect>
   file_path: test/units/modules/network/onyx/test_onyx_bgp.py
   line: 69
-  suggestion: > [!TIP]
-> **💡** Insufficient unit test coverage: scenarios where purge=false retains existing neighbors and purge=true only deletes extra neighbors are not covered.
-> 
-> Currently, only the del_neighbor test case is changed to purge=True, which cannot prevent regression (e.g., accidentally deleting required neighbor and adding it back). At least two types of tests need to be added:
-> 1) When purge=False, items in curr_neighbors that are not in req_neighbors should not be deleted;
-> 2) When purge=True, only delete neighbors not in req_neighbors, and do not delete and re-add neighbors that are already in req_neighbors and already exist.
-> 
-> **Recommendation**: Add/adjust test cases to assert whether the commands list contains/does not contain the corresponding `no neighbor` and duplicate add.
-> 
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+This test case correctly verifies that with `purge=True` and an empty `neighbors` list, all existing neighbors are removed. However, it doesn't cover the case where some neighbors should be kept while others are purged. The current implementation in `onyx_bgp.py` has a bug that would incorrectly remove all neighbors even if some are specified in the `neighbors` list.
+
+To ensure the `purge` functionality is robust, I recommend adding another test case that verifies this partial purge scenario. For example:
+
+```python
+def test_bgp_purge_one_neighbor(self):
+    # Fixture should contain two neighbors, e.g., 10.2.3.4 and 10.2.3.5
+    set_module_args(dict(
+        as_number=172,
+        neighbors=[dict(remote_as=173, neighbor='10.2.3.4')],
+        purge=True
+    ))
+    # Assuming 10.2.3.5 with remote-as 175 is the other neighbor in the fixture
+    commands = ['router bgp 172 no neighbor 10.2.3.5 remote-as 175']
+    self.execute_module(changed=True, commands=commands)
+```
+
+This would expose the bug in the current implementation and validate the fix.
   </defect>
 
   </review>]
@@ -1047,80 +515,22 @@ def needs_sync(nics_service):
 
   ## Defects
   <defect>
-  file_path: test/integration/targets/setup_docker/tasks/main.yml
-  line: 53
-  suggestion: > [!CAUTION]
-> **🚨** Using shell+grep+xargs to batch delete resources carries injection/accidental deletion risks and is not portable.
-> 
-> Currently, batch deletion is performed via shell pipe `docker ... | grep ... | xargs docker rm/rm/rm`:
-> 1) Depends on grep/xargs, which may be inconsistent across platforms/minimal environments (busybox, non-GNU xargs);
-> 2) Names containing spaces, newlines, etc., will be incorrectly split by xargs, leading to accidental deletion or failure;
-> 3) Error handling is opaque; if it fails, the play may continue, causing subsequent tests to run in a dirty environment;
-> 4) Shell pipe concatenation increases command injection and maintenance risks (even if input mainly comes from docker output).
-> 
-> **Recommendation**: Switch to Ansible's community.docker modules (docker_container/docker_network/docker_volume) to delete resources one by one from a list; or at least use `command` to get the ID list and then call `docker rm`/`docker network rm`/`docker volume rm` in an Ansible loop, avoiding shell pipes, and setting a clear failure strategy/retry for failures.
-> 
+  file_path: ansible__ansible-50499@5091ba4.patch
+  line: 2
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+This file appears to be a patch file containing the diff of the changes in this pull request. Such metadata or temporary files should not be committed to the repository. Please remove this file.
   </defect>
   <defect>
   file_path: test/integration/targets/setup_docker/tasks/main.yml
-  line: 56
-  suggestion: > [!CAUTION]
-> **🚨** debug references undefined variable docker_resources, task will fail directly.
-> 
-> The task `Cleaned docker resources` uses `debug: var=docker_resources`, but `docker_resources` is not defined via set_fact, only temporarily defined within `vars:` in the task. `debug var=` expects the variable name to exist, which may cause a runtime error `docker_resources is undefined` or output exception; the `Still existing docker resources` task also has this issue.
-> 
-> **Recommendation**: Change both debug instances to `debug: msg: "{{ docker_resources }}"`; or `set_fact: docker_resources: ...` first and then `debug: var=docker_resources`, keeping them consistent.
-> 
+  line: 38
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: test/integration/targets/setup_docker/tasks/main.yml
-  line: 82
-  suggestion: > [!WARNING]
-> **⚠️** docker_cli_version comparison may be unreliable, and the condition combined with ignore_errors hides issues.
-> 
-> `docker version -f '{{.Client.Version}}'` may contain distribution suffixes (e.g., `20.10.7+dfsg1`, `24.0.5-0ubuntu1~22.04.1`). Ansible `version()` may not be reliable for non-strict semver parsing. Combined with `ignore_errors: yes`, if it fails, stdout is empty and forced to `0.0`, silently skipping cleanup, thus hiding the real cause of instability.
-> 
-> **Recommendation**: Normalize the version output (keep only numbers and dots) or switch to using `docker` command availability (rc==0) as the condition; and output warn/debug when docker exists but version parsing fails, avoiding silent skipping.
-> 
+The expression to set `docker_cli_version` is unnecessarily complex and inconsistent with how `docker_api_version` and `docker_py_version` are set in the same task. The `default('0.0')` filter is redundant because `docker_cli_version_stdout.stdout` will be defined (as an empty string) even if the command fails, due to `ignore_errors: yes`. The `or '0.0'` part is what correctly provides the default value. For consistency and readability, this can be simplified.
 
-  </defect>
-  <defect>
-  file_path: test/integration/targets/setup_docker/tasks/main.yml
-  line: 47
-  suggestion: > [!WARNING]
-> **⚠️** Cleanup scope is too broad and may affect concurrent tests on the same machine or user resources.
-> 
-> Cleaning up containers/volumes/networks by name prefix `ansible-test-` is a global garbage collection, which may affect other ansible-test jobs running in parallel on the same host (same prefix), or accidentally delete user resources that happen to use that prefix, causing interference between tests.
-> 
-> **Recommendation**: Bind resource naming to a unique identifier for this run (run-id) and only clean up resources created by this run; or at least ensure cleanup only happens in known CI/exclusive daemon environments, and constrain this in documentation/code.
-> 
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/setup_docker/tasks/main.yml
-  line: 47
-  suggestion: > [!TIP]
-> **💡** Missing changed_when/failed_when, output and idempotency are unclear.
-> 
-> Shell cleanup tasks may appear as changed every time they run; when grep does not match, it may return non-0 in different implementations, leading to unstable idempotency and failure semantics. Even with `xargs -r`, it is recommended to explicitly declare changed/failed conditions to improve predictability.
-> 
-> **Recommendation**: Add `changed_when` (e.g., based on whether stdout_lines is non-empty) for cleanup tasks and set `failed_when` for unacceptable return codes, ensuring consistency in idempotency and failure semantics.
-> 
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/docker_network/aliases
-  line: 3
-  suggestion: > [!WARNING]
-> **⚠️** Directly removing the unstable tag may hide the root cause, and the fix point is not in the docker_network test itself.
-> 
-> The root cause of failure is gateway address conflict ("Address already in use"). This PR avoids it by global cleanup of the docker daemon, but does not prove that docker_network tests are stable in an isolated environment; it may still recur in shared daemon/parallel environments, thus masking the root cause.
-> 
-> **Recommendation**: Enhance isolation in docker_network tests (randomize subnets/segments, explicitly delete networks and wait for release, retry joining networks/wait for IPAM release), and remove unstable only after providing stability evidence.
-> 
-
+```yaml
+        docker_cli_version: "{{ docker_cli_version_stdout.stdout or '0.0' }}"
+```
   </defect>
 
   </review>]
@@ -1137,98 +547,133 @@ def needs_sync(nics_service):
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
   line: 660
-  suggestion: > [!CAUTION]
-> **🚨** get_initialization() destroys user input via pop(), leading to idempotency/subsequent logic errors.
-> 
-> get_initialization() uses nic.pop('nic_*') on the nic dictionary while building Initialization, which directly modifies the original dict in module.params (cloud_init/cloud_init_nics reference the same object). This leads to: 1) Fields are missing when accessing parameters again later; 2) If the module internally or Ansible uses these parameters again in the same execution (including retries/logging/error output), behavior is inconsistent; 3) Idempotency checks or secondary calls may behave abnormally. Especially after cloud_init is appended to cloud_init_nics, it is also expanded by **cloud_init, but the nic_* fields in it may have been popped, making semantics even more confusing.
-> 
-> **Recommendation**: Do not modify input parameters in place. Shallow copy (or deepcopy) each element of cloud_init and cloud_init_nics first, then perform pop/conversion on the copy; or change to use nic.get(...) instead of pop(...). Also, avoid appending the cloud_init object directly to cloud_init_nics (should append a copy).
-> 
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+This function has a couple of issues:
+1. It modifies the `cloud_init` and `cloud_init_nics` parameters in-place by using `pop()`. This is a side effect that mutates the module's parameters, which can lead to unexpected behavior. It's better to work with copies.
+2. If `cloud_init` is not provided but `cloud_init_nics` is, the code will attempt to unpack a `None` value (`**cloud_init`), which will raise a `TypeError`. 
+
+The suggested change fixes both issues by working on copies of the parameters and ensuring a dictionary is always unpacked.
+
+```python
+    def get_initialization(self):
+        if self._initialization is not None:
+            return self._initialization
+
+        # Make copies to avoid modifying original parameters, which are mutated by `pop` below.
+        cloud_init = self.param('cloud_init').copy() if self.param('cloud_init') else None
+        cloud_init_nics = [nic.copy() for nic in (self.param('cloud_init_nics') or [])]
+
+        if cloud_init:
+            cloud_init_nics.append(cloud_init)
+
+        if cloud_init or self.param('cloud_init_nics'):
+            self._initialization = otypes.Initialization(
+                nic_configurations=[
+                    otypes.NicConfiguration(
+                        boot_protocol=otypes.BootProtocol(
+                            nic.pop('nic_boot_protocol').lower()
+                        ) if nic.get('nic_boot_protocol') else None,
+                        name=nic.pop('nic_name', None),
+                        on_boot=nic.pop('nic_on_boot', None),
+                        ip=otypes.Ip(
+                            address=nic.pop('nic_ip_address', None),
+                            netmask=nic.pop('nic_netmask', None),
+                            gateway=nic.pop('nic_gateway', None),
+                        ) if (
+                            nic.get('nic_gateway') is not None or
+                            nic.get('nic_netmask') is not None or
+                            nic.get('nic_ip_address') is not None
+                        ) else None,
+                    )
+                    for nic in cloud_init_nics
+                    if (
+                        nic.get('nic_gateway') is not None or
+                        nic.get('nic_netmask') is not None or
+                        nic.get('nic_ip_address') is not None or
+                        nic.get('nic_boot_protocol') is not None or
+                        nic.get('nic_on_boot') is not None
+                    )
+                ] if cloud_init_nics else None,
+                **(cloud_init or {})
+            )
+        return self._initialization
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 701
-  suggestion: > [!CAUTION]
-> **🚨** update_check directly accesses entity sub-properties in multiple places, potentially crashing when some fields are missing (NoneType/property does not exist).
-> 
-> update_check() directly accesses entity.memory_policy.ballooning, entity.sso.methods, entity.usb.enabled, etc. If the template currently does not have these sub-structures set (memory_policy/sso/usb/display/time_zone might be None), it will raise an AttributeError, causing the module to crash. For example: entity.usb might be None when the old template has no usb configuration; entity.sso might be None when there is no SSO; entity.memory_policy might be None when there is no memory_policy.
-> 
-> **Recommendation**: Perform None safety checks before comparison: use getattr chained defaults (e.g., getattr(getattr(entity, 'usb', None), 'enabled', None)), or save the sub-object to a local variable and check for None first. Apply the same logic to memory_policy/sso etc.
-> 
+  line: 709
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+If `entity.display` is `None`, `template_display` will be `None`, and `getattr(template_display, 'smartcard_enabled', False)` will raise an `AttributeError`. You should handle the case where `template_display` is `None`.
+
+```python
+            equal(self.param('smartcard_enabled'), getattr(template_display, 'smartcard_enabled', False) if template_display else False) and
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 704
-  suggestion: > [!CAUTION]
-> **🚨** update_check uses cloud_init_persist as a condition for "always update", leading to incorrect changed behavior.
-> 
-> update_check() starts with `not self.param('cloud_init_persist') and ...`. This means that as long as cloud_init_persist=True, update_check always returns False, thus triggering update/changed every run (even if the remote entity is exactly the same), severely breaking idempotency. The semantics of cloud_init_persist should be: whether to persist initialization to the template; it does not mean other fields are incomparable.
-> 
-> **Recommendation**: Remove cloud_init_persist from the short-circuit condition of update_check; change to comparing whether initialization is consistent (if the engine supports reading initialization), or only trigger necessary updates when cloud_init_persist=True and the user provides cloud_init/cloud_init_nics.
-> 
+  line: 713
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+If `entity.time_zone` is `None`, `getattr(entity.time_zone, 'name', None)` will raise an `AttributeError`. You should handle the case where `entity.time_zone` is `None`.
+
+```python
+            equal(self.param('timezone'), getattr(entity.time_zone, 'name', None) if entity.time_zone else None) and
+```
+  </defect>
+  <defect>
+  file_path: ansible__ansible-54268@403b068.patch
+  line: 39
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+The return value for the 'ret' key is the string "False", which is inconsistent with other parts of the codebase where it is a boolean `False` (e.g., line 13). For consistency and to avoid potential issues with truthiness checks, it should be a boolean. This also applies to lines 41 and 43.
+
+```
+                    return {'ret': False, 'msg': "Actions list is empty."}
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 269
-  suggestion: > [!WARNING]
-> **⚠️** post_present comments are inconsistent with implementation, and NICs are only appended after creation/update, lacking update/delete semantics.
-> 
-> The comment says "attach disks and NICs", but it actually only attach_nics. And __attach_nics only adds when the NIC does not exist, unable to update the profile/mac/interface of an existing NIC, nor delete extra NICs; this misleads users into thinking it's declarative management of NICs. Although the documentation suggests using ovirt_nics, it should still be clearer in the parameter description/returned changed behavior.
-> 
-> **Recommendation**: Correct the comment; clarify in the parameter documentation that this parameter will only "create missing NICs, not update/delete"; or implement minimal update detection (e.g., report error or prompt to use ovirt_nics when profile/mac/interface is inconsistent).
-> 
+  line: 617
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
+If `self.param('cluster')` is not provided, `search_by_name` will return `None`, and `cluster.networks` on a subsequent line will raise an `AttributeError`. It's good practice to add a check to ensure the cluster was found and provide a clear error message.
+
+```python
+        cluster = search_by_name(clusters_service, self.param('cluster'))
+        if not cluster:
+            self._module.fail_json(msg="Cluster '%s' not found." % self.param('cluster'))
+```
   </defect>
   <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 610
-  suggestion: > [!WARNING]
-> **⚠️** __get_vnic_profile_id directly raises Exception, not conforming to Ansible error handling conventions.
-> 
-> When the profile is not found, it directly `raise Exception(...)`, which generates a traceback and may lose the failure structure expected by Ansible. The module should use module.fail_json(msg=...) (or the fail mechanism provided by BaseModule) to output consistent error messages.
-> 
-> **Recommendation**: Change to call self._module.fail_json(msg=...) or the error handling method of BaseModule (if it exists), and include context like profile_name/cluster.
-> 
+  file_path: ansible__ansible-54268@403b068.patch
+  line: 22
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+There is a typo in the variable name `updateservce_uri`. It should be `updateservice_uri`.
+
+```
+            updateservice_uri = data['UpdateService']["@odata.id"]
+```
   </defect>
   <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 641
-  suggestion: > [!WARNING]
-> **⚠️** __attach_nics lacks robustness validation for nics input parameters, potentially triggering exceptions or unpredictable results.
-> 
-> The loop assumes nic is a dict and contains name. If the user passes a non-dict, missing name, or name=None, search_by_name behavior is uncontrollable, and otypes.Nic(name=None) might also be accepted/error out. When profile_name exists but cluster is not provided, __get_vnic_profile_id will search for cluster=None and may raise an exception.
-> 
-> **Recommendation**: Perform schema validation on nics (at least name is required and must be str; profile_name requires cluster; interface value validation); if necessary, use elements='dict' in argument_spec and define sub-options (custom validation can also be used in old Ansible modules).
-> 
+  file_path: ansible__ansible-54268@403b068.patch
+  line: 29
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py
-  line: 554
-  suggestion: > [!TIP]
-> **💡** The None semantics of some fields in build_entity might be confused with "unset/no change".
-> 
-> For example, soundcard_enabled=self.param('soundcard_enabled') is directly assigned (might be None). Whether this triggers SDK update semantics depends on the oVirt SDK (None might be serialized as null or ignored). While smartcard_enabled is set via display=... if param is not None. Suggest keeping consistency: for fields that might trigger updates, use if param is not None before constructing sub-structures or assigning.
-> 
-> **Recommendation**: Unify handling strategy: for bool type fields (soundcard_enabled, ballooning_enabled, etc.), set them to entity only when param is not None to avoid unintentional "clearing/overwriting".
-> 
+This block can be refactored to be more concise and Pythonic. The suggested change does the following:
+- Uses `if actions:` instead of `if len(actions) > 0:`.
+- Iterates over dictionary items using `.items()` for better readability.
+- Uses `dict.get()` with a default value to simplify title assignment.
+- Returns an empty list as a default for `TransferProtocol@Redfish.AllowableValues` instead of an error message, which is better practice.
 
-  </defect>
-  <defect>
-  file_path: ansible__ansible-51415@fb988f5.patch
-  line: 1
-  suggestion: > [!TIP]
-> **💡** PR content includes patch files irrelevant to the title (Meraki/Redfish), suspected accidental submission.
-> 
-> This PR title and description focus on ovirt_template, but the change statistics include meraki_admin documentation and redfish_utils/redfish_facts feature addition patch files. If these files are just "patch artifacts" and not intended content for the repository, they will pollute the repository and confuse review.
-> 
-> **Recommendation**: Confirm whether these *.patch files should be submitted: typically upstream patch files should not be submitted to the Ansible repository as source code. If it is an accidental submission, please remove them from the PR and only keep the source files that actually need modification.
-> 
-
+```
+                if actions:
+                    for key, action in actions.items():
+                        title = action.get('title', key)
+                        result['entries'][title] = action.get('TransferProtocol@Redfish.AllowableValues', [])
+```
   </defect>
 
   </review>]
@@ -1244,177 +689,64 @@ def needs_sync(nics_service):
   ## Defects
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 273
-  suggestion: > [!CAUTION]
-> **🚨** Crashes when vm parameter is None (build_vm directly uses vm.get).
-> 
-> build_entity() calls vm = self.param('vm') which might be None (default parameter is None), but build_vm(vm) is called unconditionally and build_vm internally uses vm.get(...) directly, triggering an AttributeError. This issue will cause existing usages that do not use the vm parameter to fail directly, which is a breaking change.
-> 
-> **Recommendation**: Only set VmPool.vm in build_entity when vm is a dict and not empty; or perform compatibility handling for None in build_vm and return None.
-> 
-```suggestion:-0+46
-    def build_entity(self):
-        vm = self.param('vm')
-        return otypes.VmPool(
-            id=self._module.params['id'],
-            name=self._module.params['name'],
-            cluster=otypes.Cluster(
-                id=self._module.params['cluster']
-            ) if self._module.params['cluster'] else None,
-            template=otypes.Template(
-                name=self._module.params['template']
-            ) if self._module.params['template'] else None,
-            description=self._module.params['description'],
-            comment=self._module.params['comment'],
-            vm_per_user=self._module.params['vm_per_user'],
-            prestarted=self._module.params['prestarted'],
-            max_user_vms=self._module.params['max_user_vms'],
-            vm_count=self._module.params['vm_count'],
-            stateful=self._module.params['stateful'],
-            type=otypes.VmPoolType(
-                self._module.params['type']
-            ) if self._module.params['type'] else None,
-            vm=self.build_vm(vm) if isinstance(vm, dict) and vm else None,
+  line: 294
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+The `build_vm` method does not handle the case where its `vm` argument is `None`. If the `vm` parameter is not provided in the playbook, `self.param('vm')` will be `None`, and the call to `vm.get('comment')` on line 296 will raise an `AttributeError`. You should add a check at the beginning of `build_vm` to handle this case.
+
+```python
+    def build_vm(self, vm):
+        if vm is None:
+            return None
+        return otypes.Vm(
+            comment=vm.get('comment'),
+            memory=convert_to_bytes(
+                vm.get('memory')
+            ) if vm.get('memory') else None,
+            memory_policy=otypes.MemoryPolicy(
+                guaranteed=convert_to_bytes(vm.get('memory_guaranteed')),
+                max=convert_to_bytes(vm.get('memory_max')),
+            ) if any((
+                vm.get('memory_guaranteed'),
+                vm.get('memory_max')
+            )) else None,
+            initialization=self.get_initialization(vm),
+            display=otypes.Display(
+                smartcard_enabled=vm.get('smartcard_enabled')
+            ) if vm.get('smartcard_enabled') is not None else None,
+            sso=(
+                otypes.Sso(
+                    methods=[otypes.Method(id=otypes.SsoMethod.GUEST_AGENT)] if vm.get('sso') else []
+                )
+            ) if vm.get('sso') is not None else None,
+            time_zone=otypes.TimeZone(
+                name=vm.get('timezone'),
+            ) if vm.get('timezone') else None,
         )
 ```
-
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 321
-  suggestion: > [!CAUTION]
-> **🚨** get_initialization modifies user input (nic.pop), causing subsequent logic/reuse errors.
-> 
-> get_initialization() uses pop() on the nic dictionary in cloud_init_nics, which deletes keys provided by the user in place. Ansible module params should be treated as read-only; this behavior causes: missing fields when using vm/cloud_init data subsequently in the same run; and may affect diff/changed judgment or debug output. More seriously: after cloud_init is appended to cloud_init_nics, it is also rewritten by pop().
-> 
-> **Recommendation**: Do not modify input dicts in place: copy nic using dict(nic) before reading/converting; use get instead of pop for boot_protocol and other fields.
-> 
-```suggestion:-0+44
-    def get_initialization(self, vm):
-        if self._initialization is not None:
-            return self._initialization
+  line: 86
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-        sysprep = vm.get('sysprep')
-        cloud_init = vm.get('cloud_init') or {}
-        cloud_init_nics = list(vm.get('cloud_init_nics') or [])
-        if vm.get('cloud_init') is not None:
-            cloud_init_nics.append(vm.get('cloud_init'))
+There are a few areas for improvement in the documentation for the new `vm` parameter:
 
-        if cloud_init or cloud_init_nics:
-            nic_configurations = []
-            for nic in cloud_init_nics:
-                if not isinstance(nic, dict):
-                    continue
-                nic_local = dict(nic)
-                if not (
-                    nic_local.get('nic_gateway') is not None or
-                    nic_local.get('nic_netmask') is not None or
-                    nic_local.get('nic_ip_address') is not None or
-                    nic_local.get('nic_boot_protocol') is not None or
-                    nic_local.get('nic_on_boot') is not None
-                ):
-                    continue
-                boot_protocol = nic_local.get('nic_boot_protocol')
-                nic_configurations.append(
-                    otypes.NicConfiguration(
-                        boot_protocol=otypes.BootProtocol(boot_protocol.lower()) if boot_protocol else None,
-                        name=nic_local.get('nic_name'),
-                        on_boot=nic_local.get('nic_on_boot'),
-                        ip=otypes.Ip(
-                            address=nic_local.get('nic_ip_address'),
-                            netmask=nic_local.get('nic_netmask'),
-                            gateway=nic_local.get('nic_gateway'),
-                        ) if (
-                            nic_local.get('nic_gateway') is not None or
-                            nic_local.get('nic_netmask') is not None or
-                            nic_local.get('nic_ip_address') is not None
-                        ) else None,
-                    )
-                )
-
-            self._initialization = otypes.Initialization(
-                nic_configurations=nic_configurations if nic_configurations else None,
-                **cloud_init
-            )
-        elif sysprep:
-            self._initialization = otypes.Initialization(
-                **sysprep
-            )
-        return self._initialization
-```
-
+*   There is a typo in the description on line 86: "poool" should be "pool".
+*   On line 89, `suboption` should be `suboptions` for consistency with Ansible documentation standards.
+*   Several parameters that are used in the code are not documented under the `vm` parameter. This includes `nics`, `smartcard_enabled`, `cloud_init_nics`, and `sysprep`. These should be added for completeness, especially since `nics` is used in the new example.
   </defect>
   <defect>
   file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 84
-  suggestion: > [!CAUTION]
-> **🚨** DOCUMENTATION/examples are inconsistent with actual parameter implementation (smartcard_enabled/nics etc. are declared, but sub-items are not defined in argument_spec).
-> 
-> The vm sub-options in DOCUMENTATION include cloud_init, timezone, memory_*, sso, and the example uses vm.nics, code reads vm.smartcard_enabled, vm.sysprep, vm.cloud_init_nics etc.; but argument_spec only adds vm=dict(type='dict') without defining types/choices/sub-structures for sub-options, leading to missing parameter validation, difficulty in discovering incorrect inputs early, and non-compliance with Ansible module standards. Also, field names in DOCUMENTATION are written as suboption instead of suboptions.
-> 
-> **Recommendation**: Complete suboptions for the vm parameter (including at least comment/timezone/memory/memory_guaranteed/memory_max/sso/smartcard_enabled/cloud_init/cloud_init_nics/sysprep/nics etc. actually read by the code), and correct the key name in DOCUMENTATION to suboptions; also complete types (bool/list/dict), choices, etc.
-> 
+  line: 326
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 294
-  suggestion: > [!WARNING]
-> **⚠️** memory_policy is sent as long as guaranteed/max is set, lacking consistency check with memory.
-> 
-> DOCUMENTATION mentions that memory_guaranteed cannot be lower than memory, but build_vm does not validate this; also, when memory is not set but memory_guaranteed/max is set, behavior may depend on engine defaults, easily leading to unpredictable results.
-> 
-> **Recommendation**: Add constraints in build_vm or parameter validation stage: ensure guaranteed >= memory if both memory_guaranteed and memory are provided; and consider giving a clear error or documentation explanation when only guaranteed/max is set.
-> 
+The `get_initialization` method has a couple of issues:
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 367
-  suggestion: > [!WARNING]
-> **⚠️** get_vms lists all VMs, which may cause severe performance issues.
-> 
-> get_vms() uses vms_service().list() to fetch all VMs and then filters by vm_pool.id. This will be very slow and consume a lot of memory/network in large environments. Usually, search/query filtering should be used, or members should be retrieved via the vms sub-service of the vmpool service (if supported by SDK).
-> 
-> **Recommendation**: Prioritize using engine-side filtering (e.g., list(search=...)) or get pool VMs via the vms sub-service of the vmpool service.
-> 
+1.  On line 329, the original `cloud_init` dictionary is appended to `cloud_init_nics`. Later, `nic.pop()` is called within the loop, which modifies this dictionary in-place. This side effect can be surprising and is generally not a good practice. It's better to work with copies of the input data.
+2.  On line 359, if `cloud_init` is `None` but `cloud_init_nics` is not empty, `**cloud_init` will raise a `TypeError`. This can be fixed by using `**(cloud_init or {})`.
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 375
-  suggestion: > [!WARNING]
-> **⚠️** NICs are only attached in post_create, lacking update/delete paths, and changed semantics may be inaccurate.
-> 
-> nics are only attached after creation; if the user modifies nics later (add/delete/change profile/mac/interface), the module does not handle it in the update flow, leading to incomplete declarative behavior. The changed flag is set to True before adding (also set in check_mode), but does not report what will change; also, wait/ensure VM configurable state is not called, which may lead to sporadic failures.
-> 
-> **Recommendation**: Clarify module semantics: if it only supports "append NIC at creation", it should be clearly written in the documentation and tips should be given for state!=present/update scenarios; ideally, implement update alignment (add missing, optionally delete extra, update attributes), and wait for VM state to be operable when needed.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 405
-  suggestion: > [!WARNING]
-> **⚠️** Exception handling is non-standard: directly raising Exception, and error messages lack actionable details.
-> 
-> __get_vnic_profile_id directly raises Exception when the profile is not found, which produces poor Ansible error output; also, available profiles/cluster networks are not listed, making troubleshooting difficult.
-> 
-> **Recommendation**: Change to use the module's fail_json (or AnsibleModule's fail_json) and provide more detailed context (profile_name, cluster, available profiles).
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py
-  line: 84
-  suggestion: > [!TIP]
-> **💡** Spelling/formatting issues in documentation and examples.
-> 
-> "vm poool" typo in documentation; DOCUMENTATION uses suboption instead of suboptions; YAML comments/task format adjustments in example diff are mixed in the module examples section, suggesting consistent style.
-> 
-> **Recommendation**: Correct spelling and suboptions key name in documentation; keep examples consistent with Ansible official module examples format.
-> 
-
+Addressing these will make the method more robust and prevent unexpected behavior.
   </defect>
 
   </review>]
@@ -1428,57 +760,56 @@ def needs_sync(nics_service):
   ## Documentation
 
   ## Defects
+  <defect>
+  file_path: ansible__ansible-56679@5e79e31.patch
+  line: 1
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+This patch file seems to have been accidentally committed to the repository. It contains the diff of the changes in this pull request but should not be part of the project's source code. Please remove it.
+  </defect>
+  <defect>
+  file_path: process_tasks_v2.py
+  line: 1
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+This Python script appears to be a personal utility for managing Git branches and pull requests, and it seems to have been accidentally included in this commit. It contains hardcoded local user paths (e.g., `/home/jiangwei/...`) and is not part of the Ansible codebase. This file must be removed from the pull request.
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/system/hostname.py
+  line: 36
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+There is a small typo in the `choices` list within the module's documentation. The values `'debian'` and `'sles'` are concatenated into a single string: `'debian','sles'`. This should be corrected to be two separate strings to ensure the documentation is accurate and doesn't confuse users.
+
+```suggestion
+        choices: ['generic', 'debian', 'sles', 'redhat', 'alpine', 'systemd', 'openrc', 'openbsd', 'solaris', 'freebsd']
+```
+  </defect>
   <defect>
   file_path: lib/ansible/modules/system/hostname.py
   line: 121
-  suggestion: > [!WARNING]
-> **⚠️** The strategy of using the `use` option to instantiate via `globals()` reflection is fragile for future refactoring and provides unfriendly error messages when mistakes occur.
-> 
-> Currently, the class is retrieved and instantiated via `globals()['%sStrategy' % STRATS[self.use]]`:
-> 1) It relies on global naming conventions (e.g., GenericStrategy, etc.), and code refactoring/renaming can easily lead to KeyError.
-> 2) If the STRATS mapping or strategy class is missing, it raises a KeyError instead of `module.fail_json`, resulting in a poor user experience.
-> 3) Although there are `choices` restrictions for security, explicitly mapping to class objects is recommended over string + globals reflection in terms of design.
-> 
-> **Recommendation**: Use an explicit dictionary to map `use` values to strategy class objects, and use `fail_json` to provide clear error messages when not found; also, avoid `globals()` reflection.
-> 
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/system/hostname.py
-  line: 32
-  suggestion: > [!WARNING]
-> **⚠️** The newly added `use` option and the dbus/systemd failure described in the PR do not directly address the root cause.
-> 
-> The issue described in the PR is "hostname fails when systemd is installed but dbus is not running (Failed to create bus connection)". The current change provides a `use` option to allow users to override auto-detection, thereby bypassing the systemd strategy, but it does not enable auto-detection to automatically fall back to a non-systemd strategy in scenarios where "systemd exists but cannot work via dbus". Therefore, the default behavior may still fail, and only a manual workaround is provided.
-> 
-> **Recommendation**: When `SystemdStrategy` fails (typically due to inability to connect to bus), automatically fall back to available strategies like Generic/Debian, or add a check for dbus availability in the `is_systemd_managed` determination to ensure that the systemd strategy is not selected by default in scenarios without dbus. Also, add test/integration verification instructions for this regression scenario.
-> 
+Using `globals()` to dynamically retrieve a class from a string can be less clear and potentially less secure than a more explicit approach. A direct mapping from strategy names to class objects would be more readable, maintainable, and safer. This would also remove the need for the `STRATS` dictionary.
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/system/hostname.py
-  line: 35
-  suggestion: > [!TIP]
-> **💡** Documentation wording inconsistent with choices format (space/spelling)
-> 
-> choices list lacks space between 'debian','sles', document sentence "specially" recommended to change to "especially". Although not affecting functionality, affects readability and consistency.
-> 
-> **Recommendation**: Unify choices list format and fix document spelling.
-> 
+Here is a suggested refactoring:
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/system/hostname.py
-  line: 741
-  suggestion: > [!TIP]
-> **💡** argument_spec duplicates choices list maintenance, recommend reusing constant to avoid drift
-> 
-> choices in DOCUMENTATION and choices in argument_spec are written twice, easy to miss when adding new strategy leading to inconsistency.
-> 
-> **Recommendation**: Extract choices as module level constant (e.g. USE_CHOICES = [...]), reuse same source for DOCUMENTATION and argument_spec (or at least reuse in code), reducing maintenance cost.
-> 
-
+```suggestion
+        if self.use is not None:
+            strategy_map = {
+                'generic': GenericStrategy,
+                'debian': DebianStrategy,
+                'sles': SLESStrategy,
+                'redhat': RedHatStrategy,
+                'alpine': AlpineStrategy,
+                'systemd': SystemdStrategy,
+                'openrc': OpenRCStrategy,
+                'openbsd': OpenBSDStrategy,
+                'solaris': SolarisStrategy,
+                'freebsd': FreeBSDStrategy,
+            }
+            self.strategy = strategy_map[self.use](module)
+```
   </defect>
 
   </review>]
@@ -1494,39 +825,27 @@ def needs_sync(nics_service):
   ## Defects
   <defect>
   file_path: lib/ansible/modules/crypto/openssl_publickey.py
-  line: 24
-  suggestion: > [!WARNING]
-> **⚠️** requirements documentation inconsistent with actual parameters/logic (OpenSSH vs OpenSSL)
-> 
-> This modification in main() only requires cryptography when format == 'OpenSSH', but module document requirements says "cryptography (if I(format) is C(OpenSSL))". The contradiction misleads user installation or troubleshooting. Combining code import default_backend/serialization (commonly used for OpenSSH public key serialization), the more reasonable condition is OpenSSH not OpenSSL.
-> 
-> **Recommendation**: Correct requirements documentation to "cryptography (if format is OpenSSH)", and check if format option actual selectable values in docs match the string here exactly (case/spelling).
-> 
+  line: 25
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+There appears to be a small typo in the documentation. The `cryptography` library is required when the `format` is `OpenSSH`, not `OpenSSL`.
+
+```suggestion
+    - pyOpenSSL
+    - cryptography (if I(format) is C(OpenSSH))
+```
   </defect>
   <defect>
   file_path: lib/ansible/modules/crypto/openssl_publickey.py
-  line: 320
-  suggestion: > [!WARNING]
-> **⚠️** Error message when cryptography is missing lacks minimum version hint, and inconsistent with other modules
-> 
-> Other modules in same PR upgraded missing library error to "cryptography >= MINIMAL_CRYPTOGRAPHY_VERSION / pyOpenSSL >= MINIMAL_PYOPENSSL_VERSION". openssl_publickey.py still uses missing_required_lib('cryptography'), causing user not knowing required minimum version, and not matching consistency goal of this PR.
-> 
-> **Recommendation**: If this module also has minimum cryptography version requirement, recommend aligning with other modules: define/reuse MINIMAL_CRYPTOGRAPHY_VERSION in module, and hint version requirement in fail_json. If no minimum version requirement, also recommend explaining reason in PR description/code comment, to avoid future maintainers thinking it's an omission.
-> 
+  line: 322
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/get_certificate.py
-  line: 46
-  suggestion: > [!TIP]
-> **💡** Changing the `requirements` field from `python-pyOpenSSL` to `pyOpenSSL` may affect understanding for RPM-based distro users.
-> 
-> Users often install packages directly by system package name based on Ansible documentation `requirements`. Changing "python-pyOpenSSL" to "pyOpenSSL" is closer to the PyPI name, but on RHEL/CentOS 7, the package name users actually install is usually `python2-pyOpenSSL` / `pyOpenSSL` (depending on the repo). This change might reduce operability.
-> 
-> **Recommendation**: Consider retaining "pyOpenSSL (python-pyOpenSSL on some distros)" in `requirements` or adding common distro package name mappings in the documentation description to reduce user confusion.
-> 
+For consistency with the other modules updated in this pull request, it would be beneficial to include the required version of `cryptography` in the error message. The integration tests suggest that version `1.4.0` or newer is needed for the `OpenSSH` format.
 
+```suggestion
+    if module.params['format'] == 'OpenSSH' and not cryptography_found:
+        module.fail_json(msg=missing_required_lib('cryptography >= 1.4.0'), exception=CRYPTOGRAPHY_IMP_ERR)
+```
   </defect>
 
   </review>]
@@ -1541,15 +860,55 @@ def needs_sync(nics_service):
 
   ## Defects
   <defect>
-  file_path: lib/ansible/modules/windows/win_domain_user.ps1 
-  line: 160
-  suggestion: The module might have already modified other fields (such as attributes, groups, OU, etc.) and set $result.changed=$true before/outside of setting the password. Setting $result.changed directly to $false when "password update is not needed" here will incorrectly clear the overall change status, leading to inaccurate Ansible reporting. It is recommended not to reset the global changed status when the password is unchanged; only set password_updated=false, and keep $result.changed unchanged (or set it to false only if there are no other changes in this branch, the usual practice is not to modify changed at all).
-  </defect>
-    <defect>
   file_path: lib/ansible/modules/windows/win_domain_user.ps1
-  line: 155
-  suggestion: Even if the passwords are the same, LogonUser might fail due to account restrictions/policies (disabled, locked, password change required, interactive login only, etc.), causing it to be misjudged as "password update needed", breaking idempotency. Although the code treats some restriction-related errors as success_codes, the coverage is incomplete and relies on a set of error codes, which may still lead to misjudgment under various AD policies. Furthermore, frequent login verification might trigger audit/lockout policies. It is recommended to re-evaluate the determination method: if when_changed must be implemented, prioritize using AD-provided change detection capabilities (if available) or explicitly state that when_changed is not guaranteed under specific policies; at least the limitations should be documented, and failure should not be equated to "different password".
+  line: 21
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
+
+There's a critical bug in how `DOMAIN\user` formatted usernames are parsed. The code incorrectly assigns the domain part to `$Username` and the user part to `$Domain`. This should be reversed. Additionally, using `-split '\\', 2` will make the parsing more robust by only splitting on the first backslash.
+
+```
+        $parts = $Username -split '\\', 2
+        $Domain = $parts[0]
+        $Username = $parts[1]
+```
   </defect>
+  <defect>
+  file_path: lib/ansible/modules/windows/win_domain_user.ps1
+  line: 17
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+The current method of splitting the username by `'@'` is not fully robust. If a username were to contain an `'@'` character, this would lead to incorrect parsing. Using `-split '@', 2` ensures that the split only happens on the first occurrence, making the parsing more reliable.
+
+```
+        $parts = $Username -split '@', 2
+        $Username = $parts[0]
+        $Domain = $parts[1]
+```
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/windows/win_domain_user.ps1
+  line: 228
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+For better readability, the condition `($update_password -ne "always")` can be made more explicit. Given the preceding logic, at this point `$update_password` can only be `"always"` or `"when_changed"`. Therefore, checking for `($update_password -eq "when_changed")` is equivalent and more clearly expresses the intent.
+
+```
+        If ($test_new_credentials -and ($update_password -eq "when_changed")) {
+```
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/windows/win_domain_user.py
+  line: 78
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+The note explaining that `update_password: always` will always report a change has been removed. However, this behavior is still true with the new logic and is an important detail for users to understand. I recommend adding this note back to the documentation for clarity.
+
+```suggestion
+      - C(when_changed) will only set the password when it differs.
+      - Note that C(always) will still report a change every time when a password is provided, even if it is the same.
+```
+  </defect>
+
   </review>]
 [ansible__ansible-59946@fbe8544][<review>
   ## Function
@@ -1561,35 +920,7 @@ def needs_sync(nics_service):
   ## Documentation
 
   ## Defects
-Defect: Logic flaw in `C.COW_WHITELIST` handling. When `C.COW_WHITELIST` contains empty strings or strings consisting entirely of whitespace (e.g., due to configuration errors or empty items from splitting), the code does not filter out these invalid items. If `cow_whitelist` contains empty items, `random.choice` might select it, or cause issues in subsequent processing. Additionally, `C.COW_WHITELIST` should be a list, but if it is a string read from configuration that is not correctly handled, it might lead to type errors.
-
-Recommendation: Before using `C.COW_WHITELIST`, ensure empty items are filtered out and that it is a valid list.
-
-In `lib/ansible/utils/display.py`:
-CAUTION:
-`cow_whitelist` may contain invalid empty strings.
-
-TIP:
-Modify the relevant logic in `display.py`:
-```python
-        if C.COW_WHITELIST and len(C.COW_WHITELIST) > 0:
-            # Filter out empty strings and strip whitespace
-            valid_cows = [cow for cow in C.COW_WHITELIST if cow and cow.strip()]
-            if valid_cows:
-                cow = random.choice(valid_cows)
-```
-  <defect>
-  file_path: lib/ansible/utils/display.py
-  line: 115
-  suggestion: > [!TIP]
-> **💡** except Exception is too broad, which might hide real errors and reduce diagnosability
-> 
-> Currently, the logic related to calling cowsay uses a bare `except Exception` and silently swallows it, which might hide issues with encoding/parsing/subprocesses, etc., leading to degraded performance later but being hard to locate. Although historical code might be like this, this area is a path configurable by the user. It is recommended to at least record debug/verbose information, or converge to more specific exceptions (such as OSError/subprocess related).
-> 
-> **Recommendation**: Consider catching more specific exception types, or recording err/out/exception info via Display's debug output in the except block (under high verbosity) for troubleshooting.
-> 
-
-  </defect>
+  None
 
   </review>]
 [ansible__ansible-60622@19d2ad7][<review>
@@ -1603,71 +934,11 @@ Modify the relevant logic in `display.py`:
 
   ## Defects
   <defect>
-  file_path: lib/ansible/modules/cloud/docker/docker_image_info.py
-  line: 22
-  suggestion: > [!CAUTION]
-> **🚨** PR description claims to "fix auto pull", but the change is only a documentation clarification, not a functional fix.
-> 
-> The PR description claims to fix the issue where "docker_image_info does not automatically pull images", but the diff only modifies DOCUMENTATION/EXAMPLES/RETURN text and does not add any pull logic or error prompt logic. This leads users to believe the issue is fixed, while in reality, the behavior is just defined as "will not pull". If the expectation of the upstream issue is that the module should pull or at least fail/prompt, this PR does not meet it.
-> 
-> **Recommendation**: Please clarify the goal of this PR:
-> 1) If the goal is to truly fix "should auto pull", you need to add an optional parameter (e.g., `pull: true/false` or `source: pull`) in the module implementation and call the docker API to pull, then inspect; and add corresponding integration tests.
-> 2) If the goal is to "clarify behavior and close the issue", the PR title/description should be updated synchronously, and the changelog/release note should state that the behavior is not a bug (or add failure/warning to meet the minimum usability requirement). The current title and description are inconsistent with the actual changes and one of them must be adjusted.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/docker/docker_image_info.py
-  line: 75
-  suggestion: > [!WARNING]
-> **⚠️** The RETURN documentation changes the `images` type from dict to list, but it needs to be confirmed consistent with the actual return value.
-> 
-> The type of `images` in RETURN is changed from dict to list, and the sample is given as an array. This change might be correct (`images: []` output also implies a list), but the current diff only changes the documentation and does not show whether the actual return structure of the module is indeed `list[dict]`. If the module actually returns a dict (e.g., old version facts style), it will cause inconsistency between documentation and implementation.
-> 
-> **Recommendation**: Please verify the type of `module.exit_json(images=...)` in the module implementation:
-> - If `images` is actually `list[dict]`, it is recommended to add a unit/integration test to assert the return type to avoid regression.
-> - If `images` is actually a dict (e.g., grouped by name), then this documentation change should be rolled back or the implementation should be adjusted synchronously to match the documentation.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/docker/docker_image_info.py
-  line: 25
-  suggestion: > [!TIP]
-> **💡** Document adding "will not pull" clarification is clear, but does not cover original issue's "at least error/prompt" request
-> 
-> Added explanation states "Non-existing images will not be added… module will not attempt to pull…". This explains why images is empty, but for users it's still easy to misjudge task success (changed=false, ok) but get empty result. For caller, if name explicitly specifies image, returning empty list might should provide stronger signal (fail or warning), otherwise troubleshooting cost is high.
-> 
-> **Recommendation**: Consider adding a parameter to control behavior when image is missing, e.g.:
-> - fail_on_missing: true, if all requested images do not exist then fail; or
-> - warn_on_missing: true, return missing list/warning info in results.
-> If not changing implementation, at least explicitly demonstrate in docs/examples how to assert result not empty (you added length==2 example, which is good), and explain returning empty does not mean pull success.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/cloud/docker/docker_image_info.py
-  line: 56
-  suggestion: > [!TIP]
-> **💡** New assert example in EXAMPLES has average usability, recommend supplementing writing closer to single image check
-> 
-> Current example registers result and assert length==2, expressing "only check local existence". But for most users (single image), it is more common to: check length==1 or images|length>0, and give message on failure.
-> 
-> **Recommendation**: Recommend adding a single image assertion example in EXAMPLES (e.g. assert images|length == 1 and prompt need to docker_image: source=pull first).
-> 
-
-  </defect>
-  <defect>
   file_path: ansible__ansible-60622@19d2ad7.patch
-  line: 1
-  suggestion: > [!TIP]
-> **💡** Submitting a `.patch` file to the repository may not comply with conventional contribution norms.
-> 
-> The changes in this PR include a new file `ansible__ansible-60622@19d2ad7.patch`, which looks like just a diff backup of the same file. Such patch files should generally not be submitted with the source code, as they increase maintenance burden and cause duplicated information.
-> 
-> **Recommendation**: Suggest removing this `.patch` file from the repository, retaining only the modification of real source files; if it must be retained, please explain its purpose and place it in a suitable location (e.g., `docs/` or `tooling/`) and avoid duplication with source diffs.
-> 
+  line: 2
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
+This file appears to be a patch file that was accidentally added to the repository. It should be removed, as its contents are the diff for the changes in this PR. The changes themselves are correctly applied in `lib/ansible/modules/cloud/docker/docker_image_info.py`.
   </defect>
 
   </review>]
@@ -1683,118 +954,68 @@ Modify the relevant logic in `display.py`:
   ## Defects
   <defect>
   file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 550
-  suggestion: > [!CAUTION]
-> **🚨** Syntax error in `argument_spec`: missing comma prevents module loading.
-> 
-> In `argument_spec`, `keysize=dict(type='int')` is missing a comma afterwards. Writing `label`/`uuid` immediately after triggers a SyntaxError, causing the module to fail being imported/executed by Ansible.
-> 
-> **Recommendation**: Add a comma after the `keysize` parameter definition, and maintain correct key-value pair separation in `argument_spec`.
-> 
-```suggestion:-0+5
-        remove_keyfile=dict(type='path'),
-        force_remove_last_key=dict(type='bool', default=False),
-        keysize=dict(type='int'),
-        label=dict(type='str'),
-        uuid=dict(type='str'),
+  line: 239
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+The `uuid` parameter is being shadowed by this assignment from `self._module.params`. This makes the argument passed to the function useless and is likely not the intended behavior. This line should be removed to ensure the method uses the `uuid` argument that is passed to it.
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/crypto/luks_device.py
+  line: 254
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+Similar to `get_device_by_uuid`, the `label` parameter is being shadowed by this assignment from `self._module.params`. This makes the argument passed to the function useless. This line should be removed so the method uses the `label` argument passed to it.
+  </defect>
+  <defect>
+  file_path: lib/ansible/modules/crypto/luks_device.py
+  line: 498
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+This method has two issues:
+
+1.  **Side Effect**: It modifies `self.device`, which is an undesirable side effect for a condition-checking method. It should not modify instance state.
+2.  **Flawed Logic**: The `luks_is_open` variable is overwritten. If `device` is provided for an open container, `luks_is_open` becomes `True`. However, if `name` is also provided but for a closed container, `luks_is_open` is overwritten to `False`, causing the method to return an incorrect result.
+
+Here is a suggested implementation that fixes both issues by removing the side effect and correcting the logic:
+
+```python
+        if self.device is not None:
+            name = self._crypthandler.get_container_name_by_device(self.device)
+            if name is not None:
+                return True
+
+        if self._module.params['name'] is not None:
+            device = self._crypthandler.get_container_device_by_name(
+                self._module.params['name'])
+            if device is not None:
+                return True
+
+        return False
 ```
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 236
-  suggestion: > [!CAUTION]
-> **🚨** `get_device_by_label`/`get_device_by_uuid` ignores input arguments and incorrectly assumes `run_command` return structure.
-> 
-> Both function signatures include `uuid`/`label` parameters, but internally they are overwritten by `self._module.params[...]`, making the input parameters useless. More seriously, `run_command` results are accessed as if they were a structure with `RETURN_CODE`/`STDOUT` indices. `AnsibleModule.run_command` actually returns a tuple `(rc, stdout, stderr)`. The current `DummyModule.run_command` even returns a string, which leads to index errors or getting wrong characters, making the logic unreliable.
-> 
-> **Recommendation**: Unpack `(rc, out, err)` correctly according to `AnsibleModule.run_command` return value, and genuinely use the function input arguments (or remove input arguments and only use `module.params`, but do not mix them). Also handle `blkid` multi-line/empty output/multiple matches, and provide clear error messages upon failure.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 416
-  suggestion: > [!CAUTION]
-> **🚨** `ConditionsHandler.__init__` unconditionally parses the device, causing unrelated paths to `fail_json` as well.
-> 
-> Executing `self.device = self.get_device_name()` immediately during `ConditionsHandler` construction attempts to parse the device unconditionally. When the user executes a path that does not require a device or uses certain parameter combinations, it may also directly trigger `fail_json`. Moreover, the error message of `get_device_name` only mentions label/UUID, but it actually also supports name.
-> 
-> **Recommendation**: Do not parse the device unconditionally in `__init__`; instead, parse it on demand (lazy) when needed. Also, explicit check for mutual exclusion/dependency relationships of `device`/`label`/`uuid`/`name` (`argument_spec` uses `required_if`/`mutually_exclusive` or code explicit verification) before calling `fail_json`.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 323
-  suggestion: > [!WARNING]
-> **⚠️** Using `label` existence to implicitly force LUKS2 creation: inconsistent semantics and uncontrollable.
-> 
-> The `run_luks_create` logic forces `'--type luks2 --label ...'` if `label!=None`, preventing users from creating LUKS2 without a label, or explicitly selecting LUKS2 (unless setting a label). The PR description mentions support for luks2, but there is no `format` parameter implementation; behavior is implicitly triggered by `label`, easily introducing compatibility/expectation deviations.
-> 
-> **Recommendation**: Add an explicit `format`/`type` parameter (e.g., `format: luks1|luks2` or `luks_type`); treat `label` as an optional field for LUKS2. If the user specifies `label` but `format!=luks2`, report an error or automatically upgrade and explain in the documentation.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 340
-  suggestion: > [!WARNING]
-> **⚠️** `run_luks_open` removing `'--type luks'` may change behavior.
-> 
-> The original implementation used `'cryptsetup open --type luks ...'`, now changed to `'cryptsetup open ...'`. Although it can usually be automatically identified, it is a behavioral change that may affect error prompting/path identification, inconsistent with module explicitness.
-> 
-> **Recommendation**: Evaluate whether `'--type luks'` needs to be retained (usually applicable to both LUKS1/2), or explain the reason in the change description and add regression tests covering LUKS1/LUKS2 open flows.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/modules/crypto/luks_device.py
-  line: 103
-  suggestion: > [!WARNING]
-> **⚠️** Inaccurate documentation and version declaration, and English wording errors.
-> 
-> `label`/`uuid` marked `version_added: 2.9` may not match the target branch; there are grammar/spelling issues in the description; `requirements` added `blkid` but did not explain usage and alternatives.
-> 
-> **Recommendation**: Correct `version_added` according to the target Ansible version; polish the description; supplement parameter relationships (`label` only for LUKS2), and explain `uuid`/`label` parsing dependency on `blkid` and alternatives.
-> 
-
   </defect>
   <defect>
   file_path: test/units/modules/crypto/test_luks_device.py
-  line: 21
-  suggestion: > [!CAUTION]
-> **🚨** DummyModule.run_command return value type error makes test meaningless/unable to simulate correctly
-> 
-> run_command should return a (rc, stdout, stderr) tuple, but the test DummyModule returns a string or None; production code accessing results based on this will exception or get wrong characters, leading to test inability to verify real behavior.
-> 
-> **Recommendation**: Change DummyModule.run_command to return (0, stdout, '') or (rc, '', err), and precisely simulate blkid/cryptsetup/lsblk output based on cmd.
-> 
+  line: 246
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
+`ConditionsHandler` is being initialized with `(module, module)`. The second argument should be an instance of `CryptHandler`, not the module itself. This was correctly fixed in `test_luks_remove_key` but seems to have been missed here.
+
+```suggestion
+        conditions = luks_device.ConditionsHandler(module, luks_device.CryptHandler(module))
+```
   </defect>
   <defect>
-  file_path: test/units/modules/crypto/test_luks_device.py
-  line: 6
-  suggestion: > [!WARNING]
-> **⚠️** Unused imports increase noise
-> 
-> Imports like patch/basic are unused in current test, will trigger lint/static check warnings.
-> 
-> **Recommendation**: Remove unused imports, or supplement tests that actually use them (e.g. patch basic.AnsibleModule.run_command).
-> 
+  file_path: lib/ansible/modules/crypto/luks_device.py
+  line: 435
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: test/units/modules/crypto/test_luks_device.py
-  line: 148
-  suggestion: > [!WARNING]
-> **⚠️** `monkeypatch get_device_by_label` return structure does not match production code expectation.
-> 
-> The test monkeypatch returns `[0, '/dev/dummy', '']`, but production code expects a device path string (or `None`). This causes `ConditionsHandler.device` to become a list, leading to type mismatch in subsequent calls, which might be masked by broad exception handling.
-> 
-> **Recommendation**: Let monkeypatch return `'/dev/dummy'`; and make precise assertions on exceptions (e.g., assert `fail_json` is called), avoiding broad `try/except` masking issues.
-> 
+There's a typo here: "properly" should be "proper". Also, for multi-line strings, it's generally preferred in Python to wrap them in parentheses rather than using line continuation characters (`\`).
 
+```python
+            error_msg = ("Can't find the proper device based on label or "
+                         "UUID, please review your playbook and check if the"
+                         " label/UUID informed was correct on remote")
+```
   </defect>
 
   </review>]
@@ -1808,134 +1029,20 @@ Modify the relevant logic in `display.py`:
   ## Documentation
 
   ## Defects
-Defect: When `become` is true and `become_pass` is not provided, `paramiko_ssh`, `docker`, `local`, and `ssh` connection plugins send `None` as the password, causing authentication failures or hangs in some cases instead of raising an error.
-Recommendation: Check if `become_pass` is true before sending the password. If it is false (i.e., `None` or an empty string) and `become` requires a password, an error should be raised.
+  <defect>
+  file_path: lib/ansible/plugins/connection/paramiko_ssh.py
+  line: 437
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
-Involved files:
-1. `lib/ansible/plugins/connection/paramiko_ssh.py`
-2. `lib/ansible/plugins/connection/docker.py`
-3. `lib/ansible/plugins/connection/local.py`
-4. `lib/ansible/plugins/connection/ssh.py`
+This logic has a flaw. If `self.become` is active but no `become_pass` is set, `get_option` will return `None`. The code will then call `to_bytes(None, ...)` which results in `b'None'` being sent as the password. This is incorrect. The original behavior was to raise an error if a password was required but not provided. The logic should be adjusted to check if a password was actually retrieved before attempting to send it.
 
-In `lib/ansible/plugins/connection/paramiko_ssh.py`:
-CAUTION:
-Sending `become_pass` directly without checking if it is `None`. `to_bytes(None)` might raise an error or produce unexpected results (depending on implementation, but in Ansible, calling to_bytes on None should generally be avoided unless explicitly handled). More importantly, if the password is None, sending it should not be attempted.
-
-WARNING:
-The current exception handling is too broad (`except Exception`), which might hide real errors produced by `to_bytes` or `chan.sendall`.
-
-TIP:
-Modify the code as follows:
-```python
-            if passprompt:
-                if self.become:
-                    become_pass = self.become.get_option('become_pass', playcontext=self._play_context)
+```suggestion
+                    become_pass = self.become.get_option('become_pass', playcontext=self._play_context) if self.become else None
                     if become_pass:
                         chan.sendall(to_bytes(become_pass, errors='surrogate_or_strict') + b'\n')
                     else:
                         raise AnsibleError("A password is required but none was supplied")
-                else:
-                    raise AnsibleError("A password is required but none was supplied")
 ```
-(Note: Other plugins (`docker.py`, `local.py`, `ssh.py`) have similar logic defects, i.e., directly using the return value of `self.become.get_option('become_pass')` without checking if it is None before attempting to use it, or not correctly handling None when a password is required)
-  <defect>
-  file_path: lib/ansible/plugins/connection/docker.py
-  line: 252
-  suggestion: > [!CAUTION]
-> **🚨** docker connection writes become_pass without checking None, possibly writing 'None' or triggering exception
-> 
-> Directly retrieving become_pass and writing to stdin after check_success fails. If become_pass is None, it causes writing meaningless content or triggering to_bytes type issues. It should ensure a password is provided when needed, otherwise raise a clear error.
-> 
-> **Recommendation**: Check if become_pass is a truthy value before writing; if empty, raise AnsibleError, or follow the existing error handling path of the connection plugin (consistent with ssh/paramiko behavior).
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/connection/local.py
-  line: 121
-  suggestion: > [!CAUTION]
-> **🚨** local connection writes become_pass without checking None, possibly writing 'None' or triggering exception
-> 
-> Same as docker.py: existence of become plugin does not necessarily mean become_pass exists. Not handling None might lead to incorrect input and hard-to-troubleshoot issues.
-> 
-> **Recommendation**: Check become_pass before writing to stdin; if empty, provide clear error message or follow existing error branch.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/connection/ssh.py
-  line: 950
-  suggestion: > [!CAUTION]
-> **🚨** ssh connection does not verify if become_pass is empty when prompting for password, possibly sending 'None'
-> 
-> Directly writing become_pass when become_prompt is detected. If user enables become but provides no password (or empty after alias variable resolution), invalid content will be sent; a more reasonable behavior is to error "password required but not supplied". Original implementation also didn't explicitly check, but previously relied on play_context.become_pass which usually wouldn't enter certain flows if empty; now fetching from plugin makes the risk more obvious (especially when plugin exists but no password).
-> 
-> **Recommendation**: Check if become_pass is a truthy value before writing; otherwise raise AnsibleError("A password is required but none was supplied") or keep consistent with current ssh.py error system.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/become/__init__.py
-  line: 43
-  suggestion: > [!WARNING]
-> **⚠️** BecomeBase.get_option fallback implementation is not rigorous: playcontext might be None and exception type/comments inconsistent
-> 
-> 1) The code unconditionally uses getattr(playcontext, ...) in the except KeyError branch. When caller doesn't pass playcontext (or third-party call), it triggers AttributeError.
-> 2) docstring/comment mentions ValueError, but KeyError is caught, semantic inconsistency.
-> 3) Common failure types of base get_option might not only be KeyError (depending on OptionManager implementation), fallback here might be incomplete or misleading.
-> 4) Fallback list includes become_exe, but current calls mainly pass become_user/become_pass/become_flags; if extended in future, consistent testing should be ensured.
-> 
-> **Recommendation**: Explicitly check if playcontext is provided before fallback; if None, re-raise original exception or return default value and log warning. Synchronously fix exception type description in comments, and add unit test coverage for fallback path (including playcontext=None).
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/action/__init__.py
-  line: 178
-  suggestion: > [!WARNING]
-> **⚠️** become_kwargs is populated only when self._connection.become is truthy, semantics relying on truthiness might be unstable
-> 
-> Here `if self._connection.become:` is used to determine if become is enabled. If become plugin object implements __bool__ or its internal state causes boolean value to be False, it will incorrectly skip become parameter population. Other places mostly use `is None` to determine plugin existence (e.g. this PR already changed to `self._connection.become is None`). Mixing these two judgment methods might lead to inconsistent behavior.
-> 
-> **Recommendation**: Recommend unifying to use `if self._connection.become is not None:` to determine if plugin is set; whether become is truly enabled should be determined by become flag/task parameters controlled by higher level, or expressed by setting/clearing become plugin by connection plugin.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/action/fetch.py
-  line: 75
-  suggestion: > [!WARNING]
-> **⚠️** fetch judgment on whether become changed from play_context.become to connection.become is None, possibly changing behavior
-> 
-> Original logic decided whether to use slurp based on play_context.become (whether privilege escalation is requested). New logic is based on whether connection.become sets a plugin: if play_context.become=True but connection layer hasn't set become plugin (or plugin lazy set), it will incorrectly go to remote_checksum path; vice versa. This change might introduce behavior regression.
-> 
-> **Recommendation**: Confirm architecture convention: lifecycle/consistency of play_context.become vs connection.become. If connection.become can always reflect whether task is become during fetch.run, then OK; otherwise should continue using play_context.become or change to more explicit condition (e.g. `if not self.get_become_option('become')` or `if not self._play_context.become`). And recommend adding integration test coverage for fetch+become scenarios.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/plugins/action/win_updates.py
-  line: 109
-  suggestion: > [!TIP]
-> **💡** Temporarily setting runas become plugin without setting become_flags/become_exe, relying on default values might be opaque
-> 
-> Here set_options only directly sets become_user/become_pass. Test asserts become_flags=='', indicating default comes from plugin implementation. For maintainability, recommend explicitly setting needed default items, or explaining in comments why relying on plugin default.
-> 
-> **Recommendation**: Consider setting become_flags/become_exe simultaneously in direct (if runas supports/needs), or adding comments nearby explaining why setting user/pass only is sufficient.
-> 
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/win_become/tasks/main.yml
-  line: 146
-  suggestion: > [!TIP]
-> **💡** New precedence test does not explicitly assert result, might not effectively verify
-> 
-> This task only calls win_whoami and sets variable precedence, but no register + assert to verify "ansible_runas_pass was used instead of ansible_become_pass". If module internally doesn't need password or test environment happens to bypass prompt, it might not fail, thus failing to capture regression.
-> 
-> **Recommendation**: Add register and assert task success, and preferably construct a path that must use password (or trigger success/failure difference via intentional wrong ansible_become_pass vs correct ansible_runas_pass) to ensure coverage.
-> 
-
   </defect>
 
   </review>]
@@ -1951,105 +1058,74 @@ Modify the code as follows:
   ## Defects
   <defect>
   file_path: docs/docsite/rst/dev_guide/style_guide/index.rst
+  line: 59
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
+
+reStructuredText requires a blank line between a paragraph and a table definition. Please add a blank line after this line to ensure the document renders correctly.
+
+```suggestion
+Latin words/phrases:
+
+```
+  </defect>
+  <defect>
+  file_path: docs/docsite/rst/community/committer_guidelines.rst
+  line: 18
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+There are a couple of punctuation issues on this line. The period after 'and so on' should be a comma to correctly continue the sentence. Also, the period inside the parentheses in '(and so on.)' should be removed as it's not at the end of a sentence.
+
+```suggestion
+As a core team member, you are an integral part of the team that develops the :ref:`roadmap <roadmaps>`. Please be engaged, and push for the features and fixes that you want to see. Also keep in mind that Red Hat, as a company, will commit to certain features, fixes, APIs, and so on, for various releases. Red Hat, the company, and the Ansible team must get these committed features (and so on) completed and released as scheduled. Obligations to users, the community, and customers must come first. Because of these commitments, a feature you want to develop yourself may not get into a release if it impacts a lot of other parts within Ansible.
+```
+  </defect>
+  <defect>
+  file_path: docs/docsite/rst/community/committer_guidelines.rst
   line: 52
-  suggestion: > [!CAUTION]
-> **🚨** The newly added Style Guide paragraph contains spelling, grammar, punctuation, and table syntax issues, which may lead to poor documentation quality or rendering anomalies.
-> 
-> There are several obvious issues in this paragraph:
-> - Title capitalization: Should be "Latin" instead of "latin" (consistency of title style in the same document).
-> - Grammar error: "some European who speak English" should be "some Europeans who speak English" or a more natural expression.
-> - Punctuation error: Double periods at the end "translation..".
-> - "Latin words/phrases:" extra space at the end of line; and followed immediately by a table, suggesting a clearer lead-in sentence.
-> - Inconsistent table content: "i.e" in the left column but "e.g.", "etc." with dots in previous examples; suggest unifying to "i.e."/"etc."/"via"/"versus" style.
-> - Suggested translations "by/ through", "rather than/against" contain slashes, which is not good for readability and translation; a better approach is to give options separated by commas or new lines.
-> These issues conflict with the PR goal (improving understandability, facilitating automated translation).
-> 
-> **Recommendation**: Correct the text grammar and punctuation, unify term capitalization and abbreviation style; change the "English" column of the table to more explicit expressions with fewer slashes, and ensure RST table syntax is correct and renderable.
-> 
-```suggestion:-0+20
-Avoid using Latin phrases
--------------------------
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-Latin words and phrases like ``e.g.`` or ``etc.`` are easily understood by native English speakers and some Europeans who speak English.
+The use of slashes in 'IRC/GitHub/and so on.' is a bit awkward. Using commas to separate the list items would improve readability. Also, the period after 'and so on' is incorrect as the sentence ends after the parenthesis.
+
+```suggestion
+  - Drag your community team members down. Always discuss the technical merits, but you should never address the person's limitations (you can later go for beers and call them idiots, but not in IRC, GitHub, and so on.).
+```
+  </defect>
+  <defect>
+  file_path: docs/docsite/rst/dev_guide/style_guide/index.rst
+  line: 56
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+There's a minor grammatical error here. 'European' is used as an adjective, but it should be a noun in this context. It should be 'some Europeans who speak English'.
+
+```suggestion
+are easily understood by native English speakers and some Europeans who speak English.
+```
+  </defect>
+  <defect>
+  file_path: docs/docsite/rst/dev_guide/style_guide/index.rst
+  line: 57
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+There's a typo here with a double period at the end of the sentence.
+
+```suggestion
 They are harder to understand for speakers of Asian languages who speak some English. They are also tricky for automated translation.
+```
+  </defect>
+  <defect>
+  file_path: docs/docsite/rst/dev_guide/style_guide/index.rst
+  line: 63
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-Avoid these Latin words and phrases:
+For consistency and correctness, the abbreviations in the 'Latin' column should include periods. Specifically, 'i.e' should be 'i.e.' and 'etc' should be 'etc.'. This also aligns with the mention of 'etc.' in the text above.
 
-+-------------------------------+------------------------------+
-| Latin                         | English                      |
-+===============================+==============================+
+```suggestion
 | i.e.                          | in other words               |
 +-------------------------------+------------------------------+
 | e.g.                          | for example                  |
 +-------------------------------+------------------------------+
 | etc.                          | and so on                    |
-+-------------------------------+------------------------------+
-| via                           | through                      |
-+-------------------------------+------------------------------+
-| vs., versus                   | rather than                  |
-+-------------------------------+------------------------------+
 ```
-
-  </defect>
-  <defect>
-  file_path: docs/docsite/rst/community/committer_guidelines.rst
-  line: 18
-  suggestion: > [!WARNING]
-> **⚠️** Replacing "etc." with "and so on." results in unnatural punctuation and parenthetical expressions in sentences.
-> 
-> The new text contains "APIs, and so on. for various releases.", where "and so on." is immediately followed by "for various releases", making the sentence structure unnatural; also "(and so on.) completed" looks awkward. Such mechanical replacement reduces documentation readability.
-> 
-> **Recommendation**: Avoid using structures with periods like "and so on." in the middle of sentences, change to more natural "and similar items" / "and related items", or rewrite the enumeration sentence to remove the placeholder phrase.
-> 
-
-  </defect>
-  <defect>
-  file_path: docs/docsite/rst/community/committer_guidelines.rst
-  line: 52
-  suggestion: > [!WARNING]
-> **⚠️** Replacing "etc." with "and so on." causes the enumeration inside parentheses to become cumbersome and unnatural.
-> 
-> "IRC/GitHub/and so on." reads very awkwardly in parentheses; the original meaning was "IRC/GitHub etc. venues". A more natural way to write this in English is "IRC, GitHub, and similar venues" or "IRC, GitHub, and other public channels".
-> 
-> **Recommendation**: Change "IRC/GitHub/and so on." to use comma separation and expressions like "other" or "similar", avoiding slash stacking.
-> 
-
-  </defect>
-  <defect>
-  file_path: docs/docsite/rst/community/development_process.rst
-  line: 167
-  suggestion: > [!WARNING]
-> **⚠️** Replacing "etc" with "and so on" in technical enumeration is unclear; suggest listing directly or rewriting.
-> 
-> "The toplevel keys (bugfixes, major_changes, and so on) …" is less clear to readers than "etc.", and here "and others" or "and more" would be more appropriate. Furthermore, in the context of defining valid keys, using vague phrases reduces accuracy.
-> 
-> **Recommendation**: Change to "and other sections" or directly state "and others defined in the config file".
-> 
-
-  </defect>
-  <defect>
-  file_path: docs/docsite/rst/community/other_tools_and_programs.rst
-  line: 106
-  suggestion: > [!TIP]
-> **💡** "via Docker" changed to "by Docker" is not idiomatic.
-> 
-> When describing implementation means, "using Docker" or "with Docker" is usually used. "by Docker" sounds more like an agent than a tool, and the semantics are inaccurate.
-> 
-> **Recommendation**: Change "by Docker" to "using Docker" or "with Docker".
-> 
-
-  </defect>
-  <defect>
-  file_path: docs/docsite/rst/community/maintainers.rst
-  line: 45
-  suggestion: > [!TIP]
-> **💡** "via an automated process" changed to "by an automated process" has average readability; suggest more natural wording.
-> 
-> "routed … by an automated process" is usable but slightly stiff; "routed … through an automated process/system" is more natural and fits better with the consistent expression of the documentation.
-> 
-> **Recommendation**: Consider using "through an automated process" or "by an automated system".
-> 
-
   </defect>
 
   </review>]
@@ -2064,69 +1140,32 @@ Avoid these Latin words and phrases:
 
   ## Defects
   <defect>
-  file_path: lib/ansible/module_utils/aws/elbv2.py
-  line: 723
-  suggestion: > [!WARNING]
-> **⚠️** Condition Values comparison changed to full list equality causes order sensitivity, which may introduce non-idempotency/false positives.
-> 
-> Changing `current_condition['Values'][0] == condition['Values'][0]` to `current_condition['Values'] == condition['Values']` fixes the "multiple values cannot recognize same condition" issue, but the new implementation is sensitive to list order. For conditions like host-header/path-pattern, the order of Values returned by AWS API may not be consistent with user input; this may cause the module to misjudge as changed, leading to rule modification every time it runs (breaking idempotency). Furthermore, if `current_condition`/`condition` lacks the `Values` key, it will raise a KeyError (although it should usually exist, compatibility is safer).
-> 
-> **Recommendation**: For most Fields (except special structures like source-ip), Values should be compared as unordered sets (e.g., sort before comparison, or set comparison with duplicate compatibility). Also, use defensive reading (`get`) for missing keys. For fields that need to maintain order semantics (if any), they should be explicitly distinguished.
-> 
-```suggestion:-0+1
-            elif current_condition['Field'] == condition['Field'] and sorted(current_condition.get('Values', [])) == sorted(condition.get('Values', [])):
-                condition_found = True
-                break
-```
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/module_utils/aws/elbv2.py
-  line: 738
-  suggestion: > [!WARNING]
-> **⚠️** Inconsistent Priority type handling: modified_rule may still write strings, affecting subsequent comparison/calls.
-> 
-> Changing the comparison to `int(...) != int(...)` here is good, but `modified_rule['Priority'] = new_rule['Priority']` may still save it as a string (e.g., written as '3' in playbook). If subsequent logic or boto3 calls expect int, it may lead to unnecessary diffs or type inconsistency issues (although boto3 accepts strings in most scenarios, it should not be relied upon).
-> 
-> **Recommendation**: Normalize to int when writing to `modified_rule`, or normalize types uniformly before `new_rule` enters comparison.
-> 
-
-  </defect>
-  <defect>
   file_path: test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
   line: 120
-  suggestion: > [!WARNING]
-> **⚠️** 集成测试包含大量无名 debug 输出，可能导致噪声/不稳定
-> 
-> 新增的多处 `- name:` 为空且 `debug: msg: "{{ alb }}"`/打印规则数量，会显著增加 CI 日志噪声；部分输出内容可能随环境变化导致排查困难。集成测试通常应尽量只包含断言，必要时用明确 name 并使用 `verbosity:` 或仅在失败时输出。
-> 
-> **建议**: 移除这些 debug 任务；如确需保留，请给出清晰 name，并使用 `verbosity: 1`/`2` 或将调试信息放入断言失败后的辅助输出机制。
-> 
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+This debug task, which lacks a `name`, appears to be a leftover from development. It should be removed to keep the test suite clean and its output concise.
   </defect>
   <defect>
   file_path: test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
-  line: 124
-  suggestion: > [!TIP]
-> **💡** Test assertions only verify changed/rule count, but do not verify that host-header Values are actually updated.
-> 
-> The current assertion only checks `alb.changed` and rules length, which cannot prove that the fix point (host-header multi-value update) is actually effective. Even if the module does not correctly update Values, it might still pass the test if `changed` is triggered by other differences.
-> 
-> **Recommendation**: After the second apply, add an assertion that the Conditions/Values of the corresponding Priority rule contain two hosts (e.g., filter the rule with priority==3 and assert its host-header Values).
-> 
+  line: 149
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+This is another debug task without a `name` that seems to be a leftover from development. Please remove it to maintain test cleanliness.
   </defect>
   <defect>
-  file_path: lib/ansible/modules/cloud/amazon/elb_application_lb.py
-  line: 296
-  suggestion: > [!TIP]
-> **💡** Document example adding multiple host-header values is good, but recommend supplementing explanation that Values order is irrelevant
-> 
-> Example shows multi-value host-header, helping user understanding. Considering implementation/cloud return might not guarantee order, recommend lightly mentioning in document that Values are treated as set (order unimportant), to reduce user confusion.
-> 
-> **Recommendation**: Add a sentence near example or explain in parameter description that order is not guaranteed.
-> 
+  file_path: test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
+  line: 153
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+This debug task is redundant as the number of rules is verified by the `assert` task immediately following it. It should be removed.
+  </defect>
+  <defect>
+  file_path: test/integration/targets/elb_application_lb/tasks/test_modifying_alb_listeners.yml
+  line: 192
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
+
+Please remove this final leftover debug task to keep the test code clean before merging.
   </defect>
 
   </review>]
@@ -2142,228 +1181,140 @@ Avoid these Latin words and phrases:
   ## Defects
   <defect>
   file_path: lib/ansible/executor/task_executor.py
-  line: 511
-  suggestion: > [!WARNING]
-> **⚠️** Merging variables in `delegate_to` scenarios may change existing precedence semantics.
-> 
-> The original logic only used `ansible_delegated_vars[delegate_host]` as `cvars` during `delegate_to` (connection initialization, etc. would only see variables from the delegated host's perspective). Now changed to `combine_vars(variables, delegate_vars)`, it exposes a large number of variables from the original host/play/task to the delegated connection context. Although `combine_vars` usually means the latter overrides the former (`delegate_vars` takes precedence), this may still change existing behavior:
-> 1) Connection plugins/callbacks might unexpectedly read variables that shouldn't be visible in the delegated host connection;
-> 2) If `delegate_vars` does not contain certain connection-related fields, it will fall back to the values in the original `variables`, which may lead to "cross-contamination" of connection parameters (e.g., `ansible_connection`/`ansible_host`/`ansible_user`, etc.).
-> The goal of this PR is to make the password provided by `-k` available when the delegated host does not explicitly set `ansible_password`; but implementing it via a full merge might be too broad.
-> 
-> **Recommendation**: Suggest merging more precisely: only supplement connection credentials related to `play_context`/`-k` (such as `ansible_password`/`ansible_ssh_pass`, etc.) or only inject default values at the `play_context` level into `delegate_vars`, rather than merging `variables` entirely into `cvars`. At least explicitly state in code comments/changelog that this is an "intentional expansion of the set of variables visible to delegated connections", and evaluate whether it affects the source of key fields like `ansible_connection`/`ansible_host`.
-> 
-
-  </defect>
-  <defect>
-  file_path: lib/ansible/executor/task_executor.py
   line: 510
-  suggestion: > [!TIP]
-> **💡** Lack of clarity regarding the import/availability of `combine_vars` (readability/maintainability).
-> 
-> The diff fragment does not show the import location of `combine_vars`. If this file did not import `combine_vars` before, this change will directly cause a runtime error; even if it is imported, it is recommended to add a comment nearby explaining why `delegate_to` needs merging (relationship with `-k`/`PlayContext`) to avoid future maintainers reverting it.
-> 
-> **Recommendation**: Confirm that `task_executor.py` has correctly imported `combine_vars`; and add a line of comment here explaining that this merge is to allow using the password from `-k`/`PlayContext` when the delegated host does not have `ansible_password` set.
-> 
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
+While this change correctly fixes the variable precedence for delegated tasks, the comment on the preceding line (509) is now misleading. It states that variables from the delegated host are used *instead of* the original host's, but with this change, they are now *merged*. Please consider updating the comment to reflect the new logic for better maintainability. For example: ` # Merge variables from the delegated host on top of the current variables`.
   </defect>
   <defect>
-  file_path: test/integration/targets/connection_delegation/runme.sh
-  line: 5
-  suggestion: > [!TIP]
-> **💡** Integration test has strong dependency on sshpass and many environment assumptions
-> 
-> runme.sh drives test via sshpass -p my_password ansible-playbook ... -k, but localhost connection in inventory uses custom delegation_connection, not necessarily needing sshpass. This dependency causes more platform skips (already skipped freebsd/osx/rhel), reducing coverage. Also script set -ux will echo command line in CI output, although password here is fixed test value, it is still not ideal.
-> 
-> **Recommendation**: If feasible, recommend removing sshpass dependency: directly use ANSIBLE_PASSWORD/ANSIBLE_ASK_PASS or inject via env var/config to trigger -k behavior, reducing platform limits; also avoid -x or avoid plaintext password appearing in command line.
-> 
+  file_path: test/integration/targets/connection_delegation/connection_plugins/delegation_connection.py
+  line: 29
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-  </defect>
-  <defect>
-  file_path: test/integration/targets/connection_delegation/action_plugins/delegation_action.py
-  line: 9
-  suggestion: > [!TIP]
-> **💡** Action plugin not calling super().run might affect standard behavior (although acceptable for test scenario)
-> 
-> action plugin directly returns dict without calling ActionBase.run or setting common fields like changed/failed. Usually fine as test plugin, but if extending assertion or reuse in future, might introduce inconsistency.
-> 
-> **Recommendation**: Consider filling common fields (changed/failed) in return structure, or explicitly stating in comment that this action is only for testing remote_password option parsing.
-> 
+The methods `_connect`, `exec_command`, `put_file`, `fetch_file`, and `close` are abstract in the `ConnectionBase` class. Calling `super()` on them will result in a `NotImplementedError` if they are ever called. While the current test case does not trigger these methods, it's safer and clearer to provide no-op implementations using `pass` instead of `super()` calls. This will prevent unexpected errors if this test connection plugin is reused or extended in the future.
 
+```suggestion
+    def _connect(self):
+        pass
+
+    def exec_command(self, cmd, in_data=None, sudoable=True):
+        pass
+
+    def put_file(self, in_path, out_path):
+        pass
+
+    def fetch_file(self, in_path, out_path):
+        pass
+
+    def close(self):
+        pass
+```
   </defect>
 
   </review>]
 [ansible__ansible-77944@0f6d2a8][<review>
-## Function
+  ## Function
 
-## Complexity
+  ## Complexity
 
-## Style
+  ## Style
 
-## Documentation
+  ## Documentation
 
-## Defects
-<defect>
-file_path: lib/ansible/inventory/manager.py
-line: 349
-suggestion: > [!CAUTION]
-> **🚨** refresh_inventory replaying dynamic group call with incorrect parameters, which will definitely trigger exceptions or erroneous behavior.
-> 
-> In refresh_inventory, the replayed call to _cached_dynamic_grouping is `self.add_dynamic_group(host, {})`. However, inside add_dynamic_group, `result_item.get('add_group')` is read, and an empty dict is passed, so group_name becomes None. Later, `if group_name not in self.groups:` and `self.add_group(group_name)` will either create a group named None or raise an exception (depending on the implementation of add_group). Furthermore, the function writes `result_item['changed'] = changed` at the end. While this won't crash with an empty dict, the overall logic is incorrect: when replaying, the group_by result information (add_group/parent_groups) must be carried along, rather than just the host object.
-> 
-> **Suggestion**: Change the cache structure from "list of host objects" to "(host_name, copy of result_item)" or a similar serializable structure. When replaying refresh_inventory, use the original result_item (at least containing add_group/parent_groups) and re-reference the host by host_name. Avoid using executor-side Host objects for caching.
-> 
+  ## Defects
+  <defect>
+  file_path: lib/ansible/inventory/manager.py
+  line: 349
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
-</defect>
-<defect>
-file_path: lib/ansible/inventory/manager.py
-line: 707
-suggestion: > [!CAUTION]
-> **🚨** Dynamic group cache logic is reversed: it doesn't cache during actual execution, but caches during replay.
-> 
-> In add_dynamic_group, `if not result_item: self._cached_dynamic_grouping.append(host)` is used to decide whether to cache. But in the normal path (strategy call), result_item is always non-empty, so no group information is cached, and refresh_inventory can't restore the group_by results. On the other hand, when replaying refresh_inventory, passing `{}` (an empty dict) triggers caching, appending the host to the cache list, which causes the cache to grow continuously with invalid content.
-> 
-> **Suggestion**: The cache condition should be based on "whether it comes from actual task results" rather than "whether result_item is empty". It is recommended to explicitly trigger caching during the strategy call (e.g., by passing a special parameter/flag) or always cache in InventoryManager, but perform deduplication and cache only necessary result_item data.
-> 
+To accompany the proposed changes in `add_dynamic_host` and `add_dynamic_group`, this logic needs to be updated. `_cache=False` should be passed to prevent re-caching during re-application. Additionally, for groups, the cached tuple containing both the host and result item needs to be unpacked correctly.
 
-</defect>
-<defect>
-file_path: lib/ansible/inventory/manager.py
-line: 665
-suggestion: > [!CAUTION]
-> **🚨** Dynamic host cache doesn't work in the normal path and may lead to duplicates/inflation.
-> 
-> In add_dynamic_host, `if not result_item: self._cached_dynamic_hosts.append(host_info)` is used. Normally, result_item is non-empty, so add_host information is not cached, and refresh_inventory can't restore newly added hosts/vars/groups. Moreover, when replaying, passing `{}` triggers the cache, causing the same host_info to be cached repeatedly, leading to growth in duplicates.
-> 
-> **Suggestion**: Similar to groups: caching must occur when a real add_host happens, and no caching should occur during replay. Additionally, deduplication (by host_name) should be performed, and the final merged host_vars/groups should be cached to ensure idempotent replay.
-> 
+```suggestion
+        for host in self._cached_dynamic_hosts:
+            self.add_dynamic_host(host, {}, _cache=False)
+        for host, result_item in self._cached_dynamic_grouping:
+            self.add_dynamic_group(host, result_item, _cache=False)
+```
+  </defect>
+  <defect>
+  file_path: lib/ansible/inventory/manager.py
+  line: 659
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
-</defect>
-<defect>
-file_path: lib/ansible/inventory/manager.py
-line: 668
-suggestion: > [!WARNING]
-> **⚠️** add_dynamic_host does not validate the host_name for emptiness, which may lead to exceptions or inventory contamination.
-> 
-> After `host_name = host_info.get('host_name')`, there is no validation to ensure it is a non-empty string, yet it is used in `if host_name not in self.hosts:` and `self.add_host(host_name, 'all')`. If the module outputs an exception (or a third-party module mimics the add_host result but lacks the field), it may create an invalid host or throw hard-to-locate exceptions.
-> 
-> **Suggestion**: Validate the types and non-emptiness of host_info and host_name before proceeding with the logic. Otherwise, raise an AnsibleError with contextual information.
-> 
+The current caching logic `if not result_item:` is inverted. It incorrectly triggers caching when re-applying from `refresh_inventory` (where `result_item` is an empty `{}` which is falsy) and prevents caching on initial creation from the strategy plugin (where `result_item` is a non-empty `TaskResult`). This fundamentally breaks the intended feature. A clearer approach is to use a private `_cache` flag to explicitly control the caching behavior.
 
-</defect>
-<defect>
-file_path: lib/ansible/inventory/manager.py
-line: 719
-suggestion: > [!WARNING]
-> **⚠️** add_dynamic_group does not validate the group_name, which may lead to creation or referencing of invalid groups.
-> 
-> After `group_name = result_item.get('add_group')`, it is used directly. If add_group is missing or empty, it may lead to creating a group named None or an empty string, or trigger an exception. This is especially problematic in the replay path (currently an empty dict).
-> 
-> **Suggestion**: Explicitly validate the group_name (non-empty string). If it doesn't meet the criteria, return directly or raise an AnsibleError. Replay must ensure all required fields are present.
-> 
+```suggestion
+    def add_dynamic_host(self, host_info, result_item, _cache=True):
+        '''
+        Helper function to add a new host to inventory based on a task result.
+        '''
 
-</defect>
-<defect>
-file_path: lib/ansible/plugins/strategy/__init__.py
-line: 43
-suggestion: > [!TIP]
-> **💡** Removing the to_native import might be an unrelated change; it is recommended to ensure no other references exist.
-> 
-> This diff removes `to_native` from the imports. If it is still used elsewhere in the file, it will cause a runtime failure. Even if it isn't referenced, it is advisable to keep the PR focused and avoid unrelated changes (unless it's a lint/unused import fix).
-> 
-> **Suggestion**: Confirm that there are no uses of to_native in this file. If it's just cleaning up an unused import, mention that in the PR description.
-> 
+        changed = False
+        if _cache:
+            self._cached_dynamic_hosts.append(host_info)
+```
+  </defect>
+  <defect>
+  file_path: lib/ansible/inventory/manager.py
+  line: 699
+  suggestion: ![critical](https://www.gstatic.com/codereviewagent/critical.svg)
 
-</defect>
-<defect>
-file_path: test/integration/targets/refresh_inventory/refresh.yml
-line: 23
-suggestion: > [!TIP]
-> **💡** Test playbook has a spelling and consistency issue (invenotry).
-> 
-> The task name in the always block contains a spelling error 'invenotry', which affects readability and subsequent maintenance searches.
-> 
-> **Suggestion**: Correct it to 'inventory'.
-> 
+This method has two critical issues:
 
-</defect>
-<defect>
-file_path: test/integration/targets/refresh_inventory/refresh_preserve_dynamic.yml
-line: 43
-suggestion: > [!TIP]
-> **💡** Test playbook has a spelling and consistency issue (invenotry).
-> 
-> Similar to refresh.yml, the task name contains a spelling error.
-> 
-> **Suggestion**: Correct it to 'inventory'.
-> 
+1. The caching logic `if not result_item:` is inverted, similar to `add_dynamic_host`.
+2. It incorrectly caches only the `host` object, losing the group information from `result_item`. This will cause a crash during inventory refresh when `result_item.get('add_group')` returns `None`.
 
-</defect>
+A robust fix is to use a `_cache` flag and cache a tuple of `(host, result_item)` to preserve all necessary information for re-application.
 
-</review>
-```]
+```suggestion
+    def add_dynamic_group(self, host, result_item, _cache=True):
+        '''
+        Helper function to add a group (if it does not exist), and to assign the
+        specified host to that group.
+        '''
+
+        changed = False
+
+        if _cache:
+            self._cached_dynamic_grouping.append((host, result_item))
+```
+  </defect>
+
+  </review>]
 [ansible__ansible-79049@83224b8][<review>
-## Function
+  ## Function
 
-## Complexity
+  ## Complexity
 
-## Style
+  ## Style
 
-## Documentation
+  ## Documentation
 
-## Defects
-<defect>
-file_path: lib/ansible/playbook/base.py
-line: 214
-suggestion: > [!CAUTION]
-> **🚨** validate() changed to read _<name>, which may bypass the attribute accessor and lead to type validation misjudgment.
-> 
-> The original logic performed type validation for fields without custom _validate_* by reading getattr(self, name), which usually triggers property/descriptor (and potentially inheritance merge logic). This change now reads getattr(self, f'_{name}', Sentinel). While this avoids triggering the "inheritance/merge causing squash" issue, it introduces two risks:
-> 1) For properties without a corresponding private field _<name>, the value will become Sentinel. The current code uses `if value is not None:` which allows Sentinel to proceed to subsequent validation, possibly leading to incorrect conclusions in attribute.isa/string checks (e.g., wrongly passing or wrongly throwing an exception depending on subsequent branches).
-> 2) The validate phase will no longer validate values computed/normalized via attribute accessors, potentially overlooking invalid input or diverging from previous behavior.
-> 
-> From the context, this change seems intended to "avoid triggering inheritance merge during validation". A safer approach would be to still prioritize _<name>, but skip if not present (or fall back to getattr(self, name) but ensure no squash path is triggered). At the very least, Sentinel should be treated as "not set".
-> 
-> **Suggestion**: Treat Sentinel as not set: perform type validation only when the real value is neither Sentinel nor None. Also, assess whether a fallback to getattr(self, name) is needed when _<name> is absent (be careful not to reintroduce squash).
-> 
-```suggestion:-0+1
-                    value = getattr(self, f'_{name}', Sentinel)
-                    if value is not Sentinel and value is not None:
-                        if attribute.isa == 'string' and isinstance(value, (list, dict)):
-                            raise AnsibleParserError(
-                                "The field '%s' is supposed to be a string type,"
-                                " however the incoming data structure is a %s" % (name, type(value)), obj=self.get_ds()
-                            )
-````
+  ## Defects
+  <defect>
+  file_path: lib/ansible/playbook/block.py
+  line: 301
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
-</defect>
-<defect>
-file_path: lib/ansible/playbook/block.py
-line: 301
-suggestion: > [!WARNING]
-> **⚠️** Direct indexing of self.fattributes[attr] may throw a KeyError and behaves inconsistently with task.py.
-> 
-> The original code used self.fattributes.get(attr).extend / prepend, which potentially triggered AttributeError if get returned None. This change uses self.fattributes[attr] and replaces it with getattr(fattr, ..., False) for robustness, but if attr is not in fattributes, it will throw a KeyError. The current function's try/except does not cover this KeyError (the try block starts at line 306). In the task.py implementation, there is a try/except wrapping the KeyError (see around line 495), but block.py does not have symmetrical handling, which might cause direct exceptions in certain call paths (e.g., passing undeclared field names).
-> 
-> **Suggestion**: Put the fattr retrieval in a try/except KeyError block, or fall back to self.fattributes.get(attr) and use the default extend/prepend=False when None is returned, ensuring consistency with task.py's error tolerance.
-> 
+Using `self.fattributes[attr]` will raise a `KeyError` if `attr` is not found. This is not handled as it's outside the `try...except` block that follows. Using `.get(attr)` is safer as it will return `None` if the key is missing, and the subsequent `getattr` calls will correctly default to `False`, preventing a crash.
 
-</defect>
-<defect>
-file_path: test/integration/targets/keyword_inheritance/runme.sh
-line: 1
-suggestion: > [!TIP]
-> **💡** Using set -x in runme.sh might generate excessive output in CI; it is recommended to align with existing test styles.
-> 
-> set -eux enables trace (-x), which can produce noisy logs in some CI environments. Most Ansible integration test scripts prefer set -euo pipefail (or set -eux but without enabling -x).
-> 
-> **Suggestion**: Consider removing -x or switching to set -euo pipefail; if the repository's convention in this directory uses -x, then it can be ignored.
-> 
+```suggestion
+        fattr = self.fattributes.get(attr)
+```
+  </defect>
+  <defect>
+  file_path: lib/ansible/playbook/task.py
+  line: 464
+  suggestion: ![high](https://www.gstatic.com/codereviewagent/high-priority.svg)
 
-</defect>
+Using `self.fattributes[attr]` will raise a `KeyError` if `attr` is not found. This is not handled as it's outside the `try...except` block that follows. Using `.get(attr)` is safer as it will return `None` if the key is missing, and the subsequent `getattr` calls will correctly default to `False`, preventing a crash.
 
-</review>
-```]
+```suggestion
+        fattr = self.fattributes.get(attr)
+```
+  </defect>
+
+  </review>]
 [ansible__ansible-81600@ff6fd06][<review>
   ## Function
 
@@ -2376,54 +1327,14 @@ suggestion: > [!TIP]
   ## Defects
   <defect>
   file_path: test/integration/targets/git/tasks/setup-local-repos.yml
-  line: 59
-  suggestion: > WARNING: Changing the source repository's working branch via git checkout may impact subsequent test cases and idempotency.
-
-This task executes git checkout test_branch && git rev-parse HEAD within the shallow_branches repository. This action permanently alters the current branch (HEAD) of the local repository. If subsequent tests or tasks assume the repository remains on the branch established at the end of the setup script (which concludes with git checkout -b new_branch), it will introduce implicit coupling. Furthermore, when the same test target is executed repeatedly or in parallel, such side effects in the workspace are prone to causing non-deterministic results.
-
-Suggestion: Avoid switching branches via checkout just to retrieve a commit ID. Instead, resolve the reference directly using git rev-parse refs/heads/test_branch (which does not affect the workspace), or record the SHA immediately after branch creation in the setup script and export it as a variable.
-
-```suggestion:-0+4
- - name: SETUP-LOCAL-REPOS | get ref head for test_branch
-   shell: git rev-parse refs/heads/test_branch
-   args:
-     chdir: "{{ repo_dir }}/shallow_branches"
-   register: ref_head_id
-```
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/git/tasks/setup-local-repos.yml
   line: 60
-  suggestion: > [!WARNING]
-WARNING: The shell task does not use set -e, and the use of && only covers partial failure scenarios.
+  suggestion: ![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)
 
-The current command relies on && for short-circuiting on failure, but it remains a shell one-liner without "strict mode" enabled. If this expands into multiple commands or introduces pipes in the future, failure detection will become unreliable. Since the goal here is simply to retrieve the SHA of a ref, using a direct command or git rev-parse refs/... is more robust.
+The `git checkout test_branch` is unnecessary and has the side effect of changing the current branch of the test repository. You can get the commit hash of `test_branch` directly using `git rev-parse test_branch`. This avoids modifying the state of the repository and makes the intent clearer.
 
-Suggestion: If sticking with a shell execution, it is recommended to change it to command: git rev-parse refs/heads/test_branch (this can be combined with the previous fix). This avoids shell parsing overhead and workspace side effects.
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/git/tasks/specific-revision.yml
-  line: 72
-  suggestion: > [!WARNING]
-WARNING: The new test case relies on facts set in setup-local-repos.yml, creating an implicit precondition.
-
-specific-revision.yml utilizes the variable test_branch_ref_head_id, which is only defined via set_fact within setup-local-repos.yml. If the execution path or inclusion logic is adjusted (or if this task file is run in isolation), it will fail immediately. While common in integration testing, this introduces a new point of coupling that should be made as explicit as possible.
-
-Suggestion: Add an assertion or a warning at the top of specific-revision.yml to clarify this dependency (e.g., using assert to verify the variable is defined), or recalculate it within the same file using command: git rev-parse ... to reduce implicit cross-file dependencies.
-
-  </defect>
-  <defect>
-  file_path: test/integration/targets/git/tasks/specific-revision.yml
-  line: 73
-  suggestion: > [!TIP]
-NOTE: The test semantics for refspec/value have drifted from historical cases. It is recommended to verify whether the coverage goals remain equivalent.
-
-The original test validated scenarios involving retrieving revisions that are "not reachable via heads/tags" using refspecs (e.g., the PR merge ref refs/pull/7/merge). The current change to a local refs/heads/test_branch aligns the semantics more closely with a standard branch fetch. While it still exercises the refspec mechanism, it may lose coverage for "non-standard namespace refs."
-
-Suggestion: If the goal is to reduce bandwidth while maintaining coverage, consider manually creating a non-heads/tags ref in the local repository (e.g., refs/pull/7/merge or refs/changes/...) pointing to a specific commit, and then continue using the original refspec test logic.
-
+```yaml
+  shell: git rev-parse test_branch
+```
   </defect>
 
   </review>]
@@ -2439,22 +1350,13 @@ Suggestion: If the goal is to reduce bandwidth while maintaining coverage, consi
   ## Defects
   <defect>
   file_path: changelogs/fragments/56567-Fix-win_iis_website-id assignment-for-first-new-site.yml
-  line: 87
-  suggestion: ⚠️ The truthy evaluation of $site_id may incorrectly handle 0/empty string values.
-
-The code uses if ($site_id) to determine if the site_id is specified. In PowerShell, this evaluation is based on the truthy/falsy rules, which may treat 0, empty strings, etc., as not provided, thus falling back to ID=1. If module parameters allow 0 or numeric string values (e.g., passed from an external source), it may lead to inconsistencies with user expectations. A safer approach is to explicitly check if it is $null (and exclude empty strings if necessary).
-
- Replace if ($site_id) with a more explicit check, such as if ($null -ne $site_id) (add -and $site_id -ne '' if you need to exclude empty strings). Also, confirm the type constraints of site_id (int vs string) to determine the final check logic.
-  </defect>
-  <defect>
-  file_path: changelogs/fragments/56567-Fix-win_iis_website-id assignment-for-first-new-site.yml 
   line: 1
-  suggestion: 🚨 changelog segment YAML format error and missing newline at the end of the file
+  suggestion: Please add a newline at the end of the file. It's a common convention for text files to end with a newline character to avoid issues with some tools.
 
-The current content appears to have mistakenly included diff line numbers/prefixes in the file (e.g., "1 +bugfixes: ", "2 + - ..."), which will cause the YAML to be incorrectly parsed by Ansible's changelog tool. Additionally, the file is missing a newline at the end (No newline at end of file), which does not conform to common standards and may trigger lint/format check failures.
+```yaml
+ - win_iis_website - "Fixed #47057 , site_id not used if no sites exist already and creating a new site"
 
- Modify the file content to be a valid YAML and add a newline at the end. The general format is the top-level key bugfixes, with a value of a string list; do not include content like "1 +". bugfixes:
-  - win_iis_website - "Fixed #47057, site_id not used if no sites exist already and creating a new site"
+```
   </defect>
 
   </review>]

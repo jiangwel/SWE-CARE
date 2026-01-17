@@ -20,7 +20,10 @@ from swe_care.utils.extract_prs_data import (
 from swe_care.utils.patch import get_changed_file_paths
 
 try:
-    nltk.download("punkt_tab")
+    try:
+        nltk.data.find("tokenizers/punkt_tab")
+    except LookupError:
+        nltk.download("punkt_tab")
 except Exception:
     logger.error(
         "Failed to download punkt_tab, maybe you need to use VPN to download it?"

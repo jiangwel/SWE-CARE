@@ -18,7 +18,10 @@ from swe_care.utils.llm_models.clients import BaseModelClient
 from swe_care.utils.prompt_loader import load_prompt
 
 try:
-    nltk.download("punkt_tab")
+    try:
+        nltk.data.find("tokenizers/punkt_tab")
+    except LookupError:
+        nltk.download("punkt_tab")
 except Exception:
     logger.error(
         "Failed to download punkt_tab, maybe you need to use VPN to download it?"
