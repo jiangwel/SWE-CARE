@@ -32,3 +32,24 @@ The generated files are stored in:
 ```
 /Users/jiangwei/Develop/SWE-CARE/inputs/
 ```
+
+## `get_output.py`
+
+The `get_output.py` script helps in manually adding review results to the predictions file.
+
+### Usage
+
+Run the script using Python:
+
+```bash
+python3 get_output.py
+```
+
+### Description
+
+1.  **Input**: Prompts the user to enter:
+    *   `instance_id`: The ID of the instance being reviewed.
+    *   `review_text`: The content of the review. The script automatically escapes double quotes (`"`) within the text for valid JSON formatting.
+2.  **Output**: Appends a new line to the predictions file:
+    *   **File Path**: `/Users/jiangwei/Develop/SWE-CARE/results/predictions/res.jsonl`
+    *   **Format**: JSON line `{ "instance_id": "...", "review_text": "...", "review_trajectory": null }`

@@ -1,0 +1,269 @@
+[ansible__ansible-55379@060b0e9][<review> ## Function Extends `ovirt_template` with new parameters for USB, SSO, sound, smartcard, ballooning, cloud-init, and NIC creation, aiming to match `ovirt_vm`. However, it omits `vnic_profile_mappings`, one of the requested capabilities, so the issue is not fully addressed.
+Complexity
+Additions stay within the existing module structure, but get_initialization mutates user-provided dictionaries in place and reuses them, which complicates reasoning about side effects and idempotency.
+
+Style
+Names and structure are consistent with the module, but update_check mixes guard logic and equality checks, and direct attribute access on optional SDK objects breaks the defensive style used elsewhere.
+
+Documentation
+Module docs and examples were expanded appropriately for the new options. No changelog fragment or return documentation updates were added; confirm whether they are required.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py line: 608 suggestion: Drop the leading `not self.param('cloud_init_persist')` guard in `update_check` (or replace it with an equality check against the remote initialization settings). As written, any run with `cloud_init_persist=True` will report changes every time, breaking idempotency. </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py line: 616 suggestion: Protect the USB comparison with `entity.usb` (e.g., `equal(self.param('usb_support'), entity.usb.enabled if entity.usb else None)`) to avoid `AttributeError` when the template lacks USB settings. </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py line: 615 suggestion: Guard the SSO comparison so it tolerates `entity.sso` being `None`, e.g., `equal(self.param('sso'), bool(getattr(entity.sso, 'methods', [])))`. </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_template.py line: 870 suggestion: Add `vnic_profile_mappings` (documentation, argument spec, and handling) so the module actually covers all features listed in the request. </defect>]
+
+[ansible__ansible-54268@403b068][<review> ## Function Adds `RedfishUtils.get_firmware_update_capabilities()` and wires a new `GetFirmwareUpdateCapabilities` command into `redfish_facts`. Intent matches the feature request, but the helper does not correctly handle network failures, so the command can crash rather than returning a structured error.
+Complexity
+Logic is straightforward, but missing failure-handling increases risk. Otherwise complexity is comparable to neighboring helpers.
+
+Style
+Generally consistent, though the new helper mixes camelCase-like keys with snake_case locals and contains a typo in updateservce_uri; more importantly, it diverges from existing error-handling conventions.
+
+Documentation
+Example playbook entry added; no other docs needed.
+
+Defects
+<defect> file_path: lib/ansible/module_utils/redfish_utils.py line: 522 suggestion: After calling `self.get_request(self.root_uri + updateservce_uri)`, check `if response['ret'] is False: return response` before dereferencing `response['data']`, matching the pattern used in other helpers. </defect> <defect> file_path: lib/ansible/module_utils/redfish_utils.py line: 535 suggestion: Return booleans for the `ret` flag (`{'ret': False, ...}`) rather than the string `"False"` so callers can rely on the expected type. </defect> </review>]
+
+[ansible__ansible-51415@fb988f5][<review> ## Function Extends the `meraki_admin` module docs with extra explanation for the `networks` option and adds example playbook snippets for `tags` and `networks`. It moves in the right direction but still doesn’t fully satisfy the request to explicitly state that both parameters must be supplied as dictionaries.
+Complexity
+Change is small and straightforward; no risk of unnecessary complexity.
+
+Style
+Generally matches the surrounding documentation style, although the new examples use JSON-in-flow mapping, which is less common than the block-style YAML used elsewhere.
+
+Documentation
+Adds examples, but it still omits a clear statement that each element in tags (and even networks) must be a dictionary, so the root documentation concern remains unresolved.
+
+Defects
+<defect> file_path: lib/ansible/modules/network/meraki/meraki_admin.py line: 47 suggestion: Replace the two new bullet points with a single sentence that explicitly states “Each item must be a dictionary with keys C(id) and C(access).” to make the structure unambiguous. </defect> <defect> file_path: lib/ansible/modules/network/meraki/meraki_admin.py line: 131 suggestion: Add parallel explanatory text for the `tags` parameter (e.g., “Each item must be a dictionary with keys C(tag) and C(access).”) so the docs actually convey that `tags` expects dictionaries rather than relying solely on the example. </defect> </review>]
+
+[ansible__ansible-50499@5091ba4][<review> ## Function Removes the `unstable` alias from the docker_network target and extends the shared `setup_docker` role to report docker versions and pre-emptively clean up any ansible-test prefixed containers, volumes, networks, and to list remaining docker resources. The goal is to keep stale networks from prior runs from colliding with the IPAM changes exercised by the docker_network integration test.
+Complexity
+Adds a sizable block of cleanup and diagnostic tasks to a common role. The additional logic is straightforward but broad in scope (multiple shell pipelines, redundant list commands), which increases the role’s runtime and surface area beyond what seems necessary for the narrow flake being addressed.
+
+Style
+Naming follows existing conventions and the new debug output fits the surrounding style. However, the cleanup block relies on shell pipelines with GNU-specific flags (xargs -r) rather than using safer module patterns, and it reuses register names for multiple purposes, which makes the play harder to follow.
+
+Documentation
+No user-facing docs were touched, which is reasonable, but the new cleanup behavior in a shared role probably warrants at least a brief comment or changelog note describing the intent and scope.
+
+Defects
+<defect> file_path: test/integration/targets/setup_docker/tasks/main.yml line: 42 suggestion: Use `docker ps -a --no-trunc --format ...` (or an equivalent) so the cleanup removes stopped containers as well; otherwise any aborted test that left a stopped `ansible-test-*` container will keep the network attached, `docker network rm` will fail, and the original IP conflict remains. </defect> <defect> file_path: test/integration/targets/setup_docker/tasks/main.yml line: 53 suggestion: Guard the cleanup block on `docker_cli_version_stdout.rc == 0` (or `docker_cli_version_stdout is succeeded`) instead of the `version('0.0','>')` comparison. Older Docker clients, including ones in the documented `ubuntu1604` environment, can lack the `docker version -f` flag; the command then fails, `docker_cli_version` stays at `'0.0'`, the block never runs, and the flaky network cleanup still doesn’t happen. </defect> </review>]
+
+[ansible__ansible-49298@ef7ba60][<review> ## Function - The patch only updates `ovirt_host_network.py`, but the reported failure comes from `ovirt_host_networks.py` (see stack trace in the issue). As a result the failing module never sees the new option, so the 409 error path is unchanged. Functionally the bug is still present.
+Complexity
+Changes are small and straightforward; no unnecessary complexity introduced.
+Style
+Naming and structure align with existing code, though the helper variable network_attachment_service could be better named (attachment), this is minor.
+Documentation
+The new argument is described in the module docstring, but no changelog fragment was added. Ansible generally expects a fragment for user-visible behavior changes.
+Defects
+<defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_host_network.py line: 379 suggestion: Apply the synchronization logic and argument wiring to `lib/ansible/modules/cloud/ovirt/ovirt_host_networks.py` (the module that triggers the 409) so the module that users call actually performs the sync before modification. </defect> </review>]
+
+[ansible__ansible-44951@91cfd5c][<review> ## Function Patch sets up an `id` parameter on many oVirt modules with the goal of allowing resources (notably networks) to be renamed by addressing them via their immutable IDs. However, the implementation never uses the new parameter when the module looks up the existing entity, so the module still searches by `name` (which now contains the desired *new* value). As a result, the current entity is never found and the rename flow still cannot work. The issue remains unresolved.
+Complexity
+Changes are straightforward additions of an id field and extra equality checks; nothing here is inherently too complex. The problem is more about missing logic than over‑complexity.
+
+Style
+Option/argument names are consistent, but several copy/paste errors slipped into the documentation blocks (ovirt_host says “nic”, ovirt_mac_pool example uses the wrong module, etc.), which hurts polish and clarity.
+
+Documentation
+New examples were added, but multiple ones reference the wrong module names or object types, which will mislead users. There is no accompanying documentation describing how the new id option should be passed or any caveats about rename behavior.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_network.py line: 226 suggestion: When resolving the network to operate on, prefer the supplied `id` (falling back to `name` only when `id` is absent). Without this change the module still searches by the new name, so the existing network is never found and the rename cannot succeed. </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_host.py line: 22 suggestion: Update the option description to “ID of the host to manage.” (currently says “nic”). </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_mac_pool.py line: 66 suggestion: Fix the example to invoke `ovirt_mac_pool` (it currently shows `- ovirt_nic`, which is incorrect and confusing). </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_vm.py line: 681 suggestion: The “Change VM Name” example should call `ovirt_vm`, not `ovirt_vmpool`. </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_tag.py line: 96 suggestion: Correct the comment to “Change tag name” (currently repeats “Change cluster Name”). </defect> <defect> file_path: lib/ansible/modules/cloud/ovirt/ovirt_vmpool.py line: 107 suggestion: Fix the example text to say “new pool name” (now reads “new disk name”). </defect> </review>]
+
+[ansible__ansible-42456@b29e00e][<review> ## Function Adds SSL knobs to `consul_kv` by wiring `scheme`, cert verification, and client cert inputs, but it still does not let callers disable verification (the reported failure mode) because the existing `verify` keyword is ignored and the env-path handling raises before reaching TLS.
+Complexity
+Change is fairly small; no new helpers or branching beyond the existing flow. Implementation would stay simple once the defects are fixed.
+
+Style
+Follows existing structure, although renaming the public option from verify to validate_certs without accepting the old name breaks established usage.
+
+Documentation
+DOCUMENTATION block lists the new options, but nothing explains the rename from verify to validate_certs, so users following the issue example will still call verify=False and hit the same error.
+
+Defects
+<defect> file_path: lib/ansible/plugins/lookup/consul_kv.py line: 119 suggestion: `os.environ['ANSIBLE_CONSUL_VALIDATE_CERTS']` (and the subsequent `ANSIBLE_CONSUL_CLIENT_CERT`) will raise when those env vars are absent, even if `ANSIBLE_CONSUL_URL` is set. Use `.get()` with sensible defaults and convert the string to a real bool before passing it to `verify`. </defect> <defect> file_path: lib/ansible/plugins/lookup/consul_kv.py line: 120 suggestion: Passing the raw string from `ANSIBLE_CONSUL_VALIDATE_CERTS` into `verify` means values such as `'False'` are treated as truthy paths, so verification never turns off. Parse the env value to a boolean (e.g., via `module_utils.common.text.converters.boolean`) before forwarding it. </defect> <defect> file_path: lib/ansible/plugins/lookup/consul_kv.py line: 129 suggestion: Existing playbooks already use `verify=` (as shown in the issue). Continue accepting that keyword—at least as an alias for `validate_certs`—otherwise the patch does not fix the reported failure. </defect> </review>]
+
+[ansible__ansible-42145@12c0d66][<review> ## Function Adds explicit success checks after several Meraki API calls, only allowing status code 200 and otherwise failing. This does not resolve the issue; the Meraki API legitimately returns other 2xx codes (201, 202, 204) that would now be treated as failures, so the patch would introduce regressions instead of improving status handling.
+Complexity
+Changes are simple conditional checks duplicated in several helpers; no unnecessary complexity added, though the repeated pattern could be consolidated.
+
+Style
+Follows existing structure, but the hard-coded 200 status does not align with broader HTTP semantics the module should respect.
+
+Documentation
+No documentation updates provided; none appear necessary for this logic tweak.
+
+Defects
+<defect> file_path: lib/ansible/modules/network/meraki/meraki_config_template.py line: 87 suggestion: Allow the full HTTP success range (e.g., `200 <= meraki.status < 300`) or explicitly handle the Meraki API’s documented success codes instead of restricting to `== 200`. </defect> <defect> file_path: lib/ansible/modules/network/meraki/meraki_config_template.py line: 118 suggestion: Same as above—accept all valid 2xx responses so successful deletes (often `204 No Content`) don’t trigger a failure. </defect> <defect> file_path: lib/ansible/modules/network/meraki/meraki_config_template.py line: 138 suggestion: Same correction; `POST` operations frequently return `201 Created`, which should be treated as success. </defect> <defect> file_path: lib/ansible/modules/network/meraki/meraki_config_template.py line: 152 suggestion: Same correction; unbind calls may return other 2xx codes (e.g., `202 Accepted`) that need to be accepted. </defect> </review>]
+
+[ansible__ansible-41849@08ea4e9][<review> ## Function Adds support for the `execution_role_arn` task-definition attribute, enforces the minimum botocore version needed for it, and extends integration coverage. This enables new task definitions to carry the execution role required by Fargate.
+Complexity
+Change set stays reasonably small: one extra field plumbed through the register workflow and a new negative-path assertion in tests. No unnecessary abstractions introduced.
+
+Style
+The implementation follows existing naming and structure. Swapping to AnsibleAWSModule is consistent with other AWS modules and keeps the botocore checks idiomatic.
+
+Documentation
+Module option docs mention the new parameter, but I don’t see any changelog/update note for users. Consider adding a fragment so the release notes capture the new argument.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/amazon/ecs_taskdefinition.py line: 431 suggestion: After discovering `existing = _task_definition_matches(...)`, add a check that compares `(module.params.get('execution_role_arn') or '')` with `(existing.get('executionRoleArn') or '')`. If they differ, set `existing = None` so the module registers a new revision with the requested execution role. </defect> </review>]
+
+[ansible__ansible-39963@85a7d65][<review> ## Function Adds a `tags` attribute to the load balancer module and forwards it into the SDK call, plus attempts to reconcile tags in `results`. However, the change does not actually honor `update_tags` and will clear existing tags any time the module runs without an explicit `tags` parameter, so the reported issue is not solved and a regression is introduced.
+Complexity
+Scope is small and localized, but the tag-handling logic does not correctly wire the merged tag set back into the request object.
+
+Style
+Follows existing style and naming conventions; no issues here.
+
+Documentation
+No additional documentation is needed for the code change itself; marking resource_group as required in the facts module is consistent with the code but might still warrant a release note.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/azure/azure_rm_loadbalancer.py line: 693 suggestion: Capture the merged tag set returned by `self.update_tags(...)` into `self.tags` (e.g. `update_tags, self.tags = self.update_tags(self.results['state'].get('tags', {}))`) before building the SDK parameters, so that existing tags are preserved when no new `tags` are provided and the `update_tags` option works as intended. </defect> </review>]
+
+[ansible__ansible-36996@4b45ffc][<review> ## Function Patch tries to add the documented `force_init` option by always running `terraform init` before other actions. It does not actually use the new option and breaks execution instead, so the original issue remains unresolved.
+Complexity
+Changes introduce a new helper but keep structure simple. However, the helper is wired incorrectly, which cancels out the intended benefit.
+
+Style
+Names are reasonable, but the helper ignores how binary_path is already handled (supports prefixes like sudo), so the integration is inconsistent with existing patterns.
+
+Documentation
+Module docs already mentioned force_init. No extra docs are needed, but the implementation must match the documented behavior.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/misc/terraform.py line: 163 suggestion: `init_plugins` references `module`, but `module` is only defined inside `main()` so this raises NameError. Pass `module` into the helper or move the helper logic inside `main()`. </defect> <defect> file_path: lib/ansible/modules/cloud/misc/terraform.py line: 226 suggestion: You call `init_plugins` unconditionally. This should only happen when `module.params['force_init']` (or the documented condition) is true so normal runs are not forced to re-initialize. </defect> <defect> file_path: lib/ansible/modules/cloud/misc/terraform.py line: 165 suggestion: The helper drops any extra tokens in `command` (e.g. `sudo terraform`) by only using `command[0]`, calling `/usr/bin/sudo init`. Use the full command list (`command + ['init']`) so wrappers and custom binary paths keep working. </defect> </review>]
+
+[ansible__ansible-36494@c514aeb][<review> ## Function Attempts to stop the `AttributeError` triggered when `have` is a list by looping over the entries, and consolidates rd/description/vni handling. It does address the immediate exception, but the new logic issues `no vni` against every VRF discovered on the device, so it risks altering unrelated contexts and can still fail the task.
+Complexity
+The change stays relatively small, but the broad loop over have introduces needless work for every VRF instead of targeting just the matched object.
+
+Style
+Follows existing style conventions; introducing the args tuple is consistent.
+
+Documentation
+No docs were expected or needed for this change.
+
+Defects
+<defect> file_path: lib/ansible/modules/network/nxos/nxos_vrf.py line: 252 suggestion: Limit the cleanup to the matched VRF instead of looping over every entry in `have`, e.g. check `if obj_in_have and obj_in_have.get('vni'):` (or drop the cleanup entirely in the create branch). </defect> </review>]
+
+[ansible__ansible-36147@483c4bd][<review> ## Function Adds broader idempotency handling for `networks`, `inject_map`, `redistribute`, default-value logic, and expands the nxos_bgp_af integration coverage. Unfortunately, the new logic introduces runtime errors and misconfigurations, so the patch does not yet resolve the reported issue.
+Complexity
+Combining the parsing for networks/inject_map/redistribute simplifies duplication, but several helper updates now mix responsibilities (defaults vs. diffs) and lack guards, which raises the risk of regressions.
+
+Style
+Naming and structure stay consistent with the existing module, but the new cleanup loop in get_network_command breaks the prior control flow assumptions.
+
+Documentation
+No new docs required; integration scenarios were added instead.
+
+Defects
+<defect> file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py:553 line: 553 suggestion: `existing_networks` is only defined inside the `value == 'default'` branch, so when `value` is a list the new `for enet in existing_networks` raises `UnboundLocalError`. Initialize `existing_networks = existing.get(key, [])` before the branch (and limit the removal loop to the non-default case) to avoid the crash. </defect> <defect> file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py:590 line: 590 suggestion: When `redistribute` is set to `default`, this loop iterates over each character of the string and then indexes `rule[1]`, which raises an IndexError. Add an early `if value == 'default': return default_existing(...)` (or otherwise guard) before iterating. </defect> <defect> file_path: lib/ansible/modules/network/nxos/nxos_bgp_af.py:345 line: 345 suggestion: The new parser splits `redistribute ospf 1 route-map foo` into `['ospf', '1', 'foo']`; later the command builder emits `redistribute ospf route-map 1`, which is wrong and never idempotent. Preserve multi-token protocol identifiers (e.g., join everything except the final route-map value) so comparisons and generated commands stay correct. </defect> </review>]
+
+[ansible__ansible-33909@d516d5b][<review> ## Function The patch introduces NETCONF support for the IOS XR banner and interface modules, adds helper utilities (e.g. `get_oper`), extends XML builders/namespaces, and wires in new integration tests. It generally aims to refactor the modules so they can rely on the NETCONF connection plugin while keeping CLI transport (now deprecated) functional.
+Complexity
+The change is large but mostly mechanical: new helper classes, extended metadata for XML rendering, and duplicated CLI/NETCONF execution paths. Nothing looks gratuitously complex beyond what is required for the new transport, although some pieces (e.g. the NETCONF intent checks) might benefit from extra guardrails.
+
+Style
+Naming and structure stay close to existing conventions; new metadata dictionaries mirror prior patterns. Tests and documentation blocks are updated consistently with the new NETCONF behaviour.
+
+Documentation
+User-facing module documentation was refreshed to mention NETCONF behaviour (including new return values). No obvious gaps.
+
+Defects
+<defect> file_path: lib/ansible/module_utils/network/iosxr/iosxr.py line: 353 suggestion: `get_oper()` only assigns `response` when a filter is provided. Calling `get_oper(module)` (which the new helper signature invites) will raise an `UnboundLocalError`. Initialise `response = conn.get()` when no filter is supplied, or require/validate the argument before returning. </defect> <defect> file_path: lib/ansible/modules/network/iosxr/iosxr_interface.py line: 356 suggestion: In the CLI code path, new interfaces now add `no interface <name> shutdown` when `enabled` is true. That CLI command is invalid on IOS XR (enabling must be done with `no shutdown` under the interface). Previously we only emitted this malformed command when `enabled` was false; now it triggers for the default case and will break CLI transport users. Restore the original condition or, better, emit `interface <name>` plus `no shutdown`. </defect> </review>]
+
+[ansible__ansible-31562@f2b1998][<review> ## Function Adds a `parse_xml` network filter that maps XML output to structured data using a YAML spec, updates filter documentation with XML examples, and supplies unit tests plus fixtures. This aligns with the feature request and appears to address it end-to-end.
+Complexity
+The helper _extract_param is sizeable but mirrors the existing CLI parsing logic and is driven by spec structure; overall complexity feels appropriate for the problem scope.
+
+Style
+Imports, naming, and control flow match the surrounding conventions; new code follows the existing filter module’s patterns.
+
+Documentation
+User docs now cover the XML filter with illustrative specs and explanations, so the user-facing change set is documented adequately.
+
+Defects
+None </review>]
+
+[ansible__ansible-27975@3d9966e][<review> ## Function Targets the reported bug by making the copy action refuse an empty `src`, and adds an integration test that asserts the module fails when `src: ''`. This directly addresses the issue scenario.
+Complexity
+Change to the action plugin is minimal, but the patch performs a sweeping refactor of the copy integration test playbook (hundreds of unrelated style edits). That adds review surface and risk well beyond what’s needed for the bug fix.
+
+Style
+Action plugin change follows existing patterns. The rewritten YAML largely looks tidy, but switching from inline key=value to block form dropped the protective quoting on file modes, leading to unintended type changes.
+
+Documentation
+No docs were updated, which is reasonable because user-facing behavior is unchanged apart from rejecting empty src.
+
+Defects
+<defect> file_path: test/integration/targets/copy/tasks/tests.yml line: 16 suggestion: Quote the mode so it remains a string (e.g. `mode: '0444'`). Without quotes YAML coerces it to an integer, which means the copy module will receive `292` rather than `0444`. Audit the other mode/directory_mode values introduced in this patch for the same issue. </defect> <defect> file_path: test/integration/targets/copy/tasks/tests.yml line: 128 suggestion: Same problem as above: convert `mode: 0700`/`directory_mode: 0700` and similar values to quoted strings so the tests continue exercising the intended permissions. </defect> </review>]
+
+[ansible__ansible-27435@da1a331][<review> ## Function Patch replaces the boto-based implementation with boto3 pagination to find classic ELBs and augments the returned data. However, it will fail when `names` is left at its default (empty list), so it does not reliably enumerate all ELBs and therefore does not actually resolve the reported pagination bug.
+Complexity
+Change is far more invasive than needed (complete rewrite vs fixing next_marker). New helper functions and conversions add branching/APIs that increase surface area without necessity for the stated fix.
+
+Style
+General structure matches other boto3 modules, but the new return key (elb_classic_facts) breaks the module’s longstanding elbs interface, and the RETURN block example is inconsistent. Variable naming is otherwise clear.
+
+Documentation
+Adds requirements and RETURN, but the RETURN metadata is inaccurate (description: a, nested sample) and the behavioral change to the return key is undocumented.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py line: 120 suggestion: Skip the `LoadBalancerNames` argument when the user did not supply any names (pass no filter) so the paginator can return every load balancer; boto3 rejects an empty list. </defect> <defect> file_path: lib/ansible/modules/cloud/amazon/elb_classic_lb_facts.py line: 198 suggestion: Restore the public result key (`elbs`) and include `changed=False` to maintain the existing contract. </defect> </review>]
+
+[ansible__ansible-26156@c8ca9a9][<review> ## Function The patch replaces the existing “`show ip access-list summary`” parsing with a direct check of the interface stanza in “`show running-config aclmgr | section <interface>`” to decide whether the target ACL is already applied. That should help the module avoid sending configuration when the ACL is already present, so it targets the idempotence bug, but the change also removes other behaviour the module relied on.
+Complexity
+Overall control flow becomes shorter (one helper function instead of two regex-driven parsers), so complexity is not excessive.
+
+Style
+Naming and structure of the new helper fit the surrounding code, although the inline comment has a typo (“Captitalize”).
+
+Documentation
+The module’s documented return value acl_applied_to is no longer produced, yet the RETURN block (and existing callers/tests) still depend on it, so documentation and behaviour now diverge.
+
+Defects
+<defect> file_path: lib/ansible/modules/network/nxos/nxos_acl_interface.py line: 198 suggestion: The module used to populate `results['acl_applied_to']` before returning; after this patch that field is never set, so the documented result disappears. Please keep returning the ACL/application list (update the gathering logic to work with the new command) or adjust the design/tests/documentation accordingly. </defect> </review>]
+
+[ansible__ansible-23967@f97e4c5][<review> ## Function Adds a guard that injects a fake `'Name': ''` tag when AWS returns DHCP options without any tags. This avoids the immediate KeyError, but it misrepresents untagged option sets as if they had a blank `Name` tag, so it does not really fix the underlying defect.
+Complexity
+Change is simple, but the chosen workaround inflates behavior by fabricating data; a leaner approach (e.g., defaulting to an empty list/dict of tags) would both solve the error and stay faithful to AWS’ response.
+
+Style
+Follows the surrounding style mechanically, but mutating the source object to add synthetic data is questionable.
+
+Documentation
+No docs impacted, so none required.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/amazon/ec2_vpc_dhcp_options_facts.py line: 99 suggestion: Instead of inventing a `{'Key': 'Name', 'Value': ''}` entry, default to an empty list/dict (e.g., `dhcp_option.get('Tags', [])`) before passing to `boto3_tag_list_to_ansible_dict` so untagged DHCP options remain untagged and the KeyError is avoided. </defect> </review>]
+
+[ansible__ansible-20646@f695114][<review> ## Function The change tries to allow `multi_zone=False` to be passed through so the module can flip an instance back to single-AZ, but it replaces the generic truthiness check with a boolean-only condition. That means every optional parameter that supplies a string/int value (engine, parameter group, size, etc.) now gets dropped, so the patch does not safely address the issue and introduces major regressions.
+Complexity
+Logic is short, but the conditional is now brittle and special-cases booleans instead of handling the broader parameter types that the function supports.
+
+Style
+Using module.params.get(k) in [True, False] is non-idiomatic for checking booleans, and the silent pass branch hides invalid parameter usage instead of surfacing an error like the surrounding code.
+
+Documentation
+No documentation changes were needed for this bug fix, so none were expected.
+
+Defects
+<defect> file_path: lib/ansible/modules/cloud/amazon/rds.py line: 1005 suggestion: Keep accepting non-boolean optional parameters (e.g., check `module.params.get(k) is not None` or use `if k in module.params`) so string/integer options still populate `params`. </defect> <defect> file_path: lib/ansible/modules/cloud/amazon/rds.py line: 1010 suggestion: Do not silently ignore invalid parameters when their value is `False`; continue to call `fail_json` so users get feedback when an unsupported option is supplied. </defect> </review>]
+
+[tobymao__sqlglot-2096@1794bf3][<review> ## Function Patch introduces parser support for user-defined types in `CAST(...)`, adds a flag to disable it per dialect, updates type comparisons, and adds regression/tests for Oracle table casts. It solves the reported failure for `TABLE(CAST(... AS data_list))`.
+Complexity
+Changes are fairly invasive (parser, generator, expressions, many dialects, tests) but still readable. The new is_type semantics are broader yet well-contained.
+
+Style
+Naming and structure fit existing conventions. Flag wiring and test additions follow established patterns.
+
+Documentation
+README wording tweak is fine; no further docs seem necessary.
+
+Defects
+<defect> file_path: sqlglot/parser.py line: 3859 suggestion: The fallback `exp.DataType.build(to.name, udt=True)` strips identifier metadata, so a quoted type like `CAST(x AS "CaseSensitiveType")` will round-trip as `CAST(x AS CaseSensitiveType)`. Please preserve the original identifier (for example by letting `DataType.build` accept the `Identifier` expression or by storing it directly) so quoting/case is retained for user-defined types. </defect> </review>]
